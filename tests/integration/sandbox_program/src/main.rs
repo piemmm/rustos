@@ -1,7 +1,7 @@
 //! EL0 fixture program for the `lib/sandbox` parser-sandbox seam (the
 //! fstree S8b increment — `plans/APPS.md`).
 //!
-//! One binary, five roles, selected by the **registry path** it is spawned
+//! One binary, six roles, selected by the **registry path** it is spawned
 //! under (`arg(0)`) plus the seam's role marker (`arg(1)`), because the
 //! production launchers (`tairix_sandbox::rt::RtLauncher`,
 //! `tairix_sandbox::rt::RtSessionChannel`) always pass `[path, marker]`:
@@ -19,17 +19,22 @@
 //!   inside the sandbox* and reports the denials over its reply pipe;
 //! * **session worker** (`/bin/sbx-session` + session marker) — serves the
 //!   duplex seam, silently counting every frame it is sent and answering
-//!   only the final report, then closing the session itself.
+//!   only the final report, then closing the session itself;
+//! * **stream worker** (`/bin/sbx-stream` + session marker) — echoes every
+//!   frame, and dies through its panic path on the crash frame: the
+//!   real-process stand-in for a streaming decoder a crafted input kills.
 //!
 //! The parent proves, end to end over the production spawn/pipe/wait path:
 //! decode of valid and malformed inputs through a genuinely sandboxed
 //! worker; typed crash containment with a logged crash event and a
-//! surviving caller; the syscall wall holding from the inside; and the
-//! duplex session driven entirely from a wait-set, pushing far more than
-//! one pipe's worth of frames at a worker that answers nothing until the
-//! end — which can only complete if the write-room wake fires. Each
-//! failure site exits with a distinct diagnostic code the chassis folds
-//! into its failure finisher.
+//! surviving caller; the syscall wall holding from the inside; the duplex
+//! session driven entirely from a wait-set, pushing far more than one
+//! pipe's worth of frames at a worker that answers nothing until the end —
+//! which can only complete if the write-room wake fires; and the supervised
+//! session replacing a crashed stream worker only once its paced delay has
+//! elapsed on a real one-shot wait, the replacement serving on fresh
+//! descriptors. Each failure site exits with a distinct diagnostic code the
+//! chassis folds into its failure finisher.
 //!
 //! It is a **pure-Rust** program: it links `tairix-rt` (which supplies
 //! `_start` and the global allocator), never the C ABI. It is built
@@ -51,7 +56,7 @@ mod program {
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use tairix_abi::{Errno, OpenFlags, WaitSetOp, WaitSourceKind};
+    use tairix_abi::{Errno, OpenFlags};
     use tairix_log::{Event, Sink};
     use tairix_sandbox::decode::{
         container_summary, disassemble, ContainerFormat, DecodeFailure, DecodeRefusal,
@@ -62,11 +67,12 @@ mod program {
     };
     use tairix_sandbox::rt::{
         serve_session_stdio, serve_stdio, session_worker_role, worker_role, RtLauncher,
-        RtSessionChannel,
+        RtSessionChannel, RtSessionLauncher, SessionMembers,
     };
     use tairix_sandbox::session::{
         FrameOut, SandboxSession, SessionBounds, SessionError, SessionService, SessionStep,
     };
+    use tairix_sandbox::supervise::SupervisedSession;
     use tairix_sandbox::worker::{ServeEnd, Service};
 
     /// Registry path of the parent role — and of the decode worker the
@@ -79,6 +85,11 @@ mod program {
     const PROBE_PATH: &[u8] = b"/bin/sbx-probe";
     /// Registry path whose worker serves the duplex session.
     const SESSION_PATH: &[u8] = b"/bin/sbx-session";
+    /// Registry path whose worker echoes a stream and dies on the crash
+    /// frame.
+    const STREAM_PATH: &[u8] = b"/bin/sbx-stream";
+    /// The frame the stream worker dies on.
+    const STREAM_CRASH: &[u8] = b"crash";
 
     /// Bytes each direction of the session may hold queued. Deliberately
     /// far below the burst, so the parent must drain and refill.
@@ -123,6 +134,7 @@ mod program {
 
     /// Counts [`EVENT_WORKER_CRASHED`] emissions; everything else is
     /// irrelevant to this fixture.
+    #[derive(Clone, Copy)]
     struct CountingSink;
 
     impl Sink for CountingSink {
@@ -187,27 +199,24 @@ mod program {
         }
     }
 
-    /// Add or remove one wait-set member so the armed set matches what the
-    /// session wants. Disarming is what keeps a level-triggered member —
-    /// write room, which is ready whenever the pipe is not full — from
-    /// waking a parent that has nothing to write.
-    fn arm(
-        set: u64,
-        kind: WaitSourceKind,
-        fd: u32,
-        token: u64,
-        want: bool,
-        armed: &mut bool,
-    ) -> bool {
-        if want == *armed {
-            return true;
+    /// The stream worker's service: echo every frame until the crash frame,
+    /// which kills the process through its panic path mid-conversation.
+    struct StreamService;
+
+    impl SessionService for StreamService {
+        fn handle(&mut self, request: &[u8], out: &mut dyn FrameOut) -> SessionStep {
+            assert!(request != STREAM_CRASH, "simulated parser crash");
+            let _ = out.frame(request);
+            SessionStep::Continue
         }
-        let op = if want { WaitSetOp::Add } else { WaitSetOp::Del };
-        if tairix_rt::waitset_ctl(set, op, kind, u64::from(fd), token) < 0 {
-            return false;
+    }
+
+    /// Serve the stream over the wired standard streams, until it crashes.
+    fn run_stream_worker() -> i32 {
+        match serve_session_stdio(&mut StreamService) {
+            ServeEnd::Finished | ServeEnd::Ended => 0,
+            ServeEnd::Failed(_) => FAIL_SERVE,
         }
-        *armed = want;
-        true
     }
 
     /// Drive a duplex session over a real sandboxed worker, entirely from
@@ -229,18 +238,18 @@ mod program {
         let Ok(mut session) = SandboxSession::new(transport, bounds, CountingSink) else {
             return 42;
         };
-        let Some(fds) = session.descriptors() else {
+        if session.descriptors().is_none() {
             return 43;
-        };
+        }
         let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
             return 44;
         };
+        let mut members = SessionMembers::new(set, TOKEN_READ, TOKEN_WRITE);
 
         let burst = vec![0xC3u8; SESSION_PAYLOAD];
         let mut queued: u32 = 0;
         let mut asked = false;
         let mut reported: Option<u32> = None;
-        let (mut armed_read, mut armed_write) = (false, false);
 
         while reported.is_none() {
             // Refill the outbound queue: a full queue refuses transiently,
@@ -260,27 +269,20 @@ mod program {
                     Err(_) => return 45,
                 }
             }
-            if !arm(
-                set,
-                WaitSourceKind::Stream,
-                fds.read_fd,
-                TOKEN_READ,
-                session.wants_read(),
-                &mut armed_read,
-            ) {
+            // Disarming what the session does not want is what keeps
+            // write room, ready whenever the pipe is not full, from waking a
+            // parent that has nothing to write.
+            if members
+                .sync(
+                    session.descriptors(),
+                    session.wants_read(),
+                    session.wants_write(),
+                )
+                .is_err()
+            {
                 return 46;
             }
-            if !arm(
-                set,
-                WaitSourceKind::StreamRoom,
-                fds.write_fd,
-                TOKEN_WRITE,
-                session.wants_write(),
-                &mut armed_write,
-            ) {
-                return 47;
-            }
-            if !armed_read && !armed_write {
+            if !session.wants_read() && !session.wants_write() {
                 // Nothing left to wait on and no answer: the session ended
                 // without reporting.
                 return 48;
@@ -298,13 +300,9 @@ mod program {
                 return 51;
             }
             loop {
-                match session.recv() {
-                    Ok(Some(frame)) => {
-                        let Ok(count) = <[u8; 4]>::try_from(frame.as_slice()) else {
-                            return 52;
-                        };
-                        reported = Some(u32::from_le_bytes(count));
-                    }
+                match session.recv(|frame| <[u8; 4]>::try_from(frame).map(u32::from_le_bytes)) {
+                    Ok(Some(Ok(count))) => reported = Some(count),
+                    Ok(Some(Err(_))) => return 52,
                     Ok(None) => break,
                     Err(_) => return 53,
                 }
@@ -317,6 +315,132 @@ mod program {
         // The worker closed the session itself and exits cleanly.
         if session.end() != Some(0) {
             return 55;
+        }
+        0
+    }
+
+    /// The supervised session the stream leg drives.
+    type Stream = SupervisedSession<RtSessionLauncher, CountingSink>;
+
+    /// Frames echoed through each stream worker.
+    const STREAM_PINGS: u8 = 4;
+
+    /// One wait-set turn: arm what the session wants, wait, take the woken
+    /// direction, and drain every frame that completed.
+    fn stream_turn(
+        session: &mut Stream,
+        members: &mut SessionMembers,
+        set: u64,
+    ) -> Result<Vec<Vec<u8>>, SessionError> {
+        members
+            .sync(
+                session.descriptors(),
+                session.wants_read(),
+                session.wants_write(),
+            )
+            .map_err(|_| SessionError::WorkerFailed)?;
+        let mut token = 0u64;
+        if tairix_rt::waitset_wait(set, SESSION_TIMEOUT_NS, &mut token) != 0 {
+            return Err(SessionError::WorkerFailed);
+        }
+        let now = tairix_rt::clock_get();
+        match token {
+            TOKEN_WRITE => session.on_writable(now)?,
+            TOKEN_READ => session.on_readable(now)?,
+            _ => return Err(SessionError::WorkerFailed),
+        }
+        let mut frames = Vec::new();
+        while let Some(frame) = session.recv(now, <[u8]>::to_vec)? {
+            frames.push(frame);
+        }
+        Ok(frames)
+    }
+
+    /// Stream [`STREAM_PINGS`] frames tagged `tag` through the live worker
+    /// and require each echoed back, in order.
+    fn stream_echoes(
+        session: &mut Stream,
+        members: &mut SessionMembers,
+        set: u64,
+        tag: u8,
+    ) -> Result<(), i32> {
+        for index in 0..STREAM_PINGS {
+            session.send(&[tag, index]).map_err(|_| 70)?;
+        }
+        let mut next = 0u8;
+        while next < STREAM_PINGS {
+            for frame in stream_turn(session, members, set).map_err(|_| 71)? {
+                if frame.as_slice() != [tag, next] {
+                    return Err(72);
+                }
+                next += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drive a supervised session over a real stream worker: stream through
+    /// it, kill it with the crash frame, and require the replacement to be
+    /// started only once its paced delay has elapsed on a real one-shot
+    /// wait, then to serve on a fresh pipe pair.
+    fn supervised_leg() -> i32 {
+        let Ok(bounds) = SessionBounds::new(SESSION_QUEUE, SESSION_QUEUE) else {
+            return 60;
+        };
+        let mut session = Stream::new(RtSessionLauncher::new(STREAM_PATH), bounds, CountingSink);
+        let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
+            return 61;
+        };
+        let mut members = SessionMembers::new(set, TOKEN_READ, TOKEN_WRITE);
+        if session.start(tairix_rt::clock_get()) != Some(1) {
+            return 62;
+        }
+        if let Err(code) = stream_echoes(&mut session, &mut members, set, 1) {
+            return code;
+        }
+
+        let crashes = CRASH_EVENTS.load(Ordering::Relaxed);
+        if session.send(STREAM_CRASH).is_err() {
+            return 63;
+        }
+        let mut observed = false;
+        for _ in 0..16 {
+            if stream_turn(&mut session, &mut members, set) == Err(SessionError::WorkerFailed) {
+                observed = true;
+                break;
+            }
+        }
+        if !observed || session.is_live() {
+            return 64;
+        }
+        if CRASH_EVENTS.load(Ordering::Relaxed) != crashes + 1 {
+            return 65;
+        }
+
+        let Some(due) = session.restart_deadline() else {
+            return 66;
+        };
+        let now = tairix_rt::clock_get();
+        if now < due && session.start(now).is_some() {
+            return 67;
+        }
+        // Park on the emptied wait-set until the replacement is due.
+        if members.sync(None, false, false).is_err() {
+            return 68;
+        }
+        let mut token = 0u64;
+        let waited = tairix_rt::waitset_wait(set, due.saturating_sub(now), &mut token);
+        if waited != 0 && Errno::try_from_syscall(waited) != Some(Errno::TimedOut) {
+            return 69;
+        }
+        if session.start(tairix_rt::clock_get()) != Some(2) {
+            return 73;
+        }
+        if session.descriptors().is_none() {
+            return 74;
+        }
+        if let Err(code) = stream_echoes(&mut session, &mut members, set, 2) {
+            return code;
         }
         0
     }
@@ -394,7 +518,14 @@ mod program {
 
         // 6. The duplex session, driven from a wait-set over both
         //    directions of a real sandboxed worker's pipe pair.
-        session_leg()
+        let session = session_leg();
+        if session != 0 {
+            return session;
+        }
+
+        // 7. The supervised session: a crashed stream worker replaced after
+        //    its paced delay, the caller surviving throughout.
+        supervised_leg()
     }
 
     /// Program entry point: the role marker (`arg(1)`) selects a worker
@@ -403,7 +534,10 @@ mod program {
     /// registry rows are the only spawners.
     fn main() -> i32 {
         if session_worker_role() {
-            return run_session_worker();
+            return match tairix_rt::arg(0) {
+                Some(path) if path == STREAM_PATH => run_stream_worker(),
+                _ => run_session_worker(),
+            };
         }
         if worker_role() {
             return match tairix_rt::arg(0) {

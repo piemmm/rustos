@@ -276,6 +276,7 @@ members = [
     "userland/gui/session",
     "userland/gui/switchboard",
     "userland/net/netstack",
+    "userland/net/discoveryd",
 
     # Userland — games. A leaf subtree: its crates compose each other and
     # `lib/*`, and nothing outside it may depend on them, so game code never

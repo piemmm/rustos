@@ -195,6 +195,11 @@ pub const TARGETS: &[Target] = &[
         description: "netstack socket serve path (decode + CAP_NET gate + dispatch, accounting)",
     },
     Target {
+        package: "tairix-discoveryd",
+        test: "fuzz_discoveryd",
+        description: "discoveryd front/decoder channel (canonical frame codecs, the sandboxed decoder over hostile datagrams, and the front against a hostile decoder: containment, replacement, tick pacing, back-pressure)",
+    },
+    Target {
         package: "tairix-confd",
         test: "fuzz_vault",
         description: "app-data sealed-scope records (master secret + sealed document)",

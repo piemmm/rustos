@@ -61,7 +61,7 @@ mod program {
     use tairix_abi::net::{SocketAddr, SocketId, SocketStreamEvent, StreamCloseReason};
     use tairix_abi::net_ipc::NetAddrFamily;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{Errno, Origin};
+    use tairix_abi::Errno;
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
     use tairix_rt::net::{accept, bind, close, listen, stream_recv, stream_send, stream_socket};
     use tairix_test_netstack_wire as wire;
@@ -173,22 +173,21 @@ mod program {
     }
 
     /// Block for the listener's `Accepted` readiness and claim the child
-    /// connection, returning the child socket handle and the kernel-attested
-    /// origin of the stack (captured so every later event can be required to
-    /// match it — a delivery port is otherwise an unauthenticated inbox).
+    /// connection once it has established, returning its handle. Only the
+    /// stack's own events arrive: the receive discards any other sender's.
     fn accept_connection(
         set: u64,
         listener: SocketId,
         buf: &mut [u8],
-    ) -> Result<(SocketId, Origin), &'static str> {
+    ) -> Result<SocketId, &'static str> {
         let deadline = tairix_rt::clock_get().saturating_add(PHASE_TIMEOUT_NANOS);
         loop {
             // Claim any ready connection first: the child may be ready before
             // (or without) a separate readiness event being drained.
             match accept(listener, CONN_PORT) {
                 Ok(child) => {
-                    let origin = capture_origin(set, deadline)?;
-                    return Ok((child, origin));
+                    await_connected(set, deadline)?;
+                    return Ok(child);
                 }
                 Err(Errno::WouldBlock) => {}
                 Err(_) => return Err("tcpserve: accept refused"),
@@ -197,8 +196,8 @@ mod program {
             // listener means a connection is queued; anything else on this
             // port is unexpected).
             match stream_recv(LISTEN_PORT, buf) {
-                Ok((SocketStreamEvent::Accepted { socket }, _)) if socket == listener => {}
-                Ok((SocketStreamEvent::Accepted { .. }, _)) => {
+                Ok(SocketStreamEvent::Accepted { socket }) if socket == listener => {}
+                Ok(SocketStreamEvent::Accepted { .. }) => {
                     return Err("tcpserve: Accepted for a foreign listener")
                 }
                 Ok(_) => return Err("tcpserve: unexpected event on the listener port"),
@@ -210,21 +209,19 @@ mod program {
         }
     }
 
-    /// Capture the stack origin from the child's first delivered event
-    /// (`Connected`), which the accept path flushes to the connection port.
-    fn capture_origin(set: u64, deadline_ns: u64) -> Result<Origin, &'static str> {
+    /// Wait for the child's first delivered event, `Connected`, which the
+    /// accept path flushes to the connection port.
+    fn await_connected(set: u64, deadline_ns: u64) -> Result<(), &'static str> {
         let mut buf = [0u8; DELIVER_MAX_PAYLOAD];
         loop {
             match stream_recv(CONN_PORT, &mut buf) {
-                Ok((SocketStreamEvent::Connected { .. }, origin)) => return Ok(origin),
-                Ok((SocketStreamEvent::Data { .. }, origin)) => {
-                    // Data may arrive coalesced with the connection flush;
-                    // the origin is what we need, and re-draining data here
-                    // would drop it, so require Connected to precede data.
-                    let _ = origin;
+                Ok(SocketStreamEvent::Connected { .. }) => return Ok(()),
+                Ok(SocketStreamEvent::Data { .. }) => {
+                    // Re-draining data here would drop it, so Connected must
+                    // come first.
                     return Err("tcpserve: data before the connection's Connected event");
                 }
-                Ok((SocketStreamEvent::Closed { .. }, _)) => {
+                Ok(SocketStreamEvent::Closed { .. }) => {
                     return Err("tcpserve: connection closed before it established")
                 }
                 Ok(_) => return Err("tcpserve: unexpected first event on the connection"),
@@ -240,12 +237,7 @@ mod program {
     /// child, verify each chunk against the deterministic stream at its
     /// absolute offset, echo the bytes straight back, and complete when the
     /// peer closes after the whole transfer round-tripped.
-    fn serve_echo(
-        set: u64,
-        child: SocketId,
-        stack: Origin,
-        buf: &mut [u8],
-    ) -> Result<(), &'static str> {
+    fn serve_echo(set: u64, child: SocketId, buf: &mut [u8]) -> Result<(), &'static str> {
         let deadline = tairix_rt::clock_get().saturating_add(PHASE_TIMEOUT_NANOS);
         let mut received: usize = 0;
         let mut pending: Vec<u8> = Vec::new();
@@ -253,41 +245,34 @@ mod program {
         loop {
             // Drain available inbound events without blocking.
             match stream_recv(CONN_PORT, buf) {
-                Ok((event, origin)) => {
-                    if origin != stack {
-                        return Err("tcpserve: event from an unexpected origin");
+                Ok(SocketStreamEvent::Data { socket, payload }) if socket == child => {
+                    if verify_chunk(received, payload).is_err() {
+                        return Err("tcpserve: received byte did not match the stream");
                     }
-                    match event {
-                        SocketStreamEvent::Data { socket, payload } if socket == child => {
-                            if verify_chunk(received, payload).is_err() {
-                                return Err("tcpserve: received byte did not match the stream");
-                            }
-                            received = received.saturating_add(payload.len());
-                            pending.extend_from_slice(payload);
-                        }
-                        SocketStreamEvent::Data { .. } => {
-                            return Err("tcpserve: data for a foreign socket")
-                        }
-                        SocketStreamEvent::Closed { socket, reason } if socket == child => {
-                            match reason {
-                                // The client half-closes cleanly after it has
-                                // received and re-verified the whole echo.
-                                StreamCloseReason::PeerClosed => peer_closed = true,
-                                // A reset, timeout, or refusal is an abortive
-                                // teardown before completion — fail closed.
-                                _ => return Err("tcpserve: connection aborted before completion"),
-                            }
-                        }
-                        SocketStreamEvent::Closed { .. } => {
-                            return Err("tcpserve: close for a foreign socket")
-                        }
-                        SocketStreamEvent::Connected { .. } => {
-                            return Err("tcpserve: a second Connected event")
-                        }
-                        SocketStreamEvent::Accepted { .. } => {
-                            return Err("tcpserve: Accepted event on a connection socket")
-                        }
+                    received = received.saturating_add(payload.len());
+                    pending.extend_from_slice(payload);
+                }
+                Ok(SocketStreamEvent::Data { .. }) => {
+                    return Err("tcpserve: data for a foreign socket")
+                }
+                Ok(SocketStreamEvent::Closed { socket, reason }) if socket == child => {
+                    match reason {
+                        // The client half-closes cleanly after it has received
+                        // and re-verified the whole echo.
+                        StreamCloseReason::PeerClosed => peer_closed = true,
+                        // A reset, timeout, or refusal is an abortive teardown
+                        // before completion — fail closed.
+                        _ => return Err("tcpserve: connection aborted before completion"),
                     }
+                }
+                Ok(SocketStreamEvent::Closed { .. }) => {
+                    return Err("tcpserve: close for a foreign socket")
+                }
+                Ok(SocketStreamEvent::Connected { .. }) => {
+                    return Err("tcpserve: a second Connected event")
+                }
+                Ok(SocketStreamEvent::Accepted { .. }) => {
+                    return Err("tcpserve: Accepted event on a connection socket")
                 }
                 Err(Errno::WouldBlock) => {}
                 Err(_) => return Err("tcpserve: connection event receive failed"),
@@ -344,8 +329,8 @@ mod program {
 
         let listener = open_and_listen()?;
         let mut buf = [0u8; DELIVER_MAX_PAYLOAD];
-        let (child, stack) = accept_connection(set, listener, &mut buf)?;
-        serve_echo(set, child, stack, &mut buf)?;
+        let child = accept_connection(set, listener, &mut buf)?;
+        serve_echo(set, child, &mut buf)?;
         // Orderly close of our half; the listener is closed too. A refused
         // close is not a data-integrity failure — the transfer already
         // completed and the peer already closed — so it is not fatal.

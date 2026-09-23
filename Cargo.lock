@@ -1498,6 +1498,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-discoveryd"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-fuzzseed",
+ "tairix-hash",
+ "tairix-log",
+ "tairix-net",
+ "tairix-rng",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-display"
 version = "0.0.0"
 dependencies = [
@@ -2848,7 +2863,9 @@ dependencies = [
  "tairix-log",
  "tairix-net",
  "tairix-netchan",
+ "tairix-rng",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2913,7 +2930,6 @@ dependencies = [
  "tairix-resolver",
  "tairix-rng",
  "tairix-rt",
- "tairix-util",
 ]
 
 [[package]]
@@ -3032,6 +3048,7 @@ dependencies = [
  "tairix-abi",
  "tairix-net",
  "tairix-procinfo",
+ "tairix-rng",
  "tairix-rt",
 ]
 
@@ -6567,6 +6584,7 @@ dependencies = [
  "tairix-net",
  "tairix-procinfo",
  "tairix-resolver",
+ "tairix-rng",
  "tairix-rt",
  "tairix-sandbox",
  "tairix-sysconfig",

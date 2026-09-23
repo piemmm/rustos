@@ -1264,6 +1264,24 @@ fn an_empty_pattern_paints_nothing_rather_than_the_fallback() {
     }
 }
 
+/// A tile magnified until the map back from it reads as collapsed paints
+/// nothing, like a collapsed tile, rather than decoding into artwork the
+/// renderer then refuses to draw at all.
+#[test]
+fn a_tile_magnified_past_the_renderers_precision_paints_nothing() {
+    let svg = document(
+        r##"<pattern id="p" width="6" height="6" patternUnits="userSpaceOnUse"
+              patternTransform="rotate(20) scale(1e5)">
+              <circle cx="2" cy="2" r="1.5" fill="#c33"/></pattern>
+            <rect width="8" height="8" fill="url(#p) #00f"/>
+            <rect x="2" width="4" height="4" fill="#000"/>"##,
+    );
+    let image = decode_square(svg.as_bytes()).expect("a decodable document");
+    assert_eq!(image.nodes().len(), 1, "only the plain rectangle paints");
+    let mut surface = tairix_raster::Surface::new(16, 16).expect("a small surface");
+    assert!(surface.draw_artwork(image.nodes(), image.design()));
+}
+
 /// The same distinction for a gradient: no stops is `none`, while a name the
 /// document never defines is what the fallback is for.
 #[test]

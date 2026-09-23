@@ -150,6 +150,13 @@ request). With no deadline left — every server in use retired by a
 Kiss-o'-Death and the re-selection ladder spent — the service exits rather than
 holding a task and a bound delivery port doing nothing.
 
+Every nonce and jitter value comes from one generator keyed from the kernel
+CSPRNG at start-up. A service the kernel cannot key exits with its reason
+recorded rather than send a predictable nonce, and the delivery port it binds
+is process-private (`tairix_rt::bind_private_port`), so no other process can
+squat it; the socket layer discards any datagram the network stack did not
+send.
+
 A request that cannot be sent is not retried on the spot: the engine's own
 response timeout ends the transaction and its bounded backoff paces the next
 attempt, so a machine whose network is not up yet sends nothing and spins on

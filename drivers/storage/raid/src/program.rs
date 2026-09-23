@@ -50,7 +50,6 @@ use tairix_abi::raid_admin::{
 use tairix_abi::raid_ipc::{
     MemberOffer, RAID_ARRAY_COMPATIBLE, RAID_MAX_REQUEST, RAID_REGISTRY_ENDPOINT,
 };
-use tairix_abi::random::RandomFlags;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::sysinfo::BlkHealthTransition;
 use tairix_abi::time::Time64;
@@ -562,7 +561,7 @@ fn peer_origin(ticket: u64) -> Option<Origin> {
 /// could place one array's disk into the other. A draw that cannot be served
 /// leaves the create refused rather than falling back to a guessable value.
 fn fill_random(bytes: &mut [u8; 16]) -> bool {
-    tairix_rt::random_get(bytes, RandomFlags::empty()).is_ok_and(|len| len == bytes.len())
+    tairix_rt::random_fill(bytes).is_ok()
 }
 
 /// Retire a stopped array's published node, refusing while a volume is still

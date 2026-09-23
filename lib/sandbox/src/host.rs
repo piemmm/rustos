@@ -137,22 +137,7 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
             .live
             .take()
             .and_then(|channel| self.launcher.dispose(channel));
-        let exit_field = match exit_code {
-            Some(code) => FieldValue::SignedInt(i64::from(code)),
-            None => FieldValue::Null,
-        };
-        tairix_log::log(
-            &self.sink,
-            &Event {
-                level: Level::Warn,
-                id: EVENT_WORKER_CRASHED,
-                message: "parser sandbox worker crashed; replaced",
-                fields: &[Field {
-                    key: "exit_code",
-                    value: exit_field,
-                }],
-            },
-        );
+        log_worker_crashed(&self.sink, "worker failed mid-request", exit_code);
         match self.launcher.launch() {
             Ok(channel) => self.live = Some(channel),
             Err(errno) => self.log_unavailable(errno),
@@ -175,14 +160,44 @@ impl<L: Launcher, S: Sink> Drop for ParserSandbox<L, S> {
     }
 }
 
+/// Emit [`EVENT_WORKER_CRASHED`]: a worker that will be replaced was
+/// disposed of for `reason`, with its exit code when one is known.
+///
+/// The one emitter of that id, shared by [`ParserSandbox`] and the
+/// supervised session ([`crate::supervise`]) — the two seams whose failed
+/// worker is replaced rather than ended.
+pub fn log_worker_crashed<S: Sink>(sink: &S, reason: &'static str, exit_code: Option<i32>) {
+    let exit_field = match exit_code {
+        Some(code) => FieldValue::SignedInt(i64::from(code)),
+        None => FieldValue::Null,
+    };
+    tairix_log::log(
+        sink,
+        &Event {
+            level: Level::Warn,
+            id: EVENT_WORKER_CRASHED,
+            message: "parser sandbox worker crashed; replaced",
+            fields: &[
+                Field {
+                    key: "reason",
+                    value: FieldValue::Str(reason),
+                },
+                Field {
+                    key: "exit_code",
+                    value: exit_field,
+                },
+            ],
+        },
+    );
+}
+
 /// Emit [`EVENT_WORKER_UNAVAILABLE`]: a sandboxed worker could not be
 /// started.
 ///
-/// The one emitter of that id. [`ParserSandbox`] logs its own failed
-/// launches through it, and a session's owner logs its transport
-/// constructor's — a session has no launcher of its own
-/// ([`crate::session`]), so the discipline stays written once rather than
-/// copied into each consumer.
+/// The one emitter of that id. [`ParserSandbox`] and the supervised session
+/// log their own failed launches through it, and a plain session's owner
+/// logs its transport constructor's — a plain session has no launcher of
+/// its own ([`crate::session`]).
 pub fn log_unavailable<S: Sink>(sink: &S, errno: Errno) {
     tairix_log::log(
         sink,

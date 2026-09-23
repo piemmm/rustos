@@ -829,16 +829,14 @@ mod program {
     /// Seeded once and drawn from thereafter, rather than a syscall per draw:
     /// laying an Expert board is ninety-nine draws.
     fn seeded_rng() -> FastRng {
-        let mut seed = [0u8; 32];
-        if tairix_rt::random_get(&mut seed, tairix_abi::RandomFlags::empty()).is_err() {
+        FastRng::keyed_by(tairix_rt::random_fill).unwrap_or_else(|_| {
             // The kernel's generator is not ready. A game seeded from the
             // monotonic clock is a worse game, not a broken one — and the
             // alternative is refusing to start over an unpredictability
             // requirement a puzzle does not have.
             report("the system generator is unavailable; seeding this session from the clock");
-            return FastRng::seed_from_u64(tairix_rt::clock_get());
-        }
-        FastRng::from_key(&seed)
+            FastRng::seed_from_u64(tairix_rt::clock_get())
+        })
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is

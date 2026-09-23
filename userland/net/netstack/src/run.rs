@@ -63,9 +63,8 @@ mod program {
     };
     use tairix_abi::reply::encode_status_reply;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{CapabilityId, Duration64, Errno, Origin, RandomFlags, ORIGIN_WIRE_LEN};
+    use tairix_abi::{CapabilityId, Duration64, Errno, Origin, ORIGIN_WIRE_LEN};
     use tairix_caps::CapabilitySet;
-    use tairix_hash::HashSeed;
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
     use tairix_net::iface::{eui64_interface_id, TempAddrSource};
     use tairix_net::stack::StackEvent;
@@ -73,8 +72,12 @@ mod program {
         events, queue_tx, serve, BondChange, Caller, CryptoCookieSecret, Delivery, FrameBatch,
         NetChannelClient, NetChannelTransport, Netstack, ServiceHint, SocketService, StreamIo,
     };
+    use tairix_rng::{FastRng, RandU64};
     use tairix_rt::servicenotice::Watchdog;
     use tairix_rt::LogSink;
+
+    /// Exit code when the service cannot serve; the reason is recorded first.
+    const EXIT_UNAVAILABLE: i32 = 1;
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory
     /// bound).
@@ -141,23 +144,16 @@ mod program {
         }
     }
 
-    /// The RFC 8981 temporary-address randomness source: a blocking draw
-    /// from the platform CSPRNG for each randomised interface identifier
-    /// and desync jitter. A blocking draw is safe here because a
-    /// temporary address is formed only off the data path (interface
-    /// bring-up and infrequent regeneration), and the identifier must be
-    /// unpredictable to off-path observers. Fail-closed: a short draw
-    /// leaves the tail zero, which the engine rejects as reserved and
-    /// re-draws, never emitting a predictable identifier.
+    /// One interface's RFC 8981 temporary-address randomness: a generator
+    /// forked from the service's, so the randomised identifiers and desync
+    /// jitter are unpredictable to off-path observers and no interface's
+    /// stream tells another's.
     #[derive(Debug)]
-    struct RandomTempSource;
+    struct TempSource(FastRng);
 
-    impl TempAddrSource for RandomTempSource {
+    impl TempAddrSource for TempSource {
         fn fill_random(&mut self, out: &mut [u8]) {
-            for byte in out.iter_mut() {
-                *byte = 0;
-            }
-            let _ = tairix_rt::random_get(out, RandomFlags::empty());
+            self.0.fill_bytes(out);
         }
     }
 
@@ -203,33 +199,32 @@ mod program {
         engines.min(renewal)
     }
 
-    /// Bind the endpoint and serve requests for the life of the service.
+    /// Bind both call endpoints and watch them on a fresh wait-set, returning
+    /// the set, or the reason neither can be served.
     ///
-    /// The endpoint is unrestricted-sender (empty `send_caps`), so any
+    /// Each endpoint is unrestricted-sender (empty `send_caps`), so any
     /// process may post — per-operation gating is enforced by the
     /// dispatcher against each caller's attested origin, not by the
     /// transport. `recv_caps` is empty: endpoint ownership already
     /// restricts receive to this task.
-    fn main() -> i32 {
+    fn bind_endpoints() -> Result<u64, &'static str> {
         let empty = CapabilitySet::empty();
-        let bound = tairix_rt::call_create(
+        // Already bound, or no registry: PID 1 supervises and relaunches.
+        if tairix_rt::call_create(
             NETSTACK_ENDPOINT,
             &empty,
             &empty,
             NETSTACK_MAX_REQUEST,
             NETSTACK_MAX_REPLY,
             CAPACITY,
-        );
-        if bound != 0 {
-            // Could not publish the endpoint (already bound, or no
-            // registry): fail closed; PID 1 supervises and relaunches.
-            return 1;
+        ) != 0
+        {
+            return Err("the admin endpoint could not be bound");
         }
         // A negative return is the `-errno` encoding; a non-negative one is
         // the minted handle.
-        let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
-            return 1;
-        };
+        let set = u64::try_from(tairix_rt::waitset_create())
+            .map_err(|_| "the reactor wait-set could not be created")?;
         if tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
@@ -238,9 +233,8 @@ mod program {
             ENDPOINT_TOKEN,
         ) != 0
         {
-            return 1;
+            return Err("the admin endpoint could not be watched");
         }
-
         // The socket (data-plane control) endpoint: a second reserved
         // rendezvous, unrestricted-sender like the admin one — the socket
         // dispatcher gates every call on `CAP_NET` against the caller's
@@ -254,7 +248,7 @@ mod program {
             CAPACITY,
         ) != 0
         {
-            return 1;
+            return Err("the socket endpoint could not be bound");
         }
         if tairix_rt::waitset_ctl(
             set,
@@ -264,31 +258,48 @@ mod program {
             SOCKET_TOKEN,
         ) != 0
         {
-            return 1;
+            return Err("the socket endpoint could not be watched");
         }
+        Ok(set)
+    }
+
+    /// Bind the endpoints and serve requests for the life of the service.
+    fn main() -> i32 {
+        // The per-boot secrets come first and fail closed: sequence numbers,
+        // SYN cookies, ephemeral ports, and identifiers drawn from a source
+        // that could not be keyed would be predictable to an off-path peer.
+        let Ok(secret) = CryptoCookieSecret::keyed_by(tairix_rt::random_fill) else {
+            return unavailable("the kernel random source cannot key the SYN cookies");
+        };
+        let Ok(mut rng) = FastRng::keyed_by(tairix_rt::random_fill) else {
+            return unavailable("the kernel random source cannot key the stack's generator");
+        };
+        // One key for every hash over input a remote peer chooses: a bond's
+        // transmit flow hash, each interface's neighbour-cache index, and the
+        // socket table's demux.
+        let Some(hash_key) = tairix_rt::hash_seed() else {
+            return unavailable("the kernel random source cannot key peer-input hashing");
+        };
+        let set = match bind_endpoints() {
+            Ok(set) => set,
+            Err(reason) => return unavailable(reason),
+        };
 
         // This task's own never-reused id, used to name its per-channel
         // notify ports (the `notify_endpoint_for` naming rule). Without it
         // the notify-port id space cannot be formed, so fail closed.
         let Ok(origin) = tairix_rt::self_origin() else {
-            return 1;
+            return unavailable("the service's own origin could not be read");
         };
         let pid = origin.pid();
 
-        // Draw the per-boot SYN-cookie key from the platform CSPRNG (a
-        // blocking draw — the key is long-lived and must be unpredictable).
-        // It is never persisted and is dropped at shutdown, so paged-out or
-        // captured cookies cannot be forged after a reboot.
-        let mut cookie_key = [0u8; 32];
-        let _ = tairix_rt::random_get(&mut cookie_key, RandomFlags::empty());
-        let secret = CryptoCookieSecret::new(cookie_key);
-
         // Each managed interface's Stack draws its RFC 8981 privacy
-        // identifiers from the platform CSPRNG through this factory; the
-        // engine consults it only while net.ipv6.privacy is enabled.
-        let temp_factory = Box::new(|| Box::new(RandomTempSource) as Box<dyn TempAddrSource>);
-        let hash_key = peer_hash_key();
-        let mut stack = Netstack::new(temp_factory, dhcp_rng_factory(), hash_key);
+        // identifiers through this factory; the engine consults it only while
+        // net.ipv6.privacy is enabled.
+        let mut temp_parent = rng.fork();
+        let temp_factory =
+            Box::new(move || Box::new(TempSource(temp_parent.fork())) as Box<dyn TempAddrSource>);
+        let mut stack = Netstack::new(temp_factory, dhcp_rng_factory(rng.fork()), hash_key);
         // The socket table's demux indices hash under the same process key
         // as the bond's flow hash: a peer chooses half of a connection key.
         let mut sockets = SocketService::new(hash_key);
@@ -332,6 +343,7 @@ mod program {
                         &mut stack,
                         &sockets,
                         &mut channels,
+                        &mut rng,
                         pid,
                         set,
                         &mut request,
@@ -355,6 +367,7 @@ mod program {
                     &mut sockets,
                     &mut channels,
                     &secret,
+                    &mut rng,
                     &mut socket_request,
                     &mut origin_buf,
                     &mut socket_reply,
@@ -465,11 +478,15 @@ mod program {
     /// origin **before any state is touched**, exactly as [`serve`] gates
     /// every other admin op; every other request goes to [`serve`]
     /// unchanged.
+    // The service loop's state is passed as disjoint borrows, so a bind can
+    // take the channel table and the generator while `serve` takes the
+    // stack; a context struct would hold them all under one borrow.
     #[allow(clippy::too_many_arguments)]
     fn serve_admin(
         stack: &mut Netstack,
         sockets: &SocketService,
         channels: &mut [Option<Channel>],
+        rng: &mut FastRng,
         pid: u64,
         set: u64,
         request: &mut [u8],
@@ -494,6 +511,7 @@ mod program {
             let result = serve_bind_driver(
                 stack,
                 channels,
+                rng,
                 &caller,
                 pid,
                 set,
@@ -543,12 +561,13 @@ mod program {
     /// audited), then provision the channel. The interface stays unbound on
     /// any refusal.
     // The bind carries the whole channel context (stack, channel table,
-    // caller, ids, endpoint, alias, hardware location) as flat arguments;
-    // a struct would only obscure the one call site.
+    // generator, caller, ids, endpoint, alias, hardware location) as flat
+    // arguments; a struct would only obscure the one call site.
     #[allow(clippy::too_many_arguments)]
     fn serve_bind_driver(
         stack: &mut Netstack,
         channels: &mut [Option<Channel>],
+        rng: &mut FastRng,
         caller: &Caller,
         pid: u64,
         set: u64,
@@ -567,6 +586,7 @@ mod program {
         match bind_driver(
             stack,
             channels,
+            rng,
             pid,
             set,
             endpoint_id,
@@ -692,11 +712,15 @@ mod program {
     }
 
     /// Serve one waiting socket request on [`NETSTACK_SOCKET_ENDPOINT`].
+    // As `serve_admin`: the loop's state as disjoint borrows, so the socket
+    // table and the generator are lent while the stack is too.
+    #[allow(clippy::too_many_arguments)]
     fn serve_socket(
         stack: &mut Netstack,
         sockets: &mut SocketService,
         channels: &mut [Option<Channel>],
         secret: &CryptoCookieSecret,
+        rng: &mut FastRng,
         request: &mut [u8],
         origin_buf: &mut [u8; ORIGIN_WIRE_LEN],
         reply: &mut [u8],
@@ -709,14 +733,7 @@ mod program {
         let Some(caller) = attest(NETSTACK_SOCKET_ENDPOINT, ticket, origin_buf) else {
             return;
         };
-        // Ephemeral ports are drawn from the kernel CSPRNG; a momentarily
-        // unavailable draw yields zero, which the bounded port search
-        // simply treats as one exhausted candidate.
-        let mut entropy = || {
-            let mut bytes = [0u8; 4];
-            let _ = tairix_rt::random_get(&mut bytes, RandomFlags::empty());
-            u32::from_le_bytes(bytes)
-        };
+        let mut entropy = || rng.next_u32();
         match sockets.serve(
             stack,
             &caller,
@@ -815,12 +832,13 @@ mod program {
     /// is the *client* that owns the frame region — so any NIC driver
     /// serves any stack build.
     // Each argument is an independent provisioning input (stack, channel
-    // table, ids, endpoint, alias, hardware location, clock); bundling them
-    // would only obscure the single call site.
+    // table, generator, ids, endpoint, alias, hardware location, clock);
+    // bundling them would only obscure the single call site.
     #[allow(clippy::too_many_arguments)]
     fn bind_driver(
         stack: &mut Netstack,
         channels: &mut [Option<Channel>],
+        rng: &mut FastRng,
         pid: u64,
         set: u64,
         endpoint_id: u64,
@@ -922,7 +940,9 @@ mod program {
         // EUI-64) and a CSPRNG IPv4 identification seed (entropy stays at
         // the service seam; the engine is pure), then add the interface.
         let interface_id = eui64_interface_id(*facts.mac.as_octets());
-        let ipv4_ident_seed = draw_ident_seed();
+        let mut ident = [0u8; 2];
+        rng.fill_bytes(&mut ident);
+        let ipv4_ident_seed = u16::from_le_bytes(ident);
         if let Err(err) = stack.add_interface(
             iface,
             NetIfKind::Ethernet,
@@ -947,51 +967,32 @@ mod program {
         Ok(())
     }
 
-    /// The key every hash this process takes over input a remote peer chooses
-    /// is drawn under — a bond's transmit flow hash, each interface's
-    /// neighbour-cache index — so they share one key rather than each drawing
-    /// its own.
-    ///
-    /// A platform whose CSPRNG could not be seeded has none. Neither hash is
-    /// the service's primary purpose, so both degrade to a predictable one
-    /// rather than refusing to serve the network — and it says so, because a
-    /// silently predictable hash is one a remote peer can steer.
-    fn peer_hash_key() -> HashSeed {
-        if let Some(key) = tairix_rt::hash_seed() {
-            return key;
-        }
-        let mut err = tairix_rt::io::Stderr;
-        let _ = tairix_rt::io::Write::write_all(
-            &mut err,
-            b"netstack: no platform entropy; peer-input hashing is unkeyed\n",
-        );
-        HashSeed::UNKEYED
-    }
-
-    /// Draw a CSPRNG 16-bit IPv4 identification seed. A momentarily
-    /// unavailable draw yields zero, which the engine simply treats as the
-    /// starting counter value — never a blocking wait.
-    fn draw_ident_seed() -> u16 {
-        let mut bytes = [0u8; 2];
-        let _ = tairix_rt::random_get(&mut bytes, RandomFlags::empty());
-        u16::from_le_bytes(bytes)
-    }
-
-    /// A DHCPv4 client randomness factory backed by the platform CSPRNG:
-    /// each configured DHCP interface draws a fresh source that yields a
-    /// 32-bit value per call (the RFC 2131 transaction id and backoff
-    /// jitter). A blocking draw is safe here — DHCP randomness is drawn off
-    /// the data path (bring-up and infrequent renewals) and must be
-    /// unpredictable to off-path spoofers; a short draw fails closed to a
-    /// zero (a legal, if predictable, value the engine simply uses).
-    fn dhcp_rng_factory() -> tairix_netstack::DhcpRngFactory {
-        Box::new(|| {
-            Box::new(|| {
-                let mut bytes = [0u8; 4];
-                let _ = tairix_rt::random_get(&mut bytes, RandomFlags::empty());
-                u32::from_le_bytes(bytes)
-            }) as Box<dyn FnMut() -> u32>
+    /// A DHCPv4 client randomness factory: each configured DHCP interface
+    /// gets its own generator, forked from `parent`, yielding the RFC 2131
+    /// transaction ids and backoff jitter an off-path spoofer must not
+    /// predict.
+    fn dhcp_rng_factory(mut parent: FastRng) -> tairix_netstack::DhcpRngFactory {
+        Box::new(move || {
+            let mut child = parent.fork();
+            Box::new(move || child.next_u32()) as Box<dyn FnMut() -> u32>
         })
+    }
+
+    /// Record why the service cannot serve, and the exit code that says so.
+    fn unavailable(reason: &'static str) -> i32 {
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Error,
+                id: events::SERVICE_UNAVAILABLE,
+                message: "netstack: cannot serve",
+                fields: &[Field {
+                    key: "reason",
+                    value: FieldValue::Str(reason),
+                }],
+            },
+        );
+        EXIT_UNAVAILABLE
     }
 
     /// Bounded pump rounds per channel: a doorbell can leave inbound
@@ -1131,7 +1132,7 @@ mod program {
                         "netstack: DHCPv6 lease lost (address withdrawn)",
                     ),
                     StackEvent::UdpDatagram { .. } | StackEvent::EchoReply { .. } => {
-                        emit_deliveries(&sockets.deliver(event));
+                        emit_deliveries(&sockets.deliver(event, outcome.interface));
                     }
                     StackEvent::TcpSegment {
                         source,

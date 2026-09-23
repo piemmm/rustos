@@ -19,6 +19,7 @@ use tairix_abi::{
 };
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_util::retry::RestartPacer;
 
 use crate::error::{ActivateError, ControlError, InitError, NotifyError, StartFailure};
 use crate::events;
@@ -58,31 +59,33 @@ pub const MAX_PENDING_PER_SERVICE: usize = 64;
 /// This is the **crash-loop guard**, not a resource capacity: a service
 /// that crashes the instant it starts would otherwise be relaunched forever
 /// (the `spawn`-in-a-loop the charter forbids). Once a relaunched service
-/// runs longer than [`RESTART_STABLE_WINDOW`] the counter resets, so this
+/// runs longer than [`RESTART_STABLE_WINDOW_NS`] the counter resets, so this
 /// bounds only a *tight* crash loop; a service that fails after a long,
 /// healthy uptime is always restarted afresh. The count is per service, so
 /// one crash-looping service never exhausts another's budget.
 const MAX_RESTART_ATTEMPTS: u32 = 5;
 
-/// The base of the exponential restart backoff, in nanoseconds (100 ms):
-/// the delay before the first relaunch. Each subsequent relaunch doubles
-/// it, capped at [`RESTART_BACKOFF_CAP`], so the manager never hammers a
-/// failing service.
-const RESTART_BACKOFF_BASE_NS: u128 = 100_000_000;
+/// The delay before a service's first relaunch (100 ms), doubling with each
+/// consecutive one up to [`RESTART_BACKOFF_CAP_NS`].
+const RESTART_BACKOFF_BASE_NS: u64 = 100_000_000;
 
-/// The ceiling on the exponential restart backoff. A service that keeps
-/// failing waits at most this long between relaunches, so the delay never
-/// grows without bound while the crash-loop budget counts down.
-const RESTART_BACKOFF_CAP: Duration64 = Duration64::from_secs(30);
+/// The longest a failing service waits between relaunches (30 s), so the
+/// delay never grows without bound while the crash-loop budget counts down.
+const RESTART_BACKOFF_CAP_NS: u64 = 30_000_000_000;
 
-/// How long a relaunched service must run before the manager considers it
-/// to have recovered and resets its [`MAX_RESTART_ATTEMPTS`] budget.
-///
-/// A service that stays up past this window and only then exits is treated
-/// as a fresh, isolated failure rather than part of a crash loop, so a
-/// long-lived daemon that crashes once after hours is restarted with a full
-/// budget instead of being penalised for restarts in the distant past.
-const RESTART_STABLE_WINDOW: Duration64 = Duration64::from_secs(30);
+/// How long a relaunched service must run (30 s) before the manager treats
+/// its next exit as a fresh, isolated failure with a full
+/// [`MAX_RESTART_ATTEMPTS`] budget, rather than part of a crash loop.
+const RESTART_STABLE_WINDOW_NS: u64 = 30_000_000_000;
+
+/// A fresh restart pacer carrying the manager's backoff policy.
+const fn restart_pacer() -> RestartPacer {
+    RestartPacer::new(
+        RESTART_BACKOFF_BASE_NS,
+        RESTART_BACKOFF_CAP_NS,
+        RESTART_STABLE_WINDOW_NS,
+    )
+}
 
 /// The synthetic exit code the reaper attributes to a process the liveness
 /// watchdog force-killed for wedging ([`Init::expire_watchdog`]).
@@ -95,34 +98,6 @@ const RESTART_STABLE_WINDOW: Duration64 = Duration64::from_secs(30);
 /// It is fed only to the restart-policy decision; the *real* child exit
 /// code is what the audit record reports.
 const WATCHDOG_KILL_EXIT_CODE: i32 = -1;
-
-/// The restart backoff for the `attempt`-th relaunch: `base * 2^attempt`,
-/// saturating and clamped to [`RESTART_BACKOFF_CAP`].
-///
-/// Computed in nanoseconds as a `u128`. A shift that would overflow the
-/// value (not merely the shift width) saturates to the maximum and is then
-/// clamped down, so a large `attempt` yields the cap rather than a wrapped
-/// value. The result is always in `RESTART_BACKOFF_BASE_NS..=CAP`.
-fn restart_backoff(attempt: u32) -> Duration64 {
-    let cap_ns = duration_nanos(RESTART_BACKOFF_CAP);
-    // `checked_shl` only rejects a shift wider than the type; a shift that
-    // discards significant bits still "succeeds", so verify it round-trips
-    // and otherwise saturate.
-    let scaled = match RESTART_BACKOFF_BASE_NS.checked_shl(attempt) {
-        Some(v) if (v >> attempt) == RESTART_BACKOFF_BASE_NS => v,
-        _ => u128::MAX,
-    };
-    let ns = scaled.min(cap_ns);
-    // `ns <= cap_ns`, which is well within `u64`, so the conversion is exact.
-    Duration64::from_nanos(u64::try_from(ns).unwrap_or(u64::MAX))
-}
-
-/// The whole span `d` in nanoseconds as a `u128`, for backoff arithmetic.
-/// A negative span (never produced here) clamps to zero.
-fn duration_nanos(d: Duration64) -> u128 {
-    let secs = u128::try_from(d.secs()).unwrap_or(0);
-    secs * u128::from(NANOS_PER_SEC) + u128::from(d.subsec_nanos())
-}
 
 /// Construction-time configuration for an [`Init`] instance.
 ///
@@ -311,19 +286,11 @@ struct Service {
     /// marks the service as *pending restart*, so a terminally-`Failed`
     /// state with a live restart deadline does not block its dependents.
     restart_deadline: Option<Duration64>,
-    /// How many times this service has been relaunched by the restart
-    /// policy since it last ran stably. Grows the backoff and is capped by
-    /// [`MAX_RESTART_ATTEMPTS`] so a service that dies the instant it starts
-    /// is abandoned rather than relaunched forever (the crash-loop guard).
-    restart_attempts: u32,
-    /// The monotonic instant at which the restart policy last relaunched
-    /// this service, or `None` if it has not been restarted since it was
-    /// first started (at boot or on demand). Used to reset
-    /// [`restart_attempts`](Service::restart_attempts) once a relaunched
-    /// service has run longer than [`RESTART_STABLE_WINDOW`], so a genuine
-    /// crash after a long, healthy uptime does not count against the
-    /// crash-loop budget.
-    relaunched_at: Option<Duration64>,
+    /// The relaunches the restart policy has taken since this service last
+    /// ran stably, and the backoff they have earned. Its count is what
+    /// [`MAX_RESTART_ATTEMPTS`] caps, so a service that dies the instant it
+    /// starts is abandoned rather than relaunched forever.
+    restart_pacer: RestartPacer,
     /// When set, the absolute monotonic instant at (or after) which the
     /// service is judged to have *wedged* because it has not renewed its
     /// liveness heartbeat ([`Init::heartbeat`](Init::heartbeat)) since. Armed
@@ -543,8 +510,7 @@ impl<'a> Init<'a> {
             linger_deadline: None,
             grace_deadline: None,
             restart_deadline: None,
-            restart_attempts: 0,
-            relaunched_at: None,
+            restart_pacer: restart_pacer(),
             watchdog_deadline: None,
             killed_by_watchdog: false,
         });
@@ -1093,7 +1059,9 @@ impl<'a> Init<'a> {
             return StartReport::default();
         }
         self.services[idx].restart_deadline = None;
-        self.services[idx].relaunched_at = Some(now);
+        self.services[idx]
+            .restart_pacer
+            .started(now.saturating_total_nanos());
         self.services[idx].state = ServiceState::Inactive;
         self.pump()
     }
@@ -2067,16 +2035,11 @@ impl<'a> Init<'a> {
         if !self.services[idx].spec.restart().should_restart(exit_code) {
             return;
         }
-        // Reset the crash-loop budget if the service had run stably since
-        // its last relaunch (or was never restarted — it ran since boot).
-        let ran_stably = self.services[idx]
-            .relaunched_at
-            .is_none_or(|t| duration_since(now, t) >= RESTART_STABLE_WINDOW);
-        if ran_stably {
-            self.services[idx].restart_attempts = 0;
-        }
+        let restart = self.services[idx]
+            .restart_pacer
+            .failed(now.saturating_total_nanos());
         let name = self.services[idx].spec.name().to_string();
-        if self.services[idx].restart_attempts >= MAX_RESTART_ATTEMPTS {
+        if restart.taken >= MAX_RESTART_ATTEMPTS {
             self.audit(
                 events::SERVICE_RESTART_EXHAUSTED,
                 Level::Warn,
@@ -2085,9 +2048,7 @@ impl<'a> Init<'a> {
             );
             return;
         }
-        let backoff = restart_backoff(self.services[idx].restart_attempts);
-        self.services[idx].restart_deadline = Some(add_duration(now, backoff));
-        self.services[idx].restart_attempts += 1;
+        self.services[idx].restart_deadline = Some(Duration64::from_nanos(restart.at));
         self.audit(
             events::SERVICE_RESTART_SCHEDULED,
             Level::Info,
@@ -2521,28 +2482,6 @@ fn add_duration(a: Duration64, b: Duration64) -> Duration64 {
     }
     // `nanos` is now below `NANOS_PER_SEC`, so this never fails; the
     // saturated-seconds fallback keeps the function total without a panic.
-    Duration64::new(secs, nanos).unwrap_or_else(|_| Duration64::from_secs(secs))
-}
-
-/// The non-negative span from the earlier instant `earlier` to the current
-/// instant `now`, both monotonic. A `now` before `earlier` (never expected
-/// from a monotonic clock) clamps to [`Duration64::ZERO`] rather than
-/// producing a negative span.
-fn duration_since(now: Duration64, earlier: Duration64) -> Duration64 {
-    if now <= earlier {
-        return Duration64::ZERO;
-    }
-    let mut secs = now.secs().saturating_sub(earlier.secs());
-    let now_nanos = i64::from(now.subsec_nanos());
-    let earlier_nanos = i64::from(earlier.subsec_nanos());
-    let mut nanos = now_nanos - earlier_nanos;
-    if nanos < 0 {
-        nanos += i64::from(NANOS_PER_SEC);
-        secs = secs.saturating_sub(1);
-    }
-    // `nanos` is now in `0..NANOS_PER_SEC` and `secs >= 0` because
-    // `now > earlier`; the fallback keeps the function total.
-    let nanos = u32::try_from(nanos).unwrap_or(0);
     Duration64::new(secs, nanos).unwrap_or_else(|_| Duration64::from_secs(secs))
 }
 
@@ -3770,44 +3709,15 @@ mod tests {
     }
 
     #[test]
-    fn restart_backoff_doubles_from_the_base_and_clamps_to_the_cap() {
-        // 100 ms base, doubling: 100, 200, 400, 800 ms, then clamped at the
-        // 30 s cap once the doubling would exceed it.
-        assert_eq!(
-            super::restart_backoff(0),
-            Duration64::new(0, 100_000_000).unwrap()
-        );
-        assert_eq!(
-            super::restart_backoff(1),
-            Duration64::new(0, 200_000_000).unwrap()
-        );
-        assert_eq!(
-            super::restart_backoff(3),
-            Duration64::new(0, 800_000_000).unwrap()
-        );
-        // A large attempt saturates the shift but is clamped to the cap,
-        // never overflows.
-        assert_eq!(super::restart_backoff(1_000), super::RESTART_BACKOFF_CAP);
-    }
-
-    #[test]
-    fn duration_since_is_the_non_negative_gap_and_clamps_a_backwards_clock() {
-        let earlier = Duration64::new(10, 250_000_000).unwrap();
-        let later = Duration64::new(12, 750_000_000).unwrap();
-        assert_eq!(
-            super::duration_since(later, earlier),
-            Duration64::new(2, 500_000_000).unwrap()
-        );
-        // A borrow across the second boundary carries correctly.
-        let a = Duration64::new(10, 100_000_000).unwrap();
-        let b = Duration64::new(11, 900_000_000).unwrap();
-        assert_eq!(
-            super::duration_since(b, a),
-            Duration64::new(1, 800_000_000).unwrap()
-        );
-        // now <= earlier clamps to zero rather than a negative span.
-        assert_eq!(super::duration_since(earlier, later), Duration64::ZERO);
-        assert_eq!(super::duration_since(earlier, earlier), Duration64::ZERO);
+    fn the_manager_backoff_starts_at_100_ms_and_caps_at_30_s() {
+        let mut pacer = super::restart_pacer();
+        pacer.started(0);
+        assert_eq!(pacer.failed(0).at, 100_000_000);
+        assert_eq!(pacer.failed(0).at, 200_000_000);
+        for _ in 0..16 {
+            let _ = pacer.failed(0);
+        }
+        assert_eq!(pacer.failed(0).at, super::RESTART_BACKOFF_CAP_NS);
     }
 
     #[test]
@@ -3959,7 +3869,10 @@ mod tests {
         // Second crash long after the relaunch (past the stable window):
         // the budget resets, so the backoff is the base again, not doubled.
         let pid = init.running_pid("svc").unwrap();
-        let much_later = add_duration(deadline, super::RESTART_STABLE_WINDOW);
+        let much_later = add_duration(
+            deadline,
+            Duration64::from_nanos(super::RESTART_STABLE_WINDOW_NS),
+        );
         let much_later = add_duration(much_later, Duration64::from_secs(1));
         reaper.push(ReapedChild { pid, exit_code: 1 });
         init.reap(much_later);

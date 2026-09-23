@@ -148,6 +148,7 @@
 - [App-data service (`confd`)](./userland/confd.md)
 - [Seat-manager service](./userland/seatmgr.md)
 - [Network-stack service](./userland/netstack.md)
+- [Link-local service discovery (`discoveryd`)](./userland/discoveryd.md)
 - [Audio service (`audiod`)](./userland/audiod.md)
 - [Time service (`timed`)](./userland/timed.md)
 - [Networking tools (`ss`, `host`, `telnet`)](./userland/networking.md)

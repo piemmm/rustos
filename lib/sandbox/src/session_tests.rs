@@ -7,9 +7,9 @@
 //! without processes.
 
 use super::{
-    head_declared, serve_session, FrameOut, SandboxSession, SessionBounds, SessionDescriptors,
-    SessionError, SessionService, SessionStep, SessionTransport, EVENT_SESSION_FAILED,
-    MIN_QUEUE_BYTES,
+    head_declared, serve_session, ByteQueue, FrameOut, SandboxSession, SessionBounds,
+    SessionDescriptors, SessionError, SessionService, SessionStep, SessionTransport,
+    EVENT_SESSION_FAILED, MIN_QUEUE_BYTES,
 };
 use crate::loopback::LoopbackSession;
 use crate::proto::{Channel, ProtoError, FRAME_HEADER_LEN, MAX_FRAME};
@@ -186,7 +186,7 @@ fn drain<T: SessionTransport, K: Sink>(
     session: &mut SandboxSession<T, K>,
 ) -> Result<Vec<Vec<u8>>, SessionError> {
     let mut frames = Vec::new();
-    while let Some(frame) = session.recv()? {
+    while let Some(frame) = session.recv(<[u8]>::to_vec)? {
         frames.push(frame);
     }
     Ok(frames)
@@ -245,11 +245,14 @@ fn a_frame_split_across_reads_is_assembled_before_it_is_delivered() {
     let mut session = SandboxSession::new(transport, bounds(), SilentSink).expect("committed");
     for _ in 0..FRAME_HEADER_LEN + b"hello".len() - 1 {
         session.on_readable().expect("no failure");
-        assert_eq!(session.recv().expect("no failure"), None);
+        assert_eq!(session.recv(<[u8]>::to_vec).expect("no failure"), None);
     }
     session.on_readable().expect("no failure");
-    assert_eq!(session.recv().expect("no failure"), Some(b"hello".to_vec()));
-    assert_eq!(session.recv().expect("no failure"), None);
+    assert_eq!(
+        session.recv(<[u8]>::to_vec).expect("no failure"),
+        Some(b"hello".to_vec())
+    );
+    assert_eq!(session.recv(<[u8]>::to_vec).expect("no failure"), None);
 }
 
 #[test]
@@ -259,7 +262,10 @@ fn an_empty_payload_is_a_legal_frame_in_both_directions() {
     session.send(b"").expect("queued");
     session.on_writable().expect("no failure");
     session.on_readable().expect("no failure");
-    assert_eq!(session.recv().expect("no failure"), Some(Vec::new()));
+    assert_eq!(
+        session.recv(<[u8]>::to_vec).expect("no failure"),
+        Some(Vec::new())
+    );
 }
 
 #[test]
@@ -370,7 +376,10 @@ fn a_full_accumulator_withdraws_read_readiness_until_the_owner_drains() {
     .expect("committed");
     session.on_readable().expect("no failure");
     assert!(!session.wants_read(), "the accumulator is full");
-    assert_eq!(session.recv().expect("no failure"), Some(payload.clone()));
+    assert_eq!(
+        session.recv(<[u8]>::to_vec).expect("no failure"),
+        Some(payload.clone())
+    );
     assert!(session.wants_read(), "draining one frame made room");
     assert_eq!(drain(&mut session).expect("no failure").len(), 2);
     assert!(session.wants_read());
@@ -387,7 +396,10 @@ fn a_clean_end_of_stream_finishes_and_a_truncated_one_is_contained() {
     assert!(session.peer_finished());
     assert!(!session.wants_read(), "nothing more can arrive");
     // Frames already accumulated are still drainable after the end.
-    assert_eq!(session.recv().expect("no failure"), Some(b"last".to_vec()));
+    assert_eq!(
+        session.recv(<[u8]>::to_vec).expect("no failure"),
+        Some(b"last".to_vec())
+    );
     assert!(sink.events.borrow().is_empty(), "a clean end logs nothing");
 
     // Truncated: the stream ends inside a declared frame.
@@ -437,7 +449,7 @@ fn a_worker_frame_above_the_inbound_ceiling_is_refused_before_it_is_copied() {
     .expect("committed");
     session.on_readable().expect("no failure");
     assert_eq!(
-        session.recv().expect("no failure"),
+        session.recv(<[u8]>::to_vec).expect("no failure"),
         Some(vec![7u8; limit - FRAME_HEADER_LEN])
     );
 }
@@ -465,7 +477,10 @@ fn a_transport_failure_is_contained_reaped_logged_and_latched() {
     assert_eq!(session.send(b"x"), Err(SessionError::WorkerFailed));
     assert_eq!(session.on_readable(), Err(SessionError::WorkerFailed));
     assert_eq!(session.on_writable(), Err(SessionError::WorkerFailed));
-    assert_eq!(session.recv(), Err(SessionError::WorkerFailed));
+    assert_eq!(
+        session.recv(<[u8]>::to_vec),
+        Err(SessionError::WorkerFailed)
+    );
     assert!(!session.wants_read());
     assert!(!session.wants_write());
     assert_eq!(*disposed.borrow(), 1);
@@ -542,10 +557,10 @@ fn the_queues_do_not_grow_across_a_long_session() {
         session.send(b"payload").expect("queued");
         turn(&mut session).expect("no failure");
         assert_eq!(
-            session.recv().expect("no failure"),
+            session.recv(<[u8]>::to_vec).expect("no failure"),
             Some(b">payload".to_vec())
         );
-        assert_eq!(session.recv().expect("no failure"), None);
+        assert_eq!(session.recv(<[u8]>::to_vec).expect("no failure"), None);
         assert_eq!(
             (session.outbound.arena.len(), session.inbound.arena.len()),
             baseline,
@@ -680,4 +695,18 @@ fn an_oversize_request_declaration_fails_the_worker_loop_before_allocation() {
         serve_session(&mut chan, &mut Tagger),
         ServeEnd::Failed(ProtoError::Oversize)
     );
+}
+
+#[test]
+fn a_queue_leaves_nothing_it_carried_in_memory_it_frees() {
+    // A worker's keys cross in these frames; the drop path scrubs the whole
+    // arena, consumed and pending bytes alike.
+    let mut queue = ByteQueue::commit(32).expect("committed");
+    queue
+        .append_slot(24)
+        .expect("room")
+        .copy_from_slice(&[0xA5; 24]);
+    queue.consume(16);
+    queue.scrub();
+    assert!(queue.arena.iter().all(|byte| *byte == 0));
 }

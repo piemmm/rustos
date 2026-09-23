@@ -1461,6 +1461,7 @@ fn ipv4_udp_datagram_round_trips() {
         destination: IpAddr::V4(V4_B),
         source_port: 5000,
         destination_port: 7,
+        source_on_link: true,
         payload: b"udp-payload".to_vec(),
     }));
 }
@@ -1492,6 +1493,7 @@ fn ipv6_udp_datagram_round_trips() {
         destination: IpAddr::V6(link_local(IID_B)),
         source_port: 6000,
         destination_port: 9,
+        source_on_link: true,
         payload: b"udp6".to_vec(),
     }));
 }
@@ -1558,6 +1560,7 @@ fn oversize_v6_udp_is_source_fragmented_and_round_trips() {
             destination: IpAddr::V6(link_local(IID_B)),
             source_port: 6000,
             destination_port: 9,
+            source_on_link: true,
             payload: payload.clone(),
         }),
         "the reassembled 1600-byte datagram is delivered"
@@ -2864,4 +2867,28 @@ fn the_multicast_revision_is_stable_while_nothing_changes() {
     let mut macs = Vec::new();
     s.multicast_macs(&mut macs);
     assert!(macs.is_empty(), "no family is on, so nothing is admitted");
+}
+
+#[test]
+fn a_peer_is_on_link_when_link_local_or_reached_without_a_gateway() {
+    let mut s = stack(MAC_A, IID_A);
+    // Unconfigured, only the two link-local ranges are on-link.
+    assert!(s.is_on_link(IpAddr::V4(Ipv4Addr::new(169, 254, 7, 9))));
+    assert!(s.is_on_link(IpAddr::V6(link_local(IID_B))));
+    assert!(!s.is_on_link(IpAddr::V4(V4_B)));
+
+    s.set_ipv4_config(V4_A, 24, Some(V4_B)).expect("configures");
+    // The connected subnet is on-link; what only the default route reaches
+    // is not, since it needs a gateway.
+    assert!(s.is_on_link(IpAddr::V4(V4_B)));
+    assert!(!s.is_on_link(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
+
+    let global = Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, 0xA1);
+    s.add_ipv6_static(global, 64, t(0)).expect("adds");
+    assert!(s.is_on_link(IpAddr::V6(Ipv6Addr::new(
+        0x2001, 0xdb8, 0, 1, 0, 0, 0, 0x99
+    ))));
+    assert!(!s.is_on_link(IpAddr::V6(Ipv6Addr::new(
+        0x2001, 0xdb8, 0, 2, 0, 0, 0, 0x99
+    ))));
 }

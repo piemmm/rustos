@@ -56,10 +56,6 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # nothing measurable and an observer able to reconstruct the payload stream
 # is a needless gift; rolling a private PRNG is forbidden either way.
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
-# `secret::Wiped` for the buffer the payload key is marshalled through: the
-# generator wipes its own copy on drop, and this erases the one the syscall
-# wrote on every exit from the scope, early returns included.
-tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The freestanding `Run` binary also enables the help engine's syscall-backed
 # own-bundle `HelpSource` (`BundleHelp`).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

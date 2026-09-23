@@ -151,7 +151,24 @@ sandboxes a parse imports it:
   only thing that can ever wake it, and it may therefore use the ordinary
   blocking channel — a worker blocked writing is freed by the parent's
   read readiness, and one blocked reading by the parent's room readiness.
-  That second leg is why `StreamRoom` exists at all.
+  That second leg is why `StreamRoom` exists at all. `recv` lends each
+  frame in place rather than copying it out, so taking a frame never
+  allocates: an event loop can never be left holding a frame it has no
+  memory to take, readable and unable to drain.
+- **Supervised sessions** (`supervise`): the duplex seam for a worker that
+  serves a *service* rather than one connection. `SupervisedSession`
+  starts each worker through a `SessionLauncher` and reports each start
+  as a new generation. The owner drops what it derived from the old worker
+  and sends the new one what it needs, so a replacement is correct here,
+  where it would not be for a connection. Every failure is reaped and
+  logged once (`EventId(6000)`; a refused launch is `EventId(6001)`). A
+  worker that ends its stream has failed, and so has one whose frame the
+  owner `condemn`s as unbelievable. Replacement is paced through the same
+  `RestartPacer` mechanism as the service manager's restarts, on the session's
+  own schedule: 100 ms, doubling to 30 s, forgotten after 30 s of stable
+  service. A crafted input that kills the worker
+  every time therefore costs its owner a spawn per backoff step, never a
+  spawn per input.
 - **Production transport** (`rt`, feature `program`, freestanding only):
   the parent spawns **its own binary** in a worker role — two fresh
   pipes wired to the child's fd 0/1 through `SpawnAttach::sandbox`, the
@@ -167,7 +184,10 @@ sandboxes a parse imports it:
   gate over it. The token serves any spawn of the caller's own binary
   (sandboxed or plain — `plans/STRESSTEST.md`'s worker re-entry is the
   plain consumer) and only when the caller carries a spawnable path; a
-  caller without one fails closed `NotFound`.
+  caller without one fails closed `NotFound`. `RtSessionLauncher` starts
+  supervised workers the same way. `SessionMembers` keeps a session's two
+  descriptors on the owner's wait-set exactly while the session wants
+  them, and moves them to each generation's new pipe pair.
 - **First consumers** (`decode`): executable-container summaries
   (`lib/binfmt`) and per-window instruction disassembly (`lib/disasm`)
   run inside the worker; the client-side helpers validate every reply
@@ -372,10 +392,14 @@ under plain `cargo test`.
   a band out of range, a zero-row band, an oversize destination, an
   oversize source, a malformed image, an unrecognised format, release
   fail-closing a subsequent band, and `OP_RASTERISE` still round-tripping
-  after a wallpaper sequence on the same worker); and the `fuzz_sandbox`
-  harness (hostile input files through the decode, helpdoc, and
-  imagerender icon/wallpaper request decoders, hostile worker replies
-  into every client decoder) in `cargo xtask fuzz`.
+  after a wallpaper sequence on the same worker); the supervised session
+  (generations, paced replacement and its reset after a stable window,
+  a clean end of stream counted as a failure, condemnation, and each
+  failure logged exactly once); and the `fuzz_sandbox` harness (hostile
+  input files through the decode, helpdoc, and imagerender icon/wallpaper
+  request decoders, hostile worker replies into every client decoder) in
+  `cargo xtask fuzz`. `fuzz_discoveryd` drives a supervised session
+  against a hostile worker.
 - `userland/apps/man`: the loopback-driven suite runs the real
   `HelpService` end to end, and hostile-renderer tests prove a
   disbelieved reply withholds the page (typed `ManError::Render`, no
@@ -383,6 +407,8 @@ under plain `cargo test`.
 - QEMU (`tests/integration/sandbox_program` + `sandbox_qemu_aarch64`):
   the whole seam over the real syscalls on the `virt` board — decode of
   valid and malformed inputs through a genuinely sandboxed worker, real
-  crash containment with a surviving caller, and the syscall wall probed
+  crash containment with a surviving caller, the syscall wall probed
   from inside a live sandbox (`fs_open`/`spawn` denied while the pipe
-  reply crosses).
+  reply crosses), and a supervised session whose stream worker is killed
+  by a crafted frame and replaced only once its paced delay has elapsed
+  on a real one-shot wait, the replacement serving on fresh descriptors.

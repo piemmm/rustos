@@ -12,9 +12,9 @@
 //!
 //! When the M-mode `seed`-CSR delegation lands (tracked below), this port
 //! gains the real `csrr`-based draw and the profile becomes
-//! `EntropySupport::Supported`; until then the kernel CSPRNG reserve simply
-//! stays unseeded on riscv64, exactly as it fails closed before any platform
-//! source is available.
+//! `EntropySupport::Supported`; until then the kernel never draws from it,
+//! and the reserve seeds from the other sources the kernel mixes — on a QEMU
+//! guest, the firmware boot seed.
 
 use tairix_arch_api::{EntropyProfile, EntropySupport, PlatformEntropy};
 use tairix_rng::{EntropyError, HardwareRng};

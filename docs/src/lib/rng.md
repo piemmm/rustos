@@ -190,7 +190,9 @@ closed — never an unbounded spin (§2.1).
 At boot, `kernel/core` reaches the source through `KernelArch::platform_entropy`
 and seeds the reserve once — but **never from the hardware RNG alone**, per
 §22's "no single source is trusted alone". It wraps the hardware handle as an
-`EntropySource` (`ArchEntropy`) and XOR-mixes it with *three* independent
+`EntropySource` (`ArchEntropy`) — keeping it only when the port's declared
+profile provides hardware entropy, so a `Pending` source (riscv64's `Zkr`) is
+never touched and withholds only itself — and XOR-mixes it with *three* independent
 sources — a CPU-timing-jitter source (next section), the asynchronous
 interrupt-arrival-timing pool (the section after), and the firmware-provided
 **boot seed** (below) — through nested `MixedPair`s (`KernelEntropy<A> =
@@ -200,9 +202,9 @@ over that mix, and swaps it in for the `NullEntropy` boot reserve. Because the
 mix owns the reseeding sources, every automatic reseed re-draws from them (the
 one-shot boot seed excepted — it is consumed once and then contributes the XOR
 identity). The decision is audited (`EntropyReserveSeeded` records the
-seed-time contributors — `hardware+jitter`, `hardware+jitter+bootseed`,
-`hardware+bootseed`, or `hardware` — while `EntropyReserveUnseeded` records a
-cause). XOR is entropy-preserving for independent inputs, so a backdoored,
+seed-time contributors, `+`-joined from `hardware`, `jitter`, and `bootseed` —
+`bootseed` alone on a riscv64 QEMU guest — while `EntropyReserveUnseeded`
+records `no_source` or `draw_failed`). XOR is entropy-preserving for independent inputs, so a backdoored,
 stuck, or observable hardware RNG cannot lower the seed's quality below the
 other sources' contribution, and vice versa; only if *every* source is
 unavailable does the reserve stay unseeded and `random_get` keep failing
@@ -329,6 +331,15 @@ What that gives, and what it does not:
   XOR-folds 32 fresh bytes into the key. XOR is the point — a dead, stuck, or
   hostile source contributes zeros or garbage and can never *lower* the key's
   quality.
+
+A userland program keys one from the kernel with
+`FastRng::keyed_by(tairix_rt::random_fill)`: the key crosses a buffer wiped on
+every exit, and a refused draw builds no generator, so nothing downstream can
+run on a partial or all-zero key. One kernel draw then serves every nonce,
+query id, port, and jitter value the program needs, rather than a syscall per
+value. `fork` hands a consumer its own stream keyed from the parent's output —
+netstack gives each interface's DHCP client and RFC 8981 address source one —
+with no second kernel draw.
 
 Cost, stated honestly. `.cargo/config.toml` pins `chacha20_force_soft` on
 `x86_64-unknown-none`, because that target is soft-float and SSE-disabled and

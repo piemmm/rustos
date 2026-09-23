@@ -892,63 +892,30 @@ fn wait_secondary_online<A: KernelArch + 'static>(
     }
 }
 
-/// Seed the kernel CSPRNG output reserve from the arch port's platform
-/// entropy source, replacing the unseeded `NullEntropy` boot reserve.
+/// Seed the kernel CSPRNG output reserve from every entropy source the
+/// platform offers, replacing the unseeded `NullEntropy` boot reserve.
 ///
-/// Fail-soft and audited (a security-relevant state change is logged): when
-/// the port exposes a usable source and a draw produces bytes, a
-/// [`crate::random::SeededReserve`] is installed and `random_get` begins
-/// serving cryptographic output; otherwise the reserve is left unseeded so
-/// every draw keeps failing closed with
-/// [`tairix_abi::Errno::EntropyNotReady`] — never weakened to predictable
-/// bytes. There is no panic and no busy-wait: a momentarily-underfull source
-/// is the port's bounded-retry concern, and a hard failure simply leaves the
-/// reserve unseeded.
+/// Audited either way. When the mix yields bytes a
+/// [`crate::random::SeededReserve`] is installed and `random_get` serves;
+/// otherwise the reserve stays unseeded and every draw fails closed with
+/// [`tairix_abi::Errno::EntropyNotReady`]. A port with no usable hardware
+/// source withholds only that source, so a machine whose hardware RNG is not
+/// wired yet still seeds from the others.
 fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>) {
     use crate::random::{
-        take_boot_seed_source, ArchEntropy, ArchTicks, IrqEntropyObserver, SeededReserve,
-        IRQ_ENTROPY_POOL,
+        seed_sources, take_boot_seed_source, ArchEntropy, ArchTicks, IrqEntropyObserver,
+        SeededReserve, IRQ_ENTROPY_POOL,
     };
     use tairix_rng::{EntropySource, InterruptPoolSource, JitterSource, MixedPair};
-
-    let Some(source) = state.arch.platform_entropy() else {
-        emit(
-            state.audit_sink,
-            Level::Info,
-            AuditEvent::EntropyReserveUnseeded,
-            &[Field {
-                key: "cause",
-                value: tairix_log::FieldValue::Str("no_source"),
-            }],
-        );
-        return;
-    };
-    if !source.profile().provides_hardware_entropy() {
-        // The port declares a tracked `Pending` / `Unsupported` source; do
-        // not attempt a draw that will fail, just record the fail-closed
-        // state.
-        emit(
-            state.audit_sink,
-            Level::Info,
-            AuditEvent::EntropyReserveUnseeded,
-            &[Field {
-                key: "cause",
-                value: tairix_log::FieldValue::Str("source_pending"),
-            }],
-        );
-        return;
-    }
 
     // Never trust the hardware RNG alone: XOR-mix it with an independent
     // CPU-timing-jitter source before it seeds (and reseeds) the reserve. A
     // stuck, backdoored, or observable hardware source cannot lower the seed's
     // quality below the jitter source's contribution, and vice versa.
-    let hardware = ArchEntropy::new(source);
+    let hardware = ArchEntropy::new(state.arch.platform_entropy());
     let mut jitter = JitterSource::new(ArchTicks::new(state.arch.clone()));
-    // Probe the jitter source once so the audit records honestly whether the
-    // second, independent source is contributing on this platform (a
-    // deterministic/emulated counter fails its health tests and yields, in
-    // which case the mix falls back to the hardware source alone).
+    // Probed once so the audit says whether jitter contributes here: an
+    // emulated counter fails its health tests.
     let jitter_healthy = {
         let mut probe = [0u8; 8];
         jitter.fill(&mut probe).is_ok()
@@ -961,24 +928,11 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
     // below, only once a seeded reserve exists to drain it.
     let interrupt = InterruptPoolSource::new(&IRQ_ENTROPY_POOL);
 
-    // Fold in the firmware-provided boot seed (the FDT `/chosen/rng-seed`) as
-    // a fourth, independent source. It is the source of last resort: on an
-    // emulated or virtualised machine the CPU exposes no hardware RNG and its
-    // cycle counter is deterministic, so both `hardware` and `jitter` above
-    // fail closed, and without the boot seed the reserve would never seed at
-    // all — leaving `random_get`, the per-boot machine id, and the ramzip
-    // sealing key all unavailable. It is a one-shot contribution consumed
-    // here and wiped; later reseeds draw fresh entropy from the interrupt
-    // pool. XOR-mixed like every source, so it can never lower the quality a
-    // real hardware RNG contributes on a machine that has one.
+    // The firmware boot seed (FDT `/chosen/rng-seed`) is the one source an
+    // emulated machine with no usable hardware RNG has. One-shot: consumed
+    // and wiped here, so reseeds draw on the interrupt pool.
     let boot_seed = take_boot_seed_source();
-    let boot_seed_present = boot_seed.has_seed();
-    let sources = match (jitter_healthy, boot_seed_present) {
-        (true, true) => "hardware+jitter+bootseed",
-        (true, false) => "hardware+jitter",
-        (false, true) => "hardware+bootseed",
-        (false, false) => "hardware",
-    };
+    let sources = seed_sources(hardware.is_present(), jitter_healthy, boot_seed.has_seed());
 
     let mixed = MixedPair::new(
         MixedPair::new(MixedPair::new(hardware, jitter), interrupt),
@@ -1002,7 +956,7 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
                 AuditEvent::EntropyReserveSeeded,
                 &[Field {
                     key: "sources",
-                    value: tairix_log::FieldValue::Str(sources),
+                    value: tairix_log::FieldValue::Str(sources.unwrap_or("unattributed")),
                 }],
             );
             // A seeded CSPRNG now exists, so bring the process-global
@@ -1012,15 +966,19 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
             install_ramzip_tier(state);
         }
         Err(_) => {
-            // The source is enumerated but could not produce bytes (every
-            // bounded draw was exhausted). Leave the reserve unseeded.
+            // Every bounded draw was exhausted, or no source could contribute
+            // at all. Leave the reserve unseeded.
             emit(
                 state.audit_sink,
                 Level::Info,
                 AuditEvent::EntropyReserveUnseeded,
                 &[Field {
                     key: "cause",
-                    value: tairix_log::FieldValue::Str("draw_failed"),
+                    value: tairix_log::FieldValue::Str(if sources.is_some() {
+                        "draw_failed"
+                    } else {
+                        "no_source"
+                    }),
                 }],
             );
         }

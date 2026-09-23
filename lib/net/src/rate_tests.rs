@@ -1,9 +1,10 @@
 //! Unit tests for the windowed-rate meter.
 
 use super::{
-    RateCounters, RateMeter, RateSelector, TokenBucket, HISTORY, MAX_WINDOW_NANOS,
+    PeerBudgets, RateCounters, RateMeter, RateSelector, TokenBucket, HISTORY, MAX_WINDOW_NANOS,
     MIN_SAMPLE_GAP_NANOS,
 };
+use crate::addr::{IpAddr, Ipv4Addr};
 use tairix_abi::time::Duration64;
 
 /// Nanoseconds as a monotonic instant.
@@ -231,4 +232,65 @@ fn rate_limiter_zero_configuration_fails_closed() {
     let mut zero_rate = TokenBucket::new(1, 0);
     assert!(zero_rate.allow(Duration64::from_secs(1)));
     assert!(!zero_rate.allow(Duration64::from_secs(1_000_000)));
+}
+
+fn host(last: u8) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(192, 0, 2, last))
+}
+
+/// Draws allowed out of `attempts` from one peer, all at one instant.
+fn allowed<const N: usize>(budgets: &mut PeerBudgets<N>, peer: IpAddr, attempts: u32) -> u32 {
+    let now = Duration64::from_secs(1);
+    (0..attempts)
+        .map(|_| u32::from(budgets.allow(now, peer)))
+        .sum()
+}
+
+#[test]
+fn each_peer_is_held_to_its_own_burst() {
+    let mut budgets: PeerBudgets<4> = PeerBudgets::new(3, 1, 100, 100);
+    assert_eq!(allowed(&mut budgets, host(1), 10), 3);
+    assert_eq!(allowed(&mut budgets, host(2), 10), 3);
+}
+
+#[test]
+fn a_peer_past_its_budget_does_not_spend_the_shared_one() {
+    // The shared bucket holds what one peer's burst and one more allowance
+    // need. A flooding peer refused by its own bucket must not drain it, so
+    // the next peer is still answered.
+    let mut budgets: PeerBudgets<4> = PeerBudgets::new(4, 1, 5, 1);
+    assert_eq!(allowed(&mut budgets, host(1), 1_000), 4);
+    assert_eq!(allowed(&mut budgets, host(2), 1), 1);
+}
+
+#[test]
+fn rotating_source_addresses_meets_the_shared_bound() {
+    let mut budgets: PeerBudgets<4> = PeerBudgets::new(8, 1, 10, 1);
+    let total: u32 = (0..=255u8)
+        .map(|last| allowed(&mut budgets, host(last), 2))
+        .sum();
+    assert_eq!(total, 10);
+}
+
+#[test]
+fn a_full_table_hands_the_quietest_slot_to_a_new_peer() {
+    let mut budgets: PeerBudgets<2> = PeerBudgets::new(2, 1, 100, 100);
+    assert!(budgets.allow(Duration64::from_secs(1), host(1)));
+    assert!(budgets.allow(Duration64::from_secs(2), host(2)));
+    // A third peer displaces the longest-quiet, and starts with a full
+    // budget of its own.
+    assert!(budgets.allow(Duration64::from_secs(3), host(3)));
+    assert!(budgets.allow(Duration64::from_secs(3), host(3)));
+    assert!(!budgets.allow(Duration64::from_secs(3), host(3)));
+    // The displaced peer returns with a full budget: quiet meant full.
+    assert!(budgets.allow(Duration64::from_secs(4), host(1)));
+    assert!(budgets.allow(Duration64::from_secs(4), host(1)));
+}
+
+#[test]
+fn a_peer_budget_refills_with_time() {
+    let mut budgets: PeerBudgets<2> = PeerBudgets::new(1, 2, 100, 100);
+    assert!(budgets.allow(Duration64::from_secs(1), host(1)));
+    assert!(!budgets.allow(Duration64::from_secs(1), host(1)));
+    assert!(budgets.allow(Duration64::from_secs(2), host(1)));
 }

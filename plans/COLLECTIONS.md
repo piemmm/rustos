@@ -220,12 +220,13 @@ attack; a fixed key does not.
   construction for the untrusted-key case rather than silently using a
   predictable key — fail closed.
 * A consumer that is *not* an authority decision and must keep working on a
-  platform whose CSPRNG never seeded (`riscv64` and `wasm32` expose no
-  entropy source yet) names `HashSeed::UNKEYED`, so the fallback is a
-  reviewable choice at the use site rather than a silent default. The two
-  such sites — the futex bucket index and the bond flow hash — each report
-  the unkeyed state, through the boot audit log and on `stderr`
-  respectively.
+  platform whose CSPRNG never seeded (`wasm32` exposes no entropy source yet;
+  riscv64 seeds from its firmware boot seed until `Zkr` is wired) names
+  `HashSeed::UNKEYED`, so the fallback is a reviewable choice at the use site
+  rather than a silent default. The one such site — the futex bucket index —
+  reports the unkeyed state through the boot audit log. The network stack is
+  not one: without a key it has no unpredictable sequence numbers or cookies
+  either, so it refuses to serve.
 * `FastHash` is never the default and never correct for untrusted keys. Its
   rustdoc says so, and every use site of it names it explicitly, so the
   choice is visible in review.

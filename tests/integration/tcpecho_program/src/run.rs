@@ -47,7 +47,7 @@ mod program {
     use tairix_abi::net::{SocketAddr, SocketId, SocketStreamEvent, StreamCloseReason};
     use tairix_abi::net_ipc::NetAddrFamily;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{Errno, Origin};
+    use tairix_abi::Errno;
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
     use tairix_rt::net::{close, connect, stream_recv, stream_send, stream_socket};
     use tairix_test_netstack_wire as wire;
@@ -164,30 +164,26 @@ mod program {
         Ok(())
     }
 
-    /// Block for events until the connection is established, returning the
-    /// kernel-attested origin of the stack (captured from the first event so
-    /// every later event can be required to match it — the delivery port is
-    /// otherwise an unauthenticated inbox).
-    fn await_connected(set: u64, socket: SocketId, buf: &mut [u8]) -> Result<Origin, &'static str> {
+    /// Block for events until the connection is established. Only the
+    /// stack's own events arrive: the receive discards any other sender's.
+    fn await_connected(set: u64, socket: SocketId, buf: &mut [u8]) -> Result<(), &'static str> {
         let deadline = tairix_rt::clock_get().saturating_add(PHASE_TIMEOUT_NANOS);
         loop {
             // The `event` borrow of `buf` never escapes a match arm (each arm
-            // returns an owned `Origin`/`&'static str` or parks and re-loops),
-            // so the next iteration is free to re-borrow `buf`.
+            // returns or parks and re-loops), so the next iteration is free
+            // to re-borrow `buf`.
             match stream_recv(DELIVER_PORT, buf) {
-                Ok((SocketStreamEvent::Connected { socket: s }, origin)) if s == socket => {
-                    return Ok(origin)
-                }
-                Ok((SocketStreamEvent::Connected { .. }, _)) => {
+                Ok(SocketStreamEvent::Connected { socket: s }) if s == socket => return Ok(()),
+                Ok(SocketStreamEvent::Connected { .. }) => {
                     return Err("tcpecho: Connected for a foreign socket")
                 }
-                Ok((SocketStreamEvent::Data { .. }, _)) => {
+                Ok(SocketStreamEvent::Data { .. }) => {
                     return Err("tcpecho: data before the connection was established")
                 }
-                Ok((SocketStreamEvent::Closed { .. }, _)) => {
+                Ok(SocketStreamEvent::Closed { .. }) => {
                     return Err("tcpecho: connection closed before it established")
                 }
-                Ok((SocketStreamEvent::Accepted { .. }, _)) => {
+                Ok(SocketStreamEvent::Accepted { .. }) => {
                     return Err("tcpecho: unexpected Accepted event on a client socket")
                 }
                 Err(Errno::WouldBlock) => park_for_event(set, deadline)?,
@@ -213,50 +209,37 @@ mod program {
         Ok(())
     }
 
-    /// Receive and verify the whole echoed transfer, requiring every event to
-    /// come from the same stack origin `await_connected` captured and every
-    /// byte to match the deterministic stream at its absolute offset.
-    fn receive_and_verify(
-        set: u64,
-        socket: SocketId,
-        stack: Origin,
-        buf: &mut [u8],
-    ) -> Result<(), &'static str> {
+    /// Receive and verify the whole echoed transfer, requiring every byte to
+    /// match the deterministic stream at its absolute offset.
+    fn receive_and_verify(set: u64, socket: SocketId, buf: &mut [u8]) -> Result<(), &'static str> {
         let deadline = tairix_rt::clock_get().saturating_add(PHASE_TIMEOUT_NANOS);
         let mut received = 0usize;
         while received < TRANSFER_BYTES {
             // As in `await_connected`, the `event` borrow of `buf` is confined
             // to the match arm; the `WouldBlock` arm parks and re-loops.
             match stream_recv(DELIVER_PORT, buf) {
-                Ok((event, origin)) => {
-                    if origin != stack {
-                        return Err("tcpecho: event from an unexpected origin");
+                Ok(SocketStreamEvent::Data { socket: s, payload }) if s == socket => {
+                    if verify_chunk(received, payload).is_err() {
+                        return Err("tcpecho: echoed byte did not match the sent stream");
                     }
-                    match event {
-                        SocketStreamEvent::Data { socket: s, payload } if s == socket => {
-                            if verify_chunk(received, payload).is_err() {
-                                return Err("tcpecho: echoed byte did not match the sent stream");
-                            }
-                            received += payload.len();
+                    received += payload.len();
+                }
+                Ok(SocketStreamEvent::Data { .. }) => {
+                    return Err("tcpecho: data for a foreign socket")
+                }
+                Ok(SocketStreamEvent::Closed { reason, .. }) => {
+                    return Err(match reason {
+                        StreamCloseReason::PeerClosed => {
+                            "tcpecho: peer closed before echoing the whole transfer"
                         }
-                        SocketStreamEvent::Data { .. } => {
-                            return Err("tcpecho: data for a foreign socket")
-                        }
-                        SocketStreamEvent::Closed { reason, .. } => {
-                            return Err(match reason {
-                                StreamCloseReason::PeerClosed => {
-                                    "tcpecho: peer closed before echoing the whole transfer"
-                                }
-                                _ => "tcpecho: connection reset before the transfer completed",
-                            })
-                        }
-                        SocketStreamEvent::Connected { .. } => {
-                            return Err("tcpecho: a second Connected event")
-                        }
-                        SocketStreamEvent::Accepted { .. } => {
-                            return Err("tcpecho: unexpected Accepted event on a client socket")
-                        }
-                    }
+                        _ => "tcpecho: connection reset before the transfer completed",
+                    })
+                }
+                Ok(SocketStreamEvent::Connected { .. }) => {
+                    return Err("tcpecho: a second Connected event")
+                }
+                Ok(SocketStreamEvent::Accepted { .. }) => {
+                    return Err("tcpecho: unexpected Accepted event on a client socket")
                 }
                 Err(Errno::WouldBlock) => park_for_event(set, deadline)?,
                 Err(_) => return Err("tcpecho: event receive failed"),
@@ -291,9 +274,9 @@ mod program {
 
         let socket = open_and_connect(set)?;
         let mut buf = [0u8; DELIVER_MAX_PAYLOAD];
-        let stack = await_connected(set, socket, &mut buf)?;
+        await_connected(set, socket, &mut buf)?;
         send_all(socket, set)?;
-        receive_and_verify(set, socket, stack, &mut buf)?;
+        receive_and_verify(set, socket, &mut buf)?;
         // Orderly close of our half; the peer's teardown follows. A refused
         // close is not a data-integrity failure — the transfer already
         // verified — so it is reported but does not fail the run.

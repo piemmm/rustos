@@ -31,14 +31,14 @@ use tairix_inline::{ArrayVec, BitSet256};
 
 use crate::addr::IpAddr;
 use crate::dns::{Name, RecordType};
-use crate::rate::TokenBucket;
+use crate::rate::PeerBudgets;
 use crate::timeutil::{from_nanos, nanos, NEVER};
 
 use super::cache::{Learned, RecordCache};
 use super::codec::{Message, MessageWriter, Question, Section};
 use super::{
-    rename, LinkScope, NameKind, QuestionType, RData, Record, TypeBitmap, MAX_PUBLISHED,
-    MAX_QUESTIONS, MAX_RENAMES, PORT, TTL_GOODBYE_SECS,
+    rename, NameKind, QuestionType, RData, Record, TypeBitmap, MAX_PUBLISHED, MAX_QUESTIONS,
+    MAX_RENAMES, PORT, TTL_GOODBYE_SECS,
 };
 
 /// One millisecond in the engine's nanosecond time base.
@@ -149,6 +149,24 @@ pub enum Destination {
     },
 }
 
+/// Who sent a received datagram, as the network stack attests it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Sender {
+    /// The source address.
+    pub addr: IpAddr,
+    /// The source port: 5353 for a multicast DNS peer, anything else for a
+    /// legacy resolver (RFC 6762 §6.7).
+    pub port: u16,
+    /// Whether the stack found `addr` on the receiving interface's own link.
+    ///
+    /// Only the stack's address table can know, so the engine takes its
+    /// verdict rather than a copy of the prefixes that would go stale. A
+    /// sender that is not on-link is never answered and nothing it says is
+    /// cached: answering off-link turns a host into a reflector, and mDNS
+    /// reflection is a documented amplifier.
+    pub on_link: bool,
+}
+
 /// A datagram the engine wrote into the caller's buffer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Emit {
@@ -213,16 +231,6 @@ pub enum MdnsEvent {
         /// The publication that gave up.
         id: PublishId,
     },
-}
-
-/// What the engine needs to know about the interface it speaks on.
-#[derive(Clone, Debug)]
-pub struct MdnsConfig {
-    /// Which source addresses count as on-link. A query from anywhere else
-    /// is never answered.
-    pub link: LinkScope,
-    /// Keys the cache index; a peer chooses the names cached under it.
-    pub hash_key: HashSeed,
 }
 
 /// One record this host publishes.
@@ -317,44 +325,37 @@ struct ResponsePlan<'a> {
     waive_rate_limit: bool,
 }
 
-/// One peer's unicast-reply budget.
-#[derive(Clone, Debug)]
-struct PeerBudget {
-    addr: IpAddr,
-    bucket: TokenBucket,
-    last_used: u128,
-}
-
 /// The per-interface multicast DNS engine.
 #[derive(Debug)]
 pub struct MdnsEngine {
-    config: MdnsConfig,
     cache: RecordCache,
     published: Vec<Published>,
     groups: Vec<Group>,
     questions: Vec<Asked>,
     pending: Pending,
-    peers: ArrayVec<PeerBudget, MAX_TRACKED_PEERS>,
-    link_budget: TokenBucket,
+    replies: PeerBudgets<MAX_TRACKED_PEERS>,
     events: ArrayVec<MdnsEvent, MAX_EVENTS>,
     next_id: u32,
 }
 
 impl MdnsEngine {
     /// A new engine for one interface, publishing nothing and asking
-    /// nothing.
+    /// nothing, whose cache index is keyed with `hash_key` — the per-boot
+    /// secret, since a peer chooses the names cached under it.
     #[must_use]
-    pub fn new(config: MdnsConfig) -> Self {
-        let cache = RecordCache::new(config.hash_key);
+    pub fn new(hash_key: HashSeed) -> Self {
         Self {
-            config,
-            cache,
+            cache: RecordCache::new(hash_key),
             published: Vec::new(),
             groups: Vec::new(),
             questions: Vec::new(),
             pending: Pending::idle(),
-            peers: ArrayVec::new(),
-            link_budget: TokenBucket::new(LINK_REPLY_BURST, LINK_REPLY_RATE),
+            replies: PeerBudgets::new(
+                PEER_REPLY_BURST,
+                PEER_REPLY_RATE,
+                LINK_REPLY_BURST,
+                LINK_REPLY_RATE,
+            ),
             events: ArrayVec::new(),
             next_id: 0,
         }
@@ -598,15 +599,13 @@ impl MdnsEngine {
         &mut self,
         now: Duration64,
         bytes: &[u8],
-        from: IpAddr,
-        from_port: u16,
+        sender: Sender,
         rng: &mut dyn FnMut() -> u32,
         out: &mut [u8],
     ) -> Option<Emit> {
-        // Off-link first, before a single byte is parsed: a reflected mDNS
-        // response is an amplifier, and a sender that is not on this link
-        // has no business asking this host anything.
-        if !self.config.link.is_on_link(from) {
+        // Off-link first, before a single byte is parsed: a sender that is
+        // not on this link has no business asking this host anything.
+        if !sender.on_link {
             return None;
         }
         let message = Message::parse(bytes)?;
@@ -614,10 +613,10 @@ impl MdnsEngine {
             return None;
         }
         if message.response {
-            self.on_response(now, &message, from);
+            self.on_response(now, &message, sender.addr);
             return None;
         }
-        self.on_query(now, &message, from, from_port, rng, out)
+        self.on_query(now, &message, sender.addr, sender.port, rng, out)
     }
 
     /// Drop everything learned on this link, which is what a link going down
@@ -847,7 +846,7 @@ impl MdnsEngine {
                 waive_rate_limit: false,
             }
         };
-        if !plan.multicast && !self.charge_reply(now, from) {
+        if !plan.multicast && !self.replies.allow(now, from) {
             return None;
         }
         let destination = if plan.multicast {
@@ -1232,37 +1231,6 @@ impl MdnsEngine {
     }
 
     // -- budgets and housekeeping -------------------------------------------
-
-    /// Charge one unicast reply to the peer's budget and the interface's.
-    ///
-    /// Both must admit it: the per-peer bucket keeps one asker from crowding
-    /// the others out, and the interface bucket keeps a peer rotating its
-    /// source address from sidestepping the per-peer one.
-    fn charge_reply(&mut self, now: Duration64, peer: IpAddr) -> bool {
-        if !self.link_budget.allow(now) {
-            return false;
-        }
-        let now_ns = nanos(now);
-        if let Some(entry) = self.peers.iter_mut().find(|entry| entry.addr == peer) {
-            entry.last_used = now_ns;
-            return entry.bucket.allow(now);
-        }
-        let mut bucket = TokenBucket::new(PEER_REPLY_BURST, PEER_REPLY_RATE);
-        let allowed = bucket.allow(now);
-        let entry = PeerBudget {
-            addr: peer,
-            bucket,
-            last_used: now_ns,
-        };
-        if self.peers.try_push(entry.clone()).is_err() {
-            // The table is full, so the longest-quiet peer makes room; its
-            // budget was full anyway, which is what quiet means.
-            if let Some(slot) = self.peers.iter_mut().min_by_key(|entry| entry.last_used) {
-                *slot = entry;
-            }
-        }
-        allowed
-    }
 
     /// Expire cached records and pull forward the questions whose answers
     /// are about to go stale (RFC 6762 §5.2).

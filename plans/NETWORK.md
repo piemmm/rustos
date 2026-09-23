@@ -254,9 +254,17 @@ drivers/network/<nic>                 — link-layer only: frames in/out,
   (§2.2), so inbound datagrams are delivered by the stack `ipc_send`ing a
   framed `SocketDatagram` to a per-socket async **port** the client bound
   and named in `socket()`; the client parks on the existing
-  `WaitSourceKind::Port` and drains with `ipc_recv`, authenticating the
-  stack's attested sender origin (the `plans/APPWIN.md` AW3 window-event
-  precedent). A kernel `WaitSourceKind::Socket` is deliberately **not**
+  `WaitSourceKind::Port` and drains with `ipc_recv` (the `plans/APPWIN.md`
+  AW3 window-event precedent). A delivery port is an inbox anyone may post
+  to, so the `tairix_rt::net` receive authenticates every message's
+  kernel-attested sender as the stack's service account (`NETSTACK_UID`) and
+  discards any other unread — never first-sender pinning, which a forged
+  first post or a stack restart defeats — and the port id itself is
+  CSPRNG-drawn and process-private (`tairix_rt::bind_private_port`), so
+  nothing can squat it. A delivery also names the logical interface it
+  arrived on and the stack's verdict on whether its source is on that
+  interface's link, the one authority a link-scoped protocol consults. A
+  kernel `WaitSourceKind::Socket` is deliberately **not**
   added — teaching ring 0 about a stack-owned object would break the
   microkernel boundary. `recv` is therefore a client-side port drain, not
   a stack round-trip (more efficient, and "inline for small" today; shm
@@ -494,8 +502,9 @@ docs, and the full gate) because the whole was too large for one change:
   - `CAP_NET` (`CapabilityId::NET` = 36) in `SESSION_BASELINE`, enforced
     in the `netstack` socket dispatcher before any state is touched;
   - `tairix_netstack::SocketService`: the origin (`ProcId`)-keyed socket
-    table, CSPRNG-drawn ephemeral ports (kernel `random_get`, injected as
-    an entropy closure so the engine stays pure), globally-unique port
+    table, CSPRNG-drawn ephemeral ports (from the service's generator keyed
+    once from the kernel CSPRNG, injected as an entropy closure so the
+    engine stays pure), globally-unique port
     binding, per-principal + global bounded accounting failing closed with
     `LimitExceeded`, and inbound demux from `StackEvent::UdpDatagram` to
     the owning socket's delivery port (peer-filtered, membership-gated) as
@@ -507,13 +516,13 @@ docs, and the full gate) because the whole was too large for one change:
   - the `Run` binary binds the second endpoint (`NETSTACK_SOCKET_ENDPOINT`)
     and serves it in the same event-driven wait-set loop;
   - `tairix_rt::net` client wrappers (`socket`/`bind`/`connect`/`send`/
-    `recv`/`close`/`join`/`leave`), `recv` returning the sender `Origin`
-    for fail-closed authentication; and the `random_get` rt wrapper.
+    `recv`/`close`/`join`/`leave`), `recv` handing back only what the
+    stack's service account sent; and the checked `random_fill` rt draw.
   - Tests: the `SocketService` host suite (cap gate, origin scoping,
     ephemeral/explicit bind + port reuse, quota exhaustion, unicast send,
     peer-filtered + multicast-gated delivery), `lib/net` multicast-transmit
     round-trips (v4+v6), `fuzz_net_sockabi` (the serve path), and the
-    `random_get` marshal tests. Docs: `docs/src/lib/net.md` and
+    `random_get`/`random_fill` marshal tests. Docs: `docs/src/lib/net.md` and
     `docs/src/abi/net-sockets.md`.
   - The socket control plane is fully served; a live `send` fails closed
     (`NetworkUnreachable`, empty interface table) until a NIC is bound
@@ -1866,8 +1875,8 @@ address across sessions.
 - **ABI/config/service**: `NetworkSettings.ipv6_privacy` (N9b-2), mapped from
   `net.ipv6.privacy` by `devmgr::netcfg::settings_from_config` and applied by
   `Netstack::apply_settings` → `Stack::set_privacy`. The `Run` glue injects a
-  per-interface CSPRNG-backed `TempAddrSource` (kernel `random_get`); host
-  tests inject a deterministic one.
+  per-interface `TempAddrSource` over a generator forked from the service's
+  CSPRNG-keyed one; host tests inject a deterministic one.
 
 #### N11 — RFC 8200 §4.5 IPv6 source fragmentation `[x]`
 An IPv6 datagram the host originates larger than the path MTU is

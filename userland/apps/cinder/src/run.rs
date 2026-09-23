@@ -242,15 +242,13 @@ mod program {
     /// A generator seeded from the kernel, so two companions on one desktop do
     /// not behave identically.
     fn seeded_rng() -> FastRng {
-        let mut seed = [0u8; 32];
-        if tairix_rt::random_get(&mut seed, tairix_abi::RandomFlags::empty()).is_err() {
+        FastRng::keyed_by(tairix_rt::random_fill).unwrap_or_else(|_| {
             // A companion seeded from the clock is a less varied companion,
             // not a broken one, and refusing to start over it would be dying
             // of an unpredictability requirement a pet does not have.
             report("the system generator is unavailable; seeding this session from the clock");
-            return FastRng::seed_from_u64(tairix_rt::clock_get());
-        }
-        FastRng::from_key(&seed)
+            FastRng::seed_from_u64(tairix_rt::clock_get())
+        })
     }
 
     // ---- the companion on the desktop -----------------------------------

@@ -45,20 +45,13 @@ mod program {
     use tairix_abi::net::{SocketAddr, SocketEcho, SocketId};
     use tairix_abi::net_ipc::NetAddrFamily;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{Errno, Origin, RandomFlags};
+    use tairix_abi::Errno;
     use tairix_help::BundleHelp;
     use tairix_ping::{
         parse, run, Command, EchoReply, Output, PingError, PingIo, ResolveFailure, USAGE,
     };
     use tairix_rng::{FastRng, RandU64};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
-    use tairix_util::secret::Wiped;
-
-    /// The client's async delivery-port endpoint id: an app-local,
-    /// unrestricted well-known value (not a reserved kernel id), so binding
-    /// it needs no capability. The stack sends this socket's echo replies
-    /// here.
-    const DELIVER_PORT: u64 = 0x_7069_6e67; // "ping"
 
     /// Delivery-port mailbox depth. Generous headroom so a burst of replies
     /// queues rather than back-pressuring the stack.
@@ -102,11 +95,9 @@ mod program {
     struct RtPingIo {
         /// The echo socket, opened by `connect` once the target resolved.
         socket: Option<SocketId>,
+        /// The process-private port the stack delivers echo replies to.
+        deliver: u64,
         set: u64,
-        /// The kernel-attested origin of the stack, captured from the first
-        /// reply so every later reply can be required to match it — the
-        /// delivery port is otherwise an unauthenticated inbox (fail closed).
-        stack: Option<Origin>,
         /// The receive scratch buffer (reused across replies).
         buf: alloc::vec::Vec<u8>,
         /// The payload generator, seeded once from the kernel CSPRNG.
@@ -119,9 +110,8 @@ mod program {
         /// [`PingIo::connect`](tairix_ping::PingIo::connect), once the target
         /// has resolved and its family is known.
         fn open() -> Result<Self, PingError> {
-            if tairix_rt::port_bind(DELIVER_PORT, SocketEcho::MAX_WIRE_LEN, DELIVER_CAPACITY) < 0 {
-                return Err(PingError::Socket(Errno::AddressInUse));
-            }
+            let deliver = tairix_rt::bind_private_port(SocketEcho::MAX_WIRE_LEN, DELIVER_CAPACITY)
+                .map_err(PingError::Socket)?;
             // A negative result is the kernel's `-errno`, never a handle.
             let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
                 return Err(PingError::Socket(Errno::NotImplemented));
@@ -130,7 +120,7 @@ mod program {
                 set,
                 WaitSetOp::Add,
                 WaitSourceKind::Port,
-                DELIVER_PORT,
+                deliver,
                 DELIVER_TOKEN,
             ) != 0
             {
@@ -138,8 +128,8 @@ mod program {
             }
             Ok(Self {
                 socket: None,
+                deliver,
                 set,
-                stack: None,
                 buf: vec![0u8; SocketEcho::MAX_WIRE_LEN],
                 rng: seed_generator()?,
             })
@@ -157,16 +147,7 @@ mod program {
     /// around with a predictable stream — a compressible payload would
     /// silently invalidate the measurement the tool exists to make.
     fn seed_generator() -> Result<FastRng, PingError> {
-        // The generator keeps its own copy and wipes that on drop; this is
-        // the marshalling buffer, and `Wiped` erases it on every exit from
-        // the scope including the early returns below.
-        let mut key = Wiped::<{ tairix_rng::STREAM_KEY_LEN }>::new();
-        let drawn = tairix_rt::random_get(&mut key[..], RandomFlags::empty())
-            .map_err(|raw| PingError::Socket(Errno::from_syscall(raw)))?;
-        if drawn != key.len() {
-            return Err(PingError::Socket(Errno::EntropyNotReady));
-        }
-        Ok(FastRng::from_key(&key))
+        FastRng::keyed_by(tairix_rt::random_fill).map_err(PingError::Socket)
     }
 
     impl PingIo for RtPingIo {
@@ -195,7 +176,7 @@ mod program {
         }
 
         fn connect(&mut self, family: NetAddrFamily, addr: [u8; 16]) -> Result<(), Errno> {
-            let socket = tairix_rt::net::icmp_echo_socket(family, DELIVER_PORT)?;
+            let socket = tairix_rt::net::icmp_echo_socket(family, self.deliver)?;
             // An echo peer carries no port. Connecting records the default
             // peer (so the stack filters replies to it) and assigns the
             // socket's ICMP identifier; it performs no routing, so it never
@@ -244,19 +225,10 @@ mod program {
                 if tairix_rt::clock_get() >= deadline_ns {
                     return Ok(None);
                 }
-                match tairix_rt::net::recv_echo(DELIVER_PORT, &mut self.buf) {
-                    Ok((echo, origin)) => {
-                        // Authenticate the sender: capture the stack's origin
-                        // on the first reply, then require every later reply
-                        // to match it (a forged reply from any other origin
-                        // is silently ignored — fail closed).
-                        match self.stack {
-                            Some(known) if known != origin => continue,
-                            None => self.stack = Some(origin),
-                            _ => {}
-                        }
-                        return Ok(Some(owned_reply(&echo)));
-                    }
+                // Only the stack's own replies come back: the receive
+                // discards a forged sender unread.
+                match tairix_rt::net::recv_echo(self.deliver, &mut self.buf) {
+                    Ok(echo) => return Ok(Some(owned_reply(&echo))),
                     // The mailbox is momentarily empty: park until the stack
                     // posts a reply or the one-shot timer elapses.
                     Err(Errno::WouldBlock) => self.park(RECV_PARK_NANOS),

@@ -34,7 +34,9 @@ randomness ends up drawn from an invertible generator.
   can afford it. Prediction resistance needs fresh entropy and is therefore
   the owner's job: `perturb_due` reports the cadence and `perturb` XOR-folds
   32 fresh bytes into the key, XOR so a dead or hostile source can never
-  *lower* its quality.
+  *lower* its quality. `keyed_by` builds one from a fallible source and none
+  at all from a refused draw; `fork` keys an independent child from the
+  parent's output.
 - **`NonCryptoRng`** is xoshiro256++ seeded via SplitMix64 — an ordinary
   non-cryptographic PRNG, not a security primitive, so implementing it here is
   not hand-rolled cryptography.

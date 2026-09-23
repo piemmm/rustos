@@ -73,6 +73,10 @@ one range test. The assigned identifiers:
 | `16_025` | `MULTICAST_FILTER_REFUSED` | Warn | A NIC refused the group-address set the stack asked it to admit, so frames for the groups that did not fit are not delivered. The previously admitted set stays in force and the filter is never widened — the loss of reception is real, so it is recorded rather than hidden. |
 | `16_026` | `BOND_UP` | Info | A bond acquired its first eligible member and announced its presence so peers learn which member carries its MAC. Deliberately **not** `BOND_FAILOVER`: a bring-up has no previous path to fail over from, and conflating the two made a healthy bond read as a degraded one. |
 | `16_027` | `BOND_DOWN` | Warn | A bond lost its last eligible member and its transmit fails closed until one recovers. An aggregate with no surviving link is a fault, and it announces nothing (no member to announce on), so the log is the only place it surfaces. |
+| `16_028` | `SERVICE_UNAVAILABLE` | Error | The service cannot serve and is exiting, with its reason: an endpoint could not be bound or watched, or the kernel random source could not key the per-boot secrets sequence numbers, SYN cookies, ephemeral ports, and identifiers come from — which fails closed rather than serving predictable ones. |
+
+Link-local service discovery is its own service with its own range,
+`25_000` … `25_999` (`docs/src/userland/discoveryd.md`).
 
 The stack-wide `net.*` policy (`net.ipv4.enabled`, `net.ipv6.enabled`,
 `net.ipv6.privacy`, `net.tcp.syncookies`, `net.tcp.keepalive`,

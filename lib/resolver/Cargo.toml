@@ -19,7 +19,7 @@ workspace = true
 # they stay testable against in-memory fakes with no kernel. Mirrors the
 # `program` split of `lib/procinfo`.
 [features]
-program = ["dep:tairix-rt"]
+program = ["dep:tairix-rt", "dep:tairix-rng"]
 
 [dependencies]
 # The audited ABI vocabulary: `Errno`, the socket wire types, `Origin`, and
@@ -41,6 +41,8 @@ tairix-procinfo = { path = "../procinfo", version = "=0.0.0" }
 # program is actually built for; on the host it is never linked.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+# The query-id generator, keyed once from that CSPRNG draw.
+tairix-rng = { path = "../rng", version = "=0.0.0", optional = true }
 # The `program`-feature production sysinfo transport (`IpcTransport`) the
 # server-set fetch uses is behind `tairix-procinfo`'s own `program` feature.
 tairix-procinfo = { path = "../procinfo", version = "=0.0.0", features = ["program"] }

@@ -1908,7 +1908,7 @@ re-validates arguments — the dispatcher does that first.
 | `ipc_send`      | `PortRegistry::lookup(endpoint)` in `KernelState.ipc`; payload copied in through `copy_from_user`, then `Port::send(caller.caps, payload)` | Unbound endpoint → `NotFound` (no extra audit). `len > port.max_payload` → `MessageTooLarge`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Port::send`'s errno (`PermissionDenied`, `MessageTooLarge`, …). |
 | `ipc_recv`      | `PortRegistry::lookup(endpoint)`; the caller is gated against the port's `required_recv_caps` **before** any message is observed (the same handler-side receive gate `call_recv` applies); then `Port::recv_with` peek/commit copies the head message out through `copy_to_user`, committing the dequeue only on success | Unbound endpoint → `NotFound` (no extra audit). Caller lacking a required receive capability → `PermissionDenied` (nothing about the mailbox is revealed, message retained). Bound + empty → `WouldBlock`. Buffer smaller than the message → `BufferTooSmall` (message retained). Faulting buffer / no registered address space → `BadAddress` (message retained). Otherwise `Ok(payload_len)`. |
 | `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |
-| `cap_delegate`  | `CapabilitySet` copied in through `copy_from_user`, then `CapTable::caps_for_mut(target).delegate(set, audit)` | Faulting `set_ptr` / no registered address space → `BadAddress`. Unknown `target` → `NotFound`. A widening request → `DelegationWiden`. |
+| `cap_delegate`  | `CapabilitySet` copied in through `copy_from_user`, then `CapTable::narrow(caller, target, set, audit)`: the caller itself or a live child of it, any other process only with `CAP_USER_ADMIN` | Faulting `set_ptr` / no registered address space → `BadAddress`. A target the caller has no authority over, known or not → `PermissionDenied`. Unknown `target` named by an administrator → `NotFound`. A widening request → `DelegationWiden`. |
 | `cap_revoke`    | `CapTable::caps_for_mut(target).revoke(cap, audit)`                                                           | Unknown `target` → `NotFound`.                                            |
 | `clock_get`     | `KernelArch::monotonic_ns(arch.current_cpu())`, coarsened unless the caller holds `CAP_TIME_HIRES`            | —                                                                         |
 | `irq_bind`      | `IrqTable::bind(line, caller.task_id)`                                                                        | `LineOutOfRange` / `LineAlreadyBound` → `OutOfRange`; `ArchUnsupported` → `NotImplemented`. |
@@ -2048,7 +2048,9 @@ standard `SYSCALL_HANDLER_REJECTED`
 record is *also* emitted for syscalls whose `SyscallSpec::audit == true`
 (`ipc_send`, `cap_delegate`); `cap_delegate` additionally records the
 delegate decision itself through `CapTable` (`TASK_CAPABILITIES_DELEGATED`
-on success, `TASK_CAPABILITIES_DELEGATE_WIDEN` on a rejected widening).
+on success, `TASK_CAPABILITIES_DELEGATE_WIDEN` on a rejected widening,
+`TASK_CAPABILITIES_DELEGATE_DENIED` on a target the caller has no authority
+over).
 `ipc_recv` is unaudited, so on a failed receive only the dispatcher's
 pipeline records it, and on an unbound or empty endpoint it emits
 nothing of its own.
@@ -2092,9 +2094,10 @@ bridge lives in `kernel/core`, so the decoupled dispatcher
 `ipc_recv` (both map a faulting copy to `BadAddress`, the TAIRiX
 `EFAULT`; an empty mailbox is `WouldBlock`), and D.3 landed
 `cap_delegate` — it copies the 32-byte `CapabilitySet` in (a faulting
-pointer or absent address space maps to `BadAddress`) and runs the
-`CapTable` delegate path (`AGENTS.md` §5.2: a widening request is
-`DelegationWiden`, an unknown target is `NotFound`). **D.4 landed
+pointer or absent address space maps to `BadAddress`) and runs
+`CapTable::narrow` (`AGENTS.md` §5.2: a widening request is
+`DelegationWiden`; a target outside the caller's authority is
+`PermissionDenied`, whether or not it exists). **D.4 landed
 `random_get`**: it draws CSPRNG output from the `tairix_rng::OutputReserve`
 composed into `KernelState` (`rng: RwLock<Box<dyn RandomReserve + Send +
 Sync>>`) and copies it into the caller's buffer through the same

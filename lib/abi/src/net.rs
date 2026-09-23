@@ -38,9 +38,27 @@
 //! over-length payload refuses rather than guessing.
 
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
-use crate::net_ipc::NetAddrFamily;
+use crate::net_ipc::{validate_if_name, NetAddrFamily, IF_NAME_LEN};
+use crate::origin::{Origin, TrustDomain};
 use crate::reply::{decode_status_reply, encode_status_reply, STATUS_REPLY_LEN};
 use crate::Errno;
+
+/// The uid of the service account the network stack runs as.
+///
+/// A system account compiled into the kernel's identity table, and attested
+/// on every IPC origin, so a socket client authenticates a delivery by it
+/// ([`from_network_stack`]) rather than by which sender happened to post to
+/// its delivery port first.
+pub const NETSTACK_UID: u32 = 14;
+
+/// Whether a message's kernel-attested `origin` is the network stack.
+///
+/// A delivery port is an inbox any process may post to, so a message from
+/// anyone else claiming to be a delivery is forged.
+#[must_use]
+pub fn from_network_stack(origin: &Origin) -> bool {
+    origin.trust_domain() == TrustDomain::User && origin.uid() == NETSTACK_UID
+}
 
 /// Reserved well-known call-endpoint id of the network stack's **socket**
 /// surface (`"NSK1"` little-endian). Distinct from the admin
@@ -832,20 +850,40 @@ fn encode_status_only(err: Errno, out: &mut [u8]) -> Result<usize, Errno> {
 /// The stack [`crate::SyscallNumber::IPC_SEND`]s this frame to the port the
 /// client named in [`SocketRequest::Socket`]; the client authenticates the
 /// stack's kernel-attested sender origin, then decodes it. It identifies the
-/// receiving socket, the peer it came from, and the payload.
+/// receiving socket, the interface and peer it came from, and the payload.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SocketDatagram<'a> {
     /// The socket the datagram was delivered to.
     pub socket: SocketId,
+    /// The logical interface it arrived on — a bond rather than the member
+    /// that carried it — NUL-padded as [`crate::net_ipc::validate_if_name`]
+    /// requires.
+    pub interface: [u8; IF_NAME_LEN],
     /// The peer that sent it.
     pub source: SocketAddr,
+    /// Whether `source` is on the arrival interface's own link: link-local,
+    /// or reached through one of that interface's routes with no gateway.
+    ///
+    /// The stack's live address table is the only authority for this, so a
+    /// link-scoped protocol takes the verdict here rather than keeping a copy
+    /// of the interface's prefixes that goes stale when they change.
+    pub source_on_link: bool,
     /// The datagram payload.
     pub payload: &'a [u8],
 }
 
+/// [`SocketDatagram`] flag bit: the source is on the arrival interface's link.
+const DATAGRAM_SOURCE_ON_LINK: u8 = 0x01;
+
+/// Byte offset of a delivered datagram's flag byte.
+const DATAGRAM_FLAGS_OFFSET: usize = 6;
+
+/// Byte offset of a delivered datagram's arrival-interface name.
+const DATAGRAM_INTERFACE_OFFSET: usize = 36;
+
 impl<'a> SocketDatagram<'a> {
     /// Byte length of the fixed delivery header preceding the payload.
-    pub const HEADER_LEN: usize = 36;
+    pub const HEADER_LEN: usize = DATAGRAM_INTERFACE_OFFSET + IF_NAME_LEN;
 
     /// Largest delivery message: the header plus a maximum-size payload.
     pub const MAX_WIRE_LEN: usize = Self::HEADER_LEN + SOCKET_MAX_DATAGRAM;
@@ -870,6 +908,9 @@ impl<'a> SocketDatagram<'a> {
         }
         put_u32(out, 0, SOCKET_DATAGRAM_MAGIC);
         put_u16(out, 4, SOCKET_VERSION_V1);
+        if self.source_on_link {
+            out[DATAGRAM_FLAGS_OFFSET] = DATAGRAM_SOURCE_ON_LINK;
+        }
         put_u32(out, 8, self.socket);
         out[12] = self.source.family.as_u8();
         put_u16(out, 14, self.source.port);
@@ -880,6 +921,7 @@ impl<'a> SocketDatagram<'a> {
             32,
             u32::try_from(self.payload.len()).map_err(|_| Errno::LengthOutOfRange)?,
         );
+        out[DATAGRAM_INTERFACE_OFFSET..Self::HEADER_LEN].copy_from_slice(&self.interface);
         out[Self::HEADER_LEN..total].copy_from_slice(self.payload);
         Ok(total)
     }
@@ -890,9 +932,11 @@ impl<'a> SocketDatagram<'a> {
     ///
     /// * [`Errno::BufferTooSmall`] — `bytes` is shorter than the header or
     ///   the declared payload.
-    /// * [`Errno::BadMagic`] — wrong magic or a dirty reserved field.
+    /// * [`Errno::BadMagic`] — wrong magic, an undefined flag bit, or a dirty
+    ///   reserved field.
     /// * [`Errno::AbiVersionUnsupported`] — not `netsock-v1`.
-    /// * [`Errno::OutOfRange`] — an unknown family.
+    /// * [`Errno::OutOfRange`] — an unknown family or a malformed interface
+    ///   name.
     /// * [`Errno::LengthOutOfRange`] — a declared payload beyond
     ///   [`SOCKET_MAX_DATAGRAM`].
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Errno> {
@@ -905,9 +949,13 @@ impl<'a> SocketDatagram<'a> {
         if read_u16(bytes, 4) != SOCKET_VERSION_V1 {
             return Err(Errno::AbiVersionUnsupported);
         }
-        if read_u16(bytes, 6) != 0 || bytes[13] != 0 {
+        let flags = bytes[DATAGRAM_FLAGS_OFFSET];
+        if flags & !DATAGRAM_SOURCE_ON_LINK != 0 || bytes[7] != 0 || bytes[13] != 0 {
             return Err(Errno::BadMagic);
         }
+        let mut interface = [0u8; IF_NAME_LEN];
+        interface.copy_from_slice(&bytes[DATAGRAM_INTERFACE_OFFSET..Self::HEADER_LEN]);
+        validate_if_name(&interface)?;
         let socket = read_u32(bytes, 8);
         let family = NetAddrFamily::from_u8(bytes[12])?;
         let port = read_u16(bytes, 14);
@@ -925,7 +973,9 @@ impl<'a> SocketDatagram<'a> {
             .ok_or(Errno::BufferTooSmall)?;
         Ok(Self {
             socket,
+            interface,
             source: SocketAddr { family, addr, port },
+            source_on_link: flags & DATAGRAM_SOURCE_ON_LINK != 0,
             payload,
         })
     }
@@ -1802,11 +1852,44 @@ mod tests {
         assert_eq!(decode_bind_reply(&out[..n]), Err(Errno::AddressInUse));
     }
 
+    fn origin(trust_domain: TrustDomain, uid: u32) -> Origin {
+        Origin::new(
+            trust_domain,
+            uid,
+            0,
+            7,
+            crate::ProcId::from_raw([0x5A; 16]),
+            crate::CapabilitySummary::EMPTY,
+            0,
+        )
+    }
+
+    #[test]
+    fn only_the_stack_service_account_is_the_network_stack() {
+        assert!(from_network_stack(&origin(TrustDomain::User, NETSTACK_UID)));
+        // Any other principal posting to a delivery port is forged, and so
+        // is a kernel-domain record however its uid reads.
+        assert!(!from_network_stack(&origin(TrustDomain::User, 1000)));
+        assert!(!from_network_stack(&origin(TrustDomain::User, 0)));
+        assert!(!from_network_stack(&origin(
+            TrustDomain::Kernel,
+            NETSTACK_UID
+        )));
+    }
+
+    fn iface(name: &[u8]) -> [u8; IF_NAME_LEN] {
+        let mut out = [0u8; IF_NAME_LEN];
+        out[..name.len()].copy_from_slice(name);
+        out
+    }
+
     #[test]
     fn datagram_round_trips_and_fails_closed() {
         let dg = SocketDatagram {
             socket: 7,
+            interface: iface(b"eth0"),
             source: v4(198, 51, 100, 9, 4000),
+            source_on_link: true,
             payload: b"payload bytes",
         };
         let mut out = [0u8; SocketDatagram::MAX_WIRE_LEN];
@@ -1826,13 +1909,66 @@ mod tests {
     fn empty_datagram_round_trips() {
         let dg = SocketDatagram {
             socket: 1,
+            interface: iface(b"wlan1"),
             source: v6(9),
+            source_on_link: false,
             payload: &[],
         };
         let mut out = [0u8; SocketDatagram::HEADER_LEN];
         let n = dg.encode(&mut out).expect("encode");
         assert_eq!(n, SocketDatagram::HEADER_LEN);
         assert_eq!(SocketDatagram::parse(&out[..n]), Ok(dg));
+    }
+
+    #[test]
+    fn the_on_link_verdict_is_carried_exactly_and_no_other_flag_is_admitted() {
+        let mut dg = SocketDatagram {
+            socket: 3,
+            interface: iface(b"eth0"),
+            source: v4(10, 0, 0, 2, 5353),
+            source_on_link: false,
+            payload: b"x",
+        };
+        let mut out = [0u8; SocketDatagram::MAX_WIRE_LEN];
+        for on_link in [false, true] {
+            dg.source_on_link = on_link;
+            let n = dg.encode(&mut out).expect("encode");
+            assert_eq!(
+                SocketDatagram::parse(&out[..n]).map(|d| d.source_on_link),
+                Ok(on_link)
+            );
+        }
+        let n = dg.encode(&mut out).expect("encode");
+        for bit in 1..8 {
+            let mut dirty = out;
+            dirty[DATAGRAM_FLAGS_OFFSET] |= 1 << bit;
+            assert_eq!(SocketDatagram::parse(&dirty[..n]), Err(Errno::BadMagic));
+        }
+        let mut dirty = out;
+        dirty[7] = 1;
+        assert_eq!(SocketDatagram::parse(&dirty[..n]), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn a_datagram_naming_no_valid_interface_is_refused() {
+        let dg = SocketDatagram {
+            socket: 3,
+            interface: iface(b"eth0"),
+            source: v4(10, 0, 0, 2, 5353),
+            source_on_link: true,
+            payload: b"x",
+        };
+        let mut out = [0u8; SocketDatagram::MAX_WIRE_LEN];
+        let n = dg.encode(&mut out).expect("encode");
+        let mut empty = out;
+        empty[DATAGRAM_INTERFACE_OFFSET..SocketDatagram::HEADER_LEN].fill(0);
+        assert_eq!(SocketDatagram::parse(&empty[..n]), Err(Errno::OutOfRange));
+        let mut upper = out;
+        upper[DATAGRAM_INTERFACE_OFFSET] = b'E';
+        assert_eq!(SocketDatagram::parse(&upper[..n]), Err(Errno::OutOfRange));
+        let mut tail = out;
+        tail[SocketDatagram::HEADER_LEN - 1] = b'x';
+        assert_eq!(SocketDatagram::parse(&tail[..n]), Err(Errno::OutOfRange));
     }
 
     #[test]

@@ -13,7 +13,8 @@
 //! ([`crate::session`]): one [`crate::session::SessionService`] run inline
 //! behind a [`crate::session::SessionTransport`], so a consumer's host
 //! tests drive `send` / `on_writable` / `on_readable` / `recv` exactly as
-//! its production owner will.
+//! its production owner will. [`LoopbackSessionLauncher`] starts one per
+//! launch for a supervised session ([`crate::supervise`]).
 //!
 //! Both fakes model a *healthy* worker. Containment paths are exercised by
 //! scripting a failing [`crate::proto::Channel`] or
@@ -27,6 +28,7 @@ use tairix_abi::Errno;
 use crate::host::Launcher;
 use crate::proto::{head_frame, send_frame, Channel, ProtoError, FRAME_HEADER_LEN, MAX_FRAME};
 use crate::session::{FrameOut, SessionDescriptors, SessionService, SessionStep, SessionTransport};
+use crate::supervise::SessionLauncher;
 use crate::worker::Service;
 
 /// Builds one fresh service per launched loopback worker.
@@ -232,6 +234,27 @@ impl<S: SessionService> SessionTransport for LoopbackSession<S> {
 
     fn dispose(self) -> Option<i32> {
         None
+    }
+}
+
+/// [`SessionLauncher`] whose workers are [`LoopbackSession`]s over services
+/// the factory builds, a fresh one per launch.
+pub struct LoopbackSessionLauncher<F> {
+    factory: F,
+}
+
+impl<F> LoopbackSessionLauncher<F> {
+    /// Build the launcher over the service factory.
+    pub fn new(factory: F) -> Self {
+        Self { factory }
+    }
+}
+
+impl<S: SessionService, F: FnMut() -> S> SessionLauncher for LoopbackSessionLauncher<F> {
+    type Transport = LoopbackSession<S>;
+
+    fn launch(&mut self) -> Result<LoopbackSession<S>, Errno> {
+        Ok(LoopbackSession::new((self.factory)()))
     }
 }
 

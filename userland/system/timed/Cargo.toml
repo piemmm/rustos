@@ -20,6 +20,7 @@ workspace = true
 default = ["program"]
 program = [
     "dep:tairix-rt",
+    "dep:tairix-rng",
     "dep:tairix-resolver",
     "dep:tairix-procinfo",
     "tairix-sandbox/program",
@@ -71,6 +72,8 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # linked.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The nonce and jitter generator, keyed once from the kernel CSPRNG.
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0", optional = true }
 tairix-resolver = { path = "../../../lib/resolver", version = "=0.0.0", optional = true, features = [
     "program",
 ] }

@@ -15,15 +15,15 @@
 //! Inbound datagrams are delivered by the stack as
 //! [`SocketDatagram`] frames sent to the
 //! async **port** the client bound and named in
-//! [`socket`]. The client parks on that port and drains it with [`recv`],
-//! which authenticates the stack's kernel-attested sender origin and
-//! hands back both the decoded datagram and that origin so the caller can
-//! reject a forged sender (fail closed — the delivery port is otherwise an
-//! unauthenticated inbox).
+//! [`socket`]. The client parks on that port and drains it with [`recv`].
+//! A delivery port is an inbox any process may post to, so every receive
+//! here authenticates the sender as the stack by its kernel-attested
+//! service account ([`from_network_stack`]) and discards anything else
+//! (fail closed): a caller is only ever handed the stack's own deliveries.
 
 use tairix_abi::net::{
-    decode_bind_reply, decode_send_reply, decode_socket_reply, ShutdownHow, SocketAddr,
-    SocketDatagram, SocketEcho, SocketId, SocketRequest, SocketStreamEvent, SocketType,
+    decode_bind_reply, decode_send_reply, decode_socket_reply, from_network_stack, ShutdownHow,
+    SocketAddr, SocketDatagram, SocketEcho, SocketId, SocketRequest, SocketStreamEvent, SocketType,
     NETSTACK_SOCKET_ENDPOINT, SOCKET_MAX_REPLY,
 };
 use tairix_abi::net_ipc::NetAddrFamily;
@@ -106,29 +106,20 @@ pub fn stream_send(socket: SocketId, payload: &[u8]) -> Result<u32, Errno> {
     decode_send_reply(&reply[..len])
 }
 
-/// Receive one inbound stream event on the delivery port `deliver_port`,
-/// decoding it into `buf` and returning the event with the
-/// kernel-attested [`Origin`] of the sender.
-///
-/// Like [`recv`], the caller **must** verify the returned origin is the
-/// network stack before trusting the event: the delivery port is otherwise
-/// an unauthenticated inbox (fail closed).
+/// Receive the next inbound stream event the stack delivered to
+/// `deliver_port`, decoding it into `buf`. Anything another sender posted
+/// there is discarded unread.
 ///
 /// # Errors
 ///
 /// * The raw negative kernel result (as an [`Errno`] via
-///   [`Errno::from_syscall`]) if the receive fails.
-/// * A decode [`Errno`] if the message is not a well-formed
-///   [`SocketStreamEvent`], or the sender origin is malformed.
-pub fn stream_recv(
-    deliver_port: u64,
-    buf: &mut [u8],
-) -> Result<(SocketStreamEvent<'_>, Origin), Errno> {
-    let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
-    let len = ipc_recv(deliver_port, buf, &mut sender).map_err(Errno::from_syscall)?;
-    let origin = Origin::from_bytes(&sender)?;
-    let event = SocketStreamEvent::parse(&buf[..len])?;
-    Ok((event, origin))
+///   [`Errno::from_syscall`]) if the receive fails — [`Errno::WouldBlock`]
+///   once nothing the stack sent is waiting.
+/// * A decode [`Errno`] if the stack's message is not a well-formed
+///   [`SocketStreamEvent`].
+pub fn stream_recv(deliver_port: u64, buf: &mut [u8]) -> Result<SocketStreamEvent<'_>, Errno> {
+    let len = recv_from_stack(deliver_port, buf)?;
+    SocketStreamEvent::parse(&buf[..len])
 }
 
 /// Make a bound stream `socket` passive (LISTEN): it accepts inbound
@@ -319,50 +310,52 @@ pub fn leave_multicast(socket: SocketId, group: SocketAddr) -> Result<(), Errno>
     status_call(&SocketRequest::LeaveMulticast { socket, group })
 }
 
-/// Receive one inbound datagram on the delivery port `deliver_port`,
-/// decoding it into `buf` and returning the datagram together with the
-/// kernel-attested [`Origin`] of the sender.
-///
-/// The caller **must** verify the returned origin is the network stack
-/// before trusting the datagram: the delivery port is otherwise an
-/// unauthenticated inbox any process could post to (fail closed).
+/// Receive the next inbound datagram the stack delivered to
+/// `deliver_port`, decoding it into `buf`. Anything another sender posted
+/// there is discarded unread.
 ///
 /// # Errors
 ///
 /// * The raw negative kernel result (as an [`Errno`] via
-///   [`Errno::from_syscall`]) if the receive fails.
-/// * [`Errno::BadMagic`] / [`Errno::LengthOutOfRange`] / … if the message
-///   is not a well-formed [`SocketDatagram`], or the sender origin is
-///   malformed.
-pub fn recv(deliver_port: u64, buf: &mut [u8]) -> Result<(SocketDatagram<'_>, Origin), Errno> {
-    let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
-    let len = ipc_recv(deliver_port, buf, &mut sender).map_err(Errno::from_syscall)?;
-    let origin = Origin::from_bytes(&sender)?;
-    let datagram = SocketDatagram::parse(&buf[..len])?;
-    Ok((datagram, origin))
+///   [`Errno::from_syscall`]) if the receive fails — [`Errno::WouldBlock`]
+///   once nothing the stack sent is waiting.
+/// * [`Errno::BadMagic`] / [`Errno::LengthOutOfRange`] / … if the stack's
+///   message is not a well-formed [`SocketDatagram`].
+pub fn recv(deliver_port: u64, buf: &mut [u8]) -> Result<SocketDatagram<'_>, Errno> {
+    let len = recv_from_stack(deliver_port, buf)?;
+    SocketDatagram::parse(&buf[..len])
 }
 
-/// Receive one inbound ICMP echo reply on the delivery port
-/// `deliver_port`, decoding it into `buf` and returning the reply together
-/// with the kernel-attested [`Origin`] of the sender.
-///
-/// As with [`recv`], the caller **must** verify the returned origin is the
-/// network stack before trusting the reply: the delivery port is otherwise
-/// an unauthenticated inbox any process could post to (fail closed).
+/// Receive the next inbound ICMP echo reply the stack delivered to
+/// `deliver_port`, decoding it into `buf`. Anything another sender posted
+/// there is discarded unread.
 ///
 /// # Errors
 ///
 /// * The raw negative kernel result (as an [`Errno`] via
-///   [`Errno::from_syscall`]) if the receive fails.
-/// * [`Errno::BadMagic`] / [`Errno::LengthOutOfRange`] / … if the message
-///   is not a well-formed [`SocketEcho`], or the sender origin is
-///   malformed.
-pub fn recv_echo(deliver_port: u64, buf: &mut [u8]) -> Result<(SocketEcho<'_>, Origin), Errno> {
-    let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
-    let len = ipc_recv(deliver_port, buf, &mut sender).map_err(Errno::from_syscall)?;
-    let origin = Origin::from_bytes(&sender)?;
-    let echo = SocketEcho::parse(&buf[..len])?;
-    Ok((echo, origin))
+///   [`Errno::from_syscall`]) if the receive fails — [`Errno::WouldBlock`]
+///   once nothing the stack sent is waiting.
+/// * [`Errno::BadMagic`] / [`Errno::LengthOutOfRange`] / … if the stack's
+///   message is not a well-formed [`SocketEcho`].
+pub fn recv_echo(deliver_port: u64, buf: &mut [u8]) -> Result<SocketEcho<'_>, Errno> {
+    let len = recv_from_stack(deliver_port, buf)?;
+    SocketEcho::parse(&buf[..len])
+}
+
+/// Dequeue messages from `port` into `buf` until one the network stack
+/// sent, returning its length.
+///
+/// Bounded by the port's own mailbox: each pass dequeues a message, so a
+/// flood of forged posts costs one pass each and ends at the empty mailbox's
+/// [`Errno::WouldBlock`].
+fn recv_from_stack(port: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+    loop {
+        let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
+        let len = ipc_recv(port, buf, &mut sender).map_err(Errno::from_syscall)?;
+        if from_network_stack(&Origin::from_bytes(&sender)?) {
+            return Ok(len);
+        }
+    }
 }
 
 /// Encode `request` into `buf`, call the socket endpoint, and return the

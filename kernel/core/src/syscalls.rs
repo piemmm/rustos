@@ -5044,19 +5044,13 @@ where
         let mut buf = [0u8; CapabilitySet::WIRE_LEN];
         self.copy_in_user(caller, set_ptr, &mut buf)?;
 
-        // Every 32-byte pattern is a representable set, and `buf` is
-        // exactly `WIRE_LEN`, so decoding cannot fail. Run the `CapTable`
-        // delegate path: `delegate` replaces the target's effective set
-        // with the requested subset, rejecting a *widening* request with
-        // `DelegationWiden` and auditing the decision. An unknown
-        // target task is the stable `NotFound`, not a kernel bug — the
-        // same condition `cap_revoke` surfaces.
+        // Who may be narrowed is `CapTable::narrow`'s one rule: the caller
+        // itself, its live child, or anyone for a `CAP_USER_ADMIN` holder.
         let requested = CapabilitySet::from_le_bytes(&buf)?;
-        let mut guard = self.caps.write();
-        match guard.caps_for_mut(SecTaskId(target)) {
-            Some(record) => record.delegate(&requested, self.audit).map(|()| 0),
-            None => Err(Errno::NotFound),
-        }
+        self.caps
+            .write()
+            .narrow(caller.caps, SecTaskId(target), &requested, self.audit)
+            .map(|()| 0)
     }
 
     fn cap_revoke(
@@ -15189,6 +15183,51 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         assert_eq!(h.cap_delegate(&ctx, 999, 0x1000), Err(Errno::NotFound));
+    }
+
+    /// An unprivileged caller cannot narrow a process that is neither itself
+    /// nor its child, or any task could strip any other of its capabilities
+    /// by naming its pid.
+    #[test]
+    fn cap_delegate_refuses_an_unrelated_target_without_user_admin() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        let target = make_caps_record(10, &[CapabilityId::FS_MOUNT, CapabilityId::DRV_LOAD], sink);
+        table.write().insert(target);
+
+        let caps = make_caps_record(4, &[CapabilityId::NET], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(4),
+            caps: &caps,
+        };
+        register_set_at_page1(&aspaces, 4, &CapabilitySet::EMPTY);
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.cap_delegate(&ctx, 10, 0x1000),
+            Err(Errno::PermissionDenied)
+        );
+        let guard = table.read();
+        let record = guard.caps_for(SecTaskId(10)).expect("target still present");
+        assert!(record.has(CapabilityId::FS_MOUNT));
+        assert!(record.has(CapabilityId::DRV_LOAD));
+        drop(guard);
+        assert!(sink.event_ids().contains(
+            &tairix_kernel_sec::AuditEvent::TaskCapabilitiesDelegateDenied
+                .id()
+                .0
+        ));
     }
 
     /// `cap_delegate` with a faulting set pointer fails closed with

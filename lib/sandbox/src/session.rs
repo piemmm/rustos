@@ -52,8 +52,9 @@ use tairix_abi::{Errno, FieldValue};
 use tairix_log::{Event, EventId, Field, Level, Sink};
 use tairix_util::fallible;
 
+use crate::host::log_worker_crashed;
 use crate::proto::{
-    head_declared, head_frame, recv_frame, send_frame, Channel, ProtoError, FRAME_HEADER_LEN,
+    head_declared, head_frame, recv_frame_into, send_frame, Channel, ProtoError, FRAME_HEADER_LEN,
     MAX_FRAME,
 };
 use crate::worker::ServeEnd;
@@ -126,10 +127,11 @@ pub trait SessionTransport: Sized {
 /// Typed failure a session operation can report.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SessionError {
-    /// The worker crashed, violated the framing, or the transport failed.
-    /// It has been disposed of (reaped) and is **not** replaced, because a
-    /// session worker holds the protocol state. Every later call on this
-    /// session reports the same error without touching the transport.
+    /// The worker crashed, violated the framing, or the transport failed,
+    /// and has been disposed of (reaped). A plain session is over — its
+    /// worker held the protocol state — and every later call reports the
+    /// same error without touching the transport; a supervised one
+    /// ([`crate::supervise`]) starts a replacement after its paced delay.
     WorkerFailed,
     /// The payload is larger than this session's outbound bound could ever
     /// carry. **Permanent**: nothing was queued and a retry cannot succeed.
@@ -300,6 +302,12 @@ impl ByteQueue {
         Ok(read)
     }
 
+    /// Erase the whole arena. An owner hands its worker keys through these
+    /// frames, and the process heap reuses freed memory without clearing it.
+    fn scrub(&mut self) {
+        tairix_util::secret::wipe(&mut self.arena);
+    }
+
     /// Drop the first `n` buffered bytes.
     fn consume(&mut self, n: usize) {
         self.head += n.min(self.len());
@@ -317,6 +325,12 @@ impl ByteQueue {
     }
 }
 
+impl Drop for ByteQueue {
+    fn drop(&mut self) {
+        self.scrub();
+    }
+}
+
 /// Whether `pending` divides exactly into whole frames with nothing over —
 /// the end-of-stream cleanliness test. A stream that ends mid-frame is a
 /// truncated conversation, never silently shortened data.
@@ -331,6 +345,17 @@ fn whole_frames(pending: &[u8]) -> bool {
     true
 }
 
+/// What a contained worker's failure means, which decides the event it is
+/// recorded under.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum AfterFailure {
+    /// The session ends: its worker held protocol state a fresh one could not
+    /// continue.
+    End,
+    /// A supervisor replaces the worker ([`crate::supervise`]).
+    Replace,
+}
+
 /// The parent side of a duplex session: one sandboxed worker, frames in
 /// flight both ways, and a single containment path.
 ///
@@ -338,8 +363,8 @@ fn whole_frames(pending: &[u8]) -> bool {
 /// readiness source (a wait-set over [`Self::descriptors`]) and never waits
 /// inside the session, so one session can never stall another.
 pub struct SandboxSession<T: SessionTransport, S: Sink> {
-    /// The live transport. `None` once the session has been contained —
-    /// a session worker is disposed of and never replaced.
+    /// The live transport. `None` once the session has been contained;
+    /// this worker is never revived, though a supervisor may start another.
     transport: Option<T>,
     sink: S,
     bounds: SessionBounds,
@@ -349,6 +374,7 @@ pub struct SandboxSession<T: SessionTransport, S: Sink> {
     peer_finished: bool,
     /// Set by containment. Implies `transport` is `None`.
     failed: bool,
+    after_failure: AfterFailure,
 }
 
 impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
@@ -365,6 +391,26 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
     /// [`SessionError::OutOfMemory`] when the queues cannot be committed;
     /// the worker is disposed of rather than left running unreachable.
     pub fn new(transport: T, bounds: SessionBounds, sink: S) -> Result<Self, SessionError> {
+        Self::admit(transport, bounds, sink, AfterFailure::End)
+    }
+
+    /// As [`Self::new`], for a worker a supervisor replaces when it fails:
+    /// its containment is recorded as a crash to be replaced rather than a
+    /// session ended.
+    pub(crate) fn supervised(
+        transport: T,
+        bounds: SessionBounds,
+        sink: S,
+    ) -> Result<Self, SessionError> {
+        Self::admit(transport, bounds, sink, AfterFailure::Replace)
+    }
+
+    fn admit(
+        transport: T,
+        bounds: SessionBounds,
+        sink: S,
+        after_failure: AfterFailure,
+    ) -> Result<Self, SessionError> {
         let (Some(outbound), Some(inbound)) = (
             ByteQueue::commit(bounds.outbound_bytes()),
             ByteQueue::commit(bounds.inbound_bytes()),
@@ -380,6 +426,7 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
             inbound,
             peer_finished: false,
             failed: false,
+            after_failure,
         })
     }
 
@@ -535,16 +582,18 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
         }
     }
 
-    /// Take the next complete frame the worker sent, or `None` when the
-    /// accumulator does not yet hold one.
+    /// Lend the next complete frame the worker sent to `take` and consume
+    /// it, or `None` when the accumulator does not yet hold one.
+    ///
+    /// The payload is read in place, so taking a frame never allocates: an
+    /// event loop cannot be left holding a frame it has no memory to take.
     ///
     /// # Errors
     ///
     /// [`SessionError::WorkerFailed`] once contained, and when the frame at
     /// the head declares more than [`SessionBounds::max_recv_payload`] —
-    /// refused before a payload byte is copied, and the session contained.
-    /// [`SessionError::OutOfMemory`] when the frame cannot be handed over.
-    pub fn recv(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
+    /// refused before a payload byte is read, and the session contained.
+    pub fn recv<R>(&mut self, take: impl FnOnce(&[u8]) -> R) -> Result<Option<R>, SessionError> {
         if self.failed {
             return Err(SessionError::WorkerFailed);
         }
@@ -552,15 +601,10 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
         let Some(payload_len) = head_frame(self.inbound.pending()) else {
             return Ok(None);
         };
-        let frame = {
-            let payload = &self.inbound.pending()[FRAME_HEADER_LEN..FRAME_HEADER_LEN + payload_len];
-            match fallible::collected(payload_len, payload.iter().copied()) {
-                Some(frame) => frame,
-                None => return Err(SessionError::OutOfMemory),
-            }
-        };
-        self.inbound.consume(FRAME_HEADER_LEN + payload_len);
-        Ok(Some(frame))
+        let frame_len = FRAME_HEADER_LEN + payload_len;
+        let taken = take(&self.inbound.pending()[FRAME_HEADER_LEN..frame_len]);
+        self.inbound.consume(frame_len);
+        Ok(Some(taken))
     }
 
     /// Whether the worker closed its reply stream on a frame boundary. Any
@@ -591,38 +635,50 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
         }
     }
 
+    /// Contain the worker because its owner found what it sent unbelievable,
+    /// exactly as a framing violation is contained.
+    pub(crate) fn condemn(&mut self, reason: &'static str) {
+        let _ = self.contain(reason);
+    }
+
     /// Contain a failed session: dispose of the worker (reaping it), log
     /// the stable event, and latch so every later call refuses without
-    /// touching the transport. The worker is never replaced — it held this
-    /// session's protocol state, so a fresh one could not continue it.
+    /// touching the transport. This worker is never revived: it held the
+    /// session's protocol state, so only a supervisor that can re-establish
+    /// that state may start a fresh one.
     fn contain(&mut self, reason: &'static str) -> SessionError {
         if self.failed {
             return SessionError::WorkerFailed;
         }
         self.failed = true;
         let exit_code = self.transport.take().and_then(SessionTransport::dispose);
-        let exit_field = match exit_code {
-            Some(code) => FieldValue::SignedInt(i64::from(code)),
-            None => FieldValue::Null,
-        };
-        tairix_log::log(
-            &self.sink,
-            &Event {
-                level: Level::Warn,
-                id: EVENT_SESSION_FAILED,
-                message: "sandbox session worker failed; session ended",
-                fields: &[
-                    Field {
-                        key: "reason",
-                        value: FieldValue::Str(reason),
+        match self.after_failure {
+            AfterFailure::Replace => log_worker_crashed(&self.sink, reason, exit_code),
+            AfterFailure::End => {
+                let exit_field = match exit_code {
+                    Some(code) => FieldValue::SignedInt(i64::from(code)),
+                    None => FieldValue::Null,
+                };
+                tairix_log::log(
+                    &self.sink,
+                    &Event {
+                        level: Level::Warn,
+                        id: EVENT_SESSION_FAILED,
+                        message: "sandbox session worker failed; session ended",
+                        fields: &[
+                            Field {
+                                key: "reason",
+                                value: FieldValue::Str(reason),
+                            },
+                            Field {
+                                key: "exit_code",
+                                value: exit_field,
+                            },
+                        ],
                     },
-                    Field {
-                        key: "exit_code",
-                        value: exit_field,
-                    },
-                ],
-            },
-        );
+                );
+            }
+        }
         SessionError::WorkerFailed
     }
 }
@@ -714,12 +770,16 @@ pub fn serve_session<C: Channel, S: SessionService>(chan: &mut C, service: &mut 
         chan,
         failure: None,
     };
+    // One buffer for the life of the session: a streaming worker is fed at
+    // whatever rate its input arrives, so allocating per frame is a cost
+    // the sender would choose.
+    let mut request = Vec::new();
     loop {
-        let request = match recv_frame(&mut *out.chan) {
-            Ok(Some(payload)) => payload,
-            Ok(None) => return ServeEnd::Finished,
+        match recv_frame_into(&mut *out.chan, &mut request) {
+            Ok(true) => {}
+            Ok(false) => return ServeEnd::Finished,
             Err(err) => return ServeEnd::Failed(err),
-        };
+        }
         let step = service.handle(&request, &mut out);
         if let Some(failure) = out.failure {
             return ServeEnd::Failed(failure);

@@ -125,6 +125,36 @@ impl<const N: usize> FastRng<N> {
         Self::from_key(&key)
     }
 
+    /// A generator keyed by `fill`, or the source's refusal.
+    ///
+    /// The key is marshalled through a buffer wiped on every exit, so the
+    /// generator's own copy is the only one left, and no generator is ever
+    /// built from a key the source did not finish writing.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `fill` refused with.
+    pub fn keyed_by<E>(fill: impl FnOnce(&mut [u8]) -> Result<(), E>) -> Result<Self, E> {
+        let mut key = [0u8; STREAM_KEY_LEN];
+        let keyed = fill(&mut key).map(|()| Self::from_key(&key));
+        key.zeroize();
+        keyed
+    }
+
+    /// A generator keyed from this one's output.
+    ///
+    /// The child shares nothing with anything either generator issues
+    /// afterwards, so an owner can hand each consumer its own stream from a
+    /// single draw on the source this one was keyed by.
+    #[must_use]
+    pub fn fork(&mut self) -> Self {
+        let mut key = [0u8; STREAM_KEY_LEN];
+        self.take(&mut key);
+        let child = Self::from_key(&key);
+        key.zeroize();
+        child
+    }
+
     /// Run the cipher once: the head of the keystream replaces the key, the
     /// rest becomes the issue buffer.
     fn refill(&mut self) {
@@ -448,6 +478,63 @@ mod tests {
             after, would_have_been_next,
             "discarded output was served after all"
         );
+    }
+
+    #[test]
+    fn a_generator_keyed_by_a_source_is_the_one_its_key_builds() {
+        let mut keyed = FastRng::<64>::keyed_by(|key: &mut [u8]| {
+            key.copy_from_slice(&KEY);
+            Ok::<(), ()>(())
+        })
+        .expect("the source filled the key");
+        let mut direct = FastRng::<64>::from_key(&KEY);
+        let (mut a, mut b) = ([0u8; 100], [0u8; 100]);
+        keyed.fill_bytes(&mut a);
+        direct.fill_bytes(&mut b);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_refusing_source_builds_no_generator() {
+        // A source that wrote part of the key and then refused must not leave
+        // a generator keyed by the part it wrote, nor by the zeros after it.
+        let refused = FastRng::<64>::keyed_by(|key: &mut [u8]| {
+            key[..8].fill(0xA5);
+            Err("entropy not ready")
+        });
+        assert_eq!(refused.err(), Some("entropy not ready"));
+    }
+
+    #[test]
+    fn a_fork_is_independent_of_its_parent_and_of_its_siblings() {
+        let mut parent = FastRng::<64>::from_key(&KEY);
+        let mut first = parent.fork();
+        let mut second = parent.fork();
+        let mut after_forks = [0u8; 96];
+        let mut from_first = [0u8; 96];
+        let mut from_second = [0u8; 96];
+        parent.fill_bytes(&mut after_forks);
+        first.fill_bytes(&mut from_first);
+        second.fill_bytes(&mut from_second);
+        assert_ne!(from_first, from_second, "two forks must not share a stream");
+        assert_ne!(from_first, after_forks, "a fork must not replay its parent");
+        assert_ne!(
+            from_second, after_forks,
+            "a fork must not replay its parent"
+        );
+
+        // The child is keyed by exactly the parent's next 32 bytes, so a
+        // fixture forks reproducibly and the key is consumed parent output.
+        let mut reference = FastRng::<64>::from_key(&KEY);
+        let mut child_key = [0u8; STREAM_KEY_LEN];
+        reference.fill_bytes(&mut child_key);
+        let mut expected = FastRng::<64>::from_key(&child_key);
+        let mut forked = FastRng::<64>::from_key(&KEY).fork();
+        let mut want = [0u8; 96];
+        let mut got = [0u8; 96];
+        expected.fill_bytes(&mut want);
+        forked.fill_bytes(&mut got);
+        assert_eq!(want, got);
     }
 
     #[test]

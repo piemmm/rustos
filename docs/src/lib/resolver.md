@@ -33,7 +33,10 @@ operator inspecting the configuration can never disagree (`AGENTS.md` §2.2).
   `Resolution`.
 - `RtDnsTransport` and `resolve(name, record_type)` (the `program` feature) —
   the production glue: a `DnsTransport` over the `netsock-v1` UDP datagram
-  socket (`tairix_rt::net`). It binds an app-local delivery port, opens the
+  socket (`tairix_rt::net`). Opening one keys its query-id generator once from
+  the kernel CSPRNG — a transport that cannot be keyed is refused rather than
+  run on predictable ids — and binds a process-private delivery port
+  (`tairix_rt::bind_private_port`). It opens the
   datagram socket for a server's address family on demand with a CSPRNG-drawn
   ephemeral source port (the RFC 5452 source-port randomisation the socket
   layer contributes), and parks on the delivery port for the reply — never a
@@ -54,9 +57,9 @@ configuration (the resolv.conf analogue), and every response is validated by
 the pure engine before an address is surfaced. Every DNS server and packet on
 the wire is treated as hostile (`AGENTS.md` §26.4): off-path spoofing is
 bounded by the engine's random query id and strict question match, and by
-this crate's source-port randomisation and a kernel-attested stack-origin
-check on every received datagram (a datagram from any other sender is dropped
-— fail closed).
+this crate's source-port randomisation and the socket layer's check of every
+received datagram's kernel-attested sender against the network stack's service
+account (a datagram from any other sender is discarded unread — fail closed).
 
 ## Consumers
 

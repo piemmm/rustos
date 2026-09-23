@@ -1466,6 +1466,14 @@ mod tests {
         CapabilityId::LOG_EMIT,
     ];
 
+    /// `discoveryd`'s request. Installed from its bundle and not enrolled
+    /// yet, so the list lives only in this pin.
+    const DISCOVERYD_REQUEST: &[CapabilityId] = &[
+        CapabilityId::NET,
+        CapabilityId::SANDBOX_SPAWN,
+        CapabilityId::LOG_EMIT,
+    ];
+
     /// Every program crate's on-disk `AppInfo.toml` manifest source
     /// requests exactly the capability set this registry embeds, and the
     /// two program inventories are identical (`plans/APPS.md` deliverable
@@ -1498,6 +1506,7 @@ mod tests {
             ("devmgr", ProgramKind::Service, DEVMGR_MANIFEST),
             ("df", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("dirname", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("discoveryd", ProgramKind::Service, DISCOVERYD_REQUEST),
             ("du", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("edit", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("elsh", ProgramKind::Command, SHELL_MANIFEST),

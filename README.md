@@ -69,6 +69,7 @@ for filesystems, the feature section below.
 | Machine power-off / restart (`system_power`) | ◐ restart | ✓ PSCI | ✓ SBI | — |
 | Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |
 | Memory tagging (software UAF floor) | ✓ | ✓ | ✓ | ✓ |
+| Kernel CSPRNG seeded at boot (mixed with jitter + boot seed) | ✓ RDSEED/RDRAND | ✓ RNDR | ✓ boot seed | ▢ host import |
 | Fatal kernel-fault report (registers, backtrace, stop-the-world) | ◐ `#PF` only | ✓ | ✓ | — |
 | Interactive-stall report (frame budget + user backtrace, debug) | ✓ | ✓ | ✓ | ▢ |
 | CPU frequency scaling (governor + mechanism driver) | ▢ | ✓ firmware | ▢ | — |
@@ -85,6 +86,7 @@ for filesystems, the feature section below.
 | Networking | ◐ virtio | ◐ virtio + GENET | ◐ virtio | — |
 | DHCPv4 / DHCPv6 address configuration | ✓ | ✓ | ✓ | — |
 | DNS name resolution, forward and reverse (`A`/`AAAA`/`PTR`) | ✓ | ✓ | ✓ | — |
+| Link-local service discovery (mDNS / DNS-SD, `discoveryd`) | ◐ | ◐ | ◐ | — |
 | Network clock synchronisation (`timed`, sandboxed NTP client) | ✓ | ✓ | ✓ | — |
 | Real-time clock (RTC) drivers | ✓ mc146818 | ✓ pl031 + ◐ rpi + ◐ i2c | ✓ goldfish | — |
 | Accelerator (offload-engine) drivers | ▢ | ✓ virtio-crypto | ▢ | — |
@@ -170,13 +172,14 @@ no ambient root, signed code) are designed in from the kernel up.
 | Encrypted root + encrypted swap, no plaintext mode (§4, §11) | Secret/data recovery at rest | ✓ | ✓ | ✓ | — |
 | Capability-gated, bounded DMA/MMIO (§4, §18.1) | Malicious-device DMA, unbounded device memory | ✓ | ✓ | ✓ | — |
 | Continuous fuzzing of parsers/ABI/IPC/syscalls (§19.6) | Input-handling memory-safety bugs | ✓ | ✓ | ✓ | ✓ |
-| Keyed hashing of caller-chosen keys, per-boot / per-process (§26.2, §26.4) | Hash-flooding: chosen keys collapsing a hash index onto one bucket to starve a shared lock or a bonded link | ✓ | ✓ | ◐ unkeyed | ◐ unkeyed |
+| Keyed hashing of caller-chosen keys, per-boot / per-process (§26.2, §26.4) | Hash-flooding: chosen keys collapsing a hash index onto one bucket to starve a shared lock or a bonded link | ✓ | ✓ | ✓ boot seed | ◐ unkeyed |
+| Unpredictable network identifiers, fail-closed without entropy (§22, §5.4) | Off-path TCP injection and SYN-cookie forgery; DNS, NTP, and DHCP spoofing through guessable sequence numbers, ports, ids, and nonces | ✓ | ✓ | ✓ | — |
 | Hash-chained tamper-evident audit log (§19.4) | Log tampering, forensic evasion | ◐ | ◐ | ◐ | ◐ |
 | Signed driver / app manifests (§9, §16.5) | Unsigned / malicious code execution | ◐ | ◐ | ◐ | ◐ |
 | Supply-chain pinning: SBOM, source-hash, advisory SLA (§19.3) | Dependency compromise (xz-utils class) | ◐ | ◐ | ◐ | ◐ |
 | Stack canaries / shadow stack (§19.2) | Return-address / saved-state overwrite | ◐ | ◐ | ◐ | ◐ |
 | KPTI / kernel-user address-space isolation (§19.1) | Meltdown-class kernel-memory disclosure | ◐ | ◐ | ◐ | — |
-| Minimum-capability parser sandboxes (§19.5) | Untrusted-input parser compromise (font/image/net) | ▢ | ▢ | ▢ | ▢ |
+| Minimum-capability parser sandboxes (§19.5) | Untrusted-input parser compromise (font/image/net) | ◐ | ◐ | ◐ | ▢ |
 | Hardware memory tagging — MTE / ADI (§19.10) | Use-after-free (hardware-enforced) | — | ▢ | ▢ | — |
 
 

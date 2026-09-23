@@ -56,15 +56,6 @@ mod program {
     use tairix_telnet::net::{CloseReason, Endpoint, IoEvent, TelnetIo};
     use tairix_telnet::{parse, run, Command, Output, FALLBACK_TERM, USAGE};
 
-    /// The stack's stream-event delivery port: an app-local, unrestricted
-    /// well-known endpoint id (not a reserved kernel id), so binding it needs
-    /// no capability.
-    const DELIVER_PORT: u64 = 0x_746E_7400;
-
-    /// The port the keyboard-reader thread posts to. A sibling of
-    /// [`DELIVER_PORT`] so the wait-set holds both.
-    const KEYBOARD_PORT: u64 = 0x_746E_7401;
-
     /// Wait-set token for the stack's delivery port.
     const DELIVER_TOKEN: u64 = 1;
     /// Wait-set token for the keyboard port.
@@ -145,11 +136,12 @@ mod program {
     struct RtTelnetIo {
         /// The wait-set the relay parks on.
         set: u64,
+        /// The process-private port the stack delivers stream events to.
+        deliver: u64,
+        /// The process-private port the keyboard-reader thread posts to.
+        keyboard: u64,
         /// The connected socket, when there is one.
         socket: Option<SocketId>,
-        /// The kernel-attested origin of the network stack, captured from the
-        /// first event it sent, so a later forged event is refused.
-        stack: Option<Origin>,
         /// This process's own origin, for authenticating the keyboard port.
         own: Origin,
         /// A local address to bind before connecting (`-b`).
@@ -162,20 +154,12 @@ mod program {
         /// Bind both ports, create the wait-set, and register both on it.
         fn open(bind: Option<SocketAddr>) -> Result<Self, Errno> {
             let own = tairix_rt::self_origin().map_err(Errno::from_syscall)?;
-            if tairix_rt::port_bind(DELIVER_PORT, SocketStreamEvent::MAX_WIRE_LEN, PORT_CAPACITY)
-                < 0
-            {
-                return Err(Errno::AddressInUse);
-            }
-            if tairix_rt::port_bind(KEYBOARD_PORT, KEYBOARD_CHUNK + 1, PORT_CAPACITY) < 0 {
-                return Err(Errno::AddressInUse);
-            }
+            let deliver =
+                tairix_rt::bind_private_port(SocketStreamEvent::MAX_WIRE_LEN, PORT_CAPACITY)?;
+            let keyboard = tairix_rt::bind_private_port(KEYBOARD_CHUNK + 1, PORT_CAPACITY)?;
             let set =
                 u64::try_from(tairix_rt::waitset_create()).map_err(|_| Errno::NotImplemented)?;
-            for (port, token) in [
-                (DELIVER_PORT, DELIVER_TOKEN),
-                (KEYBOARD_PORT, KEYBOARD_TOKEN),
-            ] {
+            for (port, token) in [(deliver, DELIVER_TOKEN), (keyboard, KEYBOARD_TOKEN)] {
                 if tairix_rt::waitset_ctl(set, WaitSetOp::Add, WaitSourceKind::Port, port, token)
                     != 0
                 {
@@ -184,8 +168,9 @@ mod program {
             }
             Ok(Self {
                 set,
+                deliver,
+                keyboard,
                 socket: None,
-                stack: None,
                 own,
                 bind,
                 buf: alloc::vec![0u8; SocketStreamEvent::MAX_WIRE_LEN],
@@ -201,7 +186,7 @@ mod program {
         /// Drain one keyboard message, or [`None`] if the mailbox was empty.
         fn drain_keyboard(&mut self) -> Option<Result<IoEvent, Errno>> {
             let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
-            let Ok(len) = tairix_rt::ipc_recv(KEYBOARD_PORT, &mut self.buf, &mut sender) else {
+            let Ok(len) = tairix_rt::ipc_recv(self.keyboard, &mut self.buf, &mut sender) else {
                 return None;
             };
             // The keyboard port is an inbox like any other: only this process's
@@ -224,22 +209,9 @@ mod program {
         /// Drain one stream event, or [`None`] if the mailbox was empty or the
         /// message was not one this session may act on.
         fn drain_network(&mut self) -> Option<Result<IoEvent, Errno>> {
-            let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
-            let Ok(len) = tairix_rt::ipc_recv(DELIVER_PORT, &mut self.buf, &mut sender) else {
-                return None;
-            };
-            let Ok(origin) = Origin::from_bytes(&sender) else {
-                return None;
-            };
-            // The first event fixes the stack's attested identity; every later
-            // one must match it, so nothing else can post a forged event.
-            match self.stack {
-                Some(known) if known != origin => return None,
-                Some(_) => {}
-                None => self.stack = Some(origin),
-            }
-            let bytes = self.buf.get(..len)?;
-            let event = SocketStreamEvent::parse(bytes).ok()?;
+            // Only the stack's own events come back: the receive discards a
+            // forged sender unread.
+            let event = tairix_rt::net::stream_recv(self.deliver, &mut self.buf).ok()?;
             let socket = self.socket?;
             match event {
                 SocketStreamEvent::Data { socket: s, payload } if s == socket => {
@@ -266,36 +238,17 @@ mod program {
         /// must fail loud with a reason rather than hang the terminal.
         fn await_connected(&mut self, socket: SocketId) -> Result<(), Errno> {
             for _ in 0..HANDSHAKE_PARKS {
-                let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
-                let Ok(len) = tairix_rt::ipc_recv(DELIVER_PORT, &mut self.buf, &mut sender) else {
+                let Ok(event) = tairix_rt::net::stream_recv(self.deliver, &mut self.buf) else {
                     park_for(self.set, HANDSHAKE_PARK_NANOS);
                     continue;
                 };
-                let Some(bytes) = self.buf.get(..len) else {
-                    continue;
-                };
-                let event = SocketStreamEvent::parse(bytes);
-                let ours = matches!(
-                    event,
-                    Ok(SocketStreamEvent::Connected { socket: s } | SocketStreamEvent::Closed { socket: s, .. })
-                        if s == socket
-                );
-                if !ours {
-                    continue;
-                }
-                // The stack's attested identity is pinned from an event that
-                // both parsed *and* named this socket, so a stray message
-                // cannot install a foreign origin that later events would then
-                // be measured against.
-                if self.stack.is_none() {
-                    if let Ok(origin) = Origin::from_bytes(&sender) {
-                        self.stack = Some(origin);
+                match event {
+                    SocketStreamEvent::Connected { socket: s } if s == socket => return Ok(()),
+                    SocketStreamEvent::Closed { socket: s, .. } if s == socket => {
+                        return Err(Errno::NotConnected);
                     }
+                    _ => {}
                 }
-                return match event {
-                    Ok(SocketStreamEvent::Connected { .. }) => Ok(()),
-                    _ => Err(Errno::NotConnected),
-                };
             }
             Err(Errno::TimedOut)
         }
@@ -317,7 +270,7 @@ mod program {
         }
 
         fn connect(&mut self, endpoint: Endpoint) -> Result<(), Errno> {
-            let socket = tairix_rt::net::stream_socket(endpoint.family, DELIVER_PORT)?;
+            let socket = tairix_rt::net::stream_socket(endpoint.family, self.deliver)?;
             if let Some(local) = self.bind {
                 if local.family != endpoint.family {
                     let _ = tairix_rt::net::close(socket);
@@ -466,16 +419,16 @@ mod program {
     /// relay tears it down, since `exit` is a thread-group exit. Its own
     /// wait-set holds the port's *room* source, so a mailbox the relay has not
     /// drained yet is waited on rather than polled and no keystroke is dropped.
-    fn read_keyboard() {
+    fn read_keyboard(keyboard: u64) {
         let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
-            let _ = tairix_rt::ipc_send(KEYBOARD_PORT, &[KEY_TAG_EOF]);
+            let _ = tairix_rt::ipc_send(keyboard, &[KEY_TAG_EOF]);
             return;
         };
         let room_armed = tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
             WaitSourceKind::PortRoom,
-            KEYBOARD_PORT,
+            keyboard,
             KEYBOARD_TOKEN,
         ) == 0;
         let mut buf = [0u8; KEYBOARD_CHUNK + 1];
@@ -483,19 +436,19 @@ mod program {
         // A zero-length or refused read is end of input as far as the relay is
         // concerned: there is no further keystroke to carry.
         while let Ok(read @ 1..) = Stdin.read(&mut buf[1..]) {
-            if !post(set, room_armed, &buf[..=read]) {
+            if !post(set, room_armed, keyboard, &buf[..=read]) {
                 break;
             }
         }
-        let _ = tairix_rt::ipc_send(KEYBOARD_PORT, &[KEY_TAG_EOF]);
+        let _ = tairix_rt::ipc_send(keyboard, &[KEY_TAG_EOF]);
     }
 
     /// Post one keyboard message, waiting for mailbox room rather than
     /// dropping a keystroke. Returns `false` when the port is unusable, so the
     /// reader ends instead of spinning on a destination that can never drain.
-    fn post(set: u64, room_armed: bool, message: &[u8]) -> bool {
+    fn post(set: u64, room_armed: bool, keyboard: u64, message: &[u8]) -> bool {
         for _ in 0..POST_ATTEMPTS {
-            if tairix_rt::ipc_send(KEYBOARD_PORT, message) >= 0 {
+            if tairix_rt::ipc_send(keyboard, message) >= 0 {
                 return true;
             }
             if !room_armed {
@@ -590,7 +543,8 @@ mod program {
         io.set_input_mode(InputMode::Raw);
         // The reader thread is detached: it has no value to hand back, and the
         // process exit below is what ends it.
-        match tairix_rt::thread::Thread::spawn(read_keyboard) {
+        let keyboard = io.keyboard;
+        match tairix_rt::thread::Thread::spawn(move || read_keyboard(keyboard)) {
             Ok(handle) => handle.detach(),
             Err(errno) => {
                 write_stderr_line(&format!("telnet: cannot start the input reader: {errno}"));

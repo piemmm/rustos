@@ -51,11 +51,16 @@ A first-party Rust program links the thin client wrappers in
 `tairix_rt::net` — `socket`, `bind`, `connect`, `send`, `recv`, `close`,
 `join_multicast`, `leave_multicast` — which marshal over `ipc_call` to the
 socket endpoint (control plane) and `ipc_recv` on the client's own delivery
-port (receive plane). `recv` returns both the decoded datagram and the
-kernel-attested sender `Origin` so the caller can reject a forged sender:
-the delivery port is otherwise an unauthenticated inbox (fail closed). The
-wrappers add no authority — every capability and input check stays kernel-
-and stack-side.
+port (receive plane). A delivery port is an inbox any process may post to,
+so `recv`, `stream_recv`, and `recv_echo` take a message only when its
+kernel-attested sender is the network stack's own service account
+(`NETSTACK_UID`, checked by `from_network_stack`) and discard anything else
+unread (fail closed). Authenticating the account rather than whichever
+process posted first means a forger cannot win the first post, and a
+restarted stack is still believed. The port itself is bound through
+`tairix_rt::bind_private_port`, a CSPRNG-drawn process-private id, so no
+other process can squat on it before the client binds. The wrappers add no
+authority — every capability and input check stays kernel- and stack-side.
 
 ## The microkernel-honest transport
 
@@ -75,8 +80,8 @@ Two planes make that work:
   stack has a datagram for a socket it `ipc_send`s a framed `SocketDatagram`
   to the async **port** the client bound and named in `SocketRequest::Socket`.
   The client parks on that port with the existing `WaitSourceKind::Port`
-  wait-set member and drains it with `ipc_recv`, authenticating the stack's
-  kernel-attested sender origin on each message — exactly the pattern an app
+  wait-set member and drains it with `ipc_recv`, authenticating each
+  message's kernel-attested sender as the stack — exactly the pattern an app
   uses for window events (`plans/APPWIN.md` AW3).
 
 There is deliberately **no** kernel `WaitSourceKind::Socket`. Readiness rides
@@ -198,8 +203,7 @@ of `SocketDatagram` — carrying no per-message peer (the peer is fixed):
 
 The client links `tairix_rt::net::stream_socket` / `connect` / `stream_send`
 / `listen` / `accept` / `shutdown` / `close` and drains events with `stream_recv` (which,
-like `recv`, returns the kernel-attested sender `Origin` for fail-closed
-authentication).
+like `recv`, takes only what the stack sent).
 
 ## ICMP echo sockets (`ping`, N8b-2b)
 
@@ -221,8 +225,8 @@ frame (magic `"NSKE"`) to the socket's delivery port. The IP time-to-live is
 not surfaced through this socket, so the `ping` tool prints no `ttl=` field.
 
 The client links `tairix_rt::net::icmp_echo_socket` / `connect` /
-`send_echo` and drains replies with `recv_echo` (which, like `recv`, returns
-the kernel-attested sender `Origin` for fail-closed authentication). The
+`send_echo` and drains replies with `recv_echo` (which, like `recv`, takes
+only what the stack sent). The
 user-facing tool is `userland/apps/ping`. Reaching below the transport layer
 is an administrative act (the Unix `CAP_NET_RAW`/setuid-`ping` model), so
 `CAP_NET_RAW` is part of the administrator account ceiling
@@ -236,10 +240,16 @@ the shared IPv6 link-local wire.
 
 ## Delivery (`SocketDatagram` / `SocketEcho`)
 
-A `SocketDatagram` is the 36-byte-header-plus-payload frame the stack
+A `SocketDatagram` is the 52-byte-header-plus-payload frame the stack
 `ipc_send`s to a datagram socket's delivery port: the receiving `SocketId`,
-the peer `SocketAddr` it came from, and the payload. A `SocketEcho` is the
-equivalent 36-byte-header frame for an echo socket: the receiving
+the logical interface it arrived on (a bond, not the member that carried
+it), the peer `SocketAddr` it came from, whether that peer is on the
+arrival interface's own link, and the payload. The on-link verdict is the
+stack's: the peer is link-local, or reached through one of that interface's
+routes with no gateway. A link-scoped protocol such as multicast DNS takes
+it from here rather than keeping its own copy of the interface's prefixes,
+which would go stale when they change. A `SocketEcho` is the equivalent
+36-byte-header frame for an echo socket: the receiving
 `SocketId`, the source `SocketAddr` (no port), the echoed sequence number,
 and the echoed payload. The client decodes either after `ipc_recv`.
 

@@ -166,7 +166,8 @@ reader-preferring `lib/sync::RwLock` mirrors that policy.
 | ------------------------------------ | ----------------------------------------------------- |
 | task creation (manifest verified, caps derived) | `CapTable::insert(caps)` registers the record  |
 | syscall `cap_query` / handler reads  | `CapTable::caps_for(task_id) -> &TaskCapabilities`    |
-| syscall `cap_delegate` / `cap_revoke`| `CapTable::caps_for_mut(task_id) -> &mut TaskCapabilities` then mutate via `TaskCapabilities::{delegate,revoke,apply_token}` |
+| syscall `cap_delegate`               | `CapTable::narrow(caller, target, set)`: authority over `target` first, then `TaskCapabilities::delegate` |
+| syscall `cap_revoke`                 | `CapTable::caps_for_mut(task_id) -> &mut TaskCapabilities` then mutate via `TaskCapabilities::revoke` |
 | `Scheduler::exit(task_id)` returned  | `CapTable::remove(task_id)` evicts the record         |
 
 `CapTable::insert` returns the previously-registered record for the

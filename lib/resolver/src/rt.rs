@@ -1,19 +1,19 @@
 //! The production socket-backed DNS transport and the convenience
 //! [`resolve`] entry point.
 //!
-//! [`RtDnsTransport`] implements the pure engine's
+//! [`RtDnsTransport`] drives the pure engine's
 //! [`DnsTransport`](tairix_net::dns::DnsTransport) over the `netsock-v1` UDP
-//! datagram socket (`tairix_rt::net`): it binds a process-private delivery
-//! port ([`bind_delivery_port`] — the kernel's port registry is machine-wide,
-//! so a fixed id would let one long-lived client deny resolution to every
-//! other process for the boot),
+//! datagram socket (`tairix_rt::net`): it draws query ids from a generator
+//! keyed once from the kernel CSPRNG, binds a process-private delivery
+//! port ([`tairix_rt::bind_private_port`] — the kernel's port registry is
+//! machine-wide, so a fixed id would let one long-lived client deny
+//! resolution to every other process for the boot),
 //! opens the datagram socket for a server's address family on demand with a
 //! CSPRNG-drawn ephemeral source port (the RFC 5452 source-port randomisation
 //! the socket layer contributes), sends each encoded query, and parks on the
-//! delivery port for the reply — never a busy spin. Every received datagram is
-//! checked against the network stack's kernel-attested [`Origin`]; a datagram
-//! from any other sender is dropped (the delivery port is otherwise an
-//! unauthenticated inbox — fail closed).
+//! delivery port for the reply — never a busy spin. Only the network stack's
+//! own deliveries reach the engine: the socket receive authenticates the
+//! sender's kernel-attested service account and discards any other post.
 //!
 //! [`host_address`] is the entry point a connecting tool uses for its target
 //! operand: it answers an address literal without opening a socket, so a
@@ -35,19 +35,13 @@ use tairix_abi::net::{SocketAddr, SocketDatagram, SocketId};
 use tairix_abi::net_ipc::NetAddrFamily;
 use tairix_abi::time::Duration64;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-use tairix_abi::{Errno, Origin, RandomFlags};
+use tairix_abi::Errno;
 use tairix_net::addr::IpAddr;
 use tairix_net::dns::{DnsTransport, LookupType, Resolution, Wait, PORT};
 use tairix_procinfo::IpcTransport;
+use tairix_rng::{FastRng, RandU64};
 
 use crate::{pointer_name, resolve_name, resolve_pointer, ResolveError};
-
-/// Attempts [`bind_delivery_port`] makes before failing closed.
-///
-/// The id space is 64 bits wide and the live set is a handful of ports, so a
-/// clash is vanishingly unlikely; a small bounded budget covers it without
-/// ever becoming a retry-until-it-works loop.
-const DELIVER_PORT_ATTEMPTS: usize = 8;
 
 /// Delivery-port mailbox depth. A resolution has one query outstanding at a
 /// time, but retransmission and failover can leave a couple of late replies
@@ -59,39 +53,25 @@ const DELIVER_CAPACITY: usize = 8;
 /// identifies it).
 const DELIVER_TOKEN: u64 = 1;
 
-/// Bind a fresh, **process-private** delivery port and return its id.
-///
-/// The kernel's port registry is machine-wide, so a fixed well-known id here
-/// would let whichever process bound it first — a long-lived one above all —
-/// deny name resolution to every other process for the rest of the boot. A
-/// CSPRNG-drawn unreserved id has no such contention: it is private to this
-/// transport, the stack learns it from the socket, and nothing resolves it by
-/// name. A reserved id (which would need `CAP_IPC_BIND_PRIVILEGED`) and zero
-/// are skipped rather than attempted, and the bounded budget fails closed.
-fn bind_delivery_port() -> Result<u64, Errno> {
-    for _ in 0..DELIVER_PORT_ATTEMPTS {
-        let mut bytes = [0u8; 8];
-        tairix_rt::random_get(&mut bytes, RandomFlags::empty()).map_err(Errno::from_syscall)?;
-        let id = u64::from_le_bytes(bytes);
-        if id == 0 || tairix_abi::ipc::is_reserved_endpoint(id) {
-            continue;
-        }
-        if tairix_rt::port_bind(id, SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY) >= 0 {
-            return Ok(id);
-        }
-    }
-    Err(Errno::AddressInUse)
-}
-
 /// One second in nanoseconds — the widening used to turn a monotonic
 /// [`Duration64`] deadline into the `u64` nanosecond count the wait-set and
 /// clock syscalls speak.
 const ONE_SEC_NANOS: u64 = 1_000_000_000;
 
-/// A socket-backed [`DnsTransport`]: the monotonic clock, an on-demand UDP
-/// datagram socket per address family, and the delivery-port park.
+/// A socket-backed resolver: the [`DnsTransport`] the engine drives, and the
+/// generator its query ids and retransmit jitter are drawn from.
 pub struct RtDnsTransport {
-    /// This transport's process-private delivery port ([`bind_delivery_port`]).
+    sockets: Sockets,
+    /// Keyed from the kernel CSPRNG when the transport opened, so no query
+    /// id is ever drawn from a source that could not be keyed.
+    rng: FastRng,
+}
+
+/// The monotonic clock, an on-demand UDP datagram socket per address family,
+/// and the delivery-port park.
+struct Sockets {
+    /// This transport's process-private delivery port
+    /// ([`tairix_rt::bind_private_port`]).
     deliver: u64,
     /// The wait-set the delivery port is registered with; `wait` parks on it.
     set: u64,
@@ -99,16 +79,14 @@ pub struct RtDnsTransport {
     v4: Option<SocketId>,
     /// The IPv6 datagram socket, opened on the first query to a v6 server.
     v6: Option<SocketId>,
-    /// The stack's kernel-attested origin, captured from the first received
-    /// datagram so every later one can be required to match it (fail closed).
-    stack: Option<Origin>,
     /// The receive scratch buffer (reused across datagrams), sized to the
     /// largest datagram frame the stack can deliver.
     scratch: Vec<u8>,
 }
 
 impl RtDnsTransport {
-    /// Bind the delivery port and register it with a fresh wait-set.
+    /// Key the query-id generator, bind the delivery port, and register it
+    /// with a fresh wait-set.
     ///
     /// The datagram sockets themselves are opened lazily on the first query
     /// to each family, so a lookup that only ever talks to one family opens
@@ -116,10 +94,11 @@ impl RtDnsTransport {
     ///
     /// # Errors
     ///
-    /// [`Errno`] if the delivery port cannot be bound or the wait-set cannot
-    /// be created or armed.
+    /// [`Errno`] if the kernel CSPRNG cannot key the generator, the delivery
+    /// port cannot be bound, or the wait-set cannot be created or armed.
     pub fn open() -> Result<Self, Errno> {
-        let deliver = bind_delivery_port()?;
+        let rng = FastRng::keyed_by(tairix_rt::random_fill)?;
+        let deliver = tairix_rt::bind_private_port(SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY)?;
         let set = tairix_rt::waitset_create();
         let Ok(set) = u64::try_from(set) else {
             return Err(Errno::from_syscall(set));
@@ -135,15 +114,77 @@ impl RtDnsTransport {
             return Err(Errno::NotImplemented);
         }
         Ok(Self {
-            deliver,
-            set,
-            v4: None,
-            v6: None,
-            stack: None,
-            scratch: vec![0u8; SocketDatagram::MAX_WIRE_LEN],
+            sockets: Sockets {
+                deliver,
+                set,
+                v4: None,
+                v6: None,
+                scratch: vec![0u8; SocketDatagram::MAX_WIRE_LEN],
+            },
+            rng,
         })
     }
 
+    /// Resolve `name`/`record_type` over this transport, reusing its bound
+    /// delivery port and open sockets across calls.
+    ///
+    /// A resolving tool that looks a name up under several record types (the
+    /// `host` A+AAAA default) drives one transport through this method for
+    /// each type, so the delivery port is bound once and the per-family
+    /// datagram sockets are opened once and shared — never rebinding the port
+    /// per query. The server set comes from the real System Information API
+    /// transport.
+    ///
+    /// # Errors
+    ///
+    /// A [`ResolveError`] describing why resolution could not proceed (an
+    /// invalid name, no configured server, a failed server-set query, or a
+    /// UDP transport failure). A negative or timed-out resolution is returned
+    /// as a [`Resolution`], not an error.
+    pub fn resolve(
+        &mut self,
+        name: &str,
+        record_type: LookupType,
+    ) -> Result<Resolution, ResolveError> {
+        let Self { sockets, rng } = self;
+        resolve_name(name, record_type, &IpcTransport, sockets, &mut || {
+            rng.next_u32()
+        })
+    }
+
+    /// Resolve the domain name `address` maps back to over this transport,
+    /// reusing its bound delivery port and open sockets.
+    ///
+    /// # Errors
+    ///
+    /// As [`resolve`](Self::resolve).
+    pub fn resolve_reverse(&mut self, address: IpAddr) -> Result<Resolution, ResolveError> {
+        let Self { sockets, rng } = self;
+        resolve_pointer(address, &IpcTransport, sockets, &mut || rng.next_u32())
+    }
+
+    /// The display name `address` maps back to, or [`None`] when it has no
+    /// `PTR` record or the lookup did not conclude — the shape a tool that
+    /// falls back to the numeric address wants.
+    ///
+    /// Reusing one transport across many addresses is what lets a table
+    /// renderer resolve a whole listing without rebinding a port per row.
+    pub fn reverse_name(&mut self, address: IpAddr) -> Option<String> {
+        pointer_name(&self.resolve_reverse(address).ok()?)
+    }
+
+    /// Resolve a command-line host operand to one address over this
+    /// transport, reusing its bound delivery port and open sockets.
+    ///
+    /// The literal-first, family-preference policy itself is the shared
+    /// [`crate::resolve_host`]; this only supplies the query.
+    pub fn host_address(&mut self, host: &str, family: Option<NetAddrFamily>) -> Option<IpAddr> {
+        let mut query = |name: &str, record: LookupType| self.resolve(name, record).ok();
+        crate::resolve_host(host, family, &mut query)
+    }
+}
+
+impl Sockets {
     /// The datagram socket for `family`, opened (and bound to a CSPRNG-drawn
     /// ephemeral source port) on first use and cached thereafter.
     fn socket_for(&mut self, family: NetAddrFamily) -> Result<SocketId, Errno> {
@@ -174,74 +215,9 @@ impl RtDnsTransport {
         let mut token = 0u64;
         let _ = tairix_rt::waitset_wait(self.set, nanos, &mut token);
     }
-
-    /// Resolve `name`/`record_type` over this transport, reusing its bound
-    /// delivery port and open sockets across calls.
-    ///
-    /// A resolving tool that looks a name up under several record types (the
-    /// `host` A+AAAA default) drives one transport through this method for
-    /// each type, so the delivery port is bound once and the per-family
-    /// datagram sockets are opened once and shared — never rebinding the port
-    /// per query. The server set and the CSPRNG come from the production
-    /// seams: the real System Information API transport and the kernel
-    /// random subsystem.
-    ///
-    /// # Errors
-    ///
-    /// A [`ResolveError`] describing why resolution could not proceed (an
-    /// invalid name, no configured server, a failed server-set query, or a
-    /// UDP transport failure). A negative or timed-out resolution is returned
-    /// as a [`Resolution`], not an error.
-    pub fn resolve(
-        &mut self,
-        name: &str,
-        record_type: LookupType,
-    ) -> Result<Resolution, ResolveError> {
-        let mut rng = || {
-            let mut bytes = [0u8; 4];
-            let _ = tairix_rt::random_get(&mut bytes, RandomFlags::empty());
-            u32::from_le_bytes(bytes)
-        };
-        resolve_name(name, record_type, &IpcTransport, self, &mut rng)
-    }
-
-    /// Resolve the domain name `address` maps back to over this transport,
-    /// reusing its bound delivery port and open sockets.
-    ///
-    /// # Errors
-    ///
-    /// As [`resolve`](Self::resolve).
-    pub fn resolve_reverse(&mut self, address: IpAddr) -> Result<Resolution, ResolveError> {
-        let mut rng = || {
-            let mut bytes = [0u8; 4];
-            let _ = tairix_rt::random_get(&mut bytes, RandomFlags::empty());
-            u32::from_le_bytes(bytes)
-        };
-        resolve_pointer(address, &IpcTransport, self, &mut rng)
-    }
-
-    /// The display name `address` maps back to, or [`None`] when it has no
-    /// `PTR` record or the lookup did not conclude — the shape a tool that
-    /// falls back to the numeric address wants.
-    ///
-    /// Reusing one transport across many addresses is what lets a table
-    /// renderer resolve a whole listing without rebinding a port per row.
-    pub fn reverse_name(&mut self, address: IpAddr) -> Option<String> {
-        pointer_name(&self.resolve_reverse(address).ok()?)
-    }
-
-    /// Resolve a command-line host operand to one address over this
-    /// transport, reusing its bound delivery port and open sockets.
-    ///
-    /// The literal-first, family-preference policy itself is the shared
-    /// [`crate::resolve_host`]; this only supplies the query.
-    pub fn host_address(&mut self, host: &str, family: Option<NetAddrFamily>) -> Option<IpAddr> {
-        let mut query = |name: &str, record: LookupType| self.resolve(name, record).ok();
-        crate::resolve_host(host, family, &mut query)
-    }
 }
 
-impl Drop for RtDnsTransport {
+impl Drop for Sockets {
     fn drop(&mut self) {
         // Best-effort teardown: release the datagram sockets so their handles
         // and ephemeral ports do not linger past the resolution.
@@ -254,7 +230,7 @@ impl Drop for RtDnsTransport {
     }
 }
 
-impl DnsTransport for RtDnsTransport {
+impl DnsTransport for Sockets {
     fn now(&mut self) -> Duration64 {
         Duration64::from_nanos(tairix_rt::clock_get())
     }
@@ -272,18 +248,10 @@ impl DnsTransport for RtDnsTransport {
             if now >= deadline_ns {
                 return Ok(Wait::TimedOut);
             }
+            // Only the stack's own deliveries come back: the receive
+            // discards a forged sender before the engine could see it.
             match tairix_rt::net::recv(self.deliver, &mut self.scratch) {
-                Ok((datagram, origin)) => {
-                    // Authenticate the sender: capture the stack's origin on
-                    // the first datagram, then require every later one to
-                    // match it. A datagram from any other origin is dropped
-                    // (fail closed) — the engine would reject a mismatched
-                    // reply anyway, but a forged sender never even reaches it.
-                    match self.stack {
-                        Some(known) if known != origin => continue,
-                        None => self.stack = Some(origin),
-                        _ => {}
-                    }
+                Ok(datagram) => {
                     let len = datagram.payload.len().min(buf.len());
                     buf[..len].copy_from_slice(&datagram.payload[..len]);
                     return Ok(Wait::Datagram(len));
@@ -298,9 +266,8 @@ impl DnsTransport for RtDnsTransport {
 }
 
 /// Resolve `name`/`record_type` over the production seams: the real
-/// System Information API transport for the configured server set, a
-/// freshly opened [`RtDnsTransport`] for the UDP queries, and the kernel
-/// CSPRNG for the query id and retransmit jitter.
+/// System Information API transport for the configured server set and a
+/// freshly opened [`RtDnsTransport`] for the UDP queries and their ids.
 ///
 /// This is the one call a resolving program makes; the pure
 /// [`resolve_name`] orchestration it delegates to is what the host tests

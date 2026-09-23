@@ -31,10 +31,16 @@
 //!   ([`session::EVENT_SESSION_FAILED`]). The worker side
 //!   ([`session::serve_session`]) stays a pure reactor, which is what the
 //!   kernel's sandbox allow-list already forces it to be.
+//! * [`supervise`] — the duplex seam for a worker whose state its owner can
+//!   re-establish, such as a decoder of a stream of untrusted input:
+//!   [`supervise::SupervisedSession`] replaces a failed worker, after a
+//!   paced delay a crafted input cannot shorten, and reports each fresh one
+//!   as a new generation.
 //! * [`loopback`] — the public in-process fakes, so a consumer's host tests
 //!   run the full parent path without processes (the `Fs`/`Tty` seam
 //!   pattern) — [`loopback::LoopbackLauncher`] for the one-shot seam,
-//!   [`loopback::LoopbackSession`] for the duplex one.
+//!   [`loopback::LoopbackSession`] and
+//!   [`loopback::LoopbackSessionLauncher`] for the duplex ones.
 //! * [`decode`] — the first consumers behind the seam: executable-container
 //!   summaries (`tairix-binfmt`) and instruction windows (`tairix-disasm`),
 //!   with fail-closed reply validation (the worker is hostile once it has
@@ -76,6 +82,7 @@ pub mod proto;
 #[cfg(all(freestanding, feature = "program"))]
 pub mod rt;
 pub mod session;
+pub mod supervise;
 pub mod svgfonts;
 pub mod timesync;
 pub mod wire;
@@ -87,4 +94,5 @@ pub use session::{
     serve_session, FrameOut, SandboxSession, SessionBounds, SessionDescriptors, SessionError,
     SessionService, SessionStep, SessionTransport,
 };
+pub use supervise::{SessionLauncher, SupervisedSession};
 pub use worker::{serve, ServeEnd, Service};

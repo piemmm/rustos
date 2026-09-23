@@ -17,19 +17,23 @@
 //! naming its own program path.
 //!
 //! The duplex seam ([`crate::session`]) rides the same spawn: a parent
-//! constructs an [`RtSessionChannel`], registers the two descriptor
-//! numbers it reports on its own wait-set, and drives the session from
-//! those wakes; the worker detects [`session_worker_role`] and hands
-//! control to [`serve_session_stdio`].
+//! constructs an [`RtSessionChannel`] (or has an [`RtSessionLauncher`] do so
+//! for a supervised session), keeps its wait-set in step with the two
+//! descriptors through [`SessionMembers`], and drives the session from those
+//! wakes; the worker detects [`session_worker_role`] and hands control to
+//! [`serve_session_stdio`].
 
 use alloc::vec::Vec;
 
-use tairix_abi::{Errno, FdWire, SpawnAttach, STDIN, STDOUT, STD_STREAM_COUNT};
+use tairix_abi::{
+    Errno, FdWire, SpawnAttach, WaitSetOp, WaitSourceKind, STDIN, STDOUT, STD_STREAM_COUNT,
+};
 use tairix_rt::io::{Error as IoError, Read, Stdin, Stdout, Write};
 
 use crate::host::Launcher;
 use crate::proto::Channel;
 use crate::session::{serve_session, SessionDescriptors, SessionService, SessionTransport};
+use crate::supervise::SessionLauncher;
 use crate::worker::{serve, ServeEnd, Service};
 
 /// The argument-vector marker a parent passes (as `argv[1]`) when
@@ -291,4 +295,123 @@ impl Drop for RtSessionChannel {
         let _ = tairix_rt::fs_close(self.write_fd);
         let _ = tairix_rt::fs_close(self.read_fd);
     }
+}
+
+/// The production [`SessionLauncher`]: each launch is a fresh
+/// [`RtSessionChannel`] over `path`.
+pub struct RtSessionLauncher {
+    path: Vec<u8>,
+}
+
+impl RtSessionLauncher {
+    /// Launch `path`, for a fixture whose worker roles are distinct paths.
+    #[must_use]
+    pub fn new(path: &[u8]) -> Self {
+        Self {
+            path: path.to_vec(),
+        }
+    }
+
+    /// Launch this program's own binary through [`tairix_abi::SPAWN_SELF`],
+    /// the one spelling of it a worker spawn trusts.
+    #[must_use]
+    pub fn own_binary() -> Self {
+        Self::new(tairix_abi::SPAWN_SELF)
+    }
+}
+
+impl SessionLauncher for RtSessionLauncher {
+    type Transport = RtSessionChannel;
+
+    fn launch(&mut self) -> Result<RtSessionChannel, Errno> {
+        RtSessionChannel::launch(&self.path)
+    }
+}
+
+/// An owner's wait-set registration for one session's two descriptors:
+/// `Stream` on the read end while the session wants to read, `StreamRoom`
+/// on the write end while it wants to write.
+///
+/// A direction is registered only while wanted, which is what keeps a
+/// level-triggered readiness source from waking an owner with nothing to
+/// do. A replaced worker brings new descriptors, so a member naming one the
+/// session no longer holds is removed before the new one is added.
+pub struct SessionMembers {
+    set: u64,
+    read_token: u64,
+    write_token: u64,
+    read: Option<u32>,
+    write: Option<u32>,
+}
+
+impl SessionMembers {
+    /// Track the members of wait-set `set`, reporting the read end's
+    /// readiness as `read_token` and the write end's room as `write_token`.
+    #[must_use]
+    pub const fn new(set: u64, read_token: u64, write_token: u64) -> Self {
+        Self {
+            set,
+            read_token,
+            write_token,
+            read: None,
+            write: None,
+        }
+    }
+
+    /// Register exactly the wanted directions of `descriptors` — none at all
+    /// when there are no descriptors.
+    ///
+    /// # Errors
+    ///
+    /// The wait-set's typed refusal to add or remove a member.
+    pub fn sync(
+        &mut self,
+        descriptors: Option<SessionDescriptors>,
+        wants_read: bool,
+        wants_write: bool,
+    ) -> Result<(), Errno> {
+        let read = descriptors.filter(|_| wants_read).map(|d| d.read_fd);
+        let write = descriptors.filter(|_| wants_write).map(|d| d.write_fd);
+        sync_member(
+            self.set,
+            WaitSourceKind::Stream,
+            self.read_token,
+            &mut self.read,
+            read,
+        )?;
+        sync_member(
+            self.set,
+            WaitSourceKind::StreamRoom,
+            self.write_token,
+            &mut self.write,
+            write,
+        )
+    }
+}
+
+/// Move one direction's registration from `armed` to `want`.
+fn sync_member(
+    set: u64,
+    kind: WaitSourceKind,
+    token: u64,
+    armed: &mut Option<u32>,
+    want: Option<u32>,
+) -> Result<(), Errno> {
+    if *armed == want {
+        return Ok(());
+    }
+    if let Some(fd) = armed.take() {
+        let ret = tairix_rt::waitset_ctl(set, WaitSetOp::Del, kind, u64::from(fd), token);
+        if ret != 0 {
+            return Err(Errno::from_syscall(ret));
+        }
+    }
+    if let Some(fd) = want {
+        let ret = tairix_rt::waitset_ctl(set, WaitSetOp::Add, kind, u64::from(fd), token);
+        if ret != 0 {
+            return Err(Errno::from_syscall(ret));
+        }
+        *armed = Some(fd);
+    }
+    Ok(())
 }

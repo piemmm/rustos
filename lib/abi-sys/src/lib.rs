@@ -456,9 +456,11 @@ pub extern "C" fn sys_cap_query(cap: u16) -> u32 {
     unsafe { ret_u32(raw_syscall(NUM_CAP_QUERY, [u64::from(cap), 0, 0, 0, 0, 0])) }
 }
 
-/// `cap_delegate`: delegate a (necessarily narrower) capability set described
-/// at `request` to the task named by `handle` (`SyscallNumber::CAP_DELEGATE`).
-/// Returns a `TAIRIX_E_*` code.
+/// `cap_delegate`: narrow the task named by `handle` to the capability set
+/// described at `request`, which may never widen it
+/// (`SyscallNumber::CAP_DELEGATE`). The task is the caller itself or a live
+/// child of it; any other takes `CAP_USER_ADMIN`. Returns a `TAIRIX_E_*`
+/// code.
 #[must_use]
 #[export_name = "tairix_sys_cap_delegate"]
 pub extern "C" fn sys_cap_delegate(handle: u64, request: *mut c_void) -> i32 {

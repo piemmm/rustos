@@ -718,14 +718,15 @@ it does not.
 - `Init` engine (`manager.rs`): `reap` now takes the monotonic `now` and, for
   an exit the manager did **not** itself initiate (a graceful idle-stop or
   shutdown is honoured, never fought), schedules a policy-driven restart via
-  `schedule_restart`: it arms a single one-shot `restart_deadline = now +
-  restart_backoff(attempts)` and audits `SERVICE_RESTART_SCHEDULED` (9018).
-  Backoff is exponential (100 ms base, ×2, clamped to a 30 s cap) computed in
-  `u128` ns with a shift-back overflow check. The crash-loop budget
+  `schedule_restart`: it arms a single one-shot `restart_deadline` from the
+  service's `tairix_util::retry::RestartPacer` and audits
+  `SERVICE_RESTART_SCHEDULED` (9018). The pacer is the one restart-pacing
+  definition, shared with `lib/sandbox`'s supervised worker: 100 ms base, ×2,
+  clamped to a 30 s cap, saturating. The crash-loop budget
   (`MAX_RESTART_ATTEMPTS` = 5) bounds a *tight* loop and fails closed
   (`SERVICE_RESTART_EXHAUSTED`, 9019) rather than relaunching forever (§2.1);
-  it resets once a relaunched service has run past `RESTART_STABLE_WINDOW`
-  (30 s), tracked by `relaunched_at`, so a long-lived daemon that crashes once
+  the pacer forgets the run once a relaunched service has run past
+  `RESTART_STABLE_WINDOW_NS` (30 s), so a long-lived daemon that crashes once
   after hours restarts with a full budget. `expire_restart_backoff(name, now)`
   is the one-shot-timer callback the transport arms from `restart_deadline`; it
   returns the service to `Inactive` and re-drives the admission `pump` (woken by
@@ -743,7 +744,7 @@ it does not.
   reinvention (§2.2). `stop` fails closed on an unknown name.
 - Host tests cover: every policy (never leaves a crash down; on-failure restarts
   an abnormal exit but honours a clean one; always restarts even a clean exit);
-  the backoff doubling+cap and `duration_since` carry/clamp; the crash-loop
+  the backoff doubling+cap (the pacer's own tests in `lib/util`); the crash-loop
   budget bounding a tight loop and failing closed; the stable-window budget
   reset; reverse-dependency `shutdown` and `stop` ordering (dependents first,
   independents untouched); fail-closed unknown-service stop; and shutdown

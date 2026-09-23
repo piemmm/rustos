@@ -179,6 +179,9 @@ fn push_multicast<F: FrameService>(
 pub struct ServiceOutcome {
     /// The typed engine events the pump reported.
     pub events: Vec<StackEvent>,
+    /// The logical interface whose stack raised `events`: the serviced
+    /// channel itself, or the bond a member channel carries frames for.
+    pub interface: [u8; IF_NAME_LEN],
     /// The interface's new link state, `Some` only when it differs from
     /// the state recorded before this pump.
     pub link_change: Option<LinkState>,
@@ -1435,6 +1438,7 @@ impl Netstack {
         let link_change = (reported_link != channel.facts.link).then_some(reported_link);
         Ok(ServiceOutcome {
             events,
+            interface: interfaces[index].name,
             link_change,
             multicast_refused,
         })

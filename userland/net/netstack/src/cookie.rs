@@ -12,22 +12,31 @@
 //! folded into the MAC input here; the key stays fixed for the life of the
 //! service, so no per-connection state is kept.
 
-use tairix_crypto::hmac_sha256_parts;
+use tairix_crypto::{hmac_sha256_parts, HMAC_SHA256_KEY_LEN};
 use tairix_net::tcp::listen::CookieSecret;
+use tairix_util::secret::Wiped;
 
 /// A [`CookieSecret`] backed by HMAC-SHA256 over a per-boot random key.
 pub struct CryptoCookieSecret {
-    /// The per-boot MAC key. Ephemeral: drawn from the platform RNG at
-    /// startup, never written anywhere, and dropped at shutdown.
-    key: [u8; 32],
+    /// The per-boot MAC key: never written anywhere, and wiped when the
+    /// secret is dropped.
+    key: Wiped<HMAC_SHA256_KEY_LEN>,
 }
 
 impl CryptoCookieSecret {
-    /// Build a secret from a 32-byte per-boot random key. The caller draws
-    /// `key` from the platform CSPRNG; it must never be persisted.
-    #[must_use]
-    pub fn new(key: [u8; 32]) -> Self {
-        Self { key }
+    /// A secret keyed by `fill` — the platform CSPRNG in the service — or
+    /// the source's refusal.
+    ///
+    /// No secret is built from a key the source did not finish writing, so a
+    /// failed draw can never leave cookies forgeable under an all-zero key.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `fill` refused with.
+    pub fn keyed_by<E>(fill: impl FnOnce(&mut [u8]) -> Result<(), E>) -> Result<Self, E> {
+        let mut key = Wiped::new();
+        fill(&mut key[..])?;
+        Ok(Self { key })
     }
 }
 
@@ -45,9 +54,17 @@ mod tests {
     use super::CryptoCookieSecret;
     use tairix_net::tcp::listen::CookieSecret;
 
+    fn keyed(byte: u8) -> CryptoCookieSecret {
+        CryptoCookieSecret::keyed_by(|key| {
+            key.fill(byte);
+            Ok::<(), ()>(())
+        })
+        .expect("the source filled the key")
+    }
+
     #[test]
     fn mac_is_deterministic_and_tuple_bound() {
-        let secret = CryptoCookieSecret::new([0x5A; 32]);
+        let secret = keyed(0x5A);
         let tuple = [1u8, 2, 3, 4, 5, 6, 7, 8];
         // Same input, same MAC (the handshake must reconstruct it).
         assert_eq!(secret.mac(&tuple, 7), secret.mac(&tuple, 7));
@@ -59,9 +76,20 @@ mod tests {
 
     #[test]
     fn a_different_key_yields_a_different_mac() {
-        let a = CryptoCookieSecret::new([0x11; 32]);
-        let b = CryptoCookieSecret::new([0x22; 32]);
+        let a = keyed(0x11);
+        let b = keyed(0x22);
         let tuple = [0u8; 8];
         assert_ne!(a.mac(&tuple, 1), b.mac(&tuple, 1));
+    }
+
+    #[test]
+    fn a_refused_draw_builds_no_secret() {
+        // A refused draw leaves no secret at all, never one keyed with zeros
+        // under which anyone could forge a cookie.
+        let refused = CryptoCookieSecret::keyed_by(|key| {
+            key[..4].fill(0xA5);
+            Err("entropy not ready")
+        });
+        assert!(matches!(refused, Err("entropy not ready")));
     }
 }

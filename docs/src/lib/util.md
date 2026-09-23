@@ -116,6 +116,27 @@ and panic-free throughout.
   desktop
   session's settings publisher, the session's program-catalogue scan, and the
   file manager's bundle scan.
+* `argv` — resolving a value-taking option's value from a command line,
+  attached (`-u0`, `--uid=0`) or as the following argument (`-u 0`), so
+  every GNU-shaped command app agrees on what a trailing `--uid` is. The
+  caller names the usage error; the resolver reports only the absence.
+  Consumers: `mount`, `passwd`, `useradd`, `usermod`, and `groupadd`.
+* `mathf` — bounded, total `f64` maths for `no_std` geometry (`floor`,
+  `sqrt`, `sin`, `atan2`, …) with no external libm, so the glyph
+  rasteriser (`lib/fontface`), the SVG decoder (`lib/svg`), and the desktop
+  companion round and rotate identically. Every function returns a finite
+  answer for every finite input, so no caller guards against a `NaN`.
+* `retry` — the two retry schedules. `RetryLadder` is for waiting on
+  something that has not appeared yet and has no readiness event: a
+  bounded, doubling one-shot ladder, so a boot on which the thing never
+  appears ends after the ladder's finite length rather than a poll loop.
+  The clock service's configuration store and RTC, and the service
+  manager's enrolment overrides, climb it. `RestartPacer` is for restarting
+  something that keeps dying: a capped, doubling, saturating delay,
+  forgotten once a restart stays up for a stable window. What fails may be
+  killed on purpose by a crafted input, and restarting it at once would
+  hand the sender a process spawn per input. The service manager's restart
+  policy and `lib/sandbox`'s supervised worker pace through it.
 * `tailwindow` — the bounded rolling "keep the last N bytes/lines"
   windows shared by the same two apps: `ByteWindow` and `LineWindow`
   retain only the trailing N units of a stream, so `head`'s `-c -N` /

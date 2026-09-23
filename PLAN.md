@@ -6519,7 +6519,13 @@ engine in `lib/net::dns`, the userland client `lib/resolver` (drives the
 engine over a `netsock-v1` UDP socket, reading the active recursive-server
 set from the ungated `NET_RESOLVER_SERVERS` sysinfo query), and the `host`
 command app as its first consumer; the live 3-arch DNS QEMU verticals
-remain.
+remain. Link-local service discovery (multicast DNS / DNS-SD) is staged in
+`plans/ZEROCONF.md`, whose ledger records it: the pure `lib/net::mdns` engine,
+the `lib/net::dnssd` vocabulary, and the `userland/net/discoveryd` split
+process — a capability-empty sandboxed decoder supervised through
+`lib/sandbox::supervise`, beneath a front that owns the sockets and every
+authority. Browse, publication behind the three authority gates, and posture
+follow there.
 
 ---
 

@@ -219,8 +219,10 @@ impl<'a> PaintServers<'a> {
     /// percentages resolve against.
     ///
     /// `None` for a pattern that paints nothing: a tile with no area (SVG
-    /// disables a pattern whose `width` or `height` is zero) or a placement
-    /// that collapses, which has no repeat to render.
+    /// disables a pattern whose `width` or `height` is zero), or a placement
+    /// that collapses either way — to nothing, or so large that the map back
+    /// the renderer sizes a tile by reads as collapsed — which has no repeat
+    /// to render.
     ///
     /// # Errors
     /// Returns the parse error of a malformed pattern attribute.
@@ -270,7 +272,7 @@ impl<'a> PaintServers<'a> {
             .then(Affine::translate(tile_x, tile_y))
             .then(pattern_transform)
             .then(to_design);
-        let Some(to_tile) = placed.invert() else {
+        let Some(to_tile) = placed.invert().filter(|to_tile| to_tile.invert().is_some()) else {
             return Ok(None);
         };
 

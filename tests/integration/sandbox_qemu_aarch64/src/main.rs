@@ -7,7 +7,7 @@
 //! installs the **production** `KernelDispatchHook` through a
 //! `DispatchCallbackSlot` — the production `LiveMemMap` producer for the
 //! `tairix-rt` heap, a real `KernelProcessWait`, and a `ProgramRegistry`
-//! carrying the fixture's three worker paths. The parent role of the
+//! carrying the fixture's parent and worker paths. The parent role of the
 //! fixture program (`tests/integration/sandbox_program`) is spawned through
 //! the production `InitSpawnCtx::spawn_driver_process` seam and drives the
 //! seam over the real syscalls:
@@ -24,7 +24,11 @@
 //! * the duplex session seam driven from a wait-set over both directions
 //!   of a sandboxed worker's pipe pair, pushing twice a pipe's worth of
 //!   frames at a worker that answers none of them — which completes only
-//!   if the `StreamRoom` wake fires.
+//!   if the `StreamRoom` wake fires;
+//! * the supervised session: a stream worker that dies through its panic
+//!   path mid-conversation is reaped and logged, its replacement starts
+//!   only once the paced delay has elapsed on a real one-shot wait, and the
+//!   replacement serves on a fresh pipe pair.
 //!
 //! The chassis reaps the parent through the wait producer's non-blocking poll;
 //! PASS fires only on a parent exit of 0. Any misbehaviour surfaces as a

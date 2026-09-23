@@ -21,6 +21,7 @@
 //! | 1021 | Info  | `TASK_CAPABILITIES_DELEGATED`     | A delegated subset was installed under a task. |
 //! | 1022 | Error | `TASK_CAPABILITIES_DELEGATE_WIDEN`| A delegation attempt would have widened the parent set and was refused. |
 //! | 1023 | Info  | `TASK_CAPABILITIES_REVOKED`       | One or more capabilities were revoked from a task. |
+//! | 1024 | Error | `TASK_CAPABILITIES_DELEGATE_DENIED`| A delegation named a process the caller holds no authority over and was refused. |
 //! | 1030 | Info | `DMA_ALLOCATED` | A DMA buffer was allocated for a task that holds `CAP_MEM_DMA`. |
 //! | 1031 | Error | `DMA_ALLOC_DENIED`                | A DMA allocation was refused because the calling task lacks `CAP_MEM_DMA`. |
 //! | 1040 | Info | `MMIO_MAPPED` | A device register window was mapped for a task that holds `CAP_MMIO_MAP`. |
@@ -62,6 +63,9 @@ pub enum AuditEvent {
     TaskCapabilitiesDelegateWiden,
     /// One or more capabilities were revoked from a task.
     TaskCapabilitiesRevoked,
+    /// A delegation was refused because the caller holds no authority over
+    /// the process it named.
+    TaskCapabilitiesDelegateDenied,
     /// A DMA buffer was allocated through the capability-gated
     /// per-process DMA pool.
     DmaAllocated,
@@ -92,6 +96,7 @@ impl AuditEvent {
             Self::TaskCapabilitiesDelegated => 1021,
             Self::TaskCapabilitiesDelegateWiden => 1022,
             Self::TaskCapabilitiesRevoked => 1023,
+            Self::TaskCapabilitiesDelegateDenied => 1024,
             Self::DmaAllocated => 1030,
             Self::DmaAllocDenied => 1031,
             Self::MmioMapped => 1040,
@@ -121,6 +126,7 @@ impl AuditEvent {
             | Self::ManifestSignatureInvalid
             | Self::ManifestUnknownCapability
             | Self::TaskCapabilitiesDelegateWiden
+            | Self::TaskCapabilitiesDelegateDenied
             | Self::DmaAllocDenied
             | Self::MmioMapDenied => Level::Error,
         }
@@ -145,6 +151,9 @@ impl AuditEvent {
             Self::TaskCapabilitiesDelegated => "task capabilities delegated",
             Self::TaskCapabilitiesDelegateWiden => "task delegation would widen authority",
             Self::TaskCapabilitiesRevoked => "task capabilities revoked",
+            Self::TaskCapabilitiesDelegateDenied => {
+                "task delegation denied: no authority over target"
+            }
             Self::DmaAllocated => "dma buffer allocated",
             Self::DmaAllocDenied => "dma allocation denied: missing CAP_MEM_DMA",
             Self::MmioMapped => "mmio register window mapped",
@@ -254,6 +263,10 @@ mod tests {
             EventId(1022)
         );
         assert_eq!(AuditEvent::TaskCapabilitiesRevoked.id(), EventId(1023));
+        assert_eq!(
+            AuditEvent::TaskCapabilitiesDelegateDenied.id(),
+            EventId(1024)
+        );
         assert_eq!(AuditEvent::DmaAllocated.id(), EventId(1030));
         assert_eq!(AuditEvent::DmaAllocDenied.id(), EventId(1031));
         assert_eq!(AuditEvent::MmioMapped.id(), EventId(1040));
@@ -294,6 +307,7 @@ mod tests {
             AuditEvent::TaskCapabilitiesDelegated,
             AuditEvent::TaskCapabilitiesDelegateWiden,
             AuditEvent::TaskCapabilitiesRevoked,
+            AuditEvent::TaskCapabilitiesDelegateDenied,
             AuditEvent::DmaAllocated,
             AuditEvent::DmaAllocDenied,
             AuditEvent::MmioMapped,

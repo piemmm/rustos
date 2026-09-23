@@ -102,6 +102,16 @@ fn test_flow_key() -> tairix_hash::HashSeed {
     tairix_hash::HashSeed::from_words(0xF10E_5EED_0000_0001, 0xF10E_5EED_0000_0002)
 }
 
+/// A SYN-cookie secret under a fixed key, so cookies are reproducible run to
+/// run.
+fn test_cookie_secret() -> crate::CryptoCookieSecret {
+    crate::CryptoCookieSecret::keyed_by(|key| {
+        key.fill(0x5A);
+        Ok::<(), ()>(())
+    })
+    .expect("the source filled the key")
+}
+
 /// An empty socket table keyed for the tests, so index layout is
 /// reproducible run to run.
 fn socket_service() -> SocketService {
@@ -1708,15 +1718,32 @@ fn inbound_datagram_is_delivered_to_the_bound_socket() {
         destination: IpAddr::V4(V4_A),
         source_port: 40000,
         destination_port: 7,
+        source_on_link: true,
         payload: b"payload".to_vec(),
     };
-    let deliveries = svc.deliver(&event);
+    let deliveries = svc.deliver(&event, name("eth0"));
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].deliver_port, 0x5000);
     let parsed = tairix_abi::net::SocketDatagram::parse(&deliveries[0].datagram).expect("datagram");
     assert_eq!(parsed.socket, id);
     assert_eq!(parsed.source.port, 40000);
     assert_eq!(parsed.payload, b"payload");
+    // The arrival interface and the stack's on-link verdict reach the
+    // client exactly as the pump recorded them.
+    assert_eq!(parsed.interface, name("eth0"));
+    assert!(parsed.source_on_link);
+    let off_link = StackEvent::UdpDatagram {
+        source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 50)),
+        destination: IpAddr::V4(V4_A),
+        source_port: 40000,
+        destination_port: 7,
+        source_on_link: false,
+        payload: b"payload".to_vec(),
+    };
+    let deliveries = svc.deliver(&off_link, name("bond0"));
+    let parsed = tairix_abi::net::SocketDatagram::parse(&deliveries[0].datagram).expect("datagram");
+    assert_eq!(parsed.interface, name("bond0"));
+    assert!(!parsed.source_on_link);
 
     // A datagram to an unbound port reaches no socket.
     let other = StackEvent::UdpDatagram {
@@ -1724,9 +1751,10 @@ fn inbound_datagram_is_delivered_to_the_bound_socket() {
         destination: IpAddr::V4(V4_A),
         source_port: 40000,
         destination_port: 9,
+        source_on_link: true,
         payload: b"x".to_vec(),
     };
-    assert!(svc.deliver(&other).is_empty());
+    assert!(svc.deliver(&other, name("eth0")).is_empty());
 }
 
 /// A caller holding `CAP_NET` **and** `CAP_NET_RAW` (plus the privileged
@@ -1860,7 +1888,7 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
         sequence: 1,
         payload: b"ping".to_vec(),
     };
-    let deliveries = svc.deliver(&event);
+    let deliveries = svc.deliver(&event, name("eth0"));
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].deliver_port, 0x6000);
     let echo = tairix_abi::net::SocketEcho::parse(&deliveries[0].datagram).expect("echo");
@@ -1877,7 +1905,7 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
         sequence: 1,
         payload: b"ping".to_vec(),
     };
-    assert!(svc.deliver(&stray).is_empty());
+    assert!(svc.deliver(&stray, name("eth0")).is_empty());
 
     // A reply from a different source than the connected peer is filtered.
     let wrong_peer = StackEvent::EchoReply {
@@ -1886,7 +1914,7 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
         sequence: 1,
         payload: b"ping".to_vec(),
     };
-    assert!(svc.deliver(&wrong_peer).is_empty());
+    assert!(svc.deliver(&wrong_peer, name("eth0")).is_empty());
 }
 
 #[test]
@@ -1992,18 +2020,20 @@ fn a_connected_socket_only_receives_from_its_peer() {
         destination: IpAddr::V4(V4_A),
         source_port: 40000,
         destination_port: 7,
+        source_on_link: true,
         payload: b"ok".to_vec(),
     };
-    assert_eq!(svc.deliver(&from_peer).len(), 1);
+    assert_eq!(svc.deliver(&from_peer, name("eth0")).len(), 1);
     // From a stranger: dropped.
     let from_other = StackEvent::UdpDatagram {
         source: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 9)),
         destination: IpAddr::V4(V4_A),
         source_port: 40000,
         destination_port: 7,
+        source_on_link: true,
         payload: b"no".to_vec(),
     };
-    assert!(svc.deliver(&from_other).is_empty());
+    assert!(svc.deliver(&from_other, name("eth0")).is_empty());
 }
 
 #[test]
@@ -2051,10 +2081,11 @@ fn multicast_join_gates_group_delivery() {
         destination: IpAddr::V4(GROUP),
         source_port: 5000,
         destination_port: 7000,
+        source_on_link: true,
         payload: b"m".to_vec(),
     };
     // Not joined: no delivery even though the port matches.
-    assert!(svc.deliver(&event).is_empty());
+    assert!(svc.deliver(&event, name("eth0")).is_empty());
     // Join, then it is delivered; the join emitted an IGMP report.
     let request = encode_request(&SocketRequest::JoinMulticast {
         socket: id,
@@ -2072,7 +2103,7 @@ fn multicast_join_gates_group_delivery() {
         )
         .expect("join");
     assert!(!out.tx.is_empty(), "IGMP report emitted on join");
-    assert_eq!(svc.deliver(&event).len(), 1);
+    assert_eq!(svc.deliver(&event, name("eth0")).len(), 1);
 }
 
 fn local_group(addr: Ipv4Addr) -> SocketAddr {
@@ -2203,7 +2234,7 @@ fn defence_counters_survive_a_listener_close() {
     .expect("listen");
 
     // Drive one handshake so the listener has a non-zero total to keep.
-    let secret = crate::CryptoCookieSecret::new([0x5A; 32]);
+    let secret = test_cookie_secret();
     let mut client = Tcb::connect(TcpConfig::default(), 51000, 8090, 0x1234, t(2));
     let mut seen = 0u64;
     for _ in 0..8 {
@@ -2269,7 +2300,7 @@ fn cookies_engaged_is_reported_once_per_listener() {
     let mut svc = socket_service();
     let mut stack = routed_stack();
     let who = net_caller(1);
-    let secret = crate::CryptoCookieSecret::new([0x5A; 32]);
+    let secret = test_cookie_secret();
 
     let st = open_socket(&mut svc, &mut stack, &who, SocketType::Stream).expect("open st");
     serve_req(
@@ -3022,19 +3053,20 @@ fn pump_client(
     fs: &mut LocalFrameService<'_, PeerTcpNet>,
     now: Duration64,
 ) -> Vec<Delivery> {
-    let secret = crate::CryptoCookieSecret::new([0x5A; 32]);
+    let secret = test_cookie_secret();
     let mut deliveries = Vec::new();
     for _ in 0..64 {
-        let events = ns
+        let outcome = ns
             .service_interface(name("wan"), fs, now, ServiceHint::default())
-            .expect("pump")
-            .events;
+            .expect("pump");
         let io = svc.advance_streams(ns, now);
         stage_batch(fs, &io.tx);
         deliveries.extend(io.deliveries);
-        for event in &events {
+        for event in &outcome.events {
             match event {
-                StackEvent::UdpDatagram { .. } => deliveries.extend(svc.deliver(event)),
+                StackEvent::UdpDatagram { .. } => {
+                    deliveries.extend(svc.deliver(event, outcome.interface));
+                }
                 StackEvent::TcpSegment {
                     source,
                     destination,
@@ -4550,6 +4582,27 @@ fn settle<F: FrameService>(stack: &mut Netstack, iface: &[u8; IF_NAME_LEN], fs: 
             .service_interface(*iface, fs, t(step), ServiceHint::default())
             .expect("settle pump");
     }
+}
+
+#[test]
+fn a_pump_names_the_logical_interface_its_events_arrived_on() {
+    // A member NIC has no stack of its own, so a datagram it carries
+    // arrived on the bond; a plain interface names itself.
+    let mut bonded = two_member_bond();
+    let mut region = rings_region();
+    let mut fs = HarvestedService::new(QuietNet, &mut region);
+    let outcome = bonded
+        .service_interface(name("eth1"), &mut fs, t(3), ServiceHint::default())
+        .expect("member pump");
+    assert_eq!(outcome.interface, name("bond0"));
+
+    let mut plain = managed_stack();
+    let mut region = rings_region();
+    let mut fs = HarvestedService::new(QuietNet, &mut region);
+    let outcome = plain
+        .service_interface(name("wan"), &mut fs, t(1), ServiceHint::default())
+        .expect("plain pump");
+    assert_eq!(outcome.interface, name("wan"));
 }
 
 #[test]

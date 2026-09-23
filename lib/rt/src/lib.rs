@@ -2852,6 +2852,38 @@ pub fn port_bind(endpoint: u64, max_payload: usize, capacity: usize) -> i64 {
     ret as i64
 }
 
+/// Bind a fresh, process-private message port and return its id.
+///
+/// The port registry is machine-wide, so a fixed well-known id would let
+/// whichever process bound it first — a long-lived one above all — deny this
+/// one its messages for the rest of the boot. A CSPRNG-drawn unreserved id has
+/// no such contention: a sender learns it from this process, never by name.
+/// Zero and reserved ids are skipped rather than attempted, and a bounded
+/// budget fails closed.
+///
+/// # Errors
+///
+/// The random source's refusal, or [`tairix_abi::Errno::AddressInUse`] once
+/// the budget is spent.
+pub fn bind_private_port(max_payload: usize, capacity: usize) -> Result<u64, tairix_abi::Errno> {
+    // The id space is 64 bits wide and the live set is a handful of ports,
+    // so a clash is vanishingly unlikely; this budget covers it without ever
+    // becoming a retry-until-it-works loop.
+    const ATTEMPTS: usize = 8;
+    for _ in 0..ATTEMPTS {
+        let mut bytes = [0u8; 8];
+        random_fill(&mut bytes)?;
+        let id = u64::from_le_bytes(bytes);
+        if id == 0 || tairix_abi::ipc::is_reserved_endpoint(id) {
+            continue;
+        }
+        if port_bind(id, max_payload, capacity) >= 0 {
+            return Ok(id);
+        }
+    }
+    Err(tairix_abi::Errno::AddressInUse)
+}
+
 /// Receive the oldest delivered message from a port this task bound
 /// (`SyscallNumber::IPC_RECV`), copying the payload into `buf` and the
 /// sender's kernel-attested [`tairix_abi::Origin`] wire image —
@@ -3016,23 +3048,43 @@ pub fn hash_seed() -> Option<tairix_hash::HashSeed> {
     tairix_hash::published()
 }
 
-/// Fill `buf` with cryptographically secure random bytes from the kernel random
-/// subsystem (`SyscallNumber::RANDOM_GET`), returning the number of bytes
-/// written.
+/// Fill all of `buf` with CSPRNG output from the kernel random subsystem,
+/// waiting through a due reseed.
 ///
-/// The bytes are CSPRNG output, never raw entropy, and are drawn behind
-/// the single kernel random subsystem — no component rolls its own. With
-/// [`RandomFlags::empty`] the draw blocks through a required reseed once
-/// the generator is initialised; with [`RandomFlags::NON_BLOCKING`] it
-/// returns `-EntropyNotReady` rather than waiting. The wrapper adds no
-/// authority: unprivileged callers may draw random bytes.
+/// The one draw a program takes randomness through, so none can proceed on
+/// bytes the kernel did not write: a key, nonce, or identifier either comes
+/// back whole or not at all. A buffer longer than
+/// [`tairix_abi::RANDOM_REQUEST_MAX_BYTES`] is drawn in turns. The draw adds
+/// no authority: unprivileged callers may take random bytes.
 ///
 /// # Errors
 ///
-/// Returns the raw negative kernel result (`-errno`): `-EntropyNotReady`
-/// when a non-blocking draw cannot be served yet, or a hard failure if the
-/// entropy source is genuinely unavailable. The wrapper hides no error.
-pub fn random_get(buf: &mut [u8], flags: RandomFlags) -> Result<usize, i64> {
+/// [`tairix_abi::Errno::EntropyNotReady`] when the kernel has no secure
+/// bytes to give — its generator never seeded — or served a short draw;
+/// otherwise the kernel's own refusal. `buf` must not be used then.
+pub fn random_fill(buf: &mut [u8]) -> Result<(), tairix_abi::Errno> {
+    for chunk in buf.chunks_mut(tairix_abi::RANDOM_REQUEST_MAX_BYTES) {
+        let drawn =
+            random_get(chunk, RandomFlags::empty()).map_err(tairix_abi::Errno::from_syscall)?;
+        if drawn != chunk.len() {
+            return Err(tairix_abi::Errno::EntropyNotReady);
+        }
+    }
+    Ok(())
+}
+
+/// Draw CSPRNG output into `buf` (`SyscallNumber::RANDOM_GET`), returning the
+/// count the kernel wrote: the raw syscall beneath [`random_fill`] and the
+/// non-blocking [`hash_seed`] draw.
+///
+/// With [`RandomFlags::empty`] the draw blocks through a required reseed once
+/// the generator is initialised; with [`RandomFlags::NON_BLOCKING`] it
+/// returns `-EntropyNotReady` rather than waiting.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`).
+fn random_get(buf: &mut [u8], flags: RandomFlags) -> Result<usize, i64> {
     let len = buf.len() as u64;
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
@@ -7119,6 +7171,48 @@ mod tests {
         let (_, _) = capture(9999, || {
             assert_eq!(random_get(&mut buf, RandomFlags::empty()), Ok(16));
         });
+    }
+
+    /// A caller of the checked draw never proceeds on bytes the kernel did not
+    /// write: a refusal and a short draw both fail closed.
+    #[test]
+    fn the_checked_draw_is_whole_or_refused() {
+        let mut buf = [0u8; 16];
+        seam::arm(refusal(Errno::EntropyNotReady));
+        assert_eq!(random_fill(&mut buf), Err(Errno::EntropyNotReady));
+        seam::arm(8);
+        assert_eq!(random_fill(&mut buf), Err(Errno::EntropyNotReady));
+        let (number, args) = capture(16, || assert_eq!(random_fill(&mut buf), Ok(())));
+        assert_eq!(number, NUM_RANDOM_GET);
+        assert_eq!(args[2], 0, "the checked draw waits through a reseed");
+    }
+
+    #[test]
+    fn a_private_port_is_never_bound_unless_its_id_was_drawn() {
+        // A refused draw fails closed before any bind is attempted.
+        seam::arm(refusal(Errno::EntropyNotReady));
+        assert_eq!(bind_private_port(64, 4), Err(Errno::EntropyNotReady));
+        let (number, _) = seam::last_call().expect("the draw trapped");
+        assert_eq!(number, NUM_RANDOM_GET);
+        // The seam reports a full draw but writes nothing, so every id comes
+        // back zero: zero is skipped, never bound, and the budget runs out.
+        seam::arm(8);
+        assert_eq!(bind_private_port(64, 4), Err(Errno::AddressInUse));
+        let (number, _) = seam::last_call().expect("the draws trapped");
+        assert_eq!(number, NUM_RANDOM_GET, "no bind was ever attempted");
+    }
+
+    #[test]
+    fn the_checked_draw_takes_a_long_buffer_in_turns() {
+        let turn = tairix_abi::RANDOM_REQUEST_MAX_BYTES;
+        let mut buf = alloc::vec![0u8; 2 * turn];
+        let second = buf[turn..].as_ptr() as usize as u64;
+        let (_, args) = capture(u64::try_from(turn).expect("fits"), || {
+            assert_eq!(random_fill(&mut buf), Ok(()));
+        });
+        assert_eq!(args[0], second, "the last turn draws the second half");
+        assert_eq!(args[1], u64::try_from(turn).expect("fits"));
+        assert_eq!(random_fill(&mut []), Ok(()), "nothing asked, nothing drawn");
     }
 
     /// The process hash key is drawn once, on demand, and never re-drawn.

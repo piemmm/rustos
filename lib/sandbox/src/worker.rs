@@ -18,7 +18,7 @@
 
 use alloc::vec::Vec;
 
-use crate::proto::{recv_frame, send_frame, Channel, ProtoError};
+use crate::proto::{recv_frame_into, send_frame, Channel, ProtoError};
 
 /// One request/reply protocol a worker can serve.
 ///
@@ -51,12 +51,13 @@ pub enum ServeEnd {
 /// Every iteration is strictly request → reply, so the parent's
 /// one-outstanding-request discipline holds by construction.
 pub fn serve<C: Channel, S: Service>(chan: &mut C, service: &mut S) -> ServeEnd {
+    let mut request = Vec::new();
     loop {
-        let request = match recv_frame(chan) {
-            Ok(Some(payload)) => payload,
-            Ok(None) => return ServeEnd::Finished,
+        match recv_frame_into(chan, &mut request) {
+            Ok(true) => {}
+            Ok(false) => return ServeEnd::Finished,
             Err(err) => return ServeEnd::Failed(err),
-        };
+        }
         let reply = service.handle(&request);
         if let Err(err) = send_frame(chan, &reply) {
             return ServeEnd::Failed(err);

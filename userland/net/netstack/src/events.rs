@@ -154,6 +154,13 @@ pub const BOND_UP: EventId = EventId(16_026);
 /// announce on), so the log is the only place it surfaces.
 pub const BOND_DOWN: EventId = EventId(16_027);
 
+/// The service cannot serve and is exiting; carries the reason. Recorded at
+/// `Error`: an endpoint could not be bound or watched, or the kernel random
+/// source could not key the per-boot secrets sequence numbers, SYN cookies,
+/// ephemeral ports, and identifiers are drawn from — which fails closed
+/// rather than serving predictable ones.
+pub const SERVICE_UNAVAILABLE: EventId = EventId(16_028);
+
 /// The message [`SYN_COOKIES_ENGAGED`] carries. Named here because the
 /// connection-exhaustion QEMU vertical (`plans/NETWORK.md` N16b) gates its
 /// run on this text appearing in the serial transcript, so the wording is
@@ -171,7 +178,7 @@ mod tests {
     };
     use super::{BOND_CONFIG_APPLIED, BOND_CONFIG_REFUSED, BOND_DOWN, BOND_FAILOVER, BOND_UP};
     use super::{DHCP6_LEASE_ACQUIRED, DHCP6_LEASE_LOST, DHCP_LEASE_ACQUIRED, DHCP_LEASE_LOST};
-    use super::{MULTICAST_FILTER_REFUSED, SYN_COOKIES_ENGAGED};
+    use super::{MULTICAST_FILTER_REFUSED, SERVICE_UNAVAILABLE, SYN_COOKIES_ENGAGED};
 
     #[test]
     fn ids_are_inside_reserved_range() {
@@ -203,6 +210,7 @@ mod tests {
             DHCP6_LEASE_LOST,
             SYN_COOKIES_ENGAGED,
             MULTICAST_FILTER_REFUSED,
+            SERVICE_UNAVAILABLE,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -238,6 +246,7 @@ mod tests {
             DHCP6_LEASE_LOST.0,
             SYN_COOKIES_ENGAGED.0,
             MULTICAST_FILTER_REFUSED.0,
+            SERVICE_UNAVAILABLE.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

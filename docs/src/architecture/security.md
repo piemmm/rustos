@@ -158,6 +158,7 @@ re-used or re-numbered.
 | 1021 | Info  | `TaskCapabilitiesDelegated`       | A delegated subset (or signed `CapabilityToken`) was installed.       |
 | 1022 | Error | `TaskCapabilitiesDelegateWiden`   | A delegation attempt that would have widened authority was refused.  |
 | 1023 | Info  | `TaskCapabilitiesRevoked`         | One or more capabilities were revoked from a task.                    |
+| 1024 | Error | `TaskCapabilitiesDelegateDenied`  | A delegation named a process the caller holds no authority over.      |
 | 1030 | Info  | `DmaAllocated`                    | DMA buffer granted to a task holding `CAP_MEM_DMA` (`AGENTS.md` §4).  |
 | 1031 | Error | `DmaAllocDenied`                  | DMA allocation refused because the caller lacks `CAP_MEM_DMA`.        |
 | 1040 | Info  | `MmioMapped`                      | Device register window mapped for a task holding `CAP_MMIO_MAP` (`AGENTS.md` §4). |

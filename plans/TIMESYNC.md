@@ -454,12 +454,15 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   minutes, parking between them). TS-7 made that ladder also the mechanism
   that picks up a DHCP lease acquired after start-up; configuring a server
   after the ladder is spent means restarting the service.
-- **`lib/resolver`'s delivery port is now process-private.** The kernel's port
-  registry is machine-wide, so the fixed well-known id would have let this
-  long-lived client deny name resolution to every later process for the boot;
-  `bind_delivery_port` draws an unreserved CSPRNG id under a bounded budget.
-  `timed` additionally opens that transport only for a server that is *not* an
-  address literal.
+- **Every socket client's delivery port is process-private.** The kernel's
+  port registry is machine-wide, so a fixed well-known id would let a
+  long-lived process deny another its deliveries for the boot;
+  `tairix_rt::bind_private_port` draws an unreserved CSPRNG id under a bounded
+  budget, and `timed`, `lib/resolver`, `ping`, and `telnet` all bind through
+  it. A delivery is believed only from the network stack's kernel-attested
+  service account (`tairix_abi::net::from_network_stack`), never from
+  whichever process posted first. `timed` opens the resolver's transport only
+  for a server that is *not* an address literal.
 - QEMU vertical `tairix-test-timed-qemu-aarch64` over the `time-net-root`
   disk: the peer answers each request **twice, spoof first**, and the serial
   gate requires the *exact* applied `wall_secs=` of the truthful reply — so a

@@ -571,6 +571,15 @@ impl TaskCapabilities {
         self.parent_proc_id
     }
 
+    /// Whether this record is `caller`'s own process or a child `caller`
+    /// spawned. Parentage is matched on the minted instance, never the pid,
+    /// so a recycled pid is not mistaken for the child that held it; a
+    /// caller with no minted instance has no children to claim.
+    fn is_self_or_child_of(&self, caller: &TaskCapabilities) -> bool {
+        self.process == caller.process
+            || (!caller.proc_id.is_kernel() && self.parent_proc_id == caller.proc_id)
+    }
+
     /// Attach the kernel-attested process name to this record.
     ///
     /// Consumed and returned so the process-admit path can set the name
@@ -1248,6 +1257,64 @@ impl CapTable {
         self.entries.get_mut(&process)
     }
 
+    /// Narrow the process `target` belongs to down to `requested`, on behalf
+    /// of `caller` — the `cap_delegate` syscall.
+    ///
+    /// A process may narrow itself, or a live child whose lifecycle it
+    /// already controls. Any other target takes `CAP_USER_ADMIN`, the
+    /// authority `cap_revoke` already requires to strip a capability from
+    /// an arbitrary process. Without it an unknown target is refused exactly
+    /// as an unrelated one is, so the call is no oracle for which processes
+    /// exist.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] when the caller has no authority over
+    /// `target` (audited as [`AuditEvent::TaskCapabilitiesDelegateDenied`]);
+    /// [`Errno::NotFound`] for an unknown target an administrator named;
+    /// otherwise [`TaskCapabilities::delegate`]'s errors.
+    pub fn narrow<S: Sink + ?Sized>(
+        &mut self,
+        caller: &TaskCapabilities,
+        target: TaskId,
+        requested: &CapabilitySet,
+        audit: &S,
+    ) -> Result<(), Errno> {
+        let admin = caller.has(tairix_abi::CapabilityId::USER_ADMIN);
+        let known = self.caps_for(target);
+        if known.is_none() && admin {
+            return Err(Errno::NotFound);
+        }
+        if !admin && !known.is_some_and(|record| record.is_self_or_child_of(caller)) {
+            let mut task_buf = [0u8; 16];
+            let mut target_buf = [0u8; 16];
+            record(
+                audit,
+                AuditEvent::TaskCapabilitiesDelegateDenied,
+                &[
+                    Field {
+                        key: "task",
+                        value: tairix_log::FieldValue::Str(format_hex_u64(
+                            caller.process().0,
+                            &mut task_buf,
+                        )),
+                    },
+                    Field {
+                        key: "target",
+                        value: tairix_log::FieldValue::Str(format_hex_u64(
+                            target.0,
+                            &mut target_buf,
+                        )),
+                    },
+                ],
+            );
+            return Err(Errno::PermissionDenied);
+        }
+        self.caps_for_mut(target)
+            .ok_or(Errno::NotFound)?
+            .delegate(requested, audit)
+    }
+
     /// The process-instance identity currently registered for `process`, or
     /// [`ProcId::KERNEL`] when no record names it.
     ///
@@ -1763,6 +1830,162 @@ mod tests {
                 AuditEvent::TaskCapabilitiesDelegateWiden.id().0,
             ]
         );
+    }
+
+    /// A table holding a parent, its child, and an unrelated process, each
+    /// holding `FS_MOUNT` and `NET_RAW`. The parent optionally holds
+    /// `USER_ADMIN` as well.
+    fn narrowing_fixture(
+        sink: &RecordingSink,
+        parent_is_admin: bool,
+    ) -> (CapTable, TaskCapabilities) {
+        let pair = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
+        let parent_set = if parent_is_admin {
+            caps_of(&[
+                CapabilityId::FS_MOUNT,
+                CapabilityId::NET_RAW,
+                CapabilityId::USER_ADMIN,
+            ])
+        } else {
+            pair
+        };
+        let parent_id = ProcId::from_raw([0x10; 16]);
+        let parent =
+            TaskCapabilities::derive(ProcessId(20), UserId(1000), parent_set, parent_set, sink)
+                .with_proc_id(parent_id);
+        let child = TaskCapabilities::derive(ProcessId(21), UserId(1000), pair, pair, sink)
+            .with_proc_id(ProcId::from_raw([0x11; 16]))
+            .with_parent_proc_id(parent_id);
+        let stranger = TaskCapabilities::derive(ProcessId(22), UserId(1000), pair, pair, sink)
+            .with_proc_id(ProcId::from_raw([0x12; 16]))
+            .with_parent_proc_id(ProcId::from_raw([0x99; 16]));
+        let mut table = CapTable::new();
+        table.insert(parent.clone());
+        table.insert(child);
+        table.insert(stranger);
+        (table, parent)
+    }
+
+    #[test]
+    fn a_process_may_narrow_itself_and_its_live_child() {
+        let sink = RecordingSink::new();
+        let (mut table, parent) = narrowing_fixture(&sink, false);
+        let narrower = caps_of(&[CapabilityId::FS_MOUNT]);
+
+        assert_eq!(
+            table.narrow(&parent, ProcessId(20).leader_task(), &narrower, &sink),
+            Ok(())
+        );
+        assert_eq!(
+            table.narrow(&parent, ProcessId(21).leader_task(), &narrower, &sink),
+            Ok(())
+        );
+        for pid in [20, 21] {
+            let record = table.caps_of_process(ProcessId(pid)).expect("present");
+            assert!(record.has(CapabilityId::FS_MOUNT));
+            assert!(!record.has(CapabilityId::NET_RAW));
+        }
+    }
+
+    #[test]
+    fn narrowing_an_unrelated_process_is_refused_and_audited() {
+        let sink = RecordingSink::new();
+        let (mut table, parent) = narrowing_fixture(&sink, false);
+        let before = sink.len();
+
+        assert_eq!(
+            table.narrow(
+                &parent,
+                ProcessId(22).leader_task(),
+                &CapabilitySet::EMPTY,
+                &sink
+            ),
+            Err(Errno::PermissionDenied)
+        );
+        let stranger = table.caps_of_process(ProcessId(22)).expect("present");
+        assert!(stranger.has(CapabilityId::FS_MOUNT));
+        assert!(stranger.has(CapabilityId::NET_RAW));
+        assert_eq!(sink.len(), before + 1);
+        assert_eq!(
+            sink.ids().last().copied(),
+            Some(AuditEvent::TaskCapabilitiesDelegateDenied.id().0)
+        );
+    }
+
+    #[test]
+    fn an_unknown_target_answers_like_an_unrelated_one_without_admin() {
+        // Otherwise the refusal would tell an unprivileged caller which pids
+        // are live.
+        let sink = RecordingSink::new();
+        let (mut table, parent) = narrowing_fixture(&sink, false);
+        assert_eq!(
+            table.narrow(&parent, TaskId(4242), &CapabilitySet::EMPTY, &sink),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.ids().last().copied(),
+            Some(AuditEvent::TaskCapabilitiesDelegateDenied.id().0)
+        );
+    }
+
+    #[test]
+    fn an_administrator_may_narrow_anyone_and_learns_of_a_missing_target() {
+        let sink = RecordingSink::new();
+        let (mut table, admin) = narrowing_fixture(&sink, true);
+        let narrower = caps_of(&[CapabilityId::NET_RAW]);
+        assert_eq!(
+            table.narrow(&admin, ProcessId(22).leader_task(), &narrower, &sink),
+            Ok(())
+        );
+        assert!(!table
+            .caps_of_process(ProcessId(22))
+            .expect("present")
+            .has(CapabilityId::FS_MOUNT));
+        assert_eq!(
+            table.narrow(&admin, TaskId(4242), &narrower, &sink),
+            Err(Errno::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_caller_without_a_minted_instance_claims_no_children() {
+        // Kernel-parented tasks carry the sentinel as their parent, so a
+        // sentinel caller matching them would make every boot-floor task its
+        // child.
+        let sink = RecordingSink::new();
+        let pair = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
+        let floor = TaskCapabilities::derive(ProcessId(30), UserId(0), pair, pair, &sink);
+        let unminted = TaskCapabilities::derive(ProcessId(31), UserId(0), pair, pair, &sink);
+        let mut table = CapTable::new();
+        table.insert(floor);
+        assert_eq!(
+            table.narrow(
+                &unminted,
+                ProcessId(30).leader_task(),
+                &CapabilitySet::EMPTY,
+                &sink
+            ),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(table
+            .caps_of_process(ProcessId(30))
+            .expect("present")
+            .has(CapabilityId::FS_MOUNT));
+    }
+
+    #[test]
+    fn widening_through_narrow_is_still_refused_for_an_authorised_caller() {
+        let sink = RecordingSink::new();
+        let (mut table, parent) = narrowing_fixture(&sink, false);
+        let wider = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::DRV_KERNEL]);
+        assert_eq!(
+            table.narrow(&parent, ProcessId(21).leader_task(), &wider, &sink),
+            Err(Errno::DelegationWiden)
+        );
+        assert!(!table
+            .caps_of_process(ProcessId(21))
+            .expect("present")
+            .has(CapabilityId::DRV_KERNEL));
     }
 
     #[test]

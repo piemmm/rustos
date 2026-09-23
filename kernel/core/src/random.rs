@@ -113,18 +113,32 @@ pub type BootReserve = OutputReserve<NullEntropy>;
 /// timing-jitter source through [`KernelEntropy`] before it ever seeds the
 /// reserve (the charter forbids a single trusted source). A port whose
 /// hardware source produces no bytes contributes the XOR identity and the mix
-/// falls back to whatever the other source supplies; only if *both* are
+/// falls back to whatever the other sources supply; only if *every* source is
 /// unavailable does the seed fail closed and the reserve stay unseeded —
 /// never weakened to predictable bytes.
 pub struct ArchEntropy {
-    source: &'static dyn tairix_arch_api::PlatformEntropy,
+    /// `None` when the port has no source, or declares one it cannot use yet.
+    source: Option<&'static dyn tairix_arch_api::PlatformEntropy>,
 }
 
 impl ArchEntropy {
-    /// Wrap a platform-entropy handle as an entropy source.
+    /// Wrap the port's platform-entropy handle as an entropy source.
+    ///
+    /// A handle whose declared profile does not provide hardware entropy is
+    /// dropped rather than drawn from: a `Pending` source may fault when
+    /// touched, and contributes nothing either way. Its absence withholds
+    /// only this source — never the others the mix seeds from.
     #[must_use]
-    pub fn new(source: &'static dyn tairix_arch_api::PlatformEntropy) -> Self {
-        Self { source }
+    pub fn new(source: Option<&'static dyn tairix_arch_api::PlatformEntropy>) -> Self {
+        Self {
+            source: source.filter(|port| port.profile().provides_hardware_entropy()),
+        }
+    }
+
+    /// Whether a usable hardware source backs this one.
+    #[must_use]
+    pub(crate) fn is_present(&self) -> bool {
+        self.source.is_some()
     }
 }
 
@@ -133,7 +147,26 @@ impl EntropySource for ArchEntropy {
         // The handle's `try_fill` already retries a momentarily-underfull
         // hardware source a bounded number of times and fails closed; there
         // is no extra retry or fallback here (no weakening).
-        self.source.try_fill(out)
+        self.source.ok_or(EntropyError::Unavailable)?.try_fill(out)
+    }
+}
+
+/// The sources able to contribute to the initial seed, as the seed audit
+/// names them, or `None` when none can.
+///
+/// The interrupt pool is not named: it holds nothing until interrupts have
+/// flowed, so it never contributes to the initial seed.
+#[must_use]
+pub(crate) fn seed_sources(hardware: bool, jitter: bool, boot_seed: bool) -> Option<&'static str> {
+    match (hardware, jitter, boot_seed) {
+        (true, true, true) => Some("hardware+jitter+bootseed"),
+        (true, true, false) => Some("hardware+jitter"),
+        (true, false, true) => Some("hardware+bootseed"),
+        (true, false, false) => Some("hardware"),
+        (false, true, true) => Some("jitter+bootseed"),
+        (false, true, false) => Some("jitter"),
+        (false, false, true) => Some("bootseed"),
+        (false, false, false) => None,
     }
 }
 
@@ -398,15 +431,105 @@ mod tests {
     static FILLING_PORT: StubPort = StubPort { fills: true };
     static DEAD_PORT: StubPort = StubPort { fills: false };
 
+    /// A port whose source exists in the ISA but cannot be used yet, as
+    /// riscv64's `Zkr` is until its M-mode delegation lands. Touching it is a
+    /// test failure, standing in for the fault a real one would take.
+    struct PendingPort;
+
+    impl tairix_arch_api::PlatformEntropy for PendingPort {
+        fn profile(&self) -> tairix_arch_api::EntropyProfile {
+            tairix_arch_api::EntropyProfile {
+                hardware_rng: tairix_arch_api::EntropySupport::Pending("not yet delegated"),
+            }
+        }
+    }
+
+    impl tairix_rng::HardwareRng for PendingPort {
+        fn try_fill(&self, _out: &mut [u8]) -> Result<(), EntropyError> {
+            panic!("a source declared unusable was drawn from");
+        }
+    }
+
+    static PENDING_PORT: PendingPort = PendingPort;
+
+    #[test]
+    fn a_port_with_no_usable_source_contributes_nothing_and_is_never_drawn() {
+        use super::ArchEntropy;
+        let mut out = [0u8; 8];
+        let mut absent = ArchEntropy::new(None);
+        assert!(!absent.is_present());
+        assert_eq!(absent.fill(&mut out), Err(EntropyError::Unavailable));
+        let mut pending = ArchEntropy::new(Some(&PENDING_PORT));
+        assert!(!pending.is_present());
+        assert_eq!(pending.fill(&mut out), Err(EntropyError::Unavailable));
+        assert!(ArchEntropy::new(Some(&DEAD_PORT)).is_present());
+    }
+
+    #[test]
+    fn a_pending_hardware_source_still_leaves_the_boot_seed_to_seed_the_reserve() {
+        // riscv64 under QEMU: the `Zkr` source is pending, the cycle counter
+        // is deterministic, and no interrupt has arrived, so the firmware's
+        // boot seed is the one source there is, and a pending source must not
+        // keep it from seeding.
+        use super::ArchEntropy;
+        use tairix_rng::{
+            BootSeedSource, InterruptEntropyPool, InterruptPoolSource, JitterSource, MixedPair,
+            OutputReserve,
+        };
+
+        let pool = InterruptEntropyPool::new();
+        let hardware = ArchEntropy::new(Some(&PENDING_PORT));
+        let boot_seed = BootSeedSource::new(&[0xA5u8; 32]);
+        assert_eq!(
+            super::seed_sources(hardware.is_present(), false, boot_seed.has_seed()),
+            Some("bootseed")
+        );
+        let mixed = MixedPair::new(
+            MixedPair::new(
+                MixedPair::new(hardware, JitterSource::new(lockstep_clock())),
+                InterruptPoolSource::new(&pool),
+            ),
+            boot_seed,
+        );
+        let mut reserve = OutputReserve::<_>::new();
+        reserve
+            .seed(mixed)
+            .expect("the boot seed seeds past a pending source");
+        let mut out = [0u8; 16];
+        RandomReserve::draw(&mut reserve, &mut out, true).expect("a seeded reserve serves");
+        assert_ne!(out, [0u8; 16]);
+    }
+
+    #[test]
+    fn the_seed_audit_names_exactly_the_sources_that_can_contribute() {
+        use super::seed_sources;
+        for hardware in [false, true] {
+            for jitter in [false, true] {
+                for boot_seed in [false, true] {
+                    let named = seed_sources(hardware, jitter, boot_seed);
+                    if !(hardware || jitter || boot_seed) {
+                        assert_eq!(named, None);
+                        continue;
+                    }
+                    let named = named.expect("a contributing source is named");
+                    let parts: alloc::vec::Vec<&str> = named.split('+').collect();
+                    assert_eq!(parts.contains(&"hardware"), hardware);
+                    assert_eq!(parts.contains(&"jitter"), jitter);
+                    assert_eq!(parts.contains(&"bootseed"), boot_seed);
+                }
+            }
+        }
+    }
+
     #[test]
     fn arch_entropy_forwards_to_the_platform_handle() {
         use super::ArchEntropy;
-        let mut src = ArchEntropy::new(&FILLING_PORT);
+        let mut src = ArchEntropy::new(Some(&FILLING_PORT));
         let mut out = [0u8; 32];
         src.fill(&mut out).expect("the filling stub supplies bytes");
         assert_ne!(out, [0u8; 32]);
 
-        let mut dead = ArchEntropy::new(&DEAD_PORT);
+        let mut dead = ArchEntropy::new(Some(&DEAD_PORT));
         assert_eq!(dead.fill(&mut out), Err(EntropyError::Unavailable));
     }
 
@@ -439,7 +562,7 @@ mod tests {
         // Hardware works, jitter is dead (lockstep clock): the mix must still
         // seed from the hardware source alone — the fail-fallback direction.
         let jitter = JitterSource::new(lockstep_clock());
-        let mixed = MixedPair::new(ArchEntropy::new(&FILLING_PORT), jitter);
+        let mixed = MixedPair::new(ArchEntropy::new(Some(&FILLING_PORT)), jitter);
         let mut reserve = OutputReserve::<_>::new();
         reserve.seed(mixed).expect("hardware alone seeds the mix");
         let mut out = [0u8; 16];
@@ -456,7 +579,7 @@ mod tests {
         // still seed from the independent jitter source alone — this is the
         // defense-in-depth the "never trust one source" rule buys.
         let jitter = JitterSource::new(varying_clock(0xC0FF_EE00));
-        let mixed = MixedPair::new(ArchEntropy::new(&DEAD_PORT), jitter);
+        let mixed = MixedPair::new(ArchEntropy::new(Some(&DEAD_PORT)), jitter);
         let mut reserve = OutputReserve::<_>::new();
         reserve.seed(mixed).expect("jitter alone seeds the mix");
         let mut out = [0u8; 16];
@@ -472,7 +595,7 @@ mod tests {
         // Neither source can supply bytes: the seed fails closed and the
         // reserve stays unseeded (never weakened to predictable bytes).
         let jitter = JitterSource::new(lockstep_clock());
-        let mixed = MixedPair::new(ArchEntropy::new(&DEAD_PORT), jitter);
+        let mixed = MixedPair::new(ArchEntropy::new(Some(&DEAD_PORT)), jitter);
         let mut unseeded = OutputReserve::<_>::new();
         assert!(unseeded.seed(mixed).is_err());
         assert!(!unseeded.is_ready());
@@ -499,7 +622,7 @@ mod tests {
             pool.record(stream.next_u64());
         }
         let hw_jitter = MixedPair::new(
-            ArchEntropy::new(&DEAD_PORT),
+            ArchEntropy::new(Some(&DEAD_PORT)),
             JitterSource::new(lockstep_clock()),
         );
         let mixed = MixedPair::new(hw_jitter, interrupt);
@@ -524,7 +647,7 @@ mod tests {
         let pool = InterruptEntropyPool::new();
         let interrupt = InterruptPoolSource::new(&pool);
         let hw_jitter = MixedPair::new(
-            ArchEntropy::new(&DEAD_PORT),
+            ArchEntropy::new(Some(&DEAD_PORT)),
             JitterSource::new(lockstep_clock()),
         );
         let mixed = MixedPair::new(hw_jitter, interrupt);
@@ -551,7 +674,7 @@ mod tests {
         let pool = InterruptEntropyPool::new();
         let interrupt = InterruptPoolSource::new(&pool);
         let hw_jitter = MixedPair::new(
-            ArchEntropy::new(&DEAD_PORT),
+            ArchEntropy::new(Some(&DEAD_PORT)),
             JitterSource::new(lockstep_clock()),
         );
         let boot_seed = BootSeedSource::new(&[0x5Au8; 32]);
@@ -580,7 +703,7 @@ mod tests {
         let pool = InterruptEntropyPool::new();
         let interrupt = InterruptPoolSource::new(&pool);
         let hw_jitter = MixedPair::new(
-            ArchEntropy::new(&DEAD_PORT),
+            ArchEntropy::new(Some(&DEAD_PORT)),
             JitterSource::new(lockstep_clock()),
         );
         let mixed = MixedPair::new(

@@ -44,6 +44,16 @@ code.
   for an answer nobody will produce). Consumers: the terminal's and the
   desktop session's settings publishers, the session's program-catalogue
   scan, and the file manager's bundle scan.
+* `argv` — resolving a value-taking option's attached or following value.
+  Consumers: `mount`, `passwd`, `useradd`, `usermod`, and `groupadd`.
+* `mathf` — bounded, total `f64` maths for `no_std` geometry, with no
+  external libm. Consumers: `lib/fontface`, `lib/svg`, `cinder`.
+* `retry` — `RetryLadder`, a bounded doubling one-shot schedule for
+  waiting on something with no readiness event, and `RestartPacer`, a
+  capped doubling delay between restarts of something that keeps dying,
+  forgotten after a stable window. Consumers: `timed` and PID 1's enrolment
+  reads (the ladder); PID 1's restart policy and `lib/sandbox`'s supervised
+  worker (the pacer).
 * `tailwindow` — the bounded rolling "keep the last N bytes/lines"
   windows (`ByteWindow`, `LineWindow`), so a last-N view costs memory in
   N rather than in the input. Consumers: the `head` and `tail` command

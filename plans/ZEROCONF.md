@@ -18,7 +18,7 @@ and keeps LLMNR and NetBIOS permanently out (§1 below).
 |---|---|---|
 | Z1 | `lib/net::mdns` pure engine: `SRV`/`TXT`/mDNS-`NSEC` record types, responder/querier state machine, per-interface cache, fuzz harness | done |
 | Z2 | `lib/net::dnssd` DNS-SD vocabulary: the instance/type/domain triple, TXT key-value grammar, service-type grammar | done |
-| Z3 | `discoveryd` split-process skeleton: unprivileged decoder owning the socket, privileged front owning authority | planned |
+| Z3 | `discoveryd` split process: a capability-empty sandboxed decoder, a front owning the sockets and every authority, the `lib/sandbox` supervised session | done |
 | Z4 | Browse + resolve, scoped by grant; `.local` routing in `lib/resolver`; `lib/discovery` client | planned |
 | Z5 | Publication: the three-gate authority check (attested / granted / owned), manifest `publishes` section, grant store | planned |
 | Z6 | Per-interface `discovery.mode` posture, per-network identity, service-manager advertise/goodbye lifecycle | planned |
@@ -150,23 +150,37 @@ is hundreds of packets per second at a rate the attacker chooses, so a
 per-packet round trip is both a §2.16 defect and a self-inflicted
 denial-of-service channel.
 
-So the containment is inverted, and `discoveryd` is two processes:
+So `discoveryd` is two processes, and the one that parses holds nothing:
 
-- **The decoder** owns the UDP 5353 socket and the group memberships, and
-  holds *nothing else* — no filesystem capability, no spawn, no manifest
-  access, no grant state. It parses, validates, applies the cache and
-  rate-limit bounds, and streams fixed-shape, already-validated records to the
-  front over one channel. A crash is contained and it is replaced, the
-  `lib/sandbox::host` discipline (typed error, reap, replace, log) applied to
-  a long-lived streaming worker rather than a request/reply one.
-- **The front** owns authority: grants, attested identities, the netstack
-  ownership check, the service-manager lifecycle, and the client API. It never
-  parses a wire byte.
+- **The decoder** is the service's own binary in the kernel's sandbox spawn
+  mode: capability-empty, confined to one pipe pair, with no IPC, no clock, no
+  randomness, no filesystem, and no spawn. It runs one `lib/net::mdns` engine
+  per interface. Everything it needs arrives on its pipe: each relayed
+  datagram carries the instant it was relayed, a tick carries time when the
+  decoder's reported deadline comes, and the keys its caches are indexed under
+  and its CSPRNG is seeded from arrive once, first, drawn by the front for
+  that decoder alone. It answers only with the one instant its engines next
+  need time.
+- **The front** owns the UDP 5353 sockets and the group memberships, and every
+  authority the service will exercise: grants, attested identities, the
+  netstack ownership check, the service-manager lifecycle, and the client API.
+  It never parses a wire byte. It relays a datagram only when the stack found
+  its sender on-link and the sender is within its relay budget; the payload
+  crosses unread.
 
-**This extends the `lib/sandbox` seam** — a worker that owns a socket and
-streams, where today every worker is request/reply over a channel alone. That
-extension is part of Z3 and is built in `lib/sandbox`, not privately beside
-`discoveryd`, so the second consumer finds it (§2.2).
+The socket belongs to the front because the sandbox spawn mode forbids IPC,
+and a socket is IPC: a decoder that owned one would hold `CAP_NET` and a path
+to the stack — a network-capable process parsing hostile input, the posture
+§19.5 exists to rule out. Relaying costs one pipe write per datagram and no
+round trip.
+
+The streaming shape is `lib/sandbox::supervise::SupervisedSession`: the duplex
+session seam with the one-shot seam's containment (typed error, reap, log,
+replace), paced so a crafted packet cannot buy a process spawn — replacement
+waits a delay doubling from 100 ms to 30 s, forgotten once a replacement stays
+up 30 s — and counted in generations, so the owner knows to discard what the
+dead worker told it and re-key its replacement. It lives in `lib/sandbox`, not
+beside `discoveryd`, so the second consumer finds it (§2.2).
 
 ## 5. Consumption — scoped, not ambient
 
@@ -363,6 +377,15 @@ and fail-closed**, never §24.1 growable capacities:
 - Under §26.7 (1 GiB RAM, several active segments) total resident discovery
   state is bounded by the per-interface ceilings times the interface count —
   a figure independent of segment population and of attacker behaviour.
+- The front's relay is bounded before a byte reaches the decoder: at most 32
+  senders tracked, each held to a burst of 64 datagrams refilled at 32 a
+  second, beneath one budget of 2048 at 1024 a second that all of them share.
+  A sender past its own budget is refused before the shared one is charged,
+  so one flooding peer cannot starve the rest. What the decoder has not yet
+  taken is at most 64 KiB queued, after which the front stops draining its
+  delivery port and the stack's mailbox (64 deep) drops; each wake drains at
+  most one mailbox's worth. Ticks are never closer together than 10 ms,
+  whatever deadline a decoder reports.
 
 ## 9. Interop obligations
 
@@ -378,10 +401,11 @@ Strictness must not break correct peers:
 ## 10. Layout
 
 ```
-lib/net/src/mdns.rs        pure engine: state machine, cache, suppression
-lib/net/src/dnssd.rs       instance/type/domain triple, TXT grammar
-lib/discovery/             userland client (mirrors lib/resolver)
-userland/net/discoveryd/   front + decoder
+lib/net/src/mdns.rs         pure engine: state machine, cache, suppression
+lib/net/src/dnssd.rs        instance/type/domain triple, TXT grammar
+lib/sandbox/src/supervise.rs  the supervised streaming session
+lib/discovery/              userland client (mirrors lib/resolver)
+userland/net/discoveryd/    front + decoder
 ```
 
 `lib/net/src/rxfilter.rs` needs **no change**: it gates group destinations on
@@ -441,13 +465,19 @@ re-derive:
   taking a name.
 - **Renaming is bounded and then fails closed** to *not published*, with a
   `ConflictBudgetExhausted` event — the §7 posture, implemented.
-- **`rate::TokenBucket` is the one token bucket in `lib/net`.** A second
-  protocol needing a rate limit reaches for that, never a private copy and
-  never across a layer into `icmp`.
-
-Still Z3's, not done here: nothing binds a socket, joins a group, or holds
-an identity. The engine is handed the interface's on-link prefixes and
-refuses everything else; who supplies them is the service's question.
+- **Whether a sender is on-link is the stack's verdict, not the engine's.**
+  `on_message` takes a `Sender { addr, port, on_link }`, and `on_link` is
+  what `netstack` stamped on the delivery from its live routes
+  (`Stack::is_on_link`: link-local, or covered by a route with no gateway).
+  The engine keeps no copy of any interface's prefixes to go stale; a sender
+  that is not on-link is neither answered nor cached.
+- **`rate::TokenBucket` is the one token bucket in `lib/net`, and
+  `rate::PeerBudgets` the one per-peer budget table** — a bucket per recent
+  peer beneath one they all share, the peer's charged first so a peer at its
+  own limit cannot drain the shared one. The engine's unicast replies and
+  `discoveryd`'s relay admission both take it; a second protocol needing a
+  rate limit reaches for these, never a private copy and never across a layer
+  into `icmp`.
 
 ### Z2 — `lib/net::dnssd` vocabulary — **done**
 
@@ -498,18 +528,70 @@ re-derive:
   name needs nothing: it is instance-shaped and the ordinary triple reads
   it.
 
-### Z3 — `discoveryd`: the split process
+### Z3 — `discoveryd`: the split process — **done**
 
-The `lib/sandbox` streaming-worker extension (§4); the decoder owning the
-socket and memberships and holding nothing else; the front holding authority;
-crash containment and replacement proven by test.
+`userland/net/discoveryd/` is the front and the decoder (§4) in one bundle,
+`/System/Services/discoveryd.app`, requesting `CAP_NET`, `CAP_SANDBOX_SPAWN`,
+and `CAP_LOG_EMIT` and nothing more. `lib/sandbox/src/supervise.rs` is the
+streaming seam it runs the decoder under. Nothing publishes or asks through
+the service yet, so it transmits nothing and nothing enrols it: it is
+installed but not started until Z4 gives it a client.
+
+What it now guarantees, and the decisions a later increment must not
+re-derive:
+
+- **The decoder never holds a socket** — the §4 inversion, because the
+  sandbox spawn mode forbids IPC. The front relays datagrams over the
+  session; the decoder answers with its next deadline and nothing else.
+- **The channel is fixed-shape and both readers fail closed** (`wire`). Every
+  frame is one layout behind a tag; either side refuses a frame whose tag,
+  length, or any field an honest peer would not send, and the front reads
+  from its decoder only a presence flag and an instant. A configuration
+  comes first and exactly once, and anything else ends the decoder.
+- **Admission before relay, in a fixed order.** The stack's on-link verdict
+  first, then the sender's own budget, then the shared one (§8), all before a
+  byte is encoded.
+- **Back-pressure costs nothing per datagram.** A datagram the decoder's
+  queue has no room for is held, and the front stops draining its delivery
+  port until the queue drains, leaving the stack's bounded mailbox to drop.
+- **Time is paced by the front, not the decoder.** A tick goes only when the
+  decoder's reported deadline has come, never before the decoder has reported
+  since the last tick, never within 10 ms of the last, and a tick the queue
+  has no room for waits on the queue's room, not a timer — so a decoder
+  reporting any deadline at all cannot make the front spin.
+- **Containment forgets everything.** A decoder that crashes, breaks the
+  framing, ends its stream, or sends a frame no decoder sends is reaped and
+  logged (`lib/sandbox`'s `6000`, with the reason). Everything learned from
+  it is dropped, and its replacement starts after the paced delay under keys
+  drawn afresh. A random source that cannot key a decoder stops the service
+  rather than run one under predictable keys.
+- **Until Z4 the engines transmit nothing:** they are given no room to build
+  a datagram in. Records reach the front, and anything leaves the host, only
+  as the answers to the questions Z4 introduces.
+- **Events are `25_000..26_000`:** service started (with which families
+  joined), decoder started (with its generation), service unavailable (with
+  its reason).
+- **Proven by test:** host tests over in-process workers, including the real
+  decoder end to end and doomed, lying, and back-pressured ones; the
+  `fuzz_discoveryd` harness (both codecs canonical, the decoder total over
+  hostile datagrams, the front whole against a decoder saying anything); and
+  the `sandbox_qemu_aarch64` supervised leg, where a stream worker dying
+  through its panic path mid-conversation is reaped and logged, and its
+  replacement starts only after the paced delay on a real one-shot wait and
+  serves on a fresh pipe pair.
 
 ### Z4 — browse, resolve, `.local` routing
 
 `lib/discovery` client; grant-scoped browse; `CAP_NET_DISCOVER_ALL` with its
 enforcement point; `.local` and link-local reverse routing in `lib/resolver`;
 per-interface answer scoping. A live two-process QEMU vertical, the N4e-β
-precedent.
+precedent, which is also the first to run `discoveryd`'s own reactor.
+
+It also carries what Z3 left for it by design: a `discoveryd` service account
+and on-demand enrolment with the service manager; the transmit path — an
+egress interface on the send request, and unicast answered only to on-link
+askers seen recently; and records streaming from the decoder to the front as
+answers to questions, bounded per question.
 
 ### Z5 — publication and the three gates
 
@@ -517,9 +599,15 @@ precedent.
 grant store and the reserved-type data set; the netstack ownership query; the
 audit events. The increment this plan exists for.
 
+The gates bind only what reaches the wire through `discoveryd`, so the stack
+must reserve UDP 5353 to the service: today any `CAP_NET` process may bind it
+while `discoveryd` is not running and speak multicast DNS around every gate.
+
 ### Z6 — posture, privacy, lifecycle
 
-`discovery.mode` in `lib/netconfig`; per-network identity bound to the RFC
+`discovery.mode` in `lib/netconfig`, with the group memberships joined and
+left per interface as its posture allows (a socket's join covers every
+interface today); per-network identity bound to the RFC
 8981 temporary address; service-manager advertise-on-ready and
 **goodbye-on-stop** (deterministic withdrawal, not TTL decay); discovery-driven
 on-demand activation over the existing SVC-4 path.

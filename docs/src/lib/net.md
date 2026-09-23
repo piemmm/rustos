@@ -237,7 +237,8 @@ inbound direction without a second decode path); `send_echo_request`
 and `StackEvent::EchoReply` support the diagnostic path.
 
 The engine is stateless for the transport protocols: a validated inbound
-UDP datagram surfaces as `StackEvent::UdpDatagram` and a checksum-verified
+UDP datagram surfaces as `StackEvent::UdpDatagram`, carrying whether its
+source is on this interface's link (`Stack::is_on_link`), and a checksum-verified
 inbound TCP segment as `StackEvent::TcpSegment` (the raw segment bytes plus
 its addressing context), leaving demultiplexing to a socket — and, for TCP,
 the per-connection `tcp::conn::Tcb` — to the `netstack` service. Origination
@@ -575,12 +576,17 @@ Answering a query is bounded three ways. A record is multicast at most once
 per second (RFC 6762 §6), so a flood of identical questions produces one
 answer. A unicast reply — a `QU` question or a legacy resolver's, which is
 answered on the resolver's own port with the question echoed and a 10-second
-TTL cap (RFC 6762 §6.7) — is charged to a per-peer budget and to a budget
-for the interface, so a peer rotating its source address cannot sidestep the
-first. And a query whose source is **not on-link** is not answered at all:
-the engine is handed the interface's prefixes and refuses everything else
-before a byte is parsed, because reflected mDNS is an amplifier with a
-published multiplier. Defending our own name is the one thing never charged
+TTL cap (RFC 6762 §6.7) — is charged through `rate::PeerBudgets`: the
+peer's own budget first, then the budget the interface shares. A peer over
+its own budget is refused before the shared one is touched, so one flooder
+cannot spend the interface's replies; a peer rotating its source address
+meets the shared budget. And a message whose sender is **not on-link** is
+not read at all: every datagram arrives as a `Sender` carrying the network
+stack's on-link verdict (`Stack::is_on_link` — link-local, or reached
+through a route with no gateway), and anything else is refused before a
+byte is parsed, because reflected mDNS is an amplifier with a published
+multiplier. The engine keeps no copy of the interface's prefixes to go
+stale when they change. Defending our own name is the one thing never charged
 to a budget — whether this host keeps its name must not depend on something
 a flood can drain — so a probe for a name we own is answered at once, and
 multicast, so the whole segment sees the claim.
@@ -773,6 +779,14 @@ counter that appears to move backwards saturates its delta to zero. The
 ring depth and sampling gap are a fixed measurement *resolution*, not a
 per-device capacity. `netstack` owns one meter per interface and answers
 the `NET_INTERFACE_RATES` broker read from it.
+
+The module's admission side is `TokenBucket` and `PeerBudgets`: a bounded
+set of per-peer buckets over one shared bucket. A peer is charged its own
+bucket first and the shared one only if that passes, so a peer over its own
+budget cannot spend what everyone shares. When the set is full, the
+longest-quiet peer is replaced; eviction can only hand a returning peer a
+fresh budget, which the shared bucket bounds. The mDNS engine's unicast
+replies and `discoveryd`'s relay admission are its consumers.
 
 ### `bond` — the link-aggregation decision core
 

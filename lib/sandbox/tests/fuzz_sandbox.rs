@@ -558,9 +558,9 @@ fn fuzz_session_iteration(noise: &[u8], rng: &mut Prng) {
             break;
         }
         loop {
-            match hostile.recv() {
-                Ok(Some(frame)) => assert!(
-                    frame.len() <= bounds.max_recv_payload(),
+            match hostile.recv(<[u8]>::len) {
+                Ok(Some(len)) => assert!(
+                    len <= bounds.max_recv_payload(),
                     "a frame above the inbound ceiling escaped the session"
                 ),
                 Ok(None) => break,
@@ -577,7 +577,7 @@ fn fuzz_session_iteration(noise: &[u8], rng: &mut Prng) {
     if contained {
         // A contained session stays contained on every surface.
         assert!(hostile.send(b"x").is_err());
-        assert!(hostile.recv().is_err());
+        assert!(hostile.recv(<[u8]>::len).is_err());
         assert!(!hostile.wants_read());
         assert!(!hostile.wants_write());
     }
@@ -592,8 +592,8 @@ fn fuzz_session_iteration(noise: &[u8], rng: &mut Prng) {
         let mut seen = 0;
         while honest.wants_read() && honest.on_readable().is_ok() {
             let mut drained = false;
-            while let Ok(Some(frame)) = honest.recv() {
-                assert_eq!(frame, payload, "the honest round trip is byte-exact");
+            while let Ok(Some(exact)) = honest.recv(|frame| frame == payload.as_slice()) {
+                assert!(exact, "the honest round trip is byte-exact");
                 seen += 1;
                 drained = true;
             }

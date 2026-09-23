@@ -14,7 +14,6 @@
 //! The transport is any [`Channel`]: the production pipes on a TAIRiX
 //! target, an in-memory fake in host tests.
 
-use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::Errno;
 
@@ -68,6 +67,11 @@ pub enum ProtoError {
     /// The peer declared a payload longer than [`MAX_FRAME`]. Refused
     /// before any payload byte is read or allocated.
     Oversize,
+    /// The declared payload is within bounds but the allocator refused the
+    /// room to receive it. Typed rather than aborting, so a hostile peer
+    /// declaring large frames under memory pressure cannot take its reader
+    /// down.
+    OutOfMemory,
 }
 
 /// Send one frame: the header, then the whole payload.
@@ -96,24 +100,49 @@ pub fn send_frame<C: Channel>(chan: &mut C, payload: &[u8]) -> Result<(), ProtoE
 ///
 /// # Errors
 ///
-/// [`ProtoError::Oversize`] for a declared length above [`MAX_FRAME`]
-/// (refused before any payload byte is read); [`ProtoError::PeerClosed`] /
-/// [`ProtoError::Channel`] on transport failure.
+/// As [`recv_frame_into`].
 pub fn recv_frame<C: Channel>(chan: &mut C) -> Result<Option<Vec<u8>>, ProtoError> {
+    let mut payload = Vec::new();
+    Ok(recv_frame_into(chan, &mut payload)?.then_some(payload))
+}
+
+/// Receive one frame's payload into `payload`, reusing its allocation, and
+/// report whether a frame arrived: `false` is the clean end of the
+/// conversation, exactly as [`recv_frame`]'s `None`.
+///
+/// For a loop that reads frame after frame, so it holds one buffer sized to
+/// the largest frame seen rather than allocating per frame.
+///
+/// # Errors
+///
+/// [`ProtoError::Oversize`] for a declared length above [`MAX_FRAME`]
+/// (refused before any payload byte is read); [`ProtoError::OutOfMemory`]
+/// when the room for an in-bound length cannot be reserved;
+/// [`ProtoError::PeerClosed`] / [`ProtoError::Channel`] on transport
+/// failure.
+pub fn recv_frame_into<C: Channel>(
+    chan: &mut C,
+    payload: &mut Vec<u8>,
+) -> Result<bool, ProtoError> {
     let mut header = [0u8; FRAME_HEADER_LEN];
     match read_exact(chan, &mut header)? {
-        ReadOutcome::Eof => return Ok(None),
+        ReadOutcome::Eof => return Ok(false),
         ReadOutcome::Filled => {}
     }
     let len = u32::from_le_bytes(header) as usize;
     if len > MAX_FRAME {
         return Err(ProtoError::Oversize);
     }
-    let mut payload = vec![0u8; len];
-    match read_exact(chan, &mut payload)? {
+    // The read overwrites every byte kept from the last frame, so only a
+    // longer frame's growth needs filling.
+    payload
+        .try_reserve(len.saturating_sub(payload.len()))
+        .map_err(|_| ProtoError::OutOfMemory)?;
+    payload.resize(len, 0);
+    match read_exact(chan, payload)? {
         // EOF inside a declared payload: the peer died mid-frame.
         ReadOutcome::Eof => Err(ProtoError::PeerClosed),
-        ReadOutcome::Filled => Ok(Some(payload)),
+        ReadOutcome::Filled => Ok(true),
     }
 }
 
@@ -187,7 +216,7 @@ fn map_errno(errno: Errno) -> ProtoError {
 
 #[cfg(test)]
 mod tests {
-    use super::{recv_frame, send_frame, Channel, ProtoError, MAX_FRAME};
+    use super::{recv_frame, recv_frame_into, send_frame, Channel, ProtoError, MAX_FRAME};
     use alloc::vec;
     use alloc::vec::Vec;
     use tairix_abi::Errno;
@@ -250,6 +279,36 @@ mod tests {
         send_frame(&mut sender, b"").expect("send succeeds");
         let mut receiver = Loopback::over(sender.output);
         assert_eq!(recv_frame(&mut receiver), Ok(Some(Vec::new())));
+    }
+
+    #[test]
+    fn one_reused_buffer_receives_consecutive_frames_exactly() {
+        let frames: [&[u8]; 4] = [
+            b"a longer first payload",
+            b"short",
+            b"middling one",
+            b"a payload longer than any before it",
+        ];
+        let mut sender = Loopback::over(Vec::new());
+        for frame in frames {
+            send_frame(&mut sender, frame).expect("send");
+        }
+        let mut receiver = Loopback::over(sender.output);
+        let mut buf = Vec::new();
+        assert_eq!(recv_frame_into(&mut receiver, &mut buf), Ok(true));
+        assert_eq!(buf.as_slice(), frames[0]);
+        let capacity = buf.capacity();
+        // Each frame replaces the last whole, shorter or longer, with no
+        // byte of its predecessor left behind; a shorter one keeps the
+        // allocation the longer one needed.
+        assert_eq!(recv_frame_into(&mut receiver, &mut buf), Ok(true));
+        assert_eq!(buf.as_slice(), frames[1]);
+        assert_eq!(buf.capacity(), capacity);
+        for frame in &frames[2..] {
+            assert_eq!(recv_frame_into(&mut receiver, &mut buf), Ok(true));
+            assert_eq!(buf.as_slice(), *frame);
+        }
+        assert_eq!(recv_frame_into(&mut receiver, &mut buf), Ok(false));
     }
 
     #[test]

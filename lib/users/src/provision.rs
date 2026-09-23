@@ -102,8 +102,9 @@ pub const LOGIN_UID: Uid = Uid(13);
 /// Name of the network-stack service account.
 pub const NETSTACK_USERNAME: &str = "netstack";
 
-/// The [`Uid`] of [`NETSTACK_USERNAME`].
-pub const NETSTACK_UID: Uid = Uid(14);
+/// The [`Uid`] of [`NETSTACK_USERNAME`], defined by the socket ABI because
+/// every socket client authenticates the stack's deliveries by it.
+pub const NETSTACK_UID: Uid = Uid(tairix_abi::net::NETSTACK_UID);
 
 /// Name of the sandboxed font-service account.
 pub const FONTD_USERNAME: &str = "fontd";

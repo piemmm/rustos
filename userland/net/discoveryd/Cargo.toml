@@ -1,0 +1,59 @@
+[package]
+name = "tairix-discoveryd"
+description = "TAIRiX link-local service discovery service (multicast DNS / DNS-SD, `plans/ZEROCONF.md`): a front holding the multicast DNS sockets and every authority, relaying the datagrams it receives to a capability-empty sandboxed decoder that runs the `tairix-net` mDNS engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-timed`. Host
+# tooling builds only the engine *library*, so the host test build never pulls
+# the userland runtime's `_start` / `#[global_allocator]` / `panic_impl`.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt", "tairix-sandbox/program"]
+
+# The package is both the `tairix-discoveryd` library (the front and the
+# decoder, host-testable over injected seams) and the `Run` entry-point binary
+# installed at `/System/Services/discoveryd.app/Run`, which serves as the front
+# or, spawned in the sandbox's session-worker role, as the decoder.
+[[bin]]
+name = "tairix-discoveryd-run"
+path = "src/run.rs"
+
+[dependencies]
+# The socket delivery the front relays, the interface-name grammar, and the
+# address parts the channel carries.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The multicast DNS engine the decoder runs, and the per-peer budget the
+# front's relay admission shares with it.
+tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
+# The supervised session the decoder runs under, the wire cursor its frames
+# are read with, and the in-process fakes the host tests drive it through.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
+# The structured audit records the front writes.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The keyed hash seed the decoder's caches are indexed under.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
+# The CSPRNG the decoder's engines draw their jitter from, keyed by the front.
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+# The self-wiping buffers the decoder's keys are drawn into, and fallible
+# allocation for the relay's frame buffer.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+
+# The `Run` binary's freestanding userland runtime: `_start`, the global
+# allocator, the socket and wait-set wrappers, the clock, and the random
+# syscall. Pulled only for the bare-metal targets the program is built for.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+
+[dev-dependencies]
+# The fuzz harness draws its inputs through the shared seed/budget seam.
+# Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }

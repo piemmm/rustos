@@ -34,17 +34,16 @@
 //!   security bounds, not capacities that grow with the segment: total
 //!   resident state is the per-interface ceiling times the interface count,
 //!   independent of how many hosts are shouting.
-//! - A query from a source that is not on-link is never answered. Reflected
-//!   mDNS is a documented amplifier.
+//! - A sender the stack does not find on-link ([`Sender::on_link`]) is never
+//!   answered and never cached. Reflected mDNS is a documented amplifier.
 //! - Renaming after a name conflict is bounded. A peer that keeps claiming
 //!   our name walks a stock implementation to `host-47.local`; here the
 //!   budget runs out and the interface fails closed to *not published*.
 
 use tairix_inline::ArrayVec;
 
-use crate::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
+use crate::addr::{Ipv4Addr, Ipv6Addr};
 use crate::dns::{DnsError, Name, RecordType, MAX_NAME_LEN};
-use crate::route::Prefix;
 
 #[path = "mdns_codec.rs"]
 pub mod codec;
@@ -58,7 +57,7 @@ mod engine;
 pub use cache::{CachedRecord, Learned, RecordCache};
 pub use codec::{Message, MessageWriter, Question, Section};
 pub use engine::{
-    Destination, Emit, MdnsConfig, MdnsEngine, MdnsEvent, PublishError, PublishId, QuestionId,
+    Destination, Emit, MdnsEngine, MdnsEvent, PublishError, PublishId, QuestionId, Sender,
     ServiceState,
 };
 
@@ -116,9 +115,6 @@ pub const MAX_MESSAGE_QUESTIONS: usize = 32;
 /// The largest number of records this engine reads from one received
 /// message, across all four sections.
 pub const MAX_MESSAGE_RECORDS: usize = 128;
-
-/// The largest number of on-link prefixes one interface is configured with.
-pub const MAX_LINK_PREFIXES: usize = 8;
 
 /// The renames a conflicting name is walked through before the publication
 /// fails closed to withdrawn.
@@ -508,57 +504,6 @@ impl Record {
     #[must_use]
     pub fn same_record(&self, other: &Self) -> bool {
         self.name == other.name && self.data == other.data
-    }
-}
-
-/// The addresses that count as on-link for one interface.
-///
-/// The engine cannot discover this and must never guess it: answering a
-/// query from off-link turns a host into a reflector, and mDNS reflection is
-/// a documented amplifier. The caller supplies the interface's configured
-/// prefixes; the two link-local ranges are on-link by definition and need no
-/// configuration.
-#[derive(Clone, Debug, Default)]
-pub struct LinkScope {
-    v4: ArrayVec<Prefix<Ipv4Addr>, MAX_LINK_PREFIXES>,
-    v6: ArrayVec<Prefix<Ipv6Addr>, MAX_LINK_PREFIXES>,
-}
-
-/// IPv4 link-local (RFC 3927): on-link by definition.
-const LINK_LOCAL_V4: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 0);
-
-impl LinkScope {
-    /// An interface with no configured prefix: only the link-local ranges
-    /// are on-link.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add a configured on-link prefix, ignoring one past
-    /// [`MAX_LINK_PREFIXES`].
-    pub fn add_v4(&mut self, prefix: Prefix<Ipv4Addr>) {
-        let _ = self.v4.try_push(prefix);
-    }
-
-    /// As [`Self::add_v4`], for IPv6.
-    pub fn add_v6(&mut self, prefix: Prefix<Ipv6Addr>) {
-        let _ = self.v6.try_push(prefix);
-    }
-
-    /// Whether `addr` is on this link.
-    #[must_use]
-    pub fn is_on_link(&self, addr: IpAddr) -> bool {
-        match addr {
-            IpAddr::V4(v4) => {
-                v4.octets()[..2] == LINK_LOCAL_V4.octets()[..2]
-                    || self.v4.iter().any(|prefix| prefix.contains(v4))
-            }
-            IpAddr::V6(v6) => {
-                crate::addr::is_unicast_link_local(&v6)
-                    || self.v6.iter().any(|prefix| prefix.contains(v6))
-            }
-        }
     }
 }
 

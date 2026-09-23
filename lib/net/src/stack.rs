@@ -211,6 +211,10 @@ pub enum StackEvent {
         source_port: u16,
         /// Local destination port.
         destination_port: u16,
+        /// Whether `source` is on this interface's link
+        /// ([`Stack::is_on_link`]), judged against the routes live when the
+        /// datagram arrived.
+        source_on_link: bool,
         /// The datagram payload.
         payload: Vec<u8>,
     },
@@ -839,6 +843,18 @@ impl Stack {
         &self.iface
     }
 
+    /// Whether `peer` is on this interface's own link: link-local by
+    /// definition (RFC 3927 §2.6, RFC 4291 §2.5.6), or covered by a route
+    /// with no gateway — the same test the transmit path uses to decide a
+    /// destination needs no next hop.
+    #[must_use]
+    pub fn is_on_link(&self, peer: IpAddr) -> bool {
+        match peer {
+            IpAddr::V4(v4) => v4.is_link_local() || self.routes_v4.is_on_link(v4),
+            IpAddr::V6(v6) => is_unicast_link_local(&v6) || self.routes_v6.is_on_link(v6),
+        }
+    }
+
     /// One address list each DHCP client's *current* lease carries, in wire
     /// order: the IPv4 lease's addresses first, then the IPv6 lease's.
     ///
@@ -1358,6 +1374,7 @@ impl Stack {
                 destination: IpAddr::V4(header.destination),
                 source_port: datagram.source_port,
                 destination_port: datagram.destination_port,
+                source_on_link: self.is_on_link(IpAddr::V4(header.source)),
                 payload: self.pooled_copy(datagram.payload),
             });
             return;
@@ -1631,6 +1648,7 @@ impl Stack {
                 destination: IpAddr::V6(header.destination),
                 source_port: datagram.source_port,
                 destination_port: datagram.destination_port,
+                source_on_link: self.is_on_link(IpAddr::V6(header.source)),
                 payload: self.pooled_copy(datagram.payload),
             });
             return;

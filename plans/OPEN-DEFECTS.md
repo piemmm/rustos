@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 41 open, 111 closed, 152 total.
+**closed**, and a partial fix stays **open**. 42 open, 120 closed, 162 total.
 
-### Open (41)
+### Open (42)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -70,6 +70,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D153 | the desktop session's on-screen witnesses are emitted at a rate an unprivileged client drives | noticed while adding `WINDOW_RETITLED` (`plans/NEW-DESKTOP-SETTINGS.md` DS13); not absorbed. A window opened and closed, a menu opened, or a title changed once per frame each costs one record through the session's `CAP_LOG_EMIT`, so a client holding no log authority can write the journal at frame rate. Each witness is honest and bounded by the frame pacer, and the bound belongs in the log path every service shares — a per-source record budget — rather than in one witness |
 | D154 | graphical drawing outside `lib/controls` still cuts a name where its room runs out, with no mark | noticed while moving every `lib/controls` site onto the shared recipe (`plans/NEW-DESKTOP-SETTINGS.md` DS13); not absorbed. `lib/greeter` (`layout.rs`), `lib/browse` (`render.rs`, three sites), `userland/apps/{widgets,view,terminal}`, `userland/gui/switchboard` (seven sites) and `userland/gui/taskbar` (`render.rs`) draw `truncate_to_width`'s prefix alone, against `plans/GUI-CONTROLS-DESIGN.md` §11A. Each becomes `elide_to_width` drawn through `tairix_controls::paint_run`, or through a `lib/font` home for the recipe where a crate sits below `lib/controls`, with a `testkit::marks_elision` regression test per site. The TUI programs' column cuts are the terminal convention and out of scope |
 | D155 | the breadcrumb's collapse cell draws a private `...` where every other cut text ends in `…` | blocked on a decision: `plans/GUI-CONTROLS-DESIGN.md` §11 fixes "three periods, not `…`" so the mark renders under any coverage, but the console atlas covers U+2026 (`lib/font`'s `coverage_reaches_beyond_ascii`) and the shipped faces draw it (the Settings vertical's Appearance description ends in `…`). Either the plan's rule is retired and `nav.rs` draws `tairix_font::ELLIPSIS`, or it stands and its rationale is restated; a regression test lands with whichever |
+| D164 | 22 userland programs allocate fixed start-up buffers with `vec!`, whose allocation failure panics rather than returning a typed error | a sweep, one program at a time; new code takes `tairix_util::fallible::filled`. See the Scope bullet |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -96,7 +97,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (111)
+### Closed (120)
 
 | ID | Subject |
 |---|---|
@@ -211,11 +212,121 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D149 | icon artwork landing repainted the whole icon bar and the whole library popup, where only the slots and rows that gained a picture changed |
 | D150 | boot stack had no overrun detector on any port |
 | D151 | every in-tree fuzz harness drew its structural choices from an unmixed LCG's low bits, where bit *k* has period 2^(k+1) |
+| D156 | `cap_delegate` let any task narrow any other task's capabilities by naming its pid |
+| D157 | socket clients authenticated the stack's deliveries by pinning whichever sender posted first |
+| D158 | `timed`, `ping`, and `telnet` bound fixed well-known delivery port ids any process could squat first |
+| D159 | the mDNS engine charged the shared per-interface reply budget before the per-peer one |
+| D160 | a sandbox session's parent allocated each worker-declared frame infallibly |
+| D161 | userland drew keys, nonces, sequence numbers, ports, and ids through `random_get` and carried on with zeros when it was refused |
+| D162 | the kernel never seeded its CSPRNG on a port whose hardware RNG is declared `Pending`, though the boot seed it had captured could have |
+| D163 | `netstack` exited on every start-up failure without stating why |
+| D165 | the SVG decoder admitted a pattern tile magnified past what the renderer can size, which the renderer then refused to draw at all |
 
 ## Scope
 
 The open items, in priority order:
 
+- **D164 — 22 userland programs allocate fixed start-up buffers with
+  `vec!` (OPEN).** A `vec![0u8; N]` whose allocation fails panics through the
+  allocation-error path, where the charter wants a typed error the program
+  reports before it exits. Each is a buffer of a few KiB taken once at start,
+  so the process could do nothing useful without it, but the exit should be a
+  stated refusal rather than a panic. New code takes
+  `tairix_util::fallible::filled` (`discoveryd` does); converting the rest is a
+  per-program sweep, noticed while converting `timed` and `lib/resolver` for
+  D161.
+- **D165 — the SVG decoder admitted a pattern tile the renderer refuses —
+  FIXED.** Found by `fuzz_svg` (seed `17573740323154604255`): a tile placed
+  under `scale(1e5)` inverts into a `to_tile` whose determinant is below
+  `Affine::invert`'s absolute floor, so the decoder accepted it and the
+  renderer, sizing the tile through that inverse, refused the whole drawing —
+  an icon failing to its lower tier over one fill. `PaintServers::pattern`
+  now requires the round trip the renderer takes and resolves a placement
+  magnified past it to no paint, exactly as it does a collapsed one.
+  `a_tile_magnified_past_the_renderers_precision_paints_nothing`
+  (`lib/svg`), which fails without the fix.
+- **D163 — `netstack` exited on every start-up failure without stating why
+  — FIXED.** Six refusals (an endpoint not bound or not watched, the
+  wait-set not created, the service's own origin unread) returned `1`
+  silently. Every start-up refusal, and the new no-entropy one (D161), now
+  records `SERVICE_UNAVAILABLE` (`16_028`) with its reason before exiting;
+  `bind_endpoints` returns a reason for each of its refusals so none can be
+  added without one. The exits are in the freestanding binary, which no host
+  test can drive into a failed endpoint bind; the id is pinned by the
+  event-registry tests.
+- **D162 — the kernel never seeded its CSPRNG on a port whose hardware RNG
+  is declared `Pending` — FIXED.** `seed_entropy_reserve` returned as soon as
+  the port's profile said `Pending`, before the jitter, interrupt, and FDT
+  boot-seed sources were mixed in — so riscv64, whose `Zkr` is pending and
+  whose boot path captures `/chosen/rng-seed` precisely so it can seed,
+  never did: `random_get` failed for the life of every riscv64 boot, ramzip
+  never came online, and process ids lost their unpredictable half.
+  `ArchEntropy::new` now keeps a port's handle only when its profile provides
+  hardware entropy, so a pending source withholds only itself and is never
+  touched, and the seed always mixes every source; the audit names the ones
+  able to contribute (`bootseed` on a riscv64 guest).
+  `a_pending_hardware_source_still_leaves_the_boot_seed_to_seed_the_reserve`,
+  `a_port_with_no_usable_source_contributes_nothing_and_is_never_drawn`, and
+  `the_seed_audit_names_exactly_the_sources_that_can_contribute`
+  (`kernel/core`).
+- **D161 — userland carried on with zeros when `random_get` refused —
+  FIXED.** Eight call sites discarded the result: `netstack`'s SYN-cookie key
+  (all-zero cookies, forgeable by anyone), its TCP initial sequence numbers
+  and ephemeral ports (the only one ever tried was `49152`), DHCPv4 transaction ids and IPv4
+  identification seeds; the resolver's DNS query ids; `timed`'s NTP nonces.
+  On riscv64 (D162) that was every boot. `tairix_rt::random_fill` is now the
+  one checked draw — the whole buffer or a typed refusal — and the raw
+  `random_get` wrapper is private to the runtime, so the discard cannot be
+  written outside it. Per-event values come from a `FastRng` keyed once by
+  `FastRng::keyed_by(tairix_rt::random_fill)`, which builds nothing from a
+  refused draw and costs one syscall per program rather than one per value;
+  `fork` gives each netstack interface's DHCP client and RFC 8981 source its
+  own stream. `netstack` refuses to serve without its secrets, `timed` and
+  the resolver refuse to run without their generators, and the cookie key
+  lives in a buffer wiped on drop. `the_checked_draw_is_whole_or_refused` and
+  `the_checked_draw_takes_a_long_buffer_in_turns` (`lib/rt`),
+  `a_refusing_source_builds_no_generator` and
+  `a_fork_is_independent_of_its_parent_and_of_its_siblings` (`lib/rng`),
+  `a_refused_draw_builds_no_secret` (`netstack`).
+- **D160 — a sandbox session's parent allocated each worker-declared frame
+  infallibly — FIXED.** A hostile worker declaring in-bound frames under
+  memory pressure could abort the process supervising it. `SandboxSession::recv`
+  now lends each frame in place and allocates nothing, and
+  `proto::recv_frame_into` reserves fallibly (`ProtoError::OutOfMemory`) and
+  is reused by the worker loops, which hold one buffer for the session.
+  `one_reused_buffer_receives_consecutive_frames_exactly` (`lib/sandbox`).
+- **D159 — the mDNS engine charged the shared reply budget before the
+  per-peer one — FIXED.** A peer past its own budget still spent the
+  interface's, so one flooding asker starved every other peer of unicast
+  answers. `rate::PeerBudgets` is the one per-peer budget table, peer bucket
+  first; the engine and `discoveryd`'s relay admission share it.
+  `a_peer_past_its_reply_budget_cannot_spend_the_interfaces` (engine) and the
+  `rate_tests` suite, checked against the old order by mutation.
+- **D158 — `timed`, `ping`, and `telnet` bound fixed delivery port ids —
+  FIXED.** The port registry is machine-wide, so whichever process bound
+  `0x6e74_7071` first denied `timed` its NTP replies for the boot, and
+  likewise `ping`'s and `telnet`'s. `tairix_rt::bind_private_port` draws an
+  unreserved id from the CSPRNG under a bounded budget that fails closed, and
+  every socket client (and `telnet`'s keyboard port) binds through it.
+  `a_private_port_is_never_bound_unless_its_id_was_drawn` (`lib/rt`).
+- **D157 — socket clients pinned whichever sender posted first as the stack
+  — FIXED.** A delivery port is an inbox anyone may post to: a forged first
+  post was pinned as the network stack, and a restarted stack was refused by
+  every client that had pinned its predecessor. The `tairix_rt::net` receives
+  now authenticate each message's kernel-attested sender as the stack's
+  service account (`tairix_abi::net::NETSTACK_UID`, user trust domain) and
+  discard any other unread; the four private pinning copies are deleted.
+  `only_the_stack_service_account_is_the_network_stack` (`lib/abi`).
+- **D156 — `cap_delegate` let any task narrow any other task — FIXED.** The
+  syscall looked the target up and narrowed it with no authority check, so
+  any process could strip any other of its capabilities by naming its pid.
+  `CapTable::narrow` admits the caller itself or a live child — matched on the
+  minted process instance, never a recyclable pid — and anyone else only for
+  a `CAP_USER_ADMIN` holder; without it an unknown target is refused exactly
+  like an unrelated one, so the call is no oracle for which pids exist, and
+  the refusal is audited (`TaskCapabilitiesDelegateDenied`, `1024`).
+  `cap_delegate_refuses_an_unrelated_target_without_user_admin` and six
+  `CapTable::narrow` tests (`kernel/sec`).
 - **D151 — every in-tree fuzz harness drew its structural choices from an
   unmixed LCG's low bits — FIXED.** `tairix_fuzzseed::Prng` (SplitMix64,
   pinned to the reference stream) is the one generator every harness, soak and

@@ -1,7 +1,6 @@
 //! Unit tests for the multicast DNS vocabulary.
 
 use super::*;
-use crate::route::Prefix;
 
 fn name(dotted: &str) -> Name {
     Name::encode(dotted).expect("a test name encodes")
@@ -156,42 +155,4 @@ fn renaming_past_the_name_bound_is_refused_rather_than_truncated() {
     let long = Name::from_labels(&[&[b'a'; 63], &[b'b'; 63], &[b'c'; 63], &[b'd'; 60]])
         .expect("just inside the bound");
     assert!(rename(&long, NameKind::Instance).is_err());
-}
-
-// -- on-link scope -------------------------------------------------------
-
-#[test]
-fn link_local_is_on_link_without_configuration() {
-    let scope = LinkScope::new();
-    assert!(scope.is_on_link(IpAddr::V4(Ipv4Addr::new(169, 254, 3, 4))));
-    assert!(scope.is_on_link(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1))));
-}
-
-#[test]
-fn an_off_link_source_is_not_on_link() {
-    let mut scope = LinkScope::new();
-    scope.add_v4(Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24).expect("valid prefix"));
-    assert!(scope.is_on_link(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 77))));
-    assert!(!scope.is_on_link(IpAddr::V4(Ipv4Addr::new(192, 168, 2, 77))));
-    assert!(!scope.is_on_link(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
-}
-
-#[test]
-fn a_global_v6_source_needs_a_configured_prefix() {
-    let mut scope = LinkScope::new();
-    let global = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
-    assert!(!scope.is_on_link(IpAddr::V6(global)));
-    scope.add_v6(Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 64).expect("valid"));
-    assert!(scope.is_on_link(IpAddr::V6(global)));
-}
-
-#[test]
-fn configured_prefixes_past_the_bound_are_dropped_not_grown() {
-    let mut scope = LinkScope::new();
-    for octet in 0..u8::try_from(MAX_LINK_PREFIXES + 4).expect("small") {
-        scope.add_v4(Prefix::new(Ipv4Addr::new(10, octet, 0, 0), 16).expect("valid"));
-    }
-    assert!(scope.is_on_link(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-    let past_bound = u8::try_from(MAX_LINK_PREFIXES).expect("small");
-    assert!(!scope.is_on_link(IpAddr::V4(Ipv4Addr::new(10, past_bound, 0, 1))));
 }

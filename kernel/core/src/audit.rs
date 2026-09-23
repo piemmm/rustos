@@ -318,24 +318,24 @@ pub enum AuditEvent {
     /// every lease and handle on the dead seat fails closed from this
     /// point on.
     SeatDestroyed,
-    /// The kernel CSPRNG output reserve was seeded from the platform
-    /// entropy source ([`tairix_arch_api::PlatformEntropy`]).
+    /// The kernel CSPRNG output reserve was seeded from the platform's
+    /// entropy sources.
     ///
-    /// Emitted once at boot by [`crate::init`] when the arch port's
-    /// hardware entropy source produced enough bytes to seed the reserve.
-    /// After this, `random_get` serves cryptographic output. The record
-    /// carries no entropy — only that the decision was taken (a
-    /// security-relevant state change).
+    /// Emitted once at boot by [`crate::init`] when the mix of the hardware
+    /// RNG, timing jitter, interrupt timing, and firmware boot seed produced
+    /// enough bytes to seed the reserve; its `sources` field names the ones
+    /// able to contribute. After this, `random_get` serves cryptographic
+    /// output. The record carries no entropy — only that the decision was
+    /// taken (a security-relevant state change).
     EntropyReserveSeeded,
     /// The kernel CSPRNG output reserve could **not** be seeded at boot
     /// and stays unseeded (`random_get` keeps failing closed with
     /// `EntropyNotReady`).
     ///
-    /// Emitted once at boot by [`crate::init`] when the arch port exposes
-    /// no usable entropy source, or its source could not produce bytes
-    /// (the feature is absent, or every bounded draw was exhausted). The
-    /// kernel never weakens to predictable output; it fails closed. The
-    /// record carries a `cause` field naming why.
+    /// Emitted once at boot by [`crate::init`] when no source could
+    /// contribute (`cause` = `no_source`) or every bounded draw was
+    /// exhausted (`draw_failed`). The kernel never weakens to predictable
+    /// output; it fails closed.
     EntropyReserveUnseeded,
     /// The kernel minted the per-boot identifier ([`tairix_abi::BootId`])
     /// from the seeded CSPRNG output reserve (`PREREQUISITES.md` P-E).

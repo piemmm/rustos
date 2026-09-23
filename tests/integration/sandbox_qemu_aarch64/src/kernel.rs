@@ -55,7 +55,7 @@ use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_B
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
 use tairix_kernel_core::{
     AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram, InitSpawnCtx,
-    KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
+    KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
     ProgramRegistry, RandomReserve, SchedWaitQueueArch, NULL_DMA_ALLOC_FACILITY,
     NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
 };
@@ -83,16 +83,26 @@ const BOOT_CPU: CpuId = 0;
 const IDENTITY_GIB: usize = 2;
 
 /// Physical frames the production spawn producer draws from: the parent
-/// plus up to six sandboxed workers over the run (decode, dying,
-/// replacement, probe, session — image, stack, page tables, and the
+/// plus the sandboxed workers of the run (decode, dying, replacement, probe,
+/// session, and the supervised stream worker with its replacement), of which
+/// an exited one returns its frames — image, stack, page tables, and the
 /// `tairix-rt` heap each), where the fixture links the whole decode stack
 /// (`lib/sandbox` + `lib/binfmt` + `lib/disasm`). Sized from the observed
 /// per-process appetite with generous headroom (40 MiB).
 const FRAME_COUNT: usize = 10240;
 
-/// Cooperative-loop watchdog: maximum `step` iterations before the test
-/// declares the workload deadlocked. Sized generously for QEMU TCG.
-const MAX_STEPS: u64 = 5_000_000;
+/// Cooperative-loop watchdog: the elapsed time past which the workload is
+/// declared deadlocked.
+///
+/// A time budget rather than a step count, because the supervised leg parks
+/// for its replacement's paced delay while the loop steps an empty run queue
+/// at a rate no test should depend on. Far above the workload's worst case,
+/// and below the harness's own timeout, so only a genuine hang reaches it.
+const WATCHDOG_NS: u64 = 30_000_000_000;
+
+/// Scheduler steps between watchdog clock reads, so the budget check costs
+/// nothing measurable on the drive loop.
+const STEPS_PER_CLOCK_READ: u64 = 1024;
 
 /// Stable audit-event ids for the QEMU transcript.
 const TEST_START: EventId = EventId(4350);
@@ -229,12 +239,12 @@ fn parent_caps() -> CapabilitySet {
 }
 
 /// The program registry the production `spawn` syscall resolves the
-/// seam's worker paths against: one `rxe` image, four rows. The roles
+/// seam's worker paths against: one `rxe` image, five rows. The roles
 /// ride on the *path* (`arg(0)`) and the marker (`arg(1)`) — the seam's
 /// launchers always pass `[path, role-marker]` as the startup vector,
 /// which replaces the registry defaults — so every row requests no
 /// capability and pins no arguments.
-static CHILD_PROGRAMS: [EmbeddedProgram; 4] = [
+static CHILD_PROGRAMS: [EmbeddedProgram; 5] = [
     EmbeddedProgram {
         path: b"/bin/sbx",
         rxe: PROGRAM_RXE,
@@ -255,6 +265,12 @@ static CHILD_PROGRAMS: [EmbeddedProgram; 4] = [
     },
     EmbeddedProgram {
         path: b"/bin/sbx-session",
+        rxe: PROGRAM_RXE,
+        caps: &[],
+        args: &[],
+    },
+    EmbeddedProgram {
+        path: b"/bin/sbx-stream",
         rxe: PROGRAM_RXE,
         caps: &[],
         args: &[],
@@ -522,14 +538,18 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // A task id never exceeds the ABI's pid bound, so reinterpreting it as
     // the signed pid the wait ABI carries is exact.
     let parent_pid = parent_pid.cast_signed();
+    let started_ns = KernelArch::monotonic_ns(sys.arch, BOOT_CPU);
     let mut steps = 0u64;
-    while steps < MAX_STEPS {
+    loop {
         let _ = sys.sched.step(BOOT_CPU);
         steps += 1;
 
-        // Deliver any wake a handler deferred while the task ran — the same
-        // between-dispatches service the production loop performs; without
-        // it a child's `exit` never unparks the parent blocked in `wait`.
+        // Stand in for the production timer tick, which a chassis routes no
+        // interrupt for: without it a timed park, such as the supervised
+        // leg's paced wait, would never expire. Then deliver every wake a
+        // handler deferred, as the production dispatch loop does between
+        // steps; without that a child's `exit` never unparks the parent.
+        tairix_kernel_core::timed_wake_sweep();
         let _ = tairix_kernel_core::waitq::drain_pending_wakes();
 
         match wait_producer.poll(ProcessId(0), parent_pid, WaitFlags::empty()) {
@@ -558,6 +578,12 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         if sys.sched.live_task_count() == 0 {
             qemu_exit::exit_failure(FAIL_DRAINED);
         }
+
+        if steps.is_multiple_of(STEPS_PER_CLOCK_READ)
+            && KernelArch::monotonic_ns(sys.arch, BOOT_CPU).saturating_sub(started_ns)
+                >= WATCHDOG_NS
+        {
+            qemu_exit::exit_failure(FAIL_DEADLOCK);
+        }
     }
-    qemu_exit::exit_failure(FAIL_DEADLOCK);
 }

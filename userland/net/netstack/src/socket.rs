@@ -1877,15 +1877,15 @@ impl SocketService {
         })
     }
 
-    /// Route one engine receive [`StackEvent`] to the sockets that should
-    /// receive it, returning an encoded delivery per matching socket: a
-    /// [`SocketDatagram`] for a [`StackEvent::UdpDatagram`], or a
-    /// [`SocketEcho`] for a [`StackEvent::EchoReply`]. Any other event
-    /// yields nothing.
+    /// Route one engine receive [`StackEvent`] the logical interface
+    /// `arrival` raised to the sockets that should receive it, returning an
+    /// encoded delivery per matching socket: a [`SocketDatagram`] for a
+    /// [`StackEvent::UdpDatagram`], or a [`SocketEcho`] for a
+    /// [`StackEvent::EchoReply`]. Any other event yields nothing.
     #[must_use]
-    pub fn deliver(&self, event: &StackEvent) -> Vec<Delivery> {
+    pub fn deliver(&self, event: &StackEvent, arrival: [u8; IF_NAME_LEN]) -> Vec<Delivery> {
         match event {
-            StackEvent::UdpDatagram { .. } => self.deliver_datagram(event),
+            StackEvent::UdpDatagram { .. } => self.deliver_datagram(event, arrival),
             StackEvent::EchoReply { .. } => self.deliver_echo(event),
             _ => Vec::new(),
         }
@@ -1945,12 +1945,13 @@ impl SocketService {
     /// Route one [`StackEvent::UdpDatagram`] to the datagram sockets that
     /// should receive it, returning an encoded [`SocketDatagram`] delivery
     /// per matching socket.
-    fn deliver_datagram(&self, event: &StackEvent) -> Vec<Delivery> {
+    fn deliver_datagram(&self, event: &StackEvent, arrival: [u8; IF_NAME_LEN]) -> Vec<Delivery> {
         let StackEvent::UdpDatagram {
             source,
             destination,
             source_port,
             destination_port,
+            source_on_link,
             payload,
         } = event
         else {
@@ -1988,11 +1989,13 @@ impl SocketService {
             }
             let datagram = SocketDatagram {
                 socket: entry.id,
+                interface: arrival,
                 source: SocketAddr {
                     family: src_family,
                     addr: src_bytes,
                     port: *source_port,
                 },
+                source_on_link: *source_on_link,
                 payload,
             };
             let mut buf = alloc::vec![0u8; SocketDatagram::HEADER_LEN + payload.len()];

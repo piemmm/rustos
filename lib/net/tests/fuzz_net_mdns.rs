@@ -33,10 +33,9 @@ use tairix_net::dnssd::{
     ServiceInstance, ServiceType, TxtAttributes, TxtBuilder, TxtValue, MAX_TXT_STRING_LEN,
 };
 use tairix_net::mdns::{
-    Destination, LinkScope, MdnsConfig, MdnsEngine, NameKind, QuestionType, RData, Record,
-    RecordCache, Service, TxtRecord, MAX_RECORDS, MAX_RECORDS_PER_SOURCE, MAX_TXT_LEN, PORT,
+    Destination, MdnsEngine, NameKind, QuestionType, RData, Record, RecordCache, Sender, Service,
+    TxtRecord, MAX_RECORDS, MAX_RECORDS_PER_SOURCE, MAX_TXT_LEN, PORT,
 };
-use tairix_net::route::Prefix;
 use tairix_net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -45,17 +44,21 @@ const SMOKE_ITERATIONS: u64 = 2_000;
 /// The datagram buffer the engine writes into.
 const BUF: usize = 4096;
 
-fn on_link(last: u8) -> IpAddr {
+fn peer(last: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 168, 1, last))
 }
 
+/// A sender the stack found on-link: the only kind that reaches the parser.
+fn on_link(addr: IpAddr, port: u16) -> Sender {
+    Sender {
+        addr,
+        port,
+        on_link: true,
+    }
+}
+
 fn engine() -> MdnsEngine {
-    let mut link = LinkScope::new();
-    link.add_v4(Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24).expect("valid prefix"));
-    MdnsEngine::new(MdnsConfig {
-        link,
-        hash_key: HashSeed::UNKEYED,
-    })
+    MdnsEngine::new(HashSeed::UNKEYED)
 }
 
 /// A name drawn from a small set, so the engine explores real matches
@@ -181,7 +184,7 @@ fn exercise_cache(rng: &mut Prng) {
     for _ in 0..64 {
         let now = Duration64::from_secs(i64::from(rng.next_u32() % 300));
         let record = draw_record(rng);
-        let source = on_link(u8::try_from(rng.below(6)).unwrap_or(0));
+        let source = peer(u8::try_from(rng.below(6)).unwrap_or(0));
         if !sources.contains(&source) {
             sources.push(source);
         }
@@ -249,22 +252,28 @@ fn exercise_engine(rng: &mut Prng) {
             0 => {
                 let size = rng.below(datagram.len() + 1);
                 rng.fill(&mut datagram[..size]);
-                let source = on_link(u8::try_from(rng.below(8)).unwrap_or(0));
+                let source = peer(u8::try_from(rng.below(8)).unwrap_or(0));
                 let port = if rng.next_u64() & 1 == 0 {
                     PORT
                 } else {
                     rng.next_u16()
                 };
-                let emitted =
-                    engine.on_message(now, &datagram[..size], source, port, &mut rand, &mut buf);
+                let emitted = engine.on_message(
+                    now,
+                    &datagram[..size],
+                    on_link(source, port),
+                    &mut rand,
+                    &mut buf,
+                );
                 check_emit(emitted.map(|emit| (emit.to, emit.len)), &buf);
             }
             1 => {
                 // A structurally valid message, so the deeper paths are
                 // reached rather than only the parser's rejection.
                 let built = build_message(rng);
-                let source = on_link(u8::try_from(rng.below(8)).unwrap_or(0));
-                let emitted = engine.on_message(now, &built, source, PORT, &mut rand, &mut buf);
+                let source = peer(u8::try_from(rng.below(8)).unwrap_or(0));
+                let emitted =
+                    engine.on_message(now, &built, on_link(source, PORT), &mut rand, &mut buf);
                 check_emit(emitted.map(|emit| (emit.to, emit.len)), &buf);
             }
             _ => {
@@ -285,10 +294,14 @@ fn exercise_engine(rng: &mut Prng) {
     let before = engine.cache().len();
     let deadline_before = engine.next_deadline();
     let built = build_message(rng);
-    let off_link = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+    let off_link = Sender {
+        addr: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
+        port: PORT,
+        on_link: false,
+    };
     let now = Duration64::from_nanos(millis.saturating_mul(1_000_000));
     assert!(engine
-        .on_message(now, &built, off_link, PORT, &mut rand, &mut buf)
+        .on_message(now, &built, off_link, &mut rand, &mut buf)
         .is_none());
     assert_eq!(engine.cache().len(), before);
     assert_eq!(engine.next_deadline(), deadline_before);

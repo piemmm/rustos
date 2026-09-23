@@ -309,7 +309,11 @@ sockets slow every other principal's traffic. The indices are keyed with
 the process's SipHash key, since a peer chooses the address and port half
 of every connection key and an unkeyed hash would be collision-floodable. A datagram socket demultiplexes each inbound
 `StackEvent::UdpDatagram` to its bound socket and delivers a
-`SocketDatagram`; a socket bound to the wildcard address (or to a broadcast
+`SocketDatagram` naming the logical interface it arrived on (a bond, never the
+member that carried it) and the stack's verdict on whether the source is on
+that interface's link — link-local, or reached by a route with no gateway —
+which a link-scoped protocol such as multicast DNS takes rather than keeping a
+copy of the prefixes that goes stale. A socket bound to the wildcard address (or to a broadcast
 address) receives IPv4 broadcast on its port, and after every socket
 operation the service republishes the set of bound IPv4 datagram ports to
 every interface engine, which is what admits broadcast to those ports
@@ -374,6 +378,19 @@ grant the shared frame-ring region each channel client owns),
 *enforces* `CAP_NET_ADMIN` against its callers and never holds it;
 the administrator account ceiling — and the device manager, which
 makes the `BindDriver` call — carries it.
+
+## Per-boot secrets
+
+Before binding either endpoint the service draws its per-boot secrets from
+the kernel CSPRNG: the HMAC-SHA256 SYN-cookie key (held in a buffer wiped on
+drop), one generator ephemeral ports, initial sequence numbers, and IPv4
+identification seeds are drawn from, and the process hash key. Each
+interface's DHCPv4 client and RFC 8981 address source gets its own generator
+forked from that one, with no further kernel draw. A kernel that cannot
+supply them — a reserve that never seeded — makes the service exit with
+`SERVICE_UNAVAILABLE` (`16_028`) and its reason rather than serve
+predictable sequence numbers, cookies, ports, or identifiers; every other
+start-up refusal is recorded under the same id with its own reason.
 
 ## Crash containment
 

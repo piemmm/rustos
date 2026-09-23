@@ -303,6 +303,11 @@ keeps the picture correct at every size.
   tile's own content is drawn on the shared design grid, of which the whole
   grid is one tile, so a repeat is rendered by the same `draw_artwork` walk
   as any other drawing.
+- **A tile the renderer cannot size paints nothing.** The renderer sizes a
+  tile through the inverse of `to_tile`, under `Affine::invert`'s absolute
+  determinant floor, so a placement magnified until that inverse reads as
+  collapsed is treated as a collapsed one: the decoder resolves it to no
+  paint rather than admitting artwork the renderer would refuse outright.
 - **The tile buffer is the clip.** A surface writes nothing outside itself,
   so confining the content to the tile needs no mask. That is the
   `overflow: hidden` a pattern is drawn under.

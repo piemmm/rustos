@@ -703,7 +703,8 @@ tairix/
 │   │   ├── session/     # Desktop session glue (theme + taskbar model).
 │   │   └── switchboard/ # System-overview monitor service (tray feed).
 │   ├── net/             # Userland networking services.
-│   │   └── netstack/    # The dual-stack network service (IPv4/IPv6/TCP/UDP).
+│   │   ├── netstack/    # The dual-stack network service (IPv4/IPv6/TCP/UDP).
+│   │   └── discoveryd/  # Link-local service discovery (mDNS / DNS-SD).
 │   ├── apps/            # Default apps. Each app is its own crate.
 │   └── games/           # Games. A leaf subtree: its crates compose each other
 │       │                #   and `lib/*`, and NOTHING outside it may depend on

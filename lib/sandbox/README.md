@@ -7,12 +7,13 @@ process (`docs/src/security/sandbox.md`). The kernel primitive — the
 `SPAWN_FLAG_SANDBOX` spawn mode with its empty capability record and closed
 syscall allow-list — makes such a process *exist*; this crate is the one
 user-space seam that makes it *usable*: typed paths from a calling program
-to a sandboxed worker, with crash containment and stable log events. Two
-shapes, because a parse and a protocol are different jobs — a one-shot
-request/reply path whose worker is replaced after a crash, and a duplex
-long-lived session whose worker is not, because it held the connection's
-state. Every program that sandboxes untrusted work imports this seam; a
-second per-app copy is forbidden.
+to a sandboxed worker, with crash containment and stable log events. Three
+shapes, because a parse, a connection, and a service are different jobs — a
+one-shot request/reply path whose worker is replaced after a crash, a duplex
+session whose worker is not, because it held the connection's state, and a
+supervised duplex session whose worker is, because its owner holds the state
+that matters and hands it to each replacement. Every program that sandboxes
+untrusted work imports this seam; a second per-app copy is forbidden.
 
 ## What it provides
 
@@ -47,8 +48,23 @@ second per-app copy is forbidden.
   the kernel's allow-list leaves the pipe as the worker's only wake
   source, so `serve_session` may use the ordinary blocking `Channel` while
   the parent's two readiness legs guarantee it is always woken — which is
-  why `WaitSourceKind::StreamRoom` exists. `plans/SSH.md` §1.1 is the
+  why `WaitSourceKind::StreamRoom` exists. `recv` lends each frame in
+  place, so taking one never allocates and an event loop is never left
+  holding a frame it has no memory to take. `plans/SSH.md` §1.1 is the
   first consumer; the seam is protocol-agnostic.
+- **The supervised session** (`supervise`): the duplex seam for a worker
+  that serves a *service* rather than one connection, so a failed one is
+  replaced. `SupervisedSession` starts each worker through a
+  `SessionLauncher` and reports each start as a new generation: the owner
+  drops what it derived from the last worker and sends the new one what it
+  needs. Replacement is paced by `tairix_util::retry::RestartPacer` — 100 ms,
+  doubling to 30 s, forgotten after 30 s of stable service — so a worker
+  that crashes on every input cannot turn its owner into a respawn loop. A
+  worker that ends its stream has failed, since a supervised worker serves
+  until its owner stops it, and a frame the owner cannot believe is
+  `condemn`ed exactly as a framing violation. Every failure is reaped and
+  logged once as `EventId(6000)`; a refused launch is `EventId(6001)`.
+  `discoveryd` is the first consumer.
 - **The decode service** (`decode`): the first consumers behind the seam —
   executable-container summaries through `tairix-binfmt` and per-window
   instruction disassembly through `tairix-disasm`, with a bounded,
@@ -153,7 +169,10 @@ second per-app copy is forbidden.
   kernel sandbox allow-list admits. `RtSessionChannel` is the duplex
   transport over that same spawn, through one shared
   pipe-pair-and-attach path, and reports the two descriptor numbers its
-  owner registers on a wait-set.
+  owner registers on a wait-set. `RtSessionLauncher` starts supervised
+  workers the same way, and `SessionMembers` keeps a session's two
+  descriptors registered on the owner's wait-set exactly while the session
+  wants them, across every generation's new pipe pair.
 
 ## Security posture
 
@@ -166,14 +185,15 @@ second per-app copy is forbidden.
 - Fuzzed: `fuzz_sandbox` (the decode, helpdoc, and imagerender service
   request decoders — icon and wallpaper alike — the caller-side reply
   decoders/validators, and the session seam's inbound codec over a hostile
-  worker's byte stream) is enrolled in `cargo xtask fuzz`.
+  worker's byte stream) is enrolled in `cargo xtask fuzz`; `fuzz_discoveryd`
+  drives a supervised session against a hostile worker.
 
 ## Design
 
-- `no_std` + `alloc`; `unsafe` only in the `program`-feature transport's
-  syscall marshalling (none in the protocol/seam core).
-- Host-testable end to end: the `Launcher`/`Channel` seams take in-process
-  fakes exactly as the `Fs`/`Tty` seams do elsewhere.
+- `no_std` + `alloc`, and `forbid(unsafe_code)` throughout: the `program`
+  transport reaches the kernel only through `tairix-rt`'s safe wrappers.
+- Host-testable end to end: the `Launcher`/`SessionLauncher`/`Channel` seams
+  take in-process fakes exactly as the `Fs`/`Tty` seams do elsewhere.
 
 ## Stability
 

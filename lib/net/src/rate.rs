@@ -28,7 +28,9 @@
 //! larger machine outgrows, so they are deliberately constant.
 
 use tairix_abi::time::{Duration64, NANOS_PER_SEC};
+use tairix_inline::ArrayVec;
 
+use crate::addr::IpAddr;
 use crate::timeutil::nanos;
 
 /// The monotonic per-interface counters a throughput rate is derived from.
@@ -301,6 +303,84 @@ impl TokenBucket {
         } else {
             false
         }
+    }
+}
+
+/// Token buckets for the peers seen most recently, beneath one bucket they
+/// all share.
+///
+/// Each peer is held to its own rate, and the shared bucket bounds what all
+/// of them together may draw — the backstop against a sender that rotates
+/// its source address to earn fresh per-peer budgets. A peer past its own
+/// budget is refused *before* the shared bucket is charged, so one sender at
+/// its limit cannot spend the budget every other peer relies on. A peer
+/// within its own budget that the shared bucket then refuses has still spent
+/// its token: congestion costs every peer, never only the quiet ones.
+///
+/// `N` peers are tracked, and a new one takes the slot of the longest-quiet.
+/// Eviction can only hand a returning peer a fresh budget, never cost it one,
+/// and the shared bucket bounds what a fresh budget is worth.
+#[derive(Clone, Debug)]
+pub struct PeerBudgets<const N: usize> {
+    peers: ArrayVec<TrackedPeer, N>,
+    shared: TokenBucket,
+    peer_burst: u32,
+    peer_rate: u32,
+}
+
+#[derive(Clone, Debug)]
+struct TrackedPeer {
+    addr: IpAddr,
+    bucket: TokenBucket,
+    last_used: u128,
+}
+
+impl<const N: usize> PeerBudgets<N> {
+    /// Hold each peer to bursts of `peer_burst` events refilled at
+    /// `peer_rate` per second, and all peers together to `shared_burst` at
+    /// `shared_rate`.
+    #[must_use]
+    pub fn new(peer_burst: u32, peer_rate: u32, shared_burst: u32, shared_rate: u32) -> Self {
+        const {
+            assert!(N > 0, "a peer budget must track at least one peer");
+        }
+        Self {
+            peers: ArrayVec::new(),
+            shared: TokenBucket::new(shared_burst, shared_rate),
+            peer_burst,
+            peer_rate,
+        }
+    }
+
+    /// Charge one event from `peer` at `now`; `false` means suppress it.
+    pub fn allow(&mut self, now: Duration64, peer: IpAddr) -> bool {
+        let index = match self.peers.iter().position(|entry| entry.addr == peer) {
+            Some(index) => index,
+            None => self.track(peer),
+        };
+        let entry = &mut self.peers[index];
+        entry.last_used = nanos(now);
+        entry.bucket.allow(now) && self.shared.allow(now)
+    }
+
+    /// Start tracking `peer` with a full budget, returning its slot.
+    fn track(&mut self, peer: IpAddr) -> usize {
+        let entry = TrackedPeer {
+            addr: peer,
+            bucket: TokenBucket::new(self.peer_burst, self.peer_rate),
+            last_used: 0,
+        };
+        if self.peers.try_push(entry.clone()).is_ok() {
+            return self.peers.len() - 1;
+        }
+        let quietest = self
+            .peers
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, tracked)| tracked.last_used)
+            .map_or(0, |(index, _)| index);
+        self.peers[quietest] = entry;
+        quietest
     }
 }
 

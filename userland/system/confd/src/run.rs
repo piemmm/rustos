@@ -41,7 +41,6 @@ mod program {
 
     use tairix_abi::appdata_ipc::{APPDATA_ENDPOINT, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST};
     use tairix_abi::fs::{DirEntries, OpenFlags};
-    use tairix_abi::random::RandomFlags;
     use tairix_abi::{BootId, Errno, Origin, ProcId, UnlinkFlags, ORIGIN_WIRE_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_confd::events::{ORIGIN_UNREADABLE, SERVICE_READY, SERVICE_UNAVAILABLE};
@@ -93,16 +92,7 @@ mod program {
 
     impl Entropy for RealEntropy {
         fn fill(&mut self, out: &mut [u8]) -> Result<(), Errno> {
-            let mut done = 0usize;
-            while done < out.len() {
-                let drawn = tairix_rt::random_get(&mut out[done..], RandomFlags::empty())
-                    .map_err(Errno::from_syscall)?;
-                if drawn == 0 {
-                    return Err(Errno::EntropyNotReady);
-                }
-                done += drawn;
-            }
-            Ok(())
+            tairix_rt::random_fill(out)
         }
     }
 

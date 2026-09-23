@@ -59,14 +59,13 @@ mod program {
     use tairix_abi::rtc_ipc::{self, RtcOp, RtcReading, RTC_ENDPOINT};
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{
-        Errno, Origin, RandomFlags, WallClockReading, WallTimeState, MAX_TIME_SERVERS,
-    };
+    use tairix_abi::{Errno, WallClockReading, WallTimeState, MAX_TIME_SERVERS};
     use tairix_log::{Event, EventId, Level};
     use tairix_net::addr::IpAddr;
     use tairix_net::ntp::PORT;
     use tairix_procinfo::{IpcTransport, WalkStep};
     use tairix_resolver::RtDnsTransport;
+    use tairix_rng::{FastRng, RandU64};
     use tairix_rt::LogSink;
     use tairix_sandbox::host::ParserSandbox;
     use tairix_sandbox::rt::{worker_role, RtLauncher};
@@ -83,17 +82,11 @@ mod program {
     };
     use tairix_util::retry::RetryLadder;
 
-    /// Exit code when the reactor could not be armed: the delivery port could
-    /// not be bound, or the wait-set could not be created or armed. A
-    /// reserved, fail-closed value — the service exits rather than degrading
-    /// into a poll, and PID 1 relaunches it.
-    const EXIT_REACTOR_UNAVAILABLE: i32 = 70;
-
-    /// The service's delivery-port endpoint id — an app-local, unrestricted
-    /// well-known value (not a reserved kernel id), so binding it needs no
-    /// capability. The stack posts this socket's inbound datagrams here.
-    /// (`0x_6e_74_70_71` spells "ntpq".)
-    const DELIVER_PORT: u64 = 0x_6e74_7071;
+    /// Exit code when the service cannot serve: its reactor could not be
+    /// armed, or the kernel CSPRNG cannot key its nonces. The reason is
+    /// recorded first; the service exits rather than degrading into a poll or
+    /// a predictable nonce, and PID 1 relaunches it.
+    const EXIT_UNAVAILABLE: i32 = 70;
 
     /// Delivery-port mailbox depth. One request is in flight at a time, but a
     /// late reply from a previous transaction can still be arriving; this
@@ -223,6 +216,8 @@ mod program {
     struct RtTransport {
         servers: Vec<ServerEntry>,
         dns: Option<RtDnsTransport>,
+        /// The process-private port the stack delivers replies to.
+        deliver: u64,
         v4: Option<SocketId>,
         v6: Option<SocketId>,
     }
@@ -239,7 +234,7 @@ mod program {
         /// A network-supplied server arrives as an address and is entered
         /// already resolved, so a machine whose only DNS advice would have
         /// come from the same lease never needs a resolver to keep time.
-        fn new(servers: &[TimeServer]) -> Self {
+        fn new(servers: &[TimeServer], deliver: u64) -> Self {
             let servers = servers
                 .iter()
                 .take(MAX_TIME_SERVERS)
@@ -251,6 +246,7 @@ mod program {
             Self {
                 servers,
                 dns: None,
+                deliver,
                 v4: None,
                 v6: None,
             }
@@ -289,7 +285,7 @@ mod program {
             if let Some(socket) = *cached {
                 return Ok(socket);
             }
-            let socket = tairix_rt::net::socket(family, DELIVER_PORT)?;
+            let socket = tairix_rt::net::socket(family, self.deliver)?;
             // A local port of 0 asks the stack for a CSPRNG-drawn ephemeral
             // port, widening an off-path spoofer's search space beyond the
             // nonce alone.
@@ -328,15 +324,6 @@ mod program {
                 let _ = tairix_rt::net::close(socket);
             }
         }
-    }
-
-    /// One fresh CSPRNG word. Every nonce and every jitter draw comes from
-    /// the kernel random subsystem — never a counter or a clock reading, which
-    /// would hand an off-path attacker a predictable target.
-    fn entropy() -> u64 {
-        let mut bytes = [0u8; 8];
-        let _ = tairix_rt::random_get(&mut bytes, RandomFlags::empty());
-        u64::from_le_bytes(bytes)
     }
 
     /// Record a start-up or reactor outcome.
@@ -421,19 +408,22 @@ mod program {
         Some(soonest.saturating_sub(now))
     }
 
-    /// Bind the delivery port and arm the reactor's wait-set over it.
+    /// Bind the delivery port and arm the reactor's wait-set over it,
+    /// returning the set and the port.
     ///
     /// [`None`] once the failure has been recorded: the service exits rather
     /// than degrading into a poll, and PID 1 relaunches it.
-    fn arm_reactor() -> Option<u64> {
-        if tairix_rt::port_bind(DELIVER_PORT, SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY) < 0 {
+    fn arm_reactor() -> Option<(u64, u64)> {
+        let Ok(deliver) =
+            tairix_rt::bind_private_port(SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY)
+        else {
             record(
                 SERVICE_UNAVAILABLE,
                 Level::Warn,
                 "timed: the delivery port could not be bound",
             );
             return None;
-        }
+        };
         let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
             record(
                 SERVICE_UNAVAILABLE,
@@ -446,7 +436,7 @@ mod program {
             set,
             WaitSetOp::Add,
             WaitSourceKind::Port,
-            DELIVER_PORT,
+            deliver,
             DELIVER_TOKEN,
         ) != 0
         {
@@ -457,7 +447,7 @@ mod program {
             );
             return None;
         }
-        Some(set)
+        Some((set, deliver))
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
@@ -471,8 +461,19 @@ mod program {
             return 0;
         }
 
-        let Some(set) = arm_reactor() else {
-            return EXIT_REACTOR_UNAVAILABLE;
+        // Every nonce and jitter draw comes from this generator, keyed from
+        // the kernel CSPRNG — never a counter or a clock reading, which would
+        // hand an off-path attacker a predictable target.
+        let Ok(mut rng) = <FastRng>::keyed_by(tairix_rt::random_fill) else {
+            record(
+                SERVICE_UNAVAILABLE,
+                Level::Warn,
+                "timed: the kernel random source cannot key the request nonces",
+            );
+            return EXIT_UNAVAILABLE;
+        };
+        let Some((set, deliver)) = arm_reactor() else {
+            return EXIT_UNAVAILABLE;
         };
 
         // Built immediately, from whatever is knowable right now — which on a
@@ -489,27 +490,21 @@ mod program {
             CONFIG_RETRY_ATTEMPTS,
             selection.source == ServerSource::Configured,
         );
-        let build = |selection: &ServerSelection, refresh: Duration64| {
+        let build = |selection: &ServerSelection, refresh: Duration64, entropy: u64| {
             Timed::new(TimedConfig {
                 clock: RtClock,
                 rtc: RtRtc,
                 store: RtRecordStore,
-                transport: RtTransport::new(&selection.servers),
+                transport: RtTransport::new(&selection.servers, deliver),
                 sandbox: ParserSandbox::new(RtLauncher::own_binary(), LOG_SINK),
                 sink: LOG_SINK,
                 selection: selection.clone(),
                 refresh,
-                entropy: entropy(),
+                entropy,
             })
         };
-        let mut service = build(&selection, config.time_refresh.interval());
+        let mut service = build(&selection, config.time_refresh.interval(), rng.next_u64());
 
-        // The stack's kernel-attested origin, captured from the first
-        // datagram so every later one can be required to match it. The
-        // delivery port is otherwise an unauthenticated inbox: a datagram
-        // from any other sender is dropped (fail closed) before the engine
-        // ever sees it.
-        let mut stack: Option<Origin> = None;
         let mut scratch = vec![0u8; SocketDatagram::MAX_WIRE_LEN];
         let mut token = 0u64;
         loop {
@@ -526,23 +521,11 @@ mod program {
             let waited = tairix_rt::waitset_wait(set, timeout, &mut token);
             let woken = Duration64::from_nanos(tairix_rt::clock_get());
             if waited == 0 {
-                // A datagram is waiting. Drain the mailbox, authenticating
-                // each sender, then fall through to the deadline check. Each
-                // payload is copied out of the shared receive buffer before
-                // the engine is handed it, so the next drain can reuse it.
-                while let Ok((datagram, origin)) = tairix_rt::net::recv(DELIVER_PORT, &mut scratch)
-                {
-                    let bytes = match stack {
-                        // A datagram from any sender but the network stack is
-                        // dropped: the delivery port is otherwise an
-                        // unauthenticated inbox (fail closed).
-                        Some(known) if known != origin => continue,
-                        _ => {
-                            stack = Some(origin);
-                            datagram.payload.to_vec()
-                        }
-                    };
-                    service.on_datagram(woken, &bytes);
+                // A datagram is waiting. Drain what the stack delivered —
+                // the receive discards any other sender's post — then fall
+                // through to the deadline check.
+                while let Ok(datagram) = tairix_rt::net::recv(deliver, &mut scratch) {
+                    service.on_datagram(woken, datagram.payload);
                 }
             } else if Errno::from_syscall(waited) != Errno::TimedOut {
                 // A dead wait-set would degrade the loop into a busy poll;
@@ -552,7 +535,7 @@ mod program {
                     Level::Warn,
                     "timed: the reactor wait-set failed",
                 );
-                return EXIT_REACTOR_UNAVAILABLE;
+                return EXIT_UNAVAILABLE;
             }
 
             // The re-selection rung, if one is due: the encrypted root may
@@ -569,7 +552,7 @@ mod program {
                     let upgraded = next.source > selection.source;
                     if upgraded {
                         selection = next;
-                        service = build(&selection, config.time_refresh.interval());
+                        service = build(&selection, config.time_refresh.interval(), rng.next_u64());
                     }
                     if selection.source == ServerSource::Configured {
                         // The best tier there is: nothing further to look for.
@@ -590,7 +573,7 @@ mod program {
                 }
             }
 
-            service.poll(woken, entropy());
+            service.poll(woken, rng.next_u64());
         }
     }
 
