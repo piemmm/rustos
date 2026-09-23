@@ -9,10 +9,11 @@
 //! cannot exist without. A band offers Revert only where there is something
 //! to revert.
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_controls::{Button, ButtonAction, ControlRole, ControlState, FocusState};
+use tairix_controls::{paint_run, Button, ButtonAction, ControlRole, ControlState, FocusState};
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey};
@@ -48,17 +49,17 @@ pub(crate) enum Standing {
 }
 
 impl Standing {
-    /// The line the band shows.
-    fn line(&self) -> String {
+    /// The line the band shows, allocated only where it carries a count.
+    fn line(&self) -> Cow<'_, str> {
         match self {
-            Self::Offered => String::new(),
-            Self::Unchanged => String::from("No changes"),
-            Self::Changed(1) => String::from("1 change not applied"),
-            Self::Changed(n) => alloc::format!("{n} changes not applied"),
-            Self::Refusing(1) => String::from("1 value this cannot be saved with"),
-            Self::Refusing(n) => alloc::format!("{n} values this cannot be saved with"),
-            Self::Applied => String::from("Applied"),
-            Self::Refused(reason) => reason.clone(),
+            Self::Offered => Cow::Borrowed(""),
+            Self::Unchanged => Cow::Borrowed("No changes"),
+            Self::Changed(1) => Cow::Borrowed("1 change not applied"),
+            Self::Changed(n) => Cow::Owned(alloc::format!("{n} changes not applied")),
+            Self::Refusing(1) => Cow::Borrowed("1 value this cannot be saved with"),
+            Self::Refusing(n) => Cow::Owned(alloc::format!("{n} values this cannot be saved with")),
+            Self::Applied => Cow::Borrowed("Applied"),
+            Self::Refused(reason) => Cow::Borrowed(reason),
         }
     }
 
@@ -243,27 +244,27 @@ impl Footer {
         let avail = u32::try_from(limit.saturating_sub(bounds.left().saturating_add(to_i32(gap))))
             .unwrap_or(0);
         let line = self.standing.line();
-        let fitted = font.truncate_to_width(&line, avail);
         let baseline = bounds
             .top()
             .saturating_add(to_i32(bounds.height.saturating_sub(font.line_height()) / 2));
-        font.draw_text(
+        paint_run(
             surface,
-            bounds.left().saturating_add(to_i32(gap)),
-            baseline,
-            fitted,
+            font,
+            font.elide_to_width(&line, avail),
+            (bounds.left().saturating_add(to_i32(gap)), baseline),
             Color::from(if self.standing.is_refusal() {
                 palette.danger
             } else {
                 palette.on_surface_muted
             }),
+            None,
         );
     }
 
     /// What the band is saying, for a test that asks what a reader would
     /// read there.
     #[cfg(test)]
-    pub(crate) fn line(&self) -> String {
+    pub(crate) fn line(&self) -> Cow<'_, str> {
         self.standing.line()
     }
 
@@ -319,5 +320,32 @@ const fn action_of(index: usize, acting: usize) -> FooterAction {
         FooterAction::Apply
     } else {
         FooterAction::Revert
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::String;
+
+    use tairix_controls::testkit::marks_elision;
+    use tairix_geometry::{Rect, Scale};
+    use tairix_raster::Surface;
+
+    use super::{Footer, Standing};
+
+    /// A refusal too long for the room beside the band's commands is elided
+    /// with the shared mark rather than cut where the room ran out: it is the
+    /// store's text, and a reader must be told there is more of it.
+    #[test]
+    fn a_refusal_too_long_for_the_band_is_elided_with_the_mark() {
+        let theme = crate::test_support::theme();
+        let bounds = Rect::new(0, 0, 420, Footer::measured_height(Scale::ONE, &theme));
+        assert!(marks_elision(|reason| {
+            let mut footer = Footer::staged();
+            footer.state(Standing::Refused(String::from(reason)));
+            let mut surface = Surface::new(bounds.width, bounds.height).expect("surface");
+            footer.render(&mut surface, bounds, Scale::ONE, &theme);
+            surface
+        }));
     }
 }

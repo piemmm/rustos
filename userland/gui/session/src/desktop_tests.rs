@@ -617,6 +617,30 @@ fn a_file_no_application_opens_is_refused_with_its_reason_and_does_nothing_else(
     assert_eq!(desktop.selected(), Some(0), "the icon stays selected");
 }
 
+/// The system menu's appearance rows ask for the settings in force with only
+/// the appearance moved, so they persist through the one adopt path rather
+/// than re-theming a desktop the stored document still calls the other one.
+#[test]
+fn choosing_an_appearance_asks_to_adopt_the_settings_in_force_with_it() {
+    let mut desktop = desktop_of(vec![]);
+    let in_force = DesktopSettings {
+        contrast: Contrast::High,
+        density: Density::Comfortable,
+        ..DesktopSettings::default()
+    };
+    assert!(desktop.apply_settings(in_force.clone()).is_some());
+    for appearance in Appearance::ALL {
+        assert_eq!(
+            desktop.appearance_to(appearance),
+            DesktopAction::AdoptSettings(DesktopSettings {
+                appearance,
+                ..in_force.clone()
+            }),
+            "{appearance:?}"
+        );
+    }
+}
+
 #[test]
 fn a_shortcut_is_named_in_the_desktop_folder_and_stores_its_target_verbatim() {
     let desktop = desktop_of(vec![]);

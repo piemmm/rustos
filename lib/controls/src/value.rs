@@ -28,9 +28,9 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
-    clamp_permille, inset, measured_thickness, paint_bead, paint_plate, plate_border,
+    clamp_permille, inset, measured_thickness, paint_bead, paint_plate, paint_run, plate_border,
     progress_thickness, resolve_bead, resolve_frame, resolve_mark, resolve_rail, role_font,
-    surface_rect, to_i32, withheld, PlateStyle, FULL,
+    run_width, surface_rect, to_i32, withheld, PlateStyle, FULL,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState,
@@ -666,22 +666,24 @@ impl Progress {
             return;
         }
         let palette = theme.palette();
-        let (text, color): (String, Color) = if failed {
+        let percent;
+        let (text, color) = if failed {
             match &self.label {
-                Some(reason) => (reason.clone(), Color::from(palette.recovery)),
+                Some(reason) => (reason.as_str(), Color::from(palette.recovery)),
                 None => return,
             }
         } else if let ActivityState::Progress(v) = self.state.activity {
             let pct = ((u32::from(v.permille()) + 5) / 10).min(100);
-            (format!("{pct}%"), Color::from(palette.on_surface))
+            percent = format!("{pct}%");
+            (percent.as_str(), Color::from(palette.on_surface))
         } else {
             match &self.label {
-                Some(note) => (note.clone(), Color::from(palette.on_surface)),
+                Some(note) => (note.as_str(), Color::from(palette.on_surface)),
                 None => return,
             }
         };
-        let fitted = font.truncate_to_width(&text, avail);
-        let width = font.text_width(fitted);
+        let run = font.elide_to_width(text, avail);
+        let width = run_width(font, run);
         let glyph_h = font.glyph_height();
         let cx = to_i32(x) + to_i32(w) / 2;
         let below = band_y + band_h;
@@ -691,6 +693,13 @@ impl Progress {
         } else {
             to_i32(band_y) + (to_i32(band_h) - to_i32(glyph_h)) / 2
         };
-        font.draw_text(surface, cx - to_i32(width) / 2, text_y, fitted, color);
+        paint_run(
+            surface,
+            font,
+            run,
+            (cx - to_i32(width) / 2, text_y),
+            color,
+            None,
+        );
     }
 }

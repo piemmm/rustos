@@ -265,6 +265,10 @@ tairix-terminal = { path = "../../userland/apps/terminal", version = "=0.0.0" }
 # desktop places the viewer's window from the viewer's own declaration rather
 # than a hand-copied literal.
 tairix-view = { path = "../../userland/apps/view", version = "=0.0.0", default-features = false }
+# The Settings shell, so the Settings vertical aims each press at the strip row,
+# the control and the choice the shell itself hit-tests, and measures its
+# window from the application's own size and sizing.
+tairix-settings = { path = "../../userland/apps/settings", version = "=0.0.0" }
 tairix-geometry = { path = "../../lib/geometry", version = "=0.0.0" }
 # The shared window furniture: a served window's screen footprint is its
 # client surface grown by the band the window manager reserves around it, so
@@ -360,6 +364,9 @@ tairix-test-menu-qemu-aarch64 = { path = "../../tests/integration/menu_qemu_aarc
 # The elevated Date & Time vertical's shared interaction contract (the
 # application the elevate path starts and the window count the guest latches).
 tairix-test-datetime-elevate-qemu-aarch64 = { path = "../../tests/integration/datetime_elevate_qemu_aarch64", version = "=0.0.0" }
+# The Settings vertical's shared contract: the bundle the guest attributes the
+# launch to, which a unit test pins to the one the capsule's row starts.
+tairix-test-settings-qemu-aarch64 = { path = "../../tests/integration/settings_qemu_aarch64", version = "=0.0.0" }
 # The desktop-under-pressure vertical's shared contract: the count of windows
 # the pointer script opens, which is also the occurrence the last screendump
 # is gated on, so the script and the guest's PASS gate read one definition.

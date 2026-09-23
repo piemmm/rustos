@@ -163,6 +163,15 @@ A foreign read answers the **committed** document, never the publisher's staged
 edits: a published value is what every other application sees, and a reader
 must not act on one that may never be published.
 
+The desktop session's own settings — the appearance axes, the scale, the
+pointer pair and the pinboard keys, whose registry is
+[`lib/wallpaper`](../lib/wallpaper.md#the-registry) — live in its published
+scope, under the publisher `os.tairix.desktop`. That is how
+[Settings](../desktop/settings.md) shows what the desktop is drawn with without
+holding a filesystem capability: it reads the committed document by naming the
+publisher, and every change it asks for is written by the session, never by
+Settings itself.
+
 `Blobs/<name>` and `Temp/` under `Library/` are the **bulk** scopes — see
 [The bulk scopes](#the-bulk-scopes) below. Neither is a document at all.
 

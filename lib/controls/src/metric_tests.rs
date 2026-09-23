@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconKind;
-use tairix_raster::{Color, Pixel, Surface};
+use tairix_raster::{Pixel, Surface};
 use tairix_theme::{SignalRole, TextRole, Theme};
 
 use crate::chart::Chart;
@@ -32,18 +32,10 @@ use crate::metric::{
     MetricTile, StatusPill, MAX_COMPOSITION_SEGMENTS,
 };
 use crate::state::{MeterValue, PressureKind, PressureState, ProgressValue};
-use crate::testkit::{control_font, high_contrast, text_ladder};
+use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul, text_ladder};
 
 fn font() -> BitmapFont {
     control_font(&Theme::dark(), Scale::ONE)
-}
-
-fn premul(rgba: tairix_theme::Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
 }
 
 /// Whether any pixel in rows `[y_from, y_to)` matches `want`.
@@ -1612,4 +1604,69 @@ fn a_degenerate_bar_draws_nothing_outside_itself() {
     let mut one = Surface::new(1, 1).expect("surface");
     composition.render(&mut one, Rect::new(0, 0, 1, 1), Scale::ONE, &theme);
     assert_eq!(one.pixels().len(), 1);
+}
+
+/// Every line of a tile — its label, value, unit and detail, stacked or inline
+/// — a pill's label, and a composition key's label and amount are elided with
+/// the shared mark when too long for their room rather than cut where it ran
+/// out. A cut figure is worse than a cut word: it reads as a different number.
+#[test]
+fn a_text_too_long_for_its_room_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    let kind = PressureKind::Cpu;
+    let tallest = MetricTile::new("L", "1", kind)
+        .with_unit("u")
+        .with_detail("d")
+        .measured_height(Scale::ONE, &theme);
+    let tile = |tile: MetricTile| tile_surface_at(&tile, &theme, Scale::ONE, 220, tallest);
+    for layout in [MetricLayout::Stacked, MetricLayout::Inline] {
+        let laid = |t: MetricTile| tile(t.with_layout(layout));
+        assert!(
+            marks_elision(|text| laid(MetricTile::new(text, "", kind))),
+            "a {layout:?} label"
+        );
+        assert!(
+            marks_elision(|text| laid(MetricTile::new("", text, kind))),
+            "a {layout:?} value"
+        );
+        assert!(
+            marks_elision(|text| laid(MetricTile::new("", "", kind).with_unit(text))),
+            "a {layout:?} unit"
+        );
+    }
+    assert!(
+        marks_elision(|text| tile(MetricTile::new("", "", kind).with_detail(text))),
+        "a detail line"
+    );
+
+    let pill_h = StatusPill::measured_height(Scale::ONE, &theme);
+    assert!(
+        marks_elision(|text| pill_surface_at(
+            &StatusPill::new(text),
+            &theme,
+            Scale::ONE,
+            80,
+            pill_h
+        )),
+        "a pill's label"
+    );
+
+    let key = |label: &str, amount: &str| {
+        let bar = CompositionBar::new(
+            PressureKind::Memory,
+            alloc::vec![CompositionSegment::new(label, amount, 1000)],
+        )
+        .expect("one part is the whole");
+        let h = CompositionBar::new(
+            PressureKind::Memory,
+            alloc::vec![CompositionSegment::new("", "", 1000)],
+        )
+        .expect("one part is the whole")
+        .measured_height(220, Scale::ONE, &theme);
+        let mut surface = Surface::new(220, h).expect("surface");
+        bar.render(&mut surface, Rect::new(0, 0, 220, h), Scale::ONE, &theme);
+        surface
+    };
+    assert!(marks_elision(|text| key(text, "")), "a key's label");
+    assert!(marks_elision(|text| key("", text)), "a key's amount");
 }

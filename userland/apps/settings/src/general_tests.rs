@@ -12,7 +12,9 @@ use alloc::vec::Vec;
 use tairix_abi::sysinfo::{SystemIdentity, Uptime};
 use tairix_abi::time::{Duration64, Time64, WallClockReading, WallTimeState};
 use tairix_geometry::{to_i32, Point, Scale};
+use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_raster::Surface;
 use tairix_sysconfig::{CacheMode, CacheSwitch, LoginType, SystemConfig};
 use tairix_wallpaper::DesktopSettings;
 
@@ -440,6 +442,36 @@ fn the_about_pane_states_every_reading_it_could_not_take() {
     // No processor was reported, so the pane says so rather than naming one.
     assert_eq!(measured[4], "not measured");
     assert_eq!(measured[5], "not measured");
+}
+
+/// A fact column paints its readings, not only its labels: two different
+/// readings of the same pane must reach different pixels, which they cannot
+/// while the plate is laid out with no slot for a reading to be drawn in.
+#[test]
+fn the_fact_panes_paint_their_readings() {
+    let theme = theme();
+    let paint = |pane: &str, facts: MachineFacts| {
+        let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
+        let mut sink = damage();
+        assert!(shell.go_to_pane(pane, WIDE, Scale::ONE, &theme, &mut sink));
+        shell.adopt_machine(facts);
+        shell.lay_out(WIDE, Scale::ONE, &theme);
+        let mut surface = Surface::new(WIDE.width, WIDE.height).expect("a surface");
+        shell.render(&mut surface, WIDE, Scale::ONE, &theme, &mut NoArtwork);
+        surface.pixels().to_vec()
+    };
+    let measured = MachineFacts {
+        memory_bytes: Some(2 << 30),
+        clock: Some(WallClockReading::UNSET),
+        ..MachineFacts::default()
+    };
+    for pane in ["about", "date-time"] {
+        let unmeasured = paint(pane, MachineFacts::default());
+        assert!(
+            unmeasured != paint(pane, measured.clone()),
+            "{pane} paints none of its readings"
+        );
+    }
 }
 
 #[test]

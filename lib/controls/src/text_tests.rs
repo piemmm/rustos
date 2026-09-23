@@ -20,12 +20,12 @@ use alloc::string::String;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
-use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_raster::{Pixel, Surface};
+use tairix_theme::Theme;
 
 use crate::damage::sink;
 use crate::state::{AuthorityState, ControlState, ValidationState};
-use crate::testkit::{control_font, high_contrast};
+use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul};
 use crate::text::{
     debug_buffer_identity, debug_bytes, debug_secret_cell_layout, debug_zeroize, zeroize_range,
     SearchField, TextAction, TextField,
@@ -36,10 +36,6 @@ const H: u32 = 28;
 
 fn font() -> BitmapFont {
     control_font(&Theme::dark(), Scale::ONE)
-}
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
 }
 
 fn bounds() -> Rect {
@@ -88,10 +84,6 @@ fn search_surface(field: &SearchField, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
     field.render(&mut surface, bounds(), Scale::ONE, theme);
     surface
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
 }
 
 /// Type a string into a focused, editable field a character at a time.
@@ -1278,4 +1270,19 @@ fn a_secret_field_reports_its_edits() {
     let mut damage = sink();
     field.on_key(Key::Char('p'), NONE_MODS, bounds(), &mut damage);
     assert_eq!(damage.bounds(), bounds(), "a bead was added");
+}
+
+/// A placeholder too long for the field is elided with the shared mark rather
+/// than cut where the field ran out.
+#[test]
+fn a_placeholder_too_long_for_the_field_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    assert!(
+        marks_elision(|text| field_surface(&TextField::new().with_placeholder(text), &theme)),
+        "a text field"
+    );
+    assert!(
+        marks_elision(|text| search_surface(&SearchField::new().with_placeholder(text), &theme)),
+        "a search field"
+    );
 }

@@ -22,6 +22,9 @@
 /// the verticals emulate (16384 × 16384).
 const MAX_PIXELS: u64 = 16_384 * 16_384;
 
+/// One pixel of a dump, as `(r, g, b)`.
+pub type Rgb = (u8, u8, u8);
+
 /// A decoded RGB image.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Image {
@@ -39,7 +42,7 @@ impl Image {
     /// # Errors
     ///
     /// A message naming the out-of-bounds coordinate.
-    pub fn pixel(&self, x: u32, y: u32) -> Result<(u8, u8, u8), String> {
+    pub fn pixel(&self, x: u32, y: u32) -> Result<Rgb, String> {
         if x >= self.width || y >= self.height {
             return Err(format!(
                 "pixel ({x}, {y}) out of bounds for {}x{}",

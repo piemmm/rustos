@@ -647,10 +647,15 @@ authority for any of them:
   one launch path rather than inventing a second. The row is actionable only
   while the terminal bundle resolves in the catalog the session handed the
   bar, so choosing it can never ask for a program that is not installed.
-- `SetAppearance { appearance }` — the light/dark switch: re-theme the bar
-  model, bring the desktop background in step, repaint, and redraw a prompt
-  showing behind the menu, so nothing on screen is left in the appearance
-  just left behind.
+- `SetAppearance { appearance }` — the light/dark switch. It is a change to
+  the settings in force, so it asks for the desktop's settings with only the
+  appearance moved (`Desktop::appearance_to`) and takes the one
+  persist-then-adopt path every settings change takes: the choice is
+  published to the store first and re-themes the desktop when the store
+  answers, so it outlives the session and the published document never names
+  one appearance while the screen shows the other. A prompt standing behind
+  the menu is repainted in the look now in force, as it is after any change
+  of look.
 - `LockSession` — raise the [screen lock](#the-screen-lock). Any unanswered
   prompt is taken down first: a question must not sit behind a lock where
   the user cannot see what they would be agreeing to. A lock that could not
@@ -696,7 +701,8 @@ is going down. See [Switchboard monitor service](./switchboard.md#power-transiti
 
 `set_theme(ThemeId)` and `register_theme(Theme)` are the session's
 programmatic theme controls; the interactive light/dark switch is the
-`SetAppearance` outcome above, which resolves through the same path.
+`SetAppearance` outcome above, which is adopted through the settings path and
+so reaches the registry through `adopt_appearance`.
 `set_theme` switches the registry and re-themes the taskbar in place; it
 fails closed with `ThemeError::UnknownTheme` on an unregistered id, and
 `register_theme` with `ThemeError::DuplicateId`, each leaving the active
@@ -1306,6 +1312,39 @@ a window lands in is a function of how many opened before it, so a gesture into
 the third window is aimed from a slot only a script that waited for the first
 two can name. The three-principal hand-over vertical
 ([apps](apps.md#rendering)) is built on exactly that.
+
+### And a later frame's: the window's new title on screen
+
+`WINDOW_SHOWN` speaks for a first frame only. `WINDOW_RETITLED` ("served
+window title on screen") is emitted, naming the window, after a frame carrying
+a new title the application gave a window already on screen reached the
+display. The title bar is the session's own furniture, so the session alone
+knows when a retitle is drawn. A retitle before the first frame, or before the
+frame that shows a released window afresh, is covered by that frame's own
+witness; a burst of retitles between two frames is one announcement; and a
+hidden window's retitle is announced by the frame that shows it again.
+
+Because an application's requests are served in order, a frame carrying its
+new title also carries everything it presented before asking for it. That is
+what makes the witness a later frame's: Settings retitles to the pane on show
+only after presenting that pane, so the Settings QEMU vertical gates each
+per-pane dump on it.
+
+### And the desktop's new look: the restyle on screen
+
+`DESKTOP_RESTYLED` ("desktop restyled on screen") is emitted, naming the
+appearance, after the first frame drawn in a changed look — appearance,
+contrast, density, motion or scale — reached the display. The session
+re-themes its own chrome in the frame it adopts the change in, so the witness
+speaks for the bar, the furniture and the backdrop and never for a served
+window, which its application redraws on its own time. A change made before
+the reveal is part of the desktop `DESKTOP_REVEALED` announced, so it is
+absorbed rather than announced twice.
+
+The look is also a generation the shell keeps (`style_generation`), which is
+how a surface that retains its pixels follows a change: the serve loop
+repaints a standing confirmation or credential prompt once per change, before
+the frame is presented, whichever path the change came in by.
 
 ### And the icon bar's two: a slot on screen, and the strip settled
 

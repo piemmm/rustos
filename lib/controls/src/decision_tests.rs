@@ -11,14 +11,14 @@ use alloc::vec;
 
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_raster::Surface;
+use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonContent};
 use crate::damage::sink;
 use crate::decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 use crate::state::{AuthorityState, ControlRole, ControlState};
-use crate::testkit::{high_contrast, text_ladder};
+use crate::testkit::{has_pixel, high_contrast, premul, region_has, text_ladder};
 
 fn scale2() -> Scale {
     Scale::from_percent(200).expect("valid scale")
@@ -26,20 +26,6 @@ fn scale2() -> Scale {
 
 fn iv(v: u32) -> i32 {
     i32::try_from(v).expect("fits in i32")
-}
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
-}
-
-fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) -> bool {
-    (xr.0..xr.1)
-        .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
-        .any(|(x, y)| surface.get(x, y) == Some(want))
 }
 
 fn moved(x: i32, y: i32) -> InputEvent {

@@ -5479,6 +5479,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-settings-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-confd",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-kernel-ipc",
+ "tairix-log",
+ "tairix-util",
+ "tairix-wallpaper",
+]
+
+[[package]]
 name = "tairix-test-signal"
 version = "0.0.0"
 dependencies = [
@@ -7001,6 +7019,7 @@ dependencies = [
  "tairix-raster",
  "tairix-reclaim",
  "tairix-sandbox",
+ "tairix-settings",
  "tairix-svg",
  "tairix-switchboard",
  "tairix-sysconfig",
@@ -7025,6 +7044,7 @@ dependencies = [
  "tairix-test-netstack-wire",
  "tairix-test-rng-soak",
  "tairix-test-rtc-fixture",
+ "tairix-test-settings-qemu-aarch64",
  "tairix-test-stalltrace",
  "tairix-test-svgtext",
  "tairix-test-tcpecho",

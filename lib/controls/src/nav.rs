@@ -37,8 +37,8 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
-    draw_outline, heavy_contrast, key_activation, paint_bead, paint_chevron, plate_border,
-    resolve_bead, role_font, surface_rect, to_i32, withheld, ChevronDir,
+    draw_outline, heavy_contrast, key_activation, paint_bead, paint_chevron, paint_run,
+    plate_border, resolve_bead, role_font, surface_rect, to_i32, withheld, ChevronDir,
 };
 use crate::state::{ControlState, FocusState, RenderInvariant};
 
@@ -611,11 +611,18 @@ impl Breadcrumb {
         let text = self.cell_label(placement.cell);
         let pad = Self::cell_pad(scale, theme);
         let avail = w.saturating_sub(pad.saturating_mul(2));
-        let fitted = font.truncate_to_width(text, avail);
         let glyph_h = font.glyph_height();
         let text_x = to_i32(x.saturating_add(pad));
         let text_y = to_i32(y) + (to_i32(h) - to_i32(glyph_h)).max(0) / 2;
-        font.draw_text(surface, text_x, text_y, fitted, Color::from(label_color));
+        let run = font.elide_to_width(text, avail);
+        paint_run(
+            surface,
+            font,
+            run,
+            (text_x, text_y),
+            Color::from(label_color),
+            None,
+        );
 
         if let Some((color, shape)) = resolve_bead(theme, state) {
             let border = plate_border(theme, scale);

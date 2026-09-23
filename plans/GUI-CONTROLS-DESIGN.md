@@ -926,8 +926,8 @@ a page:
 - **An entry's label leads and its reading trails on that same line**, and an
   optional bounded trend (§11.35) draws beneath — so a rail of devices is a
   live summary of everything it selects between, not just a list of names. The
-  reading keeps the room it needs and the label truncates first, exactly as a
-  MetricTile's inline layout does (§11.33).
+  reading keeps the room it needs and the label gives way first, elided with
+  the shared mark, exactly as a MetricTile's inline layout does (§11.33).
 - **Entries may carry a quiet group heading.** A heading is declared by the
   entry that *starts* the group, so it can never point at an entry that is not
   there. It draws with no plate, selects nothing, and hit-tests to nothing; a
@@ -987,8 +987,9 @@ a page:
   strip of glyphs costs a cache lookup per entry rather than re-resolving
   vector coverage every frame. Room is claimed in the order a reader needs
   it — the Signal Bead, then the disclosure chevron and the reading, then the
-  glyph, then the label, which is what truncates — so an entry too narrow for
-  its glyph keeps its name rather than becoming a nameless indent.
+  glyph, then the label, which is what gives way, elided with the shared mark
+  — so an entry too narrow for its glyph keeps its name rather than becoming a
+  nameless indent, and a cut name never reads as a complete one.
 - **A sidebar list may be two levels deep, and it is still one column.** An
   entry that holds pages of its own carries a trailing disclosure chevron
   stating *its own* posture (`Tab::with_disclosure`): down while its pages are
@@ -1363,8 +1364,8 @@ re-renders when any of them changes.
   history puts the chart in the slot the track would have taken.
 - A tile draws in one of two layouts: stacked, the default, with the label
   above the reading for a tile that owns a column of its own; or inline,
-  with the label leading and the reading (kept whole; the label truncates
-  first) trailing on one line, for a stack of readings scanned down a
+  with the label leading and the reading (kept whole; the label gives way
+  first, elided) trailing on one line, for a stack of readings scanned down a
   narrow column. Either way the optional detail line and instrument still
   span the tile's full width.
 - A tile is plated by default; an unplated tile draws no plate, rim, or
@@ -1653,7 +1654,8 @@ A column of label/value pairs at a shared row pitch: the label quiet on the
 left, the value emphasised on the right, optionally separated by hairline
 rules.
 
-- **The value keeps its measured width and the label truncates first.** The
+- **The value keeps its measured width and the label gives way first**,
+  elided with the shared mark like every identifier (§11A). The
   reading is what the reader came for, so a detail pane too narrow for both
   loses a word of description rather than a digit. This is the opposite of a
   ListRow (§11.13), where the name is the thing being read.

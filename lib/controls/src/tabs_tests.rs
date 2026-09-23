@@ -20,32 +20,18 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconKind, NoArtwork};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, SignalRole, TextRole, Theme};
+use tairix_raster::{Pixel, Surface};
+use tairix_theme::{SignalRole, TextRole, Theme};
 
 use crate::chart::{Chart, MAX_CHART_SAMPLES};
 use crate::damage::sink;
 use crate::state::{ActivityState, ControlState, SelectionState, ValidationState};
 use crate::tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
-use crate::testkit::high_contrast;
+use crate::testkit::{has_pixel, high_contrast, marks_elision, premul, region_has};
 
 const W: u32 = 240;
 const H: u32 = 28;
 const EACH: u32 = W / 3;
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
-}
-
-fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) -> bool {
-    (xr.0..xr.1)
-        .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
-        .any(|(x, y)| surface.get(x, y) == Some(want))
-}
 
 fn render(tabs: &Tabs, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
@@ -1549,6 +1535,43 @@ fn a_narrow_entry_truncates_its_label_before_its_reading() {
     assert!(
         untouched_outside(&surface, narrow, height),
         "neither the label nor the reading may run past the entry"
+    );
+}
+
+/// A text too long for its room is elided with the shared mark rather than
+/// cut where the room ran out, because a name stopped mid-word reads as a
+/// complete, different one.
+#[test]
+fn a_text_too_long_for_its_room_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    let vertical = |tab: Tab, h: u32| {
+        let tabs = Tabs::new(vec![tab]).with_orientation(TabsOrientation::Vertical);
+        render_in(&tabs, &theme, Scale::ONE, VW, h)
+    };
+    assert!(
+        marks_elision(|text| vertical(Tab::new(text), veach())),
+        "a sidebar label"
+    );
+    assert!(
+        marks_elision(|text| vertical(Tab::new("A").with_reading(text), veach())),
+        "a sidebar reading"
+    );
+    assert!(
+        marks_elision(|text| vertical(
+            Tab::new("A").with_group(text),
+            heading_band(&theme) + veach()
+        )),
+        "a group heading"
+    );
+    assert!(
+        marks_elision(|text| render_in(
+            &Tabs::new(vec![Tab::new(text)]),
+            &theme,
+            Scale::ONE,
+            EACH,
+            H
+        )),
+        "a tab label"
     );
 }
 

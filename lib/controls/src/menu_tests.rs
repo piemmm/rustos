@@ -11,8 +11,8 @@ use alloc::vec;
 
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_raster::{Color, Surface};
+use tairix_theme::Theme;
 
 use tairix_abi::window_ipc::{
     AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuReason, AppMenuRow,
@@ -26,25 +26,13 @@ use crate::menu::{
 };
 use crate::record::{Fact, FactList};
 use crate::state::{AuthorityState, ControlRole, ControlState};
-use crate::testkit::{control_font, high_contrast, text_ladder};
+use crate::testkit::{
+    control_font, has_pixel, high_contrast, marks_elision, premul, region_has, text_ladder,
+};
 
 const W: u32 = 200;
 const ROW_H: u32 = 28;
 const BORDER: u32 = 1;
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
-}
-
-fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) -> bool {
-    (xr.0..xr.1)
-        .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
-        .any(|(x, y)| surface.get(x, y) == Some(want))
-}
 
 /// A `u32` coordinate as an `i32` (test coordinates always fit).
 fn xi(v: u32) -> i32 {
@@ -1728,5 +1716,18 @@ fn a_refused_row_still_states_why_it_cannot_be_chosen() {
         refused_row("Paste", "").rows()[0].tip(),
         None,
         "a row that declared no reason has nothing to show"
+    );
+}
+
+/// A row's label, and its accelerator caption, are elided with the shared
+/// mark when too long for the row rather than cut where the row ran out.
+#[test]
+fn a_row_text_too_long_for_the_row_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    let drawn = |item: MenuItem| render(&Menu::new(vec![item]), &theme, BORDER * 2 + ROW_H);
+    assert!(marks_elision(|text| drawn(MenuItem::new(text))), "a label");
+    assert!(
+        marks_elision(|text| drawn(MenuItem::new("").with_shortcut(text))),
+        "an accelerator caption"
     );
 }

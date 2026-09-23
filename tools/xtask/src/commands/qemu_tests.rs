@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tairix_itest_harness::pie::PieArch;
+use tairix_qemu::screendump::Rgb;
 use tairix_qemu::{Outcome, ReservedSocket, Runner, Spec};
 
 use super::image_apps::AppStoreFile;
@@ -844,6 +845,25 @@ const AUTOLOAD_DESKTOP_REVEALED_MARKER: &str = tairix_desktop_session::DESKTOP_R
 /// screen yet — a click gated on either races that present and lands on
 /// whatever is behind it.
 const WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
+
+/// Serial marker a vertical gates on to know a served window's *later* frame
+/// is on screen: the session's own announcement that a frame carrying the
+/// window's new title reached the display.
+///
+/// [`WINDOW_SHOWN_MARKER`] speaks for a first frame only. An application that
+/// retitles after presenting what the title names makes this the witness for
+/// that content too: its requests are served in order, so the frame carrying
+/// the title carries everything it presented before asking for it.
+const WINDOW_RETITLED_MARKER: &str = tairix_desktop_session::WINDOW_RETITLED_MESSAGE;
+
+/// Serial marker a vertical gates a dump of the desktop's new look on: the
+/// session's own announcement that a frame drawn in a changed appearance
+/// reached the display.
+///
+/// It speaks for the session's own surfaces only — the bar, the furniture, the
+/// wallpaper — because each application redraws its own window for a new look
+/// on its own time.
+const DESKTOP_RESTYLED_MARKER: &str = tairix_desktop_session::DESKTOP_RESTYLED_MESSAGE;
 
 /// Serial marker a vertical gates a click on a *resident* application's
 /// icon-bar slot on: the session's own announcement that a frame carrying
@@ -8225,6 +8245,85 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
+    // `plans/NEW-DESKTOP-SETTINGS.md` DS13: the **Settings** vertical. A short
+    // sibling of the autoload desktop vertical rather than a further stage on
+    // it, so a gate mis-count in one choreography cannot wedge the other
+    // (`plans/OPEN-DEFECTS.md` D19/D20).
+    //
+    // It boots the same graphical world, types the unlock passphrase, logs in
+    // and starts `desktop`, then opens Settings from the Switchboard capsule's
+    // system menu. Four dumps read the screen: the window on General; a pane
+    // that states an absence; Storage, reached past the fold of the strip by
+    // its own scrollbar; and the desktop redrawn light after the Appearance
+    // pane's choice. Each window dump is gated on the session's witness that a
+    // frame carrying that pane's title is on screen — the window retitles only
+    // after presenting the pane — and the light dump on the session's witness
+    // that the restyled desktop is. The walk photographs every pane before it
+    // changes the appearance, because each application redraws itself for a
+    // new look on its own time and a dump of its window could otherwise catch
+    // that redraw half done.
+    //
+    // PASS needs the guest's four witnesses in order: an `APP_LOADED` naming
+    // the settings bundle, the create reply of its window, and two commits of
+    // the desktop's published settings document — the pane's choice, then the
+    // system menu's *Dark Appearance* row, the last gesture, which the runner
+    // sends only once the light dump is read back.
+    //
+    // Single CPU and the same 300-second *inactivity* budget its siblings
+    // carry: the longest the guest may fall silent, never a runtime deadline,
+    // so co-scheduling cannot turn a merely slow guest into a timeout.
+    QemuTest {
+        package: "tairix-test-settings-qemu-aarch64",
+        binary: "tairix-test-settings-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: true,
+        crypto: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            (
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+        ],
+        screendumps: &[
+            ScreendumpPlan {
+                marker: WINDOW_SHOWN_MARKER,
+                occurrences: 1,
+                suffix: SETTINGS_GENERAL_DUMP,
+                assert: assert_settings_general_screendump,
+            },
+            ScreendumpPlan {
+                marker: WINDOW_RETITLED_MARKER,
+                occurrences: 1,
+                suffix: SETTINGS_ABSENCE_DUMP,
+                assert: assert_settings_absence_screendump,
+            },
+            ScreendumpPlan {
+                marker: WINDOW_RETITLED_MARKER,
+                occurrences: 2,
+                suffix: SETTINGS_STORAGE_DUMP,
+                assert: assert_settings_storage_screendump,
+            },
+            ScreendumpPlan {
+                marker: DESKTOP_RESTYLED_MARKER,
+                occurrences: 1,
+                suffix: SETTINGS_LIGHT_DUMP,
+                assert: assert_settings_light_screendump,
+            },
+        ],
+        pointer_script: Some(settings_pointer_script),
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     // `plans/SMARTRAM.md` + `plans/ICONS.md`: the desktop keeps drawing its
     // real icon artwork while the machine is genuinely short of memory.
     //
@@ -10279,7 +10378,7 @@ struct ExpectedWallpaper {
 
 impl ExpectedWallpaper {
     /// The colour at `(x, y)`, or `None` when the point lies off the canvas.
-    fn rgb_at(&self, x: u32, y: u32) -> Option<(u8, u8, u8)> {
+    fn rgb_at(&self, x: u32, y: u32) -> Option<Rgb> {
         if x >= self.width || y >= self.height {
             return None;
         }
@@ -11369,6 +11468,786 @@ fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     pen.click(ready, 1, MouseButton::Secondary, clock);
     pen.click(ready, 1, MouseButton::Primary, set_row);
     Ok(pen.steps())
+}
+
+/// The Settings vertical's screendump names: the window on General, a pane
+/// that states an absence, Storage, and the desktop redrawn light.
+const SETTINGS_GENERAL_DUMP: &str = "general";
+const SETTINGS_ABSENCE_DUMP: &str = "absence";
+const SETTINGS_STORAGE_DUMP: &str = "storage";
+const SETTINGS_LIGHT_DUMP: &str = "light";
+
+/// The cascade slot the Settings window takes: the first, because nothing has
+/// opened a served window before it — the autostarted file manager holds a bar
+/// slot and no window, and the Switchboard samples headlessly until its panel
+/// is opened.
+const SETTINGS_CASCADE_SLOT: u64 = 0;
+
+/// The pane the Settings vertical photographs as a stated absence: one no
+/// subsystem of any kind stands beneath, so its statement is not one a landing
+/// stack will soon rewrite, and one seated when the window opens.
+const SETTINGS_ABSENCE_CATEGORY: tairix_settings::Category = tairix_settings::Category::Bluetooth;
+
+/// The strip row every Settings dump reads as the one drawn *at rest*: a
+/// category that discloses no panes, so it draws no chevron, and one the walk
+/// never presses before it is photographed beside another.
+const SETTINGS_RESTING_CATEGORY: tairix_settings::Category = tairix_settings::Category::Appearance;
+
+/// What one photographed Settings frame draws where its dump reads, on screen.
+#[derive(Copy, Clone, Debug)]
+struct SettingsFrame {
+    /// The strip row drawn selected.
+    selected: tairix_geometry::Rect,
+    /// [`SETTINGS_RESTING_CATEGORY`]'s row, drawn at rest.
+    resting: tairix_geometry::Rect,
+    /// The pane's content column.
+    content: tairix_geometry::Rect,
+}
+
+/// Every press the Settings vertical makes, and what each photographed frame
+/// draws.
+///
+/// Reconstructed by driving the production bar, the production menu chain and
+/// the application's own shell through the very presses the guest receives, so
+/// the script presses and the assertions read where the guest draws rather than
+/// at coordinates copied from a screenshot. Each step checks the shell went
+/// where the script means it to, so a registry or layout change fails the
+/// build of the script instead of silently walking somewhere else.
+struct SettingsWalk {
+    capsule: tairix_geometry::Point,
+    settings_row: tairix_geometry::Point,
+    absence_row: tairix_geometry::Point,
+    strip_page: tairix_geometry::Point,
+    storage_row: tairix_geometry::Point,
+    appearance_row: tairix_geometry::Point,
+    appearance_combo: tairix_geometry::Point,
+    light_choice: tairix_geometry::Point,
+    dark_row: tairix_geometry::Point,
+    general: SettingsFrame,
+    absence: SettingsFrame,
+    storage: SettingsFrame,
+}
+
+/// Where the session composites the Settings window, laid out from the
+/// application's own size and sizing.
+fn settings_window_layout(theme: &tairix_theme::Theme) -> tairix_controls::FrameLayout {
+    served_window_layout(
+        SETTINGS_CASCADE_SLOT,
+        tairix_settings::WIN_WIDTH,
+        tairix_settings::WIN_HEIGHT,
+        tairix_settings::WIN_RESIZABLE,
+        theme,
+    )
+}
+
+/// The Switchboard capsule's system menu as the guest opens it: the centre of
+/// the capsule, and of the row whose command is `action`.
+///
+/// The bar is told what the guest attests — a broker to re-authenticate
+/// through and a wake mailbox to be resumed on — because the plate opens
+/// upward from the bar, so a row the reconstruction left out would move every
+/// row above it. `appearance` is the one the bar is drawn in when the menu is
+/// opened.
+fn system_menu_aim(
+    action: tairix_taskbar::SystemAction,
+    appearance: tairix_theme::Appearance,
+) -> Result<(tairix_geometry::Point, tairix_geometry::Point), String> {
+    use tairix_input::PointerButton;
+    use tairix_taskbar::{TaskbarInput, TaskbarResponse};
+
+    let mut shell = reconstructed_shell(&[])?;
+    shell.session_mut().set_appearance(appearance);
+    let taskbar = shell.session_mut().taskbar_mut();
+    taskbar.set_elevation_available(true);
+    taskbar.set_switch_user_available(true);
+    let bar = shell.session().taskbar().layout(RECONSTRUCTION_SCALE);
+    let capsule = rect_centre(bar.switchboard, "Switchboard capsule")?;
+    let mut router = TaskbarInput::new();
+    let request = match bar_press(&mut shell, &mut router, capsule, PointerButton::Secondary) {
+        TaskbarResponse::OpenMenu(request) => request,
+        other => {
+            return Err(format!(
+                "settings script: a secondary press on the capsule asked for no menu: {other:?}"
+            ))
+        }
+    };
+    let label = tairix_taskbar::system::ROWS
+        .iter()
+        .find(|row| row.action == action)
+        .map(|row| row.label)
+        .ok_or_else(|| format!("settings script: the system menu has no {action:?} row"))?;
+    let (_, row) = chain_plate_and_row(request.model, request.placement, label, "settings script")?;
+    Ok((capsule, rect_centre(row, label)?))
+}
+
+/// Press and release the primary button at client-local `at` in the
+/// reconstructed Settings shell, answering the last outcome that was more than
+/// a repaint.
+fn settings_click(
+    shell: &mut tairix_settings::Shell,
+    at: tairix_geometry::Point,
+    viewport: tairix_geometry::Rect,
+    theme: &tairix_theme::Theme,
+) -> tairix_settings::ShellOutcome {
+    use tairix_input::{InputEvent, PointerButton};
+    use tairix_settings::ShellOutcome;
+
+    let mut damage = tairix_geometry::Region::new();
+    let mut answered = ShellOutcome::Idle;
+    for event in [
+        InputEvent::PointerMoved { to: at },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        let outcome = shell.on_pointer(&event, viewport, RECONSTRUCTION_SCALE, theme, &mut damage);
+        if !matches!(outcome, ShellOutcome::Idle | ShellOutcome::Changed) {
+            answered = outcome;
+        }
+    }
+    answered
+}
+
+/// The client-local centre of `category`'s strip row, which must be seated.
+fn settings_row_centre(
+    shell: &tairix_settings::Shell,
+    category: tairix_settings::Category,
+    viewport: tairix_geometry::Rect,
+    theme: &tairix_theme::Theme,
+) -> Result<tairix_geometry::Point, String> {
+    let index = shell
+        .rows()
+        .iter()
+        .position(|row| *row == tairix_settings::StripRow::Category(category))
+        .ok_or_else(|| format!("settings script: the strip lists no {category:?} row"))?;
+    let rect = shell
+        .strip_row_rect(index, viewport, RECONSTRUCTION_SCALE, theme)
+        .ok_or_else(|| format!("settings script: the strip does not seat {category:?}"))?;
+    rect_centre(rect, "strip row")
+}
+
+/// Press `category`'s strip row and check the shell went there.
+fn settings_walk_to(
+    shell: &mut tairix_settings::Shell,
+    category: tairix_settings::Category,
+    viewport: tairix_geometry::Rect,
+    theme: &tairix_theme::Theme,
+) -> Result<tairix_geometry::Point, String> {
+    let at = settings_row_centre(shell, category, viewport, theme)?;
+    settings_click(shell, at, viewport, theme);
+    if shell.location().category != category {
+        return Err(format!(
+            "settings script: a press on {category:?}'s row left the window on {:?}",
+            shell.location()
+        ));
+    }
+    Ok(at)
+}
+
+/// What `shell` draws where a dump reads, moved onto the screen by `origin`,
+/// the window's client origin.
+fn settings_frame(
+    shell: &tairix_settings::Shell,
+    viewport: tairix_geometry::Rect,
+    theme: &tairix_theme::Theme,
+    origin: tairix_geometry::Point,
+) -> Result<SettingsFrame, String> {
+    use tairix_geometry::Rect;
+
+    let scale = RECONSTRUCTION_SCALE;
+    let on_screen = |local: Rect| {
+        Rect::new(
+            origin.x + local.left(),
+            origin.y + local.top(),
+            local.width,
+            local.height,
+        )
+    };
+    let row = |index: usize, what: &str| {
+        shell
+            .strip_row_rect(index, viewport, scale, theme)
+            .map(on_screen)
+            .ok_or_else(|| format!("settings script: the strip does not seat the {what} row"))
+    };
+    let selected = shell
+        .selected_row()
+        .ok_or_else(|| "settings script: no strip row is drawn selected".to_string())?;
+    let resting = shell
+        .rows()
+        .iter()
+        .position(|row| *row == tairix_settings::StripRow::Category(SETTINGS_RESTING_CATEGORY))
+        .filter(|index| *index != selected)
+        .ok_or_else(|| "settings script: the resting row is missing or selected".to_string())?;
+    Ok(SettingsFrame {
+        selected: row(selected, "selected")?,
+        resting: row(resting, "resting")?,
+        content: on_screen(shell.frame(viewport, scale, theme).content),
+    })
+}
+
+/// The Settings walk, reconstructed once per process and shared by the script
+/// and every assertion that reads a frame of it.
+fn settings_walk() -> Result<&'static SettingsWalk, String> {
+    static WALK: std::sync::OnceLock<Result<SettingsWalk, String>> = std::sync::OnceLock::new();
+    WALK.get_or_init(reconstruct_settings_walk)
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// Reconstruct the whole Settings walk (see [`SettingsWalk`]).
+fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
+    use tairix_controls::ScrollPart;
+    use tairix_geometry::{Point, Rect};
+    use tairix_settings::{Category, Setting, Shell, WIN_HEIGHT, WIN_WIDTH};
+    use tairix_taskbar::SystemAction;
+    use tairix_theme::{Appearance, Theme};
+
+    let scale = RECONSTRUCTION_SCALE;
+    let theme = Theme::dark();
+    let viewport = Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT);
+    let window = settings_window_layout(&theme);
+    let origin = Point::new(window.client.left(), window.client.top());
+    // Every press is checked against the frame's own hit map: a point in the
+    // invisible resize zone over the client's outer pixels is the window
+    // manager's, and would never reach the application.
+    let frame = window_frame(tairix_settings::WIN_RESIZABLE);
+    let to_screen = |local: Point| {
+        let at = Point::new(origin.x + local.x, origin.y + local.y);
+        match frame.hit(window.outer, scale, &theme, at) {
+            tairix_controls::FurniturePart::Client => Ok(at),
+            part => Err(format!(
+                "settings script: a press at {at:?} would reach the window's {part:?}, not Settings"
+            )),
+        }
+    };
+
+    let (capsule, settings_row) = system_menu_aim(SystemAction::Settings, Appearance::Dark)?;
+    let (_, dark_row) = system_menu_aim(
+        SystemAction::Appearance(Appearance::Dark),
+        Appearance::Light,
+    )?;
+
+    let mut shell = Shell::new(tairix_wallpaper::DesktopSettings::default())
+        .ok_or_else(|| "settings script: the registry holds no category".to_string())?;
+    shell.lay_out(viewport, scale, &theme);
+    let general = settings_frame(&shell, viewport, &theme, origin)?;
+
+    let absence_row = settings_walk_to(&mut shell, SETTINGS_ABSENCE_CATEGORY, viewport, &theme)?;
+    let absence = settings_frame(&shell, viewport, &theme, origin)?;
+
+    // Storage is past the fold of the strip, which is what makes it the pane
+    // that proves a reader can reach every category: the strip's own
+    // scrollbar brings it into the column.
+    if settings_row_centre(&shell, Category::Storage, viewport, &theme).is_ok() {
+        return Err(
+            "settings script: the strip already seats Storage, so the walk no longer reaches it \
+             through the strip's own scroll"
+                .to_string(),
+        );
+    }
+    // The track after the thumb pages the strip down; the end button beneath
+    // it sits in the client's outermost pixels, which the resize zone claims.
+    let track = shell
+        .strip_scroll_rect(ScrollPart::TrackAfter, viewport, scale, &theme)
+        .ok_or_else(|| {
+            "settings script: the strip draws no track to page down to Storage by".to_string()
+        })?;
+    let strip_page = rect_centre(track, "strip track")?;
+    settings_click(&mut shell, strip_page, viewport, &theme);
+    let storage_row = settings_walk_to(&mut shell, Category::Storage, viewport, &theme)?;
+    let storage = settings_frame(&shell, viewport, &theme, origin)?;
+
+    let appearance_row = settings_walk_to(&mut shell, Category::Appearance, viewport, &theme)?;
+    let combo = shell
+        .setting_rect(Setting::Appearance, viewport, scale, &theme)
+        .ok_or_else(|| "settings script: Appearance draws no appearance row".to_string())?;
+    let appearance_combo = rect_centre(combo, "appearance row")?;
+    settings_click(&mut shell, appearance_combo, viewport, &theme);
+    let light = Appearance::ALL
+        .iter()
+        .position(|appearance| *appearance == Appearance::Light)
+        .ok_or_else(|| "settings script: no light appearance is offered".to_string())?;
+    let choice = shell
+        .choice_rect(light, viewport, scale, &theme)
+        .ok_or_else(|| "settings script: the appearance row opened no list".to_string())?;
+    let light_choice = rect_centre(choice, "light choice")?;
+    let chosen = settings_click(&mut shell, light_choice, viewport, &theme);
+    if !chosen
+        .document()
+        .is_some_and(|document| document.contains("appearance = light"))
+    {
+        return Err(format!(
+            "settings script: the light choice asked for {chosen:?}, not a light desktop"
+        ));
+    }
+
+    Ok(SettingsWalk {
+        capsule,
+        settings_row,
+        absence_row: to_screen(absence_row)?,
+        strip_page: to_screen(strip_page)?,
+        storage_row: to_screen(storage_row)?,
+        appearance_row: to_screen(appearance_row)?,
+        appearance_combo: to_screen(appearance_combo)?,
+        light_choice: to_screen(light_choice)?,
+        dark_row,
+        general,
+        absence,
+        storage,
+    })
+}
+
+/// Open Settings from the capsule's system menu, walk its strip to a stated
+/// absence, down past the fold to Storage, and to Appearance, choose Light,
+/// then choose *Dark Appearance* from the capsule's menu.
+///
+/// Every gate is the session's own witness that what the next press aims at is
+/// on screen: the menu drawn, the window's first frame, and — for each pane —
+/// the frame carrying the title the window takes after presenting it. The two
+/// presses that share a gate are one gesture each (a page then the row it
+/// brought in; a list opened then a choice on it), which the application
+/// applies strictly in order. The last press is the one whose commit
+/// completes the guest's PASS, and it is sent only once the light dump is
+/// read back.
+fn settings_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_qemu::MouseButton;
+
+    let walk = settings_walk()?;
+    let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
+    pen.click(revealed, 1, MouseButton::Secondary, walk.capsule);
+    pen.click(
+        MENU_SHOWN_MARKER,
+        1,
+        MouseButton::Primary,
+        walk.settings_row,
+    );
+    pen.click(
+        WINDOW_SHOWN_MARKER,
+        1,
+        MouseButton::Primary,
+        walk.absence_row,
+    );
+    pen.click(
+        WINDOW_RETITLED_MARKER,
+        1,
+        MouseButton::Primary,
+        walk.strip_page,
+    );
+    pen.click(
+        WINDOW_RETITLED_MARKER,
+        1,
+        MouseButton::Primary,
+        walk.storage_row,
+    );
+    pen.click(
+        WINDOW_RETITLED_MARKER,
+        2,
+        MouseButton::Primary,
+        walk.appearance_row,
+    );
+    pen.click(
+        WINDOW_RETITLED_MARKER,
+        3,
+        MouseButton::Primary,
+        walk.appearance_combo,
+    );
+    pen.click(
+        WINDOW_RETITLED_MARKER,
+        3,
+        MouseButton::Primary,
+        walk.light_choice,
+    );
+    pen.click(
+        DESKTOP_RESTYLED_MARKER,
+        1,
+        MouseButton::Secondary,
+        walk.capsule,
+    );
+    pen.click(MENU_SHOWN_MARKER, 2, MouseButton::Primary, walk.dark_row);
+    Ok(pen.steps())
+}
+
+/// The largest per-channel difference a pixel of an application's own opaque
+/// fill may show against the theme colour it was filled with: the window
+/// content is converted and copied, not blended, so any more is another
+/// colour.
+const SETTINGS_FILL_TOLERANCE: u8 = 2;
+
+/// Whether `pixel` is `colour`, within [`SETTINGS_FILL_TOLERANCE`].
+fn is_fill(pixel: Rgb, colour: tairix_theme::Rgba) -> bool {
+    pixel.0.abs_diff(colour.r) <= SETTINGS_FILL_TOLERANCE
+        && pixel.1.abs_diff(colour.g) <= SETTINGS_FILL_TOLERANCE
+        && pixel.2.abs_diff(colour.b) <= SETTINGS_FILL_TOLERANCE
+}
+
+/// Every pixel of `rect` in `image`, row by row.
+fn region_pixels(
+    t: &QemuTest,
+    path: &Path,
+    image: &tairix_qemu::screendump::Image,
+    rect: tairix_geometry::Rect,
+    what: &str,
+) -> Result<Vec<Vec<Rgb>>, String> {
+    let (left, top) = (
+        u32::try_from(rect.left()).map_err(|_| format!("{what} starts off screen"))?,
+        u32::try_from(rect.top()).map_err(|_| format!("{what} starts off screen"))?,
+    );
+    (top..top + rect.height)
+        .map(|y| {
+            (left..left + rect.width)
+                .map(|x| {
+                    image.pixel(x, y).map_err(|e| {
+                        format!(
+                            "test --qemu ({}): screendump {} lacks the {what} at ({x}, {y}): {e}",
+                            t.package,
+                            path.display(),
+                        )
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The share of `rows` for which `keep` holds.
+fn pixel_share(rows: &[Vec<Rgb>], keep: impl Fn(Rgb) -> bool) -> f64 {
+    let total: usize = rows.iter().map(Vec::len).sum();
+    let kept: usize = rows
+        .iter()
+        .map(|row| row.iter().filter(|pixel| keep(**pixel)).count())
+        .sum();
+    #[allow(clippy::cast_precision_loss)] // Column pixel counts are far below 2^52.
+    if total == 0 {
+        0.0
+    } else {
+        kept as f64 / total as f64
+    }
+}
+
+/// A strip row's trailing patch: clear of its leading glyph and label, its
+/// selection rail, and the corner a bead would sit in, so it holds nothing but
+/// the row's own fill.
+fn strip_row_fill_patch(row: tairix_geometry::Rect) -> tairix_geometry::Rect {
+    /// How far in from the row's trailing end and from its top and bottom the
+    /// patch starts, in pixels.
+    const INSET: u32 = 6;
+    /// The patch's width, in pixels.
+    const WIDTH: u32 = 16;
+    tairix_geometry::Rect::new(
+        row.right() - tairix_geometry::to_i32(INSET + WIDTH),
+        row.top() + tairix_geometry::to_i32(INSET),
+        WIDTH,
+        row.height.saturating_sub(2 * INSET),
+    )
+}
+
+/// The strip draws `frame`'s selected row lifted to the raised fill and its
+/// resting row on the plain surface — which is what says the press on a row
+/// reached the window and moved the selection there.
+fn assert_settings_strip(
+    t: &QemuTest,
+    path: &Path,
+    image: &tairix_qemu::screendump::Image,
+    theme: &tairix_theme::Theme,
+    frame: SettingsFrame,
+) -> Result<(), String> {
+    let palette = theme.palette();
+    for (row, colour, what) in [
+        (frame.selected, palette.surface_raised, "selected strip row"),
+        (frame.resting, palette.surface, "resting strip row"),
+    ] {
+        let pixels = region_pixels(t, path, image, strip_row_fill_patch(row), what)?;
+        let share = pixel_share(&pixels, |pixel| is_fill(pixel, colour));
+        if share < 1.0 {
+            return Err(format!(
+                "test --qemu ({}): screendump {}: only {share:.3} of the {what} at {row:?} is its \
+                 fill {colour:?}",
+                t.package,
+                path.display(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The least of a stated absence's content column that must be something
+/// other than the surface: the statement's own words.
+const MIN_SETTINGS_STATEMENT_INK: f64 = 0.005;
+
+/// The plate edges a pane's column must draw for it to seat at least one
+/// plate: its top rim and its bottom rim.
+const MIN_SETTINGS_PLATE_EDGES: usize = 2;
+
+/// The longest unbroken run of `colour` along `row`.
+fn longest_run(row: &[Rgb], colour: tairix_theme::Rgba) -> usize {
+    let mut longest = 0;
+    let mut run = 0;
+    for pixel in row {
+        run = if is_fill(*pixel, colour) { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    longest
+}
+
+/// How many of `rows` are a plate's top or bottom edge: an unbroken run of
+/// `rim` at least half the row wide.
+///
+/// A pane's plates are filled with the same surface as the column behind
+/// them, so the rim is the only thing that tells a plate from the column —
+/// and no line of words draws a run anywhere near that long.
+fn plate_edges(rows: &[Vec<Rgb>], rim: tairix_theme::Rgba) -> usize {
+    rows.iter()
+        .filter(|row| !row.is_empty() && longest_run(row, rim).saturating_mul(2) >= row.len())
+        .count()
+}
+
+/// [`plate_edges`] over `content` of `image`, against the theme's rim.
+fn settings_plate_edges(
+    t: &QemuTest,
+    path: &Path,
+    image: &tairix_qemu::screendump::Image,
+    theme: &tairix_theme::Theme,
+    content: tairix_geometry::Rect,
+) -> Result<usize, String> {
+    let rows = region_pixels(t, path, image, content, "content column")?;
+    Ok(plate_edges(&rows, theme.palette().rim))
+}
+
+/// [`ScreendumpPlan`] assertion for the Settings vertical's **first** dump:
+/// the window, on General, over the composited dark desktop, its strip
+/// selecting the pane it opened on and its column drawing that pane's plates.
+fn assert_settings_general_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    let theme = tairix_theme::Theme::dark();
+    let image = read_screendump(t, path)?;
+    let window = settings_window_layout(&theme).outer;
+    assert_desktop_wallpaper(t, path, &image, &theme, &[window])?;
+    assert_window_region_covered(t, path, &image, window, "Settings")?;
+    let walk = settings_walk()?;
+    assert_settings_strip(t, path, &image, &theme, walk.general)?;
+    let edges = settings_plate_edges(t, path, &image, &theme, walk.general.content)?;
+    if edges < MIN_SETTINGS_PLATE_EDGES {
+        return Err(format!(
+            "test --qemu ({}): screendump {}: General's column draws {edges} plate edges \
+             (expected >= {MIN_SETTINGS_PLATE_EDGES}: a plate's top and bottom rim)",
+            t.package,
+            path.display(),
+        ));
+    }
+    Ok(())
+}
+
+/// [`ScreendumpPlan`] assertion for the Settings vertical's **second** dump:
+/// the pane the strip walked to states its absence in words on the surface,
+/// with no plate and no control.
+fn assert_settings_absence_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    let theme = tairix_theme::Theme::dark();
+    let image = read_screendump(t, path)?;
+    let walk = settings_walk()?;
+    assert_settings_strip(t, path, &image, &theme, walk.absence)?;
+    let content = walk.absence.content;
+    let edges = settings_plate_edges(t, path, &image, &theme, content)?;
+    let pixels = region_pixels(t, path, &image, content, "content column")?;
+    let surface = theme.palette().surface;
+    let ink = pixel_share(&pixels, |pixel| !is_fill(pixel, surface));
+    if edges > 0 || ink < MIN_SETTINGS_STATEMENT_INK {
+        return Err(format!(
+            "test --qemu ({}): screendump {}: the absence pane's column draws {edges} plate \
+             edges and is {ink:.3} ink (expected none and >= {MIN_SETTINGS_STATEMENT_INK} ink: \
+             a statement in words, on no plate)",
+            t.package,
+            path.display(),
+        ));
+    }
+    Ok(())
+}
+
+/// The least run, in pixels along one row, of a capacity track's fill and of
+/// its groove for the pair to read as a partly filled track: a fill is never
+/// drawn thinner than the band is tall, and a groove shorter than this is a
+/// volume that is all but full.
+const MIN_TRACK_FILL_RUN: usize = 3;
+const MIN_TRACK_GROOVE_RUN: usize = 16;
+
+/// The most pixels of anti-aliased cap between a track's fill and its groove.
+const MAX_TRACK_JOIN_PX: usize = 3;
+
+/// What one pixel of a capacity track's row is part of.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum TrackPart {
+    Fill,
+    Groove,
+    Other,
+}
+
+/// Whether `row` holds a partly filled capacity track: a run of `fill`, then —
+/// past at most the anti-aliased cap — a run of `groove`.
+///
+/// Read as runs, keeping only the last three, so a row costs one pass and no
+/// allocation.
+fn row_holds_track(row: &[Rgb], fill: tairix_theme::Rgba, groove: tairix_theme::Rgba) -> bool {
+    let part = |pixel: Rgb| {
+        if is_fill(pixel, fill) {
+            TrackPart::Fill
+        } else if is_fill(pixel, groove) {
+            TrackPart::Groove
+        } else {
+            TrackPart::Other
+        }
+    };
+    let track = |runs: &[(TrackPart, usize); 3]| match *runs {
+        [_, (TrackPart::Fill, filled), (TrackPart::Groove, grooved)]
+        | [(TrackPart::Fill, filled), (TrackPart::Other, ..=MAX_TRACK_JOIN_PX), (TrackPart::Groove, grooved)] => {
+            filled >= MIN_TRACK_FILL_RUN && grooved >= MIN_TRACK_GROOVE_RUN
+        }
+        _ => false,
+    };
+    let mut runs = [(TrackPart::Other, 0usize); 3];
+    for pixel in row {
+        let this = part(*pixel);
+        if runs[2].0 == this {
+            runs[2].1 += 1;
+        } else {
+            runs.rotate_left(1);
+            runs[2] = (this, 1);
+        }
+        if track(&runs) {
+            return true;
+        }
+    }
+    false
+}
+
+/// [`ScreendumpPlan`] assertion for the Settings vertical's **third** dump:
+/// Storage, reached past the strip's fold, drawing its volume cards and at
+/// least one capacity track that is neither empty nor full.
+fn assert_settings_storage_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    let theme = tairix_theme::Theme::dark();
+    let image = read_screendump(t, path)?;
+    let walk = settings_walk()?;
+    assert_settings_strip(t, path, &image, &theme, walk.storage)?;
+    let edges = settings_plate_edges(t, path, &image, &theme, walk.storage.content)?;
+    if edges < MIN_SETTINGS_PLATE_EDGES {
+        return Err(format!(
+            "test --qemu ({}): screendump {}: Storage's column draws {edges} plate edges \
+             (expected >= {MIN_SETTINGS_PLATE_EDGES}: a plate's top and bottom rim)",
+            t.package,
+            path.display(),
+        ));
+    }
+    let palette = theme.palette();
+    let fill = palette.signal(tairix_controls::PressureKind::Disk.signal_role());
+    let rows = region_pixels(t, path, &image, walk.storage.content, "content column")?;
+    if !rows
+        .iter()
+        .any(|row| row_holds_track(row, fill, palette.scroll_track))
+    {
+        return Err(format!(
+            "test --qemu ({}): screendump {}: Storage's column draws no capacity track — no row \
+             holds the disk fill {fill:?} meeting the groove {:?}",
+            t.package,
+            path.display(),
+            palette.scroll_track,
+        ));
+    }
+    Ok(())
+}
+
+/// The luminance of `pixel`, on its channels' own 0–255 scale.
+fn luma(pixel: Rgb) -> u32 {
+    (2126 * u32::from(pixel.0) + 7152 * u32::from(pixel.1) + 722 * u32::from(pixel.2)) / 10_000
+}
+
+/// How much brighter, on average, a surface the session draws must read once
+/// the desktop is light than it read dark: the two grounds sit at opposite
+/// ends of the scale, so even translucent chrome over a mid-toned wallpaper
+/// moves far more than this.
+const MIN_SETTINGS_LIGHTENING: u32 = 64;
+
+/// The least share of such a surface's pixels that must be brighter light than
+/// dark: all of it but the marks drawn on it, which invert.
+const MIN_SETTINGS_LIGHTENED_SHARE: f64 = 0.75;
+
+/// `rect` of `image` is the session's own chrome redrawn light: brighter than
+/// the same rectangle of the dark `before` frame, on average by at least
+/// [`MIN_SETTINGS_LIGHTENING`] and pixel by pixel over at least
+/// [`MIN_SETTINGS_LIGHTENED_SHARE`] of it.
+fn assert_lightened(
+    t: &QemuTest,
+    path: &Path,
+    frames: (
+        &tairix_qemu::screendump::Image,
+        &tairix_qemu::screendump::Image,
+    ),
+    rect: tairix_geometry::Rect,
+    what: &str,
+) -> Result<(), String> {
+    let (image, before) = frames;
+    let now = region_pixels(t, path, image, rect, what)?;
+    let then = region_pixels(t, path, before, rect, what)?;
+    let mut total = 0u64;
+    let mut lightened = 0u64;
+    let (mut now_sum, mut then_sum) = (0u64, 0u64);
+    for (now_row, then_row) in now.iter().zip(&then) {
+        for (now_pixel, then_pixel) in now_row.iter().zip(then_row) {
+            let (a, b) = (luma(*now_pixel), luma(*then_pixel));
+            total += 1;
+            now_sum += u64::from(a);
+            then_sum += u64::from(b);
+            if a > b {
+                lightened += 1;
+            }
+        }
+    }
+    let gain = now_sum.saturating_sub(then_sum) / total.max(1);
+    #[allow(clippy::cast_precision_loss)] // Chrome pixel counts are far below 2^52.
+    let share = lightened as f64 / total.max(1) as f64;
+    if gain < u64::from(MIN_SETTINGS_LIGHTENING) || share < MIN_SETTINGS_LIGHTENED_SHARE {
+        return Err(format!(
+            "test --qemu ({}): screendump {}: the {what} at {rect:?} was not redrawn light: its \
+             luminance rose by {gain} on average, over {share:.3} of it (expected >= \
+             {MIN_SETTINGS_LIGHTENING} over >= {MIN_SETTINGS_LIGHTENED_SHARE})",
+            t.package,
+            path.display(),
+        ));
+    }
+    Ok(())
+}
+
+/// [`ScreendumpPlan`] assertion for the Settings vertical's **last** dump,
+/// taken on the session's witness that the restyled desktop is on screen: the
+/// wallpaper is still exactly the composited desktop, and the bar and the
+/// Settings window's own title bar — the session's surfaces — are drawn light.
+///
+/// The window's client is deliberately not read: the application redraws its
+/// own pixels for the new look on its own time, so this frame may hold them in
+/// either appearance, or part way between.
+fn assert_settings_light_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    let theme = tairix_theme::Theme::light();
+    let image = read_screendump(t, path)?;
+    let dark = read_screendump(
+        t,
+        &baseline_dump_path(t, path, &[SETTINGS_LIGHT_DUMP], SETTINGS_GENERAL_DUMP)?,
+    )?;
+    let window = settings_window_layout(&theme);
+    assert_desktop_wallpaper(t, path, &image, &theme, &[window.outer])?;
+    assert_lightened(
+        t,
+        path,
+        (&image, &dark),
+        taskbar_bar_rect(&theme),
+        "icon bar",
+    )?;
+    let title_bar = tairix_geometry::Rect::new(
+        window.outer.left(),
+        window.outer.top(),
+        window.outer.width,
+        u32::try_from(window.client.top() - window.outer.top()).unwrap_or(0),
+    );
+    assert_lightened(t, path, (&image, &dark), title_bar, "Settings title bar")
 }
 
 /// Build the desktop-hover script: launch the `framestats` fixture from the
@@ -13809,20 +14688,22 @@ fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
+    use tairix_qemu::screendump::Rgb;
+
     use super::{
         appbar_pointer_script, autoload_desktop_pointer_script, build_targets,
         desktop_hover_pointer_script, filepick_pointer_script, fold_peer_verdict,
         handover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
-        qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest, AUDIOTONE_PASS_PREFIX,
-        AUTOLOAD_INPUT_ARMED_OCCURRENCES, AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER,
-        BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
-        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, KEYBOARD_ONLY_ARMED_OCCURRENCES, MEMSOAK_PASS_PREFIX,
-        STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
-        SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT, SVGTEXT_MEASURED_MARKER,
-        TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE,
-        UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
-        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
-        VALUE_PIPE_WRITE_REFUSED_MARKER,
+        qemu_job_weight, row_holds_track, settings_pointer_script, sidecar_path, FsDisk, PrimePlan,
+        QemuTest, AUDIOTONE_PASS_PREFIX, AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+        AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER,
+        DESKTOP_PRESSURE_ICONS_DRAWN_DUMP, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
+        KEYBOARD_ONLY_ARMED_OCCURRENCES, MEMSOAK_PASS_PREFIX, STALLTRACE_COMMAND_LINE,
+        STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
+        SUPERVISOR_MOUNT_SCRIPT, SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX,
+        TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
+        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
+        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -13862,6 +14743,7 @@ mod tests {
             ("desktop hover", desktop_hover_pointer_script()),
             ("picker delegation", filepick_pointer_script()),
             ("hand-over", handover_pointer_script()),
+            ("settings", settings_pointer_script()),
         ] {
             let steps = script.unwrap_or_else(|e| panic!("{label} script builds: {e}"));
             for (index, step) in steps.iter().enumerate() {
@@ -13882,6 +14764,126 @@ mod tests {
                 "{label} script ends on something other than the click its guest exits on"
             );
         }
+    }
+
+    /// The bundle the Settings guest attributes its launch to is the one the
+    /// capsule's *Settings…* row starts, so the guest cannot wait for a load
+    /// nothing in the run performs.
+    #[test]
+    fn the_settings_guest_waits_for_the_bundle_the_menu_row_starts() {
+        let bundle = super::bundle_path(
+            tairix_abi::SYSTEM_APPLICATION_STORE,
+            tairix_test_settings_qemu_aarch64::SETTINGS_APP_NAME,
+        );
+        assert_eq!(
+            format!("{bundle}{}", tairix_desktop_session::BUNDLE_RUN_SUFFIX),
+            tairix_desktop_session::SETTINGS_RUN_PATH
+        );
+    }
+
+    /// A row reads as a partly filled capacity track only for a run of the
+    /// fill meeting a run of the groove — directly, or past an anti-aliased
+    /// cap — never for either alone, a gap too wide to be a cap, or runs too
+    /// short to be a track.
+    #[test]
+    fn a_capacity_track_is_a_fill_meeting_its_groove() {
+        let fill = tairix_theme::Rgba::rgb(0xe0, 0x40, 0x40);
+        let groove = tairix_theme::Rgba::rgb(0x20, 0x20, 0x20);
+        let other = (0x80, 0x80, 0x80);
+        let at = |colour: tairix_theme::Rgba| (colour.r, colour.g, colour.b);
+        let row = |parts: &[(Rgb, usize)]| -> Vec<Rgb> {
+            parts
+                .iter()
+                .flat_map(|(pixel, count)| std::iter::repeat_n(*pixel, *count))
+                .collect()
+        };
+        assert!(row_holds_track(
+            &row(&[(other, 5), (at(fill), 40), (at(groove), 200)]),
+            fill,
+            groove
+        ));
+        assert!(row_holds_track(
+            &row(&[(at(fill), 3), (other, 2), (at(groove), 16), (other, 4)]),
+            fill,
+            groove
+        ));
+        for refused in [
+            row(&[(at(fill), 300)]),
+            row(&[(at(groove), 300)]),
+            row(&[(at(fill), 40), (other, 9), (at(groove), 200)]),
+            row(&[(at(fill), 2), (at(groove), 200)]),
+            row(&[(at(fill), 40), (at(groove), 15), (other, 3)]),
+            row(&[(at(groove), 40), (at(fill), 200)]),
+        ] {
+            assert!(!row_holds_track(&refused, fill, groove));
+        }
+    }
+
+    /// A row is a plate edge only for one unbroken run of the rim at least half
+    /// its width — never for short runs that add up to as much, as a line of
+    /// words would draw.
+    #[test]
+    fn a_plate_edge_is_one_long_run_of_the_rim() {
+        let rim = tairix_theme::Rgba::rgb(0x23, 0x2b, 0x30);
+        let other = (0x0f, 0x13, 0x16);
+        let at = (rim.r, rim.g, rim.b);
+        let row = |parts: &[(Rgb, usize)]| -> Vec<Rgb> {
+            parts
+                .iter()
+                .flat_map(|(pixel, count)| std::iter::repeat_n(*pixel, *count))
+                .collect()
+        };
+        let edges = [
+            row(&[(other, 8), (at, 184), (other, 8)]),
+            row(&[(other, 100), (at, 100)]),
+        ];
+        let words = std::iter::repeat_n(row(&[(at, 30), (other, 2)]), 6)
+            .flatten()
+            .collect();
+        let not_edges = [
+            row(&[(other, 101), (at, 99)]),
+            words,
+            row(&[(other, 200)]),
+            Vec::new(),
+        ];
+        assert_eq!(super::plate_edges(&edges, rim), edges.len());
+        assert_eq!(super::plate_edges(&not_edges, rim), 0);
+    }
+
+    /// The witness counts the rim the shared plate painter actually draws: a
+    /// plate on the surface it sits on reads as exactly its top and bottom
+    /// rim, however many rows tall it is.
+    #[test]
+    fn a_painted_plate_reads_as_its_top_and_bottom_rim() {
+        let theme = tairix_theme::Theme::dark();
+        let scale = super::RECONSTRUCTION_SCALE;
+        let palette = theme.palette();
+        let border = tairix_controls::plate_border(&theme, scale);
+        let radius = scale.scale_length(theme.metrics().window_corner_radius);
+        let mut surface = tairix_raster::Surface::new(400, 160).expect("a 400x160 surface");
+        surface.fill(tairix_raster::Color::from(palette.surface));
+        assert!(tairix_controls::paint_surface_plate(
+            &mut surface,
+            (20, 30, 360, 100),
+            (radius, border),
+            &theme,
+            (palette.surface, tairix_controls::ChromeLayer::Ground),
+        )
+        .is_some());
+        let width = usize::try_from(surface.width()).expect("a surface width fits usize");
+        let rows: Vec<Vec<Rgb>> = surface
+            .pixels()
+            .chunks(width)
+            .map(|row| {
+                row.iter()
+                    .map(|pixel| (pixel.r, pixel.g, pixel.b))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            super::plate_edges(&rows, palette.rim),
+            usize::try_from(border.saturating_mul(2)).unwrap_or(usize::MAX)
+        );
     }
 
     /// A gesture into a file-manager window lands inside that window's client,
@@ -14818,9 +15820,7 @@ mod tests {
     /// A `P6` screendump of the emulated screen's own extent whose pixels
     /// come from `colour`, in exactly the shape QEMU writes, so a fixture
     /// frame reaches an assertion through the production parser.
-    fn synthetic_frame(
-        colour: impl Fn(u32, u32) -> (u8, u8, u8),
-    ) -> tairix_qemu::screendump::Image {
+    fn synthetic_frame(colour: impl Fn(u32, u32) -> Rgb) -> tairix_qemu::screendump::Image {
         let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
         let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
         let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();

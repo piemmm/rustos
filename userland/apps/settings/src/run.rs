@@ -51,7 +51,7 @@ mod program {
     use tairix_abi::net_ipc::{NetServerAddr, MAX_RESOLVER_SERVERS};
     use tairix_abi::pinboard_ipc::PinboardDocument;
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
-    use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowSizing};
+    use tairix_abi::window_ipc::{PointerAction, WindowEvent};
     use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
     use tairix_appdata::RtHost;
     use tairix_geometry::{Point, Rect, Region, Scale};
@@ -60,8 +60,8 @@ mod program {
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_rt::io::{Stderr, Write};
     use tairix_settings::{
-        AccountFacts, ElevateRefusal, Elevated, Elevation, MachineFacts, OwnAccount, Pane, Roster,
-        RunMode, Shell, ShellOutcome, VolumeReading,
+        win_sizing, AccountFacts, ElevateRefusal, Elevated, Elevation, MachineFacts, OwnAccount,
+        Pane, Roster, RunMode, Shell, ShellOutcome, VolumeReading, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
@@ -117,17 +117,6 @@ mod program {
     /// one pane, and folding it into another's would spend three round
     /// trips every time that other pane came on show.
     const ACCOUNTS_TOKEN: u64 = app::FIRST_APP_TOKEN + 5;
-
-    /// The window's logical width at the reference density: the strip plus a
-    /// content column wide enough for a pane's widest row.
-    const WIN_WIDTH: u32 = 780;
-    /// The window's logical height at the reference density.
-    const WIN_HEIGHT: u32 = 600;
-    /// The narrowest logical client the window may be resized to: enough for
-    /// the content column alone, the strip having been shed.
-    const MIN_WIDTH: u32 = 320;
-    /// The shortest logical client the window may be resized to.
-    const MIN_HEIGHT: u32 = 240;
 
     /// The desktop settings in effect for the launching user, so every
     /// composed row opens on what the desktop is actually drawn with.
@@ -980,6 +969,8 @@ mod program {
     struct SettingsWindow {
         window: AppWindow,
         mode: DisplayMode,
+        /// The title the session is carrying for the window.
+        title: &'static str,
     }
 
     impl SettingsWindow {
@@ -993,17 +984,10 @@ mod program {
             theme: &Theme,
             scale: Scale,
         ) -> Result<ProcId, i32> {
-            let sizing = WindowSizing::Resizable {
-                min_width_px: scale.scale_length(MIN_WIDTH),
-                min_height_px: scale.scale_length(MIN_HEIGHT),
-                // No ceiling: a wider window seats more of a pane's rows and
-                // a taller one scrolls less, at every size it is given.
-                max_width_px: 0,
-                max_height_px: 0,
-            };
+            self.title = shell.title();
             let server = self
                 .window
-                .open(event_endpoint, &self.mode, "settings", sizing)
+                .open(event_endpoint, &self.mode, self.title, win_sizing(scale))
                 .map_err(fail_shell)?;
             if self
                 .present(shell, theme, scale, DamageRect::full(&self.mode))
@@ -1025,7 +1009,12 @@ mod program {
             Rect::new(0, 0, self.mode.width_px, self.mode.height_px)
         }
 
-        /// Draw the shell and present `damage`.
+        /// Draw the shell and present `damage`, then retitle the window if
+        /// the pane on show has changed.
+        ///
+        /// The retitle follows the present so the title bar never names a pane
+        /// the frame beneath it does not show yet. A refused retitle keeps the
+        /// remembered title, so the next present asks again.
         fn present(
             &mut self,
             shell: &Shell,
@@ -1036,7 +1025,16 @@ mod program {
             let viewport = self.viewport();
             self.window.present(damage, |surface| {
                 shell.render(surface, viewport, scale, theme, &mut NoArtwork);
-            })
+            })?;
+            let wanted = shell.title();
+            if wanted != self.title {
+                if let Some(id) = self.window.window_id() {
+                    if self.window.client().set_title(id, wanted).is_ok() {
+                        self.title = wanted;
+                    }
+                }
+            }
+            Ok(())
         }
     }
 
@@ -1770,6 +1768,7 @@ mod program {
         let mut surface = SettingsWindow {
             window,
             mode: app::mode_for(initial_w, initial_h),
+            title: "",
         };
 
         let binding = match app::bind_event_mailbox() {

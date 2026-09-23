@@ -26,10 +26,10 @@ use crate::collection::{Card, CardAction};
 use crate::damage;
 use crate::paint::{
     authority_rgba, foreground, heavy_contrast, inset, key_activation, paint_bead,
-    paint_count_badge, paint_icon_slot, paint_plate, paint_surface_plate, paint_text_line,
-    plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_frame, resolve_rail,
-    role_font, seam_thickness, seam_width, surface_rect, text_plate_height, to_i32, withheld,
-    BeadShape, ChromeLayer, PlateStyle, FULL_COLOUR,
+    paint_count_badge, paint_icon_slot, paint_plate, paint_run, paint_surface_plate,
+    paint_text_line, plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_frame,
+    resolve_rail, role_font, seam_thickness, seam_width, surface_rect, text_plate_height, to_i32,
+    withheld, BeadShape, ChromeLayer, PlateStyle, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RecoveryState,
@@ -195,13 +195,13 @@ impl Notification {
             if let Some((x, y, w, _)) = surface_rect(bounds) {
                 let pad = scale.scale_length(theme.metrics().control_inset).max(1);
                 if w > pad.saturating_mul(2) {
-                    let fitted = font.truncate_to_width(source, w - pad.saturating_mul(2));
-                    font.draw_text(
+                    paint_run(
                         surface,
-                        to_i32(x + pad),
-                        to_i32(y + pad / 2),
-                        fitted,
+                        font,
+                        font.elide_to_width(source, w - pad.saturating_mul(2)),
+                        (to_i32(x + pad), to_i32(y + pad / 2)),
                         foreground(theme, ControlDisposition::DisabledByState),
+                        None,
                     );
                 }
             }
@@ -1364,23 +1364,23 @@ impl TraySignal {
         let mut text_y = to_i32(iy + pad);
         let text_w = iw.saturating_sub(pad.saturating_mul(2));
         if text_w > 0 {
-            let fitted = font.truncate_to_width(&self.label, text_w);
-            font.draw_text(
+            paint_run(
                 surface,
-                text_x,
-                text_y,
-                fitted,
+                font,
+                font.elide_to_width(&self.label, text_w),
+                (text_x, text_y),
                 foreground(theme, self.capsule.state.disposition()),
+                None,
             );
             if let Some(value) = &self.value {
                 text_y += to_i32(font.line_height());
-                let fitted = font.truncate_to_width(value, text_w);
-                font.draw_text(
+                paint_run(
                     surface,
-                    text_x,
-                    text_y,
-                    fitted,
+                    font,
+                    font.elide_to_width(value, text_w),
+                    (text_x, text_y),
                     Color::from(palette.on_surface_muted),
+                    None,
                 );
             }
         }

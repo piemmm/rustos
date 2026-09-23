@@ -101,12 +101,39 @@ the keyboard cursor and the pane dispatch. A pane cannot exist without a row,
 or a row without a pane — the crate's own tests hold both directions — so
 adding a category is adding a row and a renderer, never editing the shell.
 
+**The window is titled with the pane on show**, as a file manager's window is
+titled with its folder, so the title bar and the icon bar's window list say
+where it is. It retitles only after presenting the pane, so the title never
+names a frame the screen is not showing yet — which is also what lets the
+desktop session's witness for a new title on screen stand for the pane's
+frame.
+
+## General
+
+Four panes, two kinds.
+
+- **About** and **Date & Time** are read-only fact columns: one label and
+  reading per figure, each from its own ungated query, so one refusal costs
+  one row and every reading that did not arrive says so. About states the
+  machine's name and id, the OS version, uptime, processors and memory; Date
+  & Time states the wall clock and the source it was set from, and its band
+  starts `datetime.app` as an authenticated account, leaving it running — the
+  clock is that application's to set.
+- **Login & startup** (whether the machine starts at a text login or a
+  graphical one) and **Caching** (how much memory each cache class may keep,
+  under one master switch) are **staged** over the machine's `system.conf`,
+  read through the ungated `SYSTEM_CONFIG` query and parsed by the
+  `lib/sysconfig` engine `configure` writes through. Apply asks for an
+  account once and runs `configure` once with every changed key (see the
+  authority map below). The master switch's ceiling is stated on the rows it
+  takes away rather than rewriting their values, because what the store holds
+  is what would apply if the switch came back on.
+
 ## Appearance and Accessibility
 
-Two of the four panes that compose real controls today. They are two views
-of one registry: light/dark is Appearance's alone, and contrast, density,
-motion and the interface scale appear in both — from one definition, because
-a reader looks for them in either place.
+Two views of one registry: light/dark is Appearance's alone, and contrast,
+density, motion and the interface scale appear in both — from one definition,
+because a reader looks for them in either place.
 
 | Setting | What it changes |
 |---|---|
@@ -148,7 +175,7 @@ page](./cursors.md) has the store's layout and the artwork pipeline.
 
 ## Wallpaper
 
-The third composed pane, and the desktop picture's only home: the backdrop
+The desktop picture's only home: the backdrop
 menu's `Change Background…` opens Settings here rather than a second
 application. Its four rows — fit, backdrop, icon arrangement, icon sort —
 come from the same one registry as Appearance's, and post the *pinboard*
@@ -171,10 +198,9 @@ again. [The pinboard's page](./pinboard.md) has the whole arrangement.
 
 ## Storage
 
-The fourth composed pane, and the only one whose rows are *discovered* rather
-than declared: there is no fixed table of settables behind it, just the
-volumes the machine turns out to have. One card each, in the mount table's
-own order:
+The one pane that composes no settable at all: there is no table behind it,
+just the volumes the machine turns out to have. One card each, in the mount
+table's own order:
 
 | What the card shows | Where it comes from |
 |---|---|
@@ -426,13 +452,26 @@ composes its own controls, and the rest state what is missing. It stays in the
 vocabulary because it is the honest thing for a category whose readings exist
 before its controls do.
 
-Seven of the categories a desktop should offer have no subsystem beneath them
-on this tree at all: there is no audio stack, no Bluetooth stack, no
-print or scan stack, no touchpad or touch driver, no 802.11 driver, and no
-file- or screen-sharing server. Settings cannot invent them, and it must not
-draw a volume slider that changes nothing. So those categories are present,
-reachable, and honest: each states what is missing and what would have to
-land.
+Six of the categories a desktop should offer have no subsystem beneath them
+on this tree at all: there is no Bluetooth stack, no print or scan stack, no
+touchpad or touch driver, no 802.11 driver, and no file- or screen-sharing
+server. Sound has a subsystem — programs play through the audio service — but
+nothing that sets a device's volume or picks the default device, and Settings
+must not draw a volume slider that changes nothing. So those categories are
+present, reachable, and honest: each states what is missing and what would
+have to land.
+
+## On a running machine
+
+The `settings_qemu_aarch64` vertical opens Settings from the capsule's system
+menu and photographs it on General, on a stated absence, and on Storage —
+reached past the fold of the strip by the strip's own scrollbar — each dump
+gated on the desktop session's witness that the frame carrying that pane's
+title is on screen. It then chooses Light on Appearance and photographs the
+desktop redrawn light, and passes only once the desktop's published settings
+document has been committed twice: for that choice, and for the system menu's
+*Dark Appearance* row, which reaches the same document through the same
+persist-then-adopt path.
 
 ## Authority map
 

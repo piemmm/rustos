@@ -120,6 +120,7 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"
 # The shell's host tests draw text, so they inject the shared solid test
 # transport via the `test-util` feature (never a running `fontd`).
 [dev-dependencies]
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = ["test-support"] }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
 
 [lints]

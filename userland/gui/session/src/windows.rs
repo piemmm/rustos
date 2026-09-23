@@ -70,6 +70,21 @@ pub const WINDOW_SHOWN: EventId = EventId(20_003);
 /// matches on this constant rather than on a copy of its text.
 pub const WINDOW_SHOWN_MESSAGE: &str = "served window first frame on screen";
 
+/// Event id of the announcement that a served window, already on screen, is
+/// on screen wearing the new title its application gave it, in the desktop
+/// session's reserved range.
+///
+/// [`WINDOW_SHOWN`] speaks for a window's first frame only. The title bar is
+/// the session's own furniture, so the session alone knows when a retitle has
+/// been drawn — and because an application's requests are served in order, a
+/// frame carrying the new title also carries every frame the application
+/// presented before asking for it.
+pub const WINDOW_RETITLED: EventId = EventId(20_016);
+
+/// The exact message [`WINDOW_RETITLED`] is emitted with. A log consumer
+/// matches on this constant rather than on a copy of its text.
+pub const WINDOW_RETITLED_MESSAGE: &str = "served window title on screen";
+
 /// Event id of the one-shot announcement that an open menu chain's plates
 /// reached the display, in the desktop session's reserved range.
 ///
@@ -164,6 +179,9 @@ struct WindowRecord {
     parent: Option<WindowId>,
     /// How far this window has got towards being seen.
     first_frame: FirstFrame,
+    /// Whether a retitle of this already-shown window has yet to be carried
+    /// by a frame that reached the display.
+    retitled: bool,
     /// The process the kernel attested opened this window (a popup inherits
     /// its parent's). What a menu chain's information row resolves its
     /// attested identity from.
@@ -232,24 +250,43 @@ impl SessionWindows {
         core::mem::take(&mut self.owed)
     }
 
-    /// Report every served window whose awaited frame has just reached the
-    /// display.
+    /// Report what the frame just handed to the display shows of the served
+    /// windows: each whose awaited frame it carries, and each already on
+    /// screen whose new title it carries, where `visible` says the window was
+    /// composited into it.
     ///
     /// Called immediately after a frame was handed to the display, which is
-    /// what makes the claim true: a window the application has presented into
+    /// what makes the claims true: a window the application has presented into
     /// is carried by that frame, so it is on screen now. A window still
     /// awaiting its first present says nothing — its body is the session's own
     /// opening fill, not the application's pixels — and one already announced
     /// is not announced again until [`content_released`](Self::content_released)
-    /// makes it awaited afresh.
+    /// makes it awaited afresh. A first frame carries the title the window
+    /// wears, so it retires any retitle still pending; a retitle is announced
+    /// only for a window whose own pixels are on screen, so the record never
+    /// claims a title bar over a released or hidden window, and a burst of
+    /// retitles between two frames is one announcement.
     ///
-    /// Takes a reporter rather than returning a collection so an idle wake —
-    /// which is nearly every wake — allocates nothing.
-    pub fn report_newly_shown(&mut self, mut report: impl FnMut(u64)) {
+    /// One walk for both, taking reporters rather than returning collections,
+    /// so an ordinary frame allocates nothing.
+    pub fn report_on_screen(
+        &mut self,
+        visible: impl Fn(WindowId) -> bool,
+        mut shown: impl FnMut(u64),
+        mut retitled: impl FnMut(u64),
+    ) {
         for (&ipc, record) in &mut self.records {
-            if record.first_frame == FirstFrame::Painted {
-                record.first_frame = FirstFrame::Shown;
-                report(ipc);
+            match record.first_frame {
+                FirstFrame::Painted => {
+                    record.first_frame = FirstFrame::Shown;
+                    record.retitled = false;
+                    shown(ipc);
+                }
+                FirstFrame::Shown if record.retitled && visible(record.wm) => {
+                    record.retitled = false;
+                    retitled(ipc);
+                }
+                _ => {}
             }
         }
     }
@@ -260,7 +297,7 @@ impl SessionWindows {
     /// A released window composites transparent — the desktop shows through —
     /// so "a frame carrying this window's own pixels reached the display" has
     /// stopped being true, and the record must stop claiming it. The window is
-    /// announced again ([`report_newly_shown`](Self::report_newly_shown)) when
+    /// announced again ([`report_on_screen`](Self::report_on_screen)) when
     /// the application answers the redraw its next showing sends and that
     /// frame lands, which is the only honest moment to say its pixels are
     /// back.
@@ -334,6 +371,7 @@ impl SessionWindows {
                 wm,
                 parent,
                 first_frame,
+                retitled: false,
                 owner,
             },
         );
@@ -1086,14 +1124,16 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // the title bar and the taskbar entry together, so the two can
         // never name different subjects. A popup carries neither, and a
         // window the session no longer knows fails closed.
-        let Some(record) = self.windows.records.get(&window_id) else {
+        let Some(record) = self.windows.records.get_mut(&window_id) else {
             return Err(Errno::NotFound);
         };
-        if self.shell.retitle_window(self.compositor, record.wm, title) {
-            Ok(())
-        } else {
-            Err(Errno::NotFound)
+        if !self.shell.retitle_window(self.compositor, record.wm, title) {
+            return Err(Errno::NotFound);
         }
+        // A window not yet on screen shows its title with its first frame,
+        // which is already announced.
+        record.retitled |= record.first_frame == FirstFrame::Shown;
+        Ok(())
     }
 
     fn window_sizing_changed(&mut self, window_id: u64, sizing: WindowSizing) -> Result<(), Errno> {
@@ -2127,9 +2167,25 @@ mod tests {
 
     /// The windows `windows` reports as newly on screen, in report order.
     fn shown(windows: &mut SessionWindows) -> Vec<u64> {
-        let mut seen = Vec::new();
-        windows.report_newly_shown(|window| seen.push(window));
-        seen
+        on_screen(windows, |_| true).0
+    }
+
+    /// What `windows` reports the frame just taken carries — the windows newly
+    /// on screen, then those wearing a new title — with `visible` saying which
+    /// windows it composited.
+    fn on_screen(
+        windows: &mut SessionWindows,
+        visible: impl Fn(WindowId) -> bool,
+    ) -> (Vec<u64>, Vec<u64>) {
+        let (mut shown, mut retitled) = (Vec::new(), Vec::new());
+        windows.report_on_screen(
+            visible,
+            |window| shown.push(window),
+            |window| {
+                retitled.push(window);
+            },
+        );
+        (shown, retitled)
     }
 
     /// A present whose damage or frame disagrees with the recorded
@@ -3689,6 +3745,85 @@ mod tests {
             .map(|entry| entry.title.as_str())
             .collect();
         assert_eq!(labels, ["Files - Documents"]);
+    }
+
+    /// What the frame just taken carries, judged against what the compositor
+    /// actually shows.
+    fn composited(windows: &mut SessionWindows, compositor: &Compositor) -> (Vec<u64>, Vec<u64>) {
+        on_screen(windows, |wm| {
+            compositor
+                .window(wm)
+                .is_some_and(tairix_wm::Window::is_visible)
+        })
+    }
+
+    /// A retitle of a window already on screen is announced by the frame that
+    /// carries it — once however many retitles it folds, and only while the
+    /// window is composited — while a retitle before a first frame, or before
+    /// the frame that shows the window afresh, is covered by that frame's own
+    /// witness.
+    #[test]
+    fn a_retitle_is_announced_once_by_the_frame_that_shows_it() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(4, 4, DisplayFormat::Rgba8888);
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut compositor,
+            windows: &mut windows,
+            picker: &mut picker,
+            apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
+            relay: &mut RefusingRelay,
+            wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
+        };
+        host.window_opened(window_owner(1), 1, &m, "opened", WindowSizing::default())
+            .expect("opens");
+        host.window_retitled(1, "before").expect("retitles");
+        host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
+            .expect("presents");
+        let wm = host.windows.records.get(&1).expect("live").wm;
+        assert_eq!(
+            composited(host.windows, host.compositor),
+            (alloc::vec![1], Vec::new()),
+            "the first frame speaks for the title it opened with"
+        );
+
+        host.window_retitled(1, "after").expect("retitles");
+        host.window_retitled(1, "again").expect("retitles");
+        assert!(host.compositor.set_visible(wm, false));
+        assert_eq!(
+            composited(host.windows, host.compositor),
+            (Vec::new(), Vec::new()),
+            "a hidden window's title bar is not on screen"
+        );
+        assert!(host.compositor.set_visible(wm, true));
+        assert_eq!(
+            composited(host.windows, host.compositor),
+            (Vec::new(), alloc::vec![1])
+        );
+        assert_eq!(
+            composited(host.windows, host.compositor),
+            (Vec::new(), Vec::new()),
+            "one announcement per retitle carried"
+        );
+
+        host.window_retitled(1, "released").expect("retitles");
+        host.windows.content_released(1);
+        host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
+            .expect("presents");
+        assert_eq!(
+            composited(host.windows, host.compositor),
+            (alloc::vec![1], Vec::new()),
+            "a frame showing the window afresh carries its title too"
+        );
+        assert_eq!(
+            composited(host.windows, host.compositor),
+            (Vec::new(), Vec::new())
+        );
     }
 
     /// The bridge forwards a validated pick request to the slot and

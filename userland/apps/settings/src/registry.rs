@@ -622,8 +622,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
             backing: PaneBacking::None {
                 missing: "This system cannot change how a screen is driven: the display \
                           interface can be asked what a screen is doing and told to present to \
-                          it, but it lists no modes and sets none. Nothing sets the interface \
-                          scale either.",
+                          it, but it lists no modes and sets none. The interface scale is set in \
+                          Appearance.",
                 needs: "Mode enumeration and mode setting in the display interface, with driver \
                         support behind them.",
             },
@@ -745,11 +745,10 @@ pub const CATEGORIES: &[CategoryRow] = &[
             name: "sound",
             title: "Sound",
             backing: PaneBacking::None {
-                missing: "This system has no audio support at all: no sound-device driver, \
-                          nothing to mix what programs play, and no way for a program to ask to \
-                          play anything.",
-                needs: "An audio driver class, a mixer service, and an audio interface for \
-                        programs to reach it through.",
+                missing: "Programs play sound through the audio service, but it offers no \
+                          control over a device's volume or over which device is the default, \
+                          so there is nothing here to set.",
+                needs: "A device-volume and default-device control in the audio service.",
             },
             settings: &[],
         }],

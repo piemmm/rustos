@@ -9,14 +9,14 @@
 
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Pixel, Surface};
+use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use crate::damage::sink;
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use crate::scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 use crate::state::{AuthorityState, ControlState};
-use crate::testkit::high_contrast;
+use crate::testkit::{has_pixel, high_contrast, premul};
 
 const VW: u32 = 16;
 const VH: u32 = 300;
@@ -57,14 +57,6 @@ fn moved(x: i32, y: i32) -> InputEvent {
     InputEvent::PointerMoved {
         to: Point::new(x, y),
     }
-}
-
-fn premul(rgba: tairix_theme::Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
 }
 
 /// The requested offset from an action, if any.
@@ -296,6 +288,54 @@ fn part_at_classifies_every_region() {
         bar.part_at(vbounds(), Point::new(2, 100), s, &theme),
         ScrollPart::TrackBefore
     );
+}
+
+/// Every rectangle `part_rect` reports is classified as that part at each of
+/// its corners, the parts tile the bar end to end on both axes, and a part the
+/// thumb leaves no room for — or the outside — has no rectangle at all.
+#[test]
+fn part_rect_is_the_forward_mirror_of_part_at() {
+    let theme = theme();
+    let s = Scale::ONE;
+    let parts = [
+        ScrollPart::Decrement,
+        ScrollPart::TrackBefore,
+        ScrollPart::Thumb,
+        ScrollPart::TrackAfter,
+        ScrollPart::Increment,
+    ];
+    for (bar, bounds, long) in [(vbar(), vbounds(), VH), (hbar(), hbounds(), VH)] {
+        let mut bar = bar;
+        bar.set_model(bar.model().scroll_to(400));
+        let mut covered = 0;
+        for part in parts {
+            let rect = bar
+                .part_rect(part, bounds, s, &theme)
+                .unwrap_or_else(|| panic!("{part:?} is drawn mid-scroll"));
+            let (right, bottom) = (rect.right() - 1, rect.bottom() - 1);
+            for corner in [
+                Point::new(rect.left(), rect.top()),
+                Point::new(right, rect.top()),
+                Point::new(rect.left(), bottom),
+                Point::new(right, bottom),
+            ] {
+                assert_eq!(bar.part_at(bounds, corner, s, &theme), part, "{corner:?}");
+            }
+            covered += match bar.orientation() {
+                ScrollOrientation::Vertical => rect.height,
+                ScrollOrientation::Horizontal => rect.width,
+            };
+        }
+        assert_eq!(covered, long, "the parts tile the bar end to end");
+        assert_eq!(bar.part_rect(ScrollPart::Outside, bounds, s, &theme), None);
+
+        bar.set_model(bar.model().to_end());
+        assert_eq!(
+            bar.part_rect(ScrollPart::TrackAfter, bounds, s, &theme),
+            None,
+            "a thumb at the end leaves no track after it"
+        );
+    }
 }
 
 #[test]

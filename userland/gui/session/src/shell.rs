@@ -49,14 +49,14 @@ use tairix_icon::{
     artwork_cache, ArtworkCache, ArtworkResolver, IconArtworkSource, IconKind, IconRequest,
     IconSet, InlineArtwork, Landed, NoArtworkSeam,
 };
-use tairix_log::Sink;
+use tairix_log::{EventId, Sink};
 use tairix_proglib::Catalog;
 use tairix_reclaim::PressureGauge;
 use tairix_taskbar::{
     icon_cache, AppSlot, Edge, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
     TransientNotification,
 };
-use tairix_theme::{CursorSetId, MotionInteraction};
+use tairix_theme::{Appearance, CursorSetId, MotionInteraction};
 use tairix_wallpaper::{Backdrop, CursorSize};
 use tairix_wm::{
     cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse,
@@ -76,6 +76,20 @@ use crate::thumbs::WindowThumbnails;
 use crate::tip::{SeatTooltip, TipSource};
 use crate::windows::chain_geometry;
 use tairix_abi::window_ipc::WindowRegion;
+
+/// Event id of the announcement that a frame drawn in a changed look — a new
+/// appearance, contrast, density, motion or scale — reached the display, in
+/// the desktop session's reserved range.
+///
+/// The session re-themes its own chrome in the frame it adopts the change in,
+/// and only it sees that frame reach the display; each application redraws
+/// its own window afterwards, on its own time. So this speaks for the desktop
+/// the session draws, never for the windows on it.
+pub const DESKTOP_RESTYLED: EventId = EventId(20_017);
+
+/// The exact message [`DESKTOP_RESTYLED`] is emitted with. A log consumer
+/// matches on this constant rather than on a copy of its text.
+pub const DESKTOP_RESTYLED_MESSAGE: &str = "desktop restyled on screen";
 
 /// A source of live pointer/keyboard events for the desktop.
 ///
@@ -185,6 +199,10 @@ pub struct DesktopShell {
     /// The hover window picker's thumbnails, scaled a window at a time while
     /// the pointer rests out the picker's opening dwell.
     thumbs: WindowThumbnails,
+    /// The generation [`style_generation`](Self::style_generation) answers.
+    style: u64,
+    /// The look [`DESKTOP_RESTYLED`] last spoke for.
+    announced_style: u64,
     /// The per-frame shell work counted so far, so a test can prove a
     /// drained batch settles once rather than once per sample. Test-only:
     /// the product carries no counter.
@@ -296,6 +314,8 @@ impl DesktopShell {
             tip: SeatTooltip::new(),
             tip_window: None,
             thumbs: WindowThumbnails::new(),
+            style: 0,
+            announced_style: 0,
             #[cfg(test)]
             settled: SettleWork::default(),
         }
@@ -815,6 +835,7 @@ impl DesktopShell {
         if !compositor.set_scale(scale) {
             return false;
         }
+        self.style = self.style.wrapping_add(1);
         self.present(compositor);
         self.refresh_cursor(compositor);
         true
@@ -843,7 +864,35 @@ impl DesktopShell {
     /// [`set_theme`](DesktopSession::set_theme)) calls this, then
     /// [`present`](Self::present), to relay the switch.
     pub fn sync_theme(&mut self, compositor: &mut Compositor) -> bool {
-        compositor.set_theme(self.session.active_theme().clone())
+        let changed = compositor.set_theme(self.session.active_theme().clone());
+        if changed {
+            self.style = self.style.wrapping_add(1);
+        }
+        changed
+    }
+
+    /// Which look the desktop is drawn in: it moves whenever the theme or the
+    /// scale does, so a surface that retains its pixels — a prompt, a dialog —
+    /// can tell that it is holding an old one.
+    #[must_use]
+    pub const fn style_generation(&self) -> u64 {
+        self.style
+    }
+
+    /// Announce, through `report`, that the frame just handed to the display
+    /// is the first to carry a change of look, naming the appearance it is
+    /// drawn in; `revealed` says whether the desktop has been shown at all.
+    ///
+    /// A change made before the reveal is part of the desktop the reveal
+    /// announced, so it is absorbed rather than announced a second time.
+    pub fn report_restyled(&mut self, revealed: bool, report: impl FnOnce(Appearance)) {
+        if self.announced_style == self.style {
+            return;
+        }
+        self.announced_style = self.style;
+        if revealed {
+            report(self.session.active_theme().appearance());
+        }
     }
 
     /// Bring the compositor up to date with the taskbar's current model and

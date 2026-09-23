@@ -10,7 +10,7 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::Theme;
 
 use crate::button::{
     Button, ButtonAction, ButtonContent, ContentAlign, IconButton, SplitAction, SplitButton,
@@ -20,7 +20,7 @@ use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PressureKind, PressureState,
     ProgressValue, RecoveryState,
 };
-use crate::testkit::{control_font, high_contrast};
+use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul};
 
 const W: u32 = 140;
 const H: u32 = 28;
@@ -29,18 +29,10 @@ fn font() -> BitmapFont {
     control_font(&Theme::dark(), Scale::ONE)
 }
 
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
 fn render(button: &Button, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
     button.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, theme);
     surface
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
 }
 
 /// The leftmost surface column holding `want`, if any.
@@ -944,4 +936,24 @@ fn hover_press_and_focus_each_change_a_button_render() {
     state.focus = focused_state();
     focused.set_state(state);
     assert_ne!(resting, focused, "a focus ring is visible");
+}
+
+/// A label too long for its plate is elided with the shared mark, alone or
+/// beside its icon, rather than cut where the plate ran out.
+#[test]
+fn a_label_too_long_for_its_plate_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    let drawn =
+        |content: ButtonContent| render(&Button::new(content, ControlRole::Primary), &theme);
+    assert!(
+        marks_elision(|text| drawn(ButtonContent::Label(text.into()))),
+        "a label alone"
+    );
+    assert!(
+        marks_elision(|text| drawn(ButtonContent::IconLabel {
+            icon: IconKind::Pause,
+            label: text.into(),
+        })),
+        "a label beside its icon"
+    );
 }

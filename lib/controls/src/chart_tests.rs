@@ -14,18 +14,15 @@
 use alloc::vec::Vec;
 
 use tairix_geometry::{Rect, Scale};
-use tairix_raster::{Color, Pixel, Surface};
+use tairix_raster::{Pixel, Surface};
 use tairix_theme::{SignalRole, Theme};
 
 use crate::chart::{Chart, MAX_CHART_SAMPLES};
 use crate::state::PressureKind;
+use crate::testkit::{has_pixel, premul};
 
 const W: u32 = 96;
 const H: u32 = 40;
-
-fn premul(rgba: tairix_theme::Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
 
 fn chart_surface_of(chart: &Chart, theme: &Theme, w: u32, h: u32) -> Surface {
     let mut surface = Surface::new(w, h).expect("surface");
@@ -35,10 +32,6 @@ fn chart_surface_of(chart: &Chart, theme: &Theme, w: u32, h: u32) -> Surface {
 
 fn chart_surface(chart: &Chart, theme: &Theme) -> Surface {
     chart_surface_of(chart, theme, W, H)
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
 }
 
 /// Whether nothing at all was painted — every pixel still an untouched

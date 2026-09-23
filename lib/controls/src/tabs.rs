@@ -48,9 +48,9 @@ use crate::chart::Chart;
 use crate::damage;
 use crate::paint::{
     draw_outline, heavy_contrast, icon_slot_side, line_budget, paint_bead, paint_chevron,
-    paint_icon_slot, plate_border, rail_thickness, role_font, seam_thickness, seam_width,
-    surface_rect, text_plate_height, to_i32, withheld, BeadShape, ChevronDir, TextBlock,
-    FULL_COLOUR,
+    paint_icon_slot, paint_run, plate_border, rail_thickness, role_font, run_width, seam_thickness,
+    seam_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape, ChevronDir,
+    TextBlock, FULL_COLOUR,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlState, RenderInvariant, SelectionState,
@@ -1200,8 +1200,8 @@ impl Tabs {
     /// top-trailing corner — the horizontal tab shape.
     ///
     /// The bead's footprint is carved out of the label's own budget before the
-    /// label is laid out, so a long label is truncated rather than running
-    /// under the bead.
+    /// label is laid out, so a long label is elided rather than running under
+    /// the bead.
     fn paint_centred_label(
         surface: &mut Surface,
         rect: (u32, u32, u32, u32),
@@ -1218,17 +1218,18 @@ impl Tabs {
             .saturating_sub(border.saturating_add(pad).saturating_mul(2))
             .saturating_sub(bead_w);
         if avail > 0 {
-            let fitted = font.truncate_to_width(tab.label(), avail);
-            let tw = font.text_width(fitted);
+            let run = font.elide_to_width(tab.label(), avail);
+            let tw = run_width(font, run);
             let cx = to_i32(x) + to_i32(w.saturating_sub(bead_w)) / 2;
             let glyph_h = font.glyph_height();
             let text_y = to_i32(y) + (to_i32(h) - to_i32(glyph_h)).max(0) / 2;
-            font.draw_text(
+            paint_run(
                 surface,
-                cx - to_i32(tw) / 2,
-                text_y,
-                fitted,
+                font,
+                run,
+                (cx - to_i32(tw) / 2, text_y),
                 Self::label_color(theme, tab, theme.palette().accent),
+                None,
             );
         }
         Self::paint_tab_bead(surface, rect, scale, theme, tab);
@@ -1240,8 +1241,9 @@ impl Tabs {
     ///
     /// Room is claimed in the order a reader needs it: the Signal Bead first
     /// (it is a state, not a reading), then the disclosure chevron and the
-    /// reading, then the leading glyph, then the label, which is what
-    /// truncates — the reading is what the reader came for, and a row whose
+    /// reading, then the leading glyph, then the label, which is what gives
+    /// way — elided with the shared mark, so a cut name never reads as a
+    /// complete one. The reading is what the reader came for, and a row whose
     /// glyph gave way would leave a nameless indent. The trend draws only
     /// where a whole one still fits beneath the label line.
     fn paint_entry(surface: &mut Surface, tab: &Tab, paint: &mut EntryPaint<'_>) {
@@ -1287,25 +1289,26 @@ impl Tabs {
         Self::paint_entry_icon(surface, tab, paint, &mut line, label_row);
 
         if let Some(reading) = tab.reading() {
-            let fitted = font.truncate_to_width(reading, line.avail);
-            let reading_w = font.text_width(fitted).min(line.avail);
-            font.draw_text(
+            let run = font.elide_to_width(reading, line.avail);
+            let reading_w = run_width(font, run).min(line.avail);
+            paint_run(
                 surface,
-                to_i32(line.trail.saturating_sub(reading_w)),
-                to_i32(text_y),
-                fitted,
+                font,
+                run,
+                (to_i32(line.trail.saturating_sub(reading_w)), to_i32(text_y)),
                 Color::from(theme.palette().on_surface_muted),
+                None,
             );
             line.avail = line.avail.saturating_sub(reading_w.saturating_add(gap));
         }
         if line.avail > 0 {
-            let fitted = font.truncate_to_width(tab.label(), line.avail);
-            font.draw_text(
+            paint_run(
                 surface,
-                to_i32(line.lead),
-                to_i32(text_y),
-                fitted,
+                font,
+                font.elide_to_width(tab.label(), line.avail),
+                (to_i32(line.lead), to_i32(text_y)),
                 Self::label_color(theme, tab, theme.palette().on_surface),
+                None,
             );
         }
 
@@ -1657,12 +1660,13 @@ fn paint_group_heading(
     if avail == 0 || h < font.line_height() {
         return;
     }
-    font.draw_text(
+    paint_run(
         surface,
-        to_i32(x.saturating_add(pad)),
-        to_i32(y.saturating_add(gap)),
-        font.truncate_to_width(heading, avail),
+        font,
+        font.elide_to_width(heading, avail),
+        (to_i32(x.saturating_add(pad)), to_i32(y.saturating_add(gap))),
         Color::from(theme.palette().accent),
+        None,
     );
 }
 

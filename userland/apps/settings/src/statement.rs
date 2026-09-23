@@ -11,7 +11,8 @@
 //! compose. A pane that *does* compose controls has no statement to make and
 //! draws its form instead.
 
-use tairix_font::{BitmapFont, ELLIPSIS};
+use tairix_controls::paint_run;
+use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -96,56 +97,56 @@ pub fn measured_height(pane: &PaneRow, width: u32, scale: Scale, theme: &Theme) 
 /// surface while the column is scrolled; the caller clips to what is on
 /// screen.
 pub fn render(surface: &mut Surface, pane: &PaneRow, bounds: Rect, scale: Scale, theme: &Theme) {
-    let Some(statement) = Statement::of(pane) else {
-        return;
-    };
-    let metrics = Metrics::resolve(bounds.width, scale, theme);
-    if metrics.text_w == 0 {
-        return;
+    if let Some(statement) = Statement::of(pane) {
+        statement.render(surface, bounds, scale, theme);
     }
-    let x = bounds.left().saturating_add(to_i32(metrics.pad));
-    let mut y = bounds.top().saturating_add(to_i32(metrics.pad));
-    let palette = theme.palette();
+}
 
-    metrics.heading.draw_text(
-        surface,
-        x,
-        y,
-        metrics
-            .heading
-            .truncate_to_width(statement.heading, metrics.text_w),
-        Color::from(palette.on_surface),
-    );
-    y = y.saturating_add(to_i32(
-        metrics.heading.line_height().saturating_add(metrics.gap),
-    ));
+impl Statement<'_> {
+    /// Draw this statement into `surface` at `bounds`, as [`render`] states.
+    fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let metrics = Metrics::resolve(bounds.width, scale, theme);
+        if metrics.text_w == 0 {
+            return;
+        }
+        let x = bounds.left().saturating_add(to_i32(metrics.pad));
+        let mut y = bounds.top().saturating_add(to_i32(metrics.pad));
+        let palette = theme.palette();
 
-    y = metrics.draw_paragraph(
-        surface,
-        x,
-        y,
-        statement.body,
-        Color::from(palette.on_surface),
-    );
-    y = y.saturating_add(to_i32(metrics.gap));
+        paint_run(
+            surface,
+            metrics.heading,
+            metrics.heading.elide_to_width(self.heading, metrics.text_w),
+            (x, y),
+            Color::from(palette.on_surface),
+            None,
+        );
+        y = y.saturating_add(to_i32(
+            metrics.heading.line_height().saturating_add(metrics.gap),
+        ));
 
-    metrics.caption.draw_text(
-        surface,
-        x,
-        y,
-        metrics
-            .caption
-            .truncate_to_width(statement.tail_label(), metrics.text_w),
-        Color::from(palette.on_surface_muted),
-    );
-    y = y.saturating_add(to_i32(metrics.caption.line_height()));
-    metrics.draw_paragraph(
-        surface,
-        x,
-        y,
-        statement.tail,
-        Color::from(palette.on_surface_muted),
-    );
+        y = metrics.draw_paragraph(surface, x, y, self.body, Color::from(palette.on_surface));
+        y = y.saturating_add(to_i32(metrics.gap));
+
+        paint_run(
+            surface,
+            metrics.caption,
+            metrics
+                .caption
+                .elide_to_width(self.tail_label(), metrics.text_w),
+            (x, y),
+            Color::from(palette.on_surface_muted),
+            None,
+        );
+        y = y.saturating_add(to_i32(metrics.caption.line_height()));
+        metrics.draw_paragraph(
+            surface,
+            x,
+            y,
+            self.tail,
+            Color::from(palette.on_surface_muted),
+        );
+    }
 }
 
 /// The faces, paddings and text width one statement is laid out with.
@@ -222,12 +223,38 @@ impl Metrics {
             .body
             .wrap_to_width(text, self.text_w, MAX_PARAGRAPH_LINES)
         {
-            let drawn = self.body.draw_text(surface, x, pen, line.text, color);
-            if line.elided {
-                self.body.draw_text(surface, drawn, pen, ELLIPSIS, color);
-            }
+            let run = (line.text, line.elided);
+            paint_run(surface, self.body, run, (x, pen), color, None);
             pen = pen.saturating_add(to_i32(self.body.line_height()));
         }
         pen
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tairix_controls::testkit::marks_elision;
+    use tairix_geometry::{Rect, Scale};
+    use tairix_raster::Surface;
+
+    use super::Statement;
+
+    /// A heading too long for the column is elided with the shared mark
+    /// rather than cut where the column ran out.
+    #[test]
+    fn a_heading_too_long_for_the_column_is_elided_with_the_mark() {
+        let theme = crate::test_support::theme();
+        let bounds = Rect::new(0, 0, 240, 200);
+        assert!(marks_elision(|heading| {
+            let mut surface = Surface::new(bounds.width, bounds.height).expect("surface");
+            let statement = Statement {
+                heading,
+                body: "",
+                tail: "",
+                needs: true,
+            };
+            statement.render(&mut surface, bounds, Scale::ONE, &theme);
+            surface
+        }));
     }
 }

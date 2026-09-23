@@ -152,11 +152,18 @@ impl Facts {
         })
     }
 
-    /// Paint the column.
+    /// Paint the column, every plate's readings in one slot column so a value
+    /// does not step left and right down the pane.
     pub(crate) fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let column = self
+            .groups
+            .iter()
+            .map(|group| group.slot_column(bounds, scale, theme))
+            .max()
+            .unwrap_or(0);
         for (index, rect) in self.placed(bounds, scale, theme) {
             if let Some(group) = self.groups.get(index) {
-                group.render(surface, FieldLayout::new(rect, 0), scale, theme);
+                group.render(surface, FieldLayout::new(rect, column), scale, theme);
             }
         }
     }

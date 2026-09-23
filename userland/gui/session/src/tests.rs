@@ -2135,6 +2135,53 @@ fn set_appearance_re_themes_the_compositor() {
     );
 }
 
+/// A change of look moves the generation a retaining surface follows, and is
+/// announced once, by the first frame after the reveal that carries it; one
+/// made before the reveal is part of the desktop the reveal announced.
+#[test]
+fn a_restyle_is_announced_once_by_the_first_frame_after_the_reveal() {
+    let (mut shell, mut comp) = desktop_over(
+        TaskbarConfig::bottom_bar(1024, 768),
+        DisplayMode {
+            width_px: 1024,
+            height_px: 768,
+            stride_bytes: 1024 * 4,
+            format: DisplayFormat::Rgba8888,
+        },
+        test_pressure(),
+    );
+    let mut said = Vec::new();
+    let first = shell.style_generation();
+    shell.session_mut().set_appearance(Appearance::Light);
+    assert!(shell.sync_theme(&mut comp));
+    assert_ne!(shell.style_generation(), first);
+    shell.report_restyled(false, |appearance| said.push(appearance));
+    shell.report_restyled(true, |appearance| said.push(appearance));
+    assert!(
+        said.is_empty(),
+        "a look adopted before the reveal: {said:?}"
+    );
+
+    shell.session_mut().set_appearance(Appearance::Dark);
+    assert!(shell.sync_theme(&mut comp));
+    shell.report_restyled(true, |appearance| said.push(appearance));
+    shell.report_restyled(true, |appearance| said.push(appearance));
+    assert_eq!(said, [Appearance::Dark], "once, in the look it now has");
+
+    let unchanged = shell.style_generation();
+    assert!(!shell.sync_theme(&mut comp), "nothing moved");
+    assert_eq!(shell.style_generation(), unchanged);
+    let larger = Scale::from_percent(150).expect("a supported scale");
+    assert!(shell.set_scale(larger, &mut comp));
+    assert_ne!(
+        shell.style_generation(),
+        unchanged,
+        "a rescale is a restyle"
+    );
+    shell.report_restyled(true, |appearance| said.push(appearance));
+    assert_eq!(said, [Appearance::Dark, Appearance::Dark]);
+}
+
 #[test]
 fn pump_propagates_a_source_fault_after_applying_prior_events() {
     let mut shell = shell();

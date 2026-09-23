@@ -1399,7 +1399,7 @@ no authority: each row reports a typed outcome and the session resolves it.
 | Task Shell | session → launch `os.tairix.terminal` | the graphical terminal bundle |
 | — | | |
 | Settings… | session → launch `os.tairix.settings` | the settings bundle (`plans/NEW-DESKTOP-SETTINGS.md`) |
-| Light / Dark Appearance | session `ThemeRegistry::set_theme` | §10; the active one is the group's chosen member — a bullet, disabled, with its reason |
+| Light / Dark Appearance | session → the one persist-then-adopt settings path (`Desktop::appearance_to`) | §10; the active one is the group's chosen member — a bullet, disabled, with its reason |
 | — | | |
 | Lock Screen | session `ScreenLock` → `ElevateRequest::Verify` | the per-console elevation broker |
 | Log Out | session exits cleanly | the login supervisor re-prompts |

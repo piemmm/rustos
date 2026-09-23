@@ -7,16 +7,61 @@
 //! filter — and the content column always survives, because the pane is what
 //! the reader came for.
 
+use tairix_abi::window_ipc::WindowSizing;
 use tairix_controls::{Breadcrumb, TextField};
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_theme::Theme;
 
+/// The window's logical width at the reference density: the strip plus a
+/// content column wide enough for a pane's widest row.
+pub const WIN_WIDTH: u32 = 780;
+
+/// The window's logical height at the reference density.
+pub const WIN_HEIGHT: u32 = 600;
+
+/// The narrowest logical client the window may be resized to: enough for the
+/// content column alone, the strip having been shed.
+const MIN_WIDTH: u32 = 320;
+
+/// The shortest logical client the window may be resized to.
+const MIN_HEIGHT: u32 = 240;
+
+/// The sizing the window asks the window manager for at `scale`.
+///
+/// No ceiling: a wider window seats more of a pane's rows and a taller one
+/// scrolls less, at every size it is given.
+#[must_use]
+pub fn win_sizing(scale: Scale) -> WindowSizing {
+    sizing_of(
+        scale.scale_length(MIN_WIDTH),
+        scale.scale_length(MIN_HEIGHT),
+    )
+}
+
+/// One spelling of the sizing variant, so [`win_sizing`] and
+/// [`WIN_RESIZABLE`] cannot state different things about the decoration.
+const fn sizing_of(min_width_px: u32, min_height_px: u32) -> WindowSizing {
+    WindowSizing::Resizable {
+        min_width_px,
+        min_height_px,
+        max_width_px: 0,
+        max_height_px: 0,
+    }
+}
+
+/// Whether the window is decorated resizable, which is what decides the
+/// furniture band the window manager reserves around the client.
+pub const WIN_RESIZABLE: bool = sizing_of(0, 0).resizable();
+
 /// The logical width of the category sidebar, at the reference density.
 ///
-/// Wide enough at that density for the longest category label the registry
-/// holds, its leading glyph and its disclosure chevron; the strip elides a
-/// label that still does not fit rather than widening.
-pub const SIDEBAR_WIDTH: u32 = 184;
+/// Wide enough at that density, in the shipped face, for the longest category
+/// label the registry holds beside its leading glyph — with the strip's own
+/// scrollbar taken out of it, because a window short enough to scroll the strip
+/// carves the bar from this column. A label that still does not fit (another
+/// locale's, a larger face) is elided with the shared mark rather than
+/// widening the column.
+pub const SIDEBAR_WIDTH: u32 = 208;
 
 /// The narrowest logical width the content column is given before the sidebar
 /// is shed to widen it.

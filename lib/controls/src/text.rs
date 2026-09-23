@@ -35,9 +35,9 @@ use tairix_util::secret::wipe;
 
 use crate::damage;
 use crate::paint::{
-    ground_fill, line_budget, paint_bead, paint_filled_circle, paint_plate, plate_border,
-    resolve_bead, resolve_frame, role_font, surface_rect, text_plate_height, to_i32, withheld,
-    ChromeLayer, PlateStyle, TextBlock,
+    ground_fill, line_budget, paint_bead, paint_filled_circle, paint_plate, paint_run,
+    plate_border, resolve_bead, resolve_frame, role_font, surface_rect, text_plate_height, to_i32,
+    withheld, ChromeLayer, PlateStyle, TextBlock,
 };
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use crate::scrollbar::{ScrollAction, ScrollBar};
@@ -768,13 +768,13 @@ impl FieldCore {
 
         if text.is_empty() {
             if let Some(placeholder) = &self.placeholder {
-                let fitted = font.truncate_to_width(placeholder, avail_w);
-                font.draw_text(
+                paint_run(
                     &mut layer,
-                    0,
-                    baseline,
-                    fitted,
+                    font,
+                    font.elide_to_width(placeholder, avail_w),
+                    (0, baseline),
                     Color::from(palette.on_surface_muted),
+                    None,
                 );
             }
         } else if self.editor.secret {

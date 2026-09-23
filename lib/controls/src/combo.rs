@@ -21,8 +21,8 @@ use tairix_theme::{TextRole, Theme};
 use crate::damage;
 use crate::menu::{plate_rect, Menu, MenuAction, MenuItem, PlatePlacement, PlateSide};
 use crate::paint::{
-    paint_bead, paint_chevron, paint_plate, plate_border, resolve_bead, resolve_frame, role_font,
-    surface_rect, text_plate_height, to_i32, withheld, ChevronDir, PlateStyle,
+    paint_bead, paint_chevron, paint_plate, paint_run, plate_border, resolve_bead, resolve_frame,
+    role_font, surface_rect, text_plate_height, to_i32, withheld, ChevronDir, PlateStyle,
 };
 use crate::state::{ControlRole, ControlState, RenderInvariant, SelectionState};
 
@@ -360,10 +360,10 @@ impl ComboBox {
                     Color::from(palette.on_surface_muted),
                 ),
             };
-            let fitted = font.truncate_to_width(text, budget);
             let glyph_h = font.glyph_height();
             let text_y = to_i32(y) + (to_i32(h) - to_i32(glyph_h)).max(0) / 2;
-            font.draw_text(surface, to_i32(left), text_y, fitted, color);
+            let run = font.elide_to_width(text, budget);
+            paint_run(surface, font, run, (to_i32(left), text_y), color, None);
         }
 
         // The disclosure chevron at the trailing edge.

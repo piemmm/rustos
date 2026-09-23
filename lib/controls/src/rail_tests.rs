@@ -15,26 +15,18 @@ use alloc::vec;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonContent};
 use crate::damage::sink;
 use crate::rail::{ActionRail, RailAction};
 use crate::state::{AuthorityState, ControlRole, ControlState};
-use crate::testkit::high_contrast;
+use crate::testkit::{has_pixel, high_contrast, premul};
 
 const W: u32 = 160;
 const CH: u32 = 28;
 const GAP: u32 = 8;
 const ITEM_SLOT: u32 = CH + GAP;
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
-}
 
 /// A `u32` coordinate as an `i32` (test coordinates always fit).
 fn xi(v: u32) -> i32 {

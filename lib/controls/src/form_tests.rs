@@ -16,8 +16,8 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
-use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, SignalRole, Theme};
+use tairix_raster::{Pixel, Surface};
+use tairix_theme::{SignalRole, Theme};
 
 use crate::button::{Button, ButtonContent};
 use crate::combo::ComboBox;
@@ -26,7 +26,7 @@ use crate::form::{FieldAction, FieldControl, FieldGroup, FieldGroupAction, Field
 use crate::metric::StatusPill;
 use crate::selector::Toggle;
 use crate::state::{AuthorityState, ControlState, SelectionState, ValidationState};
-use crate::testkit::{control_font, high_contrast, text_ladder};
+use crate::testkit::{control_font, has_pixel, high_contrast, premul, text_ladder};
 use crate::text::TextField;
 use crate::value::Slider;
 
@@ -35,14 +35,6 @@ const H: u32 = 30;
 
 fn font() -> BitmapFont {
     control_font(&Theme::dark(), Scale::ONE)
-}
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
 }
 
 fn choices(items: &[&str]) -> Vec<String> {

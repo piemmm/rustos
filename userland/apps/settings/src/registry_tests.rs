@@ -9,6 +9,7 @@
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
+use crate::form::Setting;
 use crate::registry::{strip_rows, Category, Location, Pane, PaneBacking, StripRow, CATEGORIES};
 
 /// Every category the enum names, so the totality test iterates the closed
@@ -122,6 +123,40 @@ fn no_category_is_empty_and_every_label_is_distinct() {
             assert_eq!(row.panes[0].title, row.label, "{:?}", row.category);
         }
     }
+}
+
+/// The absence `pane` states, or a failure naming it.
+fn statement_of(pane: Pane) -> (&'static str, &'static str) {
+    let Some((_, row)) = pane.locate() else {
+        panic!("{pane:?} is not listed");
+    };
+    let PaneBacking::None { missing, needs } = row.backing else {
+        panic!("{pane:?} states no absence");
+    };
+    (missing, needs)
+}
+
+/// Displays names where the interface scale is set, which is true only while
+/// that pane offers the row.
+#[test]
+fn the_displays_pane_points_to_where_the_interface_scale_is_set() {
+    let (missing, _) = statement_of(Pane::Displays);
+    let appearance = Category::Appearance.row().expect("appearance is listed");
+    assert!(missing.contains(appearance.label), "{missing}");
+    assert!(appearance
+        .panes
+        .iter()
+        .any(|pane| pane.settings.contains(&Setting::Scale.label())));
+}
+
+/// The audio service exists, so Sound states the one thing it lacks — a
+/// control over the devices — rather than an absence the tree contradicts.
+#[test]
+fn the_sound_pane_states_the_missing_control_not_a_missing_stack() {
+    let (missing, needs) = statement_of(Pane::Sound);
+    assert!(missing.contains("audio service"), "{missing}");
+    assert!(!missing.contains("no audio support"), "{missing}");
+    assert!(needs.contains("audio service"), "{needs}");
 }
 
 #[test]

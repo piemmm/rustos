@@ -462,6 +462,7 @@ members = [
     "tests/integration/fsmutate_qemu_aarch64",
     "tests/integration/menu_qemu_aarch64",
     "tests/integration/datetime_elevate_qemu_aarch64",
+    "tests/integration/settings_qemu_aarch64",
     "tests/integration/desktop_pressure_qemu_aarch64",
     "tests/integration/autoload_input_qemu_aarch64",
     "tests/integration/greeter_default_qemu_aarch64",

@@ -25,21 +25,13 @@ use crate::state::{
     AuthorityState, ControlState, PointerState, SizeAction, WindowActivationState,
     WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
-use crate::testkit::{high_contrast, text_ladder};
+use crate::testkit::{has_pixel, high_contrast, premul, text_ladder};
 use crate::window::{
     BandCorner, FrameInsets, FrameRim, FurniturePart, GrabReach, ResizeEdge, ResizeEvent,
     ResizeGrabber, ScrollCorner, TitleBar, TitleBarCommands, TitleBarEvent, TitleHit,
     WindowControl, WindowControlAction, WindowFrame, CONTROL_ORDER, IDENTITY_SATURATION_ACTIVE,
     IDENTITY_SATURATION_INACTIVE,
 };
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
-}
 
 fn opaque_count(surface: &Surface) -> usize {
     surface.pixels().iter().filter(|p| p.a > 0).count()

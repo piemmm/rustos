@@ -15,21 +15,13 @@ use alloc::vec::Vec;
 
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_raster::{Pixel, Surface};
+use tairix_theme::Theme;
 
 use crate::damage::sink;
 use crate::nav::{Breadcrumb, BreadcrumbAction, Crumb};
 use crate::state::{AuthorityState, ControlState};
-use crate::testkit::high_contrast;
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
-}
+use crate::testkit::{has_pixel, high_contrast, marks_elision, premul};
 
 fn trail(labels: &[&str]) -> Breadcrumb {
     Breadcrumb::new(labels.iter().map(|l| Crumb::new(*l)).collect())
@@ -842,4 +834,18 @@ fn re_stating_the_focused_crumb_reports_nothing() {
     let mut damage = sink();
     bc.set_focus(Some(1), full, Scale::ONE, &theme, &mut damage);
     assert!(damage.is_empty(), "the ring has not moved");
+}
+
+/// A crumb too long for even the whole trail is elided with the shared mark
+/// rather than cut where the trail ran out.
+#[test]
+fn a_crumb_too_long_for_the_trail_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    let height = Breadcrumb::measured_height(Scale::ONE, &theme);
+    assert!(marks_elision(|text| render(
+        &Breadcrumb::new(vec![Crumb::new(text)]),
+        &theme,
+        120,
+        height
+    )));
 }
