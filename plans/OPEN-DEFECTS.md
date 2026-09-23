@@ -1,6 +1,6 @@
 # OPEN-DEFECTS — Close the remaining open core-kernel defect classes
 
-Status: **planned**
+Status: **in progress**
 
 Binding under `AGENTS.md`. This plan is the single tracker for driving
 the remaining open core-kernel defect classes to closure. It assumes
@@ -19,11 +19,12 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 ## Ledger
 
 Index only. Each defect's own section — or, for the entries that have no
-section, its Scope bullet below — is authoritative if the two ever disagree.
-The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 37 open, 111 closed, 148 total.
+section, its Scope bullet below, and for those with neither, its row here —
+is authoritative if they ever disagree. The record spells closure as DONE,
+FIXED, and CLOSED interchangeably; this table normalises all three to
+**closed**, and a partial fix stays **open**. 40 open, 110 closed, 150 total.
 
-### Open (37)
+### Open (40)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -42,6 +43,7 @@ table normalises all three to **closed**. 37 open, 111 closed, 148 total.
 | D60 | the window-content release has no end-to-end vertical | — |
 | D74 | EEVDF charges every dispatch a fixed service quantum regardless of runtime | — |
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
+| D80.1 | a window the terminal is refused is invisible to the user: the refusal reaches only its `stderr`, which a desktop app has no reader for | sub-item of the closed D80. The charter's fallback, the system log, needs `CAP_LOG_EMIT` in the terminal's manifest; a notice in the app's own UI is a `plans/GUI-TERMINAL.md` decision |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
 | D97 | a userland service's log threshold cannot be lowered on a shipped system | four documents told the reader to lower it; corrected. The device manager's `13002`/`13006`/`13007` are unreachable on a real boot |
 | D98 | the harness cannot order a typed key after a pointer click | blocks FM9-a's rename + toolbar gestures and FM9-c's delete click-through; needs one ordered script and a typed-key vocabulary |
@@ -49,6 +51,7 @@ table normalises all three to **closed**. 37 open, 111 closed, 148 total.
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
+| D118 | host tests that share one low task/process identity against process-global kernel state, and registries whose tests take no guard | partial — the registry guards and every reachable identity collision are closed, the latter as D147. Open: `console::cooked_foreground_maps_ctrl_c_to_a_queued_interrupt` failed once in 500 shuffled runs and is unexplained, its install-once-hook lead untested; and an isolated identity is still not the default — 300 of `syscalls.rs`'s 450 tests spell the literal `2` |
 | D123 | `kernel/core` is not under the UB oracle | `kernel/mem` is **closed** — enrolled and green (0 leaks) once `DirectPhysMap` gained a provenance root, every leaked fixture became a `Once` cell, `slab`'s proptest stopped wanting a cwd, the sample-sized sweeps were scaled, and the crate was dealt across the host's cores (`Spread::PerCore`) instead of taken serially in one process, which is what overran the runner's per-job budget; one 4-hour `dma` test is skipped by name. Stage 383 s. `kernel/core` is **not** budget-bound as previously recorded: 577 test-side `Box::leak` sites across ~40 fixture types had never been seen, because every whole-crate run aborted on provenance before the leak check ran — see the section |
 | D122 | kthread admission aborts the kernel on an allocation failure instead of failing closed | partial — the stack, the allocation that actually fails, is now a `Result`; the control block and the `Box<dyn>` around it still abort through the global allocator's handler |
 | D127 | the tree carries `static mut`, which the charter names as a hack, in ~30 source files and 139 test kernels | noticed while enrolling `lib/kalloc`; not absorbed. Every site is a `.bss` arena or table (`HEAP`, `KERNEL_STACKS`, port scratch) reached only through `addr_of!`, so none creates a reference and none trips `static_mut_refs` — a spelling, not a known soundness bug. `SyncUnsafeCell` is the modern form. Either the sweep lands or a charter carve-out says why storage is not state; today neither is written down |
@@ -59,12 +62,12 @@ table normalises all three to **closed**. 37 open, 111 closed, 148 total.
 | D140 | the desktop never installs the notification-icon set it can load, so a shipped chrome SVG would be ignored | latent today (no chrome kind ships an SVG); wiring it naively costs 76 speculative per-kind lookups at bring-up, so the fix is to discover the present assets from one directory listing first — see below |
 | D141 | a per-inode ACL can be authored at provisioning but never changed or read back: there is no `fs_set_acl` and no `getfacl`/`setfacl` | noticed while designing `plans/SSH.md` §1.4; not absorbed. The rest of the §5.3 model is complete — `kernel/core/src/fs/perm.rs` enforces capability gate → ACL → mode, ARXFS persists the ACL, `tairix_users::policy` authors one at home provisioning — so the gap is only the userland write and read-back path: `fs_set_mode`/`fs_set_owner` exist and their ACL counterpart does not. Three consequences: a grant lives and dies with the inode its provisioner created, so a file a user deletes and recreates silently loses it; an account provisioned before a grant is introduced has no repair path short of recreating the home; and a user cannot inspect the non-mode authority over their own files, which for a security mechanism is the sharper one. Closing it is a syscall + ABI + VFS path + ARXFS write + a tool |
 | D142 | the network stack's admin surface carries no message that *retires* an interface | noticed while landing `configure`'s write side; not absorbed. An interface removed from `network.conf` keeps the addressing the stack was last given until the next boot — every other edit now applies live. `configure` and the device manager both state the limit rather than implying otherwise, so nothing reports a success it did not get. Closing it means a framed remove message beside `NetInterfaceConfigMsg`, `Netstack` tearing the interface down (addresses, routes, bond membership, resolver entries) and the two pushers sending it for an alias the document dropped |
-| D143 | no `rsa-sha2-*` SSH key support: the only pure-Rust RSA carries an unpatched advisory | noticed while landing `plans/SSH.md` S0a; the algorithm is absent rather than shipped weak. The `rsa` crate carries RUSTSEC-2023-0071 (Marvin timing attack) with `patched = []`, unfixed on 0.9.10 and the 0.10 release candidates as of 2026-09-12, and its own advisory text says to avoid it where an attacker can observe timing over the network — which is exactly SSH. §19.3 blocks the dependency and §2.12 forbids hand-rolling the alternative; verify-only does not help, because `cargo deny` flags the crate rather than the call. The cost is a user whose only key is `~/.ssh/id_rsa`, and the rare RSA-only host key; stock OpenSSH host keys are Ed25519 by default. **Re-check trigger:** whenever `lib/crypto`'s pins are audited or `plans/SSH.md` advances a stage, confirm whether the advisory has gained a `patched` version — if it has, `plans/SSH.md` S15 unblocks as an ordinary increment |
+| D143 | no `rsa-sha2-*` SSH key support: the only pure-Rust RSA carries an unpatched advisory | noticed while landing `plans/SSH.md` S0a; the algorithm is absent rather than shipped weak. The `rsa` crate carries RUSTSEC-2023-0071 (Marvin timing attack) with `patched = []`: as of 2026-09-23, re-checked when `plans/SSH.md` S0d landed, it is unfixed on 0.9.10 and on every 0.10 release candidate through rc.18, the newest `rsa` release (April 2026). Its own advisory text says to avoid it where an attacker can observe timing over the network — which is exactly SSH. §19.3 blocks the dependency and §2.12 forbids hand-rolling the alternative; verify-only does not help, because `cargo deny` flags the crate rather than the call. The cost is a user whose only key is `~/.ssh/id_rsa`, and the rare RSA-only host key; stock OpenSSH host keys are Ed25519 by default. **Re-check trigger:** whenever `lib/crypto`'s pins are audited or `plans/SSH.md` advances a stage, confirm whether the advisory has gained a `patched` version — if it has, `plans/SSH.md` S15 unblocks as an ordinary increment |
 | D144 | `menu-qemu-aarch64` stalled once at its runtime ceiling with the terminal never launched, and the mechanism is not known | observed once in a full 182-test matrix run on `6f1895cc5`; has not reproduced (standalone 22.4 s, then 25.1 s, then green in a full gate). **Not** load: the guest was alive and idle at the kill (≈8 IPC/s, silent 1.98 s) and 600 s dwarfs the 22 s a pass needs, so it stalled rather than ran slow. Reached `desktop fully revealed` + `first input delivered kind=pointer`, then nothing: no `terminal.app` bundle load and so no `served window first frame on screen`, the gate the rest of the script waits on — the launch click had no effect. The recorded suspicion, that the row click raced the program-library popup, is **disproven**: the popup takes the pointer grab from `is_open()`, i.e. from the model, so a row click delivered before the popup's first present is still hit-tested against the open popup. Leading remaining candidate is `lib/virtio_input`'s documented silent-drop bound (the device discards events when no posted buffer is free; a press/release vanishing mid-burst was seen end to end before the pool went from 8 to 64), whose stated trigger — a click arriving while the desktop re-renders — is exactly what the old script produced by firing the row click during the popup's ~159 ms paint; weak, though, since a 64-deep pool should absorb a burst this small. The six library scripts now gate the row click on the popup's own `program-library popup on screen` witness (id 20015), so no script depends on the question and a recurrence records whether the popup ever reached the screen. Diagnosing it still needs the failing serial log copied aside: `persist_serial` rewrites one path per test |
 | D145 | `netstack`'s `accept` scans the whole socket table to find the next unaccepted child, and a spurious `accept` scans it all | noticed while converting the socket bound to measured bytes (`plans/SSH.md` S0b); not absorbed, because it is a second index's worth of design rather than part of that conversion. Every other owned-handle lookup is O(1) through a keyed index; this one is `sockets.iter().position(...)` over the entire table, so a server accepting *n* connections pays O(n²), and the common `WouldBlock` — an `accept` with nothing ready — pays a **full** scan. Remote peers decide how many connections there are to accept, so it is the same "cost follows the table" class the indices were added to remove, reached by a path the owner drives. It is not a correctness or containment defect: the bound still holds and no authority leaks. The fix is not a fifth index but a per-listener FIFO of unaccepted child ids living *inside* the `Proto::Listen` variant, so it is created, drained, and dropped with the listener that owns it and needs no reservation of its own; `accept` then pops a handle and resolves it through `by_id` in constant time. Touches `Proto::Listen`'s shape and every listener site (`to_record`, `defence_counters`, `close`, `listen`, `accept_socket`, `drive_listener`, `advance_listener`, `drain_listener_accepts`, `stream_next_deadline`, `committed_of`, the invariant check). **Re-check trigger:** `plans/SSH.md` S5, whose `sshd` is the tree's first real `accept` consumer and the first workload that would feel it |
-| D146 | a CPU fault in a minimal QEMU integration kernel is a silent hang: no vector table is installed and no fault handler is registered, so nothing reports the syndrome | found while diagnosing the `figure-determinism-qemu-aarch64` boot-stack overflow, which presented only as a 90 s silence with the transcript's last line being the step *before* the fault. These bins supply their own `kernel_main` and call at most `enable_fp_el1`; `tairix_arch_aarch64::exceptions::init_vectors` is never called, so `VBAR_EL1` stays 0 and a synchronous fault vectors to physical `0x200`, executes zeros as `UDF`, and re-faults forever — the guest is wedged rather than dead, so the harness can only kill it on the inactivity budget. The real syndrome (`Prefetch Abort, ESR 0x21/0x86000000, FAR/ELR 0x3ff0000000000000` — a branch to the f64 `1.0` from a corrupted vtable slot) was recoverable only by re-running the bin by hand under `qemu -d int`. Installing vectors alone is **not** the fix: `exceptions::fatal_exception` offers the trap to `fault::fault_handler()` and, finding none registered, falls through to `halt_current_cpu()` — still silent. The fix is a shared guest-side itest kernel helper (there is none today: `tests/integration/harness` is host-side build glue and `finisher` only provides `fail_point!`) that installs the vector table and registers a handler printing `ESR`/`FAR`/`ELR` through the serial sink before exiting with a failure code, wired into the itest bins on both bare-metal ports. riscv64 has the same gap by the same route. Until it lands, any fault in these bins costs a manual `-d int` re-run to diagnose |
-
-| D151 | every in-tree fuzz harness draws its structural choices from an unmixed LCG's low bits, where bit *k* has period 2^(k+1) | found while folding the DNS-SD grammar into `fuzz_net_mdns` (`plans/ZEROCONF.md` Z2). Measured against the shared recurrence (`x*6364136223846793005 + 1`, output = raw state): `next_u64() & 1` is `0,1,0,1,…` and `index(4)` is `2,3,0,1,…`. So a coin flip reached at a **fixed parity** of the draw sequence is a constant, and two flips an even number of draws apart are identical. Demonstrated, not theorised: the new `ServiceInstance::from_name` branch executed **0** times across 2000 sweep iterations with every assertion inside it unreached, and reaches 328 once the generator's output is mixed. **`fuzz_net_mdns` is fixed** — its `Lcg` now returns `fuzzseed::splitmix64(state)` and the exercise covers both name shapes deterministically rather than by draw. Open elsewhere: 25 harnesses carry their own copy of the unmixed generator, 14 of them make a power-of-two choice off the low bits, and `tairix_fuzzseed::Lcg::below` takes `% n` off the raw state across 44 call sites. Not swept here because each harness explores genuinely new paths once its draws decorrelate, so the sweep carries an unbounded tail of real finds across unrelated subsystems; it is its own body of work. The duplication of the generator across 25 files — with a comment in each asserting they are identical — is the second half of the same entry: the fix is to mix `tairix_fuzzseed::Lcg`, give it the `index`/`next_u32`/`next_u16` the copies grew, and delete them |
+| D146 | a CPU fault in a minimal QEMU integration kernel is a silent hang: no vector table is installed and no fault handler is registered, so nothing reports the syndrome | found while diagnosing the `figure-determinism-qemu-aarch64` boot-stack overflow, which presented only as a 90 s silence with the transcript's last line being the step *before* the fault. These bins supply their own `kernel_main` and call at most `enable_fp_el1`; `tairix_arch_aarch64::exceptions::init_vectors` is never called, so `VBAR_EL1` stays 0 and a synchronous fault vectors to physical `0x200`, executes zeros as `UDF`, and re-faults forever — the guest is wedged rather than dead, so the harness can only kill it on the inactivity budget. The real syndrome (`Prefetch Abort, ESR 0x21/0x86000000, FAR/ELR 0x3ff0000000000000` — a branch to the f64 `1.0` from a corrupted vtable slot) was recoverable only by re-running the bin by hand under `qemu -d int`. Installing vectors alone is **not** the fix: `exceptions::fatal_exception` offers the trap to `fault::fault_handler()` and, finding none registered, falls through to `halt_current_cpu()` — still silent. The fix is a shared guest-side itest kernel helper (there is none today: `tests/integration/harness` is host-side build glue and `finisher` only provides `fail_point!`) that installs the vector table and registers a handler printing `ESR`/`FAR`/`ELR` through the serial sink before exiting with a failure code, wired into the itest bins on both bare-metal ports. riscv64 has the same gap by the same route. Until it lands, any fault in these bins costs a manual `-d int` re-run to diagnose. The boot-stack guard (D150) cannot help here yet: its verdict is read on the panic path, which a fault in these bins never reaches, so an overrun that faults rather than panics — the aarch64 case above — is still silence |
+| D151 | every in-tree fuzz harness draws its structural choices from an unmixed LCG's low bits, where bit *k* has period 2^(k+1) | found while folding the DNS-SD grammar into `fuzz_net_mdns` (`plans/ZEROCONF.md` Z2). Measured against the shared recurrence (`x*6364136223846793005 + 1`, output = raw state): `next_u64() & 1` is `0,1,0,1,…` and `index(4)` is `2,3,0,1,…`. So a coin flip reached at a **fixed parity** of the draw sequence is a constant, and two flips an even number of draws apart are identical. Demonstrated, not theorised: the new `ServiceInstance::from_name` branch executed **0** times across 2000 sweep iterations with every assertion inside it unreached, and reaches 328 once the generator's output is mixed. **`fuzz_net_mdns` is fixed** — its `Lcg` now returns `fuzzseed::splitmix64(state)` and the exercise covers both name shapes deterministically rather than by draw. Open elsewhere, every one taking its choices off the raw state: 26 files carry their own `struct Lcg` — 22 fuzz harnesses, three `lib/net/src` unit-test fixtures and the WinterSun net corpus its three harnesses share — `lib/compress`'s three harnesses inline the same multiplier as a closure and choose off its lowest bits (`next() % 4`, `next() & 1`, `is_multiple_of(8)`), and `tairix_fuzzseed::Lcg` is itself unmixed, its `below` taking `% n` at 188 call sites, 152 of them in `fuzz_image`. Not swept here because each harness explores genuinely new paths once its draws decorrelate, so the sweep carries an unbounded tail of real finds across unrelated subsystems; it is its own body of work. The duplication — with a comment in each copy asserting they are identical — is the second half of the same entry: mix `tairix_fuzzseed::Lcg`, give it the `index`/`next_u32`/`next_u16` the copies grew, and delete the copies, together with the private generators that escape the low-bit flaw but duplicate the seam (xorshift64* in `kernel/ipc`, `kernel/mem` twice, `kernel/syscall` and `lib/virtio`; the high-bits LCG in `lib/image`'s VP8 fixture; `fs_soak`'s SplitMix64) |
+| D152 | a panic raised inside the framebuffer console's renderer deadlocks its own report | aarch64, the one port whose kernel renders a framebuffer console, on a release build with a live framebuffer. `SerialSink::write_event` renders through `video::write_bytes`, whose shared `paint` body takes `RENDER_LOCK` blocking, so a fault inside `lib/fbcon` or `paint` with the lock held hangs silently on the record it is emitting; `video::reclaim_surface`'s `try_lock` steps around the hang without fixing the write path. See the Scope bullet |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -91,7 +94,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (111)
+### Closed (110)
 
 | ID | Subject |
 |---|---|
@@ -190,7 +193,6 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D115 | the Switchboard memory composition read "unknown" under load, because it was built from a count of *mappings* rather than of RAM |
 | D116 | a duplex storage or network trace tinted both directions alike, and the storage rail plotted only reads |
 | D117 | a wait-queue test asserted a clear reading of process-global deferred-wake flags its siblings set |
-| D118 | host tests that share one low task/process identity against process-global kernel state, and registries whose tests take no guard |
 | D119 | a wired path-backed descriptor was refused to a child holding no `CAP_FS_ACCESS`, breaking the inherited-document hand-off |
 | D120 | a per-CPU guarded-copy republish was refused, halting every aarch64 secondary |
 | D121 | `ContextSwitch::prepare` took the task's stack as a bare integer, so no UB oracle could interpret the three paging ports |
@@ -211,6 +213,46 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 
 The open items, in priority order:
 
+- **D150 — the boot stack had no overrun detector on any port — FIXED.** The
+  MMU is off while the boot stack is in use, so the guard is poison rather
+  than a hole: every port reserves 4 KiB below the stack (the linker script on
+  aarch64 and riscv64, `boot.s` on x86_64), the boot stub fills it with
+  `lib/memguard`'s `GUARD_BYTE` — handed in as a `global_asm!` const operand,
+  so assembly never re-spells the sentinel — and
+  `CpuStateCapture::boot_stack_guard` gives the panic record its verdict: an
+  `sp` below the stack first, else the canary's `intact` or `disturbed`. The
+  `bootguard_qemu_*` verticals prove reservation, fill and handle on all three
+  bare-metal ports. The verdict is read only on the panic path, which a
+  minimal itest kernel's CPU fault never reaches (D146). The record is
+  `plans/FIX-PANICS.md`.
+- **D149 — icon artwork landing repainted the whole icon bar and the whole
+  library popup — FIXED.** `ArtworkDesk::take_landed` answers a
+  `tairix_icon::Landed` naming the decodes that came back, and each surface
+  latches only what the batch moved: the slots whose `AppSlot` changed (the
+  strip whole only when the slot count re-lays it), the popup row whose picture
+  changed, and the bar controls that resolve class artwork as they paint.
+  `plans/FIX-DESKTOP-SPEEDUP.md` C.7.
+- **D148 — the hover gate's damage bound was exhausted by a desktop that
+  re-damaged its whole icon bar after every published frame — FIXED.** The
+  library popup's one-shot "seen" witness fired through
+  `Taskbar::library_mut`, a borrow that latches the whole bar and popup, so a
+  calm desktop recomposed a full-width strip every frame. It now reports
+  through `Taskbar::report_library_shown`, which latches nothing, and arriving
+  desktop-icon artwork marks its cells (`Desktop::mark_icons`) rather than the
+  layer. The hover vertical bounds total damage rather than a per-frame mean,
+  so a host's frame count cannot move it. `plans/FIX-DESKTOP-SPEEDUP.md` C.7.
+- **D147 — host tests hand-picked the task ids they keyed process-global
+  registry state on — FIXED.** The call-endpoint registry, the wait-set table
+  and the shared-region table are scrubbed by task id on `exit`, which sibling
+  tests drive holding no registry guard, so a test that named its principal by
+  a literal lost in-flight state to a sibling's reclaim of that number. A
+  `test_boot::claim_task` claim is now a 16-id block above every hand-spelt and
+  scheduler-drawn id and `claim_peer_task` hands out the rest of it, so a test
+  modelling several principals names each without picking one; the owners,
+  posters and exiting tasks those registries are keyed on now come from
+  claims, save the few literals D118 records.
+  `only_the_posters_own_reclaim_cancels_an_in_service_call` pins that a reclaim
+  below the floor leaves a claimed poster's call alone.
 - **D129 — the `SleepLock` releaser deleted a live waiter's re-registered
   row — FIXED.** SMP-only: about half of all four-CPU boots stopped at the
   `ARXFS passphrase:` prompt with no input driver loaded. A wait-queue row was
@@ -223,12 +265,13 @@ The open items, in priority order:
   `kernel/sched/api::park` with an honest error contract, and the enrolment
   gained a four-CPU row for the unlock -> store-scan -> autoload chain. The
   authoritative record is `plans/FIX-SLEEPLOCK.md` (S1, S3, S4, S6).
-- **D138 — the desktop-pressure vertical photographs its baseline before the
-  bar has drawn a slot.** A test defect, not a desktop one: the reveal marker
-  and the slot-drawn marker have no ordering, so under parallel load the
-  artwork baseline is taken with the slot empty and the vertical reports the
-  desktop as having dropped artwork it had not yet drawn. Proved in the
-  preserved dumps; see the section.
+- **D138 — the desktop-pressure vertical photographed its baseline before the
+  bar had drawn a slot — FIXED.** A test defect, not a desktop one: the reveal
+  marker and the slot-drawn marker have no ordering, so under parallel load the
+  artwork baseline was taken with the slot empty and the vertical reported the
+  desktop as having dropped artwork it had not yet drawn. The baseline and the
+  pointer script now wait on `APP_BAR_SETTLED`, the session's witness for a
+  revealed bar holding its resolved pictures; see the section.
 - **D137 — the blocking `wait` parked the calling thread but registered its
   process — FIXED.** A non-leader thread reaping a child registered the
   group's *leader* on `PROCWAIT_WAITQ` and parked *itself*, so the exit woke
@@ -868,14 +911,12 @@ The open items, in priority order:
   recorded here rather than fixed inline because the remaining half widens
   the block trait across every implementor. Detail below.
 - **D22 — `netstack-dhcp-qemu-riscv64` intermittent stall under the full
-  pipeline (OPEN).** The vertical hits its 360 s deadline when the guest
-  matrix shares the host with the rest of `cargo xtask ci`, having stopped at
-  `driver-store catalogue unavailable`. The re-evaluation wakeup and the
-  root-unlock independence are both cleared by code inspection, and its
-  budget was already once enlarged for this same reason — so the fix is
-  bounded guest concurrency or a real completion signal, never a third bump.
-  Reproduced again under a whole-project `ci`; the same run measures the
-  lone-run cost at ~30 s, bounding the gap at >12× (detail below).
+  pipeline — DONE.** Not load: the in-kernel virtio completion wait had no
+  deadline, so one unobserved completion parked the boot task inside a disk
+  request holding that disk's lock, behind which `/System`'s mount and the
+  driver-store service sit. Every park now carries the caller's deadline and
+  `virtio_blk` fails a silent request closed; the 360 s budget is unchanged.
+  See the section.
 - **D23 — the debug FIQ self-sample corrupted the aarch64 exception-return
   window — DONE.** A desktop session on the QEMU-`virt` **debug** image hard
   locked a secondary core with a `pre_silence` PC *inside* the trap
@@ -919,25 +960,27 @@ The open items, in priority order:
   session queue (`WouldBlock`) counted as a publish fault, so five busy
   sample periods killed the monitor; nothing restarts one. Back-pressure is
   now excluded from the give-up budget.
-- **D35 — an app-ward window event is dropped when its mailbox is full
-  (OPEN).** The session's delivery is one non-blocking send with no
-  hold-back, so a state edge (`Resized`, `FilePicked`, …) can be lost.
-  Needs a "destination has space" wait-set member kind first.
-- **D36 — a panic *inside* the framebuffer console's renderer hangs its own
+- **D35 — an app-ward window event was dropped when its mailbox was full —
+  DONE.** The session's delivery was one non-blocking send with no hold-back,
+  so a state edge (`Resized`, `FilePicked`, …) could be lost. The session now
+  holds back what a full mailbox refuses, in order and folded by kind, and
+  flushes it when the level-triggered `WaitSourceKind::PortRoom` member
+  reports room; see the section.
+- **D152 — a panic *inside* the framebuffer console's renderer hangs its own
   report (OPEN).** Noticed while wiring the D8 surface handover
-  (`plans/DISPLAY.md`), not caused by it. On a release build with a live
-  framebuffer, `SerialSink::write_event` renders the record through
-  `video::render_bytes`, which takes `RENDER_LOCK` **blocking**. A panic
-  raised while that lock is already held by this CPU — an index or arithmetic
-  fault inside `lib/fbcon`, or inside `render_bytes` itself — therefore
-  deadlocks on the report it is trying to emit: no oops on the screen, no
-  oops on serial, a silent hang. The re-entrancy guard does not help (it does
-  not release the lock). D8's panic reclaim deliberately steps around this
-  (`video::reclaim_surface` uses `try_lock` precisely so it cannot add a
-  second hang site) but does **not** fix the underlying write path. The real
-  fix is Linux's `bust_spinlocks` shape: on entry to the panic path, mark the
-  console locks broken so every later console write proceeds unlocked — the
-  machine is going down and a torn frame beats silence. Needs a `lib/sync`
+  (`plans/DISPLAY.md`), not caused by it. On an aarch64 release build with a
+  live framebuffer, `SerialSink::write_event` renders the record through
+  `video::write_bytes`, whose shared `paint` body takes `RENDER_LOCK`
+  **blocking**. A panic raised while that lock is already held by this CPU —
+  an index or arithmetic fault inside `lib/fbcon`, or inside `paint` itself —
+  therefore deadlocks on the report it is trying to emit: no oops on the
+  screen, no oops on serial, a silent hang. The re-entrancy guard does not
+  help (it does not release the lock). D8's panic reclaim deliberately steps
+  around this (`video::reclaim_surface` uses `try_lock` precisely so it cannot
+  add a second hang site) but does **not** fix the underlying write path. The
+  real fix is Linux's `bust_spinlocks` shape: on entry to the panic path, mark
+  the console locks broken so every later console write proceeds unlocked —
+  the machine is going down and a torn frame beats silence. Needs a `lib/sync`
   primitive for "abandon this lock", so it is a `lib/sync` + per-port change,
   not a one-liner. **Regression cover owed with the fix** (§7): a host test
   that panics with the render lock held and asserts the record still reaches
@@ -1093,7 +1136,18 @@ three further ordering defects the work exposed); and ARXFS scrub's metadata
 copy-repair wrote to the device with no read-only guard, so a mount held
 read-only precisely because its medium must not be touched was written anyway
 (fixed — the copy-repair is one read-only-aware rule, and reading that code
-found two more read-only writes on the same path).
+found two more read-only writes on the same path). D65 joined them and is now
+fixed: ARXFS's B-tree insert recursed 8 KiB of stack per tree level,
+overflowing a release kernel's 32 KiB stack — measured at 48 KiB for one write
+to a fragmented file, and 34 KiB for one to a single-leaf tree, so it was
+reachable without any depth at all (item A1 of
+`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`; the mutation path is iterative and the
+measured cost no longer scales with depth). D66 is the fourth and is also
+fixed: one `DriverError` value spoke for a taken name, a populated directory
+and a retryable transient at once, so a name taken between the VFS's
+pre-check and the driver call was reported as an I/O error, and any consumer
+reaching a filesystem driver without the VFS's per-operation mapping read
+`EWOULDBLOCK` where `EEXIST` was meant.
 - **D77 — the desktop session panicked inside `alloc` under the 32-window
   pressure soak — FIXED.** `desktop-pressure-qemu-aarch64` failed
   intermittently when the session process died after 31 of its 32 windows
@@ -1298,27 +1352,14 @@ found two more read-only writes on the same path).
     glyph cache) and holds it within what that render retains: 218,312 bytes
     against 286,480 retained for a 1880×1000 window, where the transient
     asked for 7,753,840.
-- **D76 — a family of riscv64 QEMU verticals blow their absolute ceiling only
-  under the loaded matrix (OPEN).** The riscv64 netstack family plus
-  `autoload-input` and `rtc-goldfish` leave the guest alive and parked in WFI
-  at the *absolute* ceiling; membership varies per run, so treat any list of
-  names as a sample. Completion is bimodal — ~8.7 s or never — which says a
-  lost race, not slowness; both quantitative degradation figures are harness
-  artifacts and are withdrawn. Two sub-mechanisms: the keyboard driver's load
-  step never completes, and (for the netstack rows) the guest provably
-  finishes but the harness's host-side peer observer never confirms.
-  Diagnosed, not fixed; the fix is bounded guest concurrency or a real
-  completion signal, never a ceiling bump. Detail below. D65 joined them and is now fixed: ARXFS's
-B-tree insert recursed 8 KiB of stack per tree level, overflowing a release
-kernel's 32 KiB stack — measured at 48 KiB for one write to a fragmented file,
-and 34 KiB for one to a single-leaf tree, so it was reachable without any depth
-at all (item A1 of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`; the mutation path is
-iterative and the measured cost no longer scales with depth).
-D66 is the fourth and is also fixed: one `DriverError` value spoke
-for a taken name, a populated directory and a retryable transient at once, so a
-name taken between the VFS's pre-check and the driver call was reported as an
-I/O error, and any consumer reaching a filesystem driver without the VFS's
-per-operation mapping read `EWOULDBLOCK` where `EEXIST` was meant.
+- **D76 — a family of riscv64 QEMU verticals blew their absolute ceiling only
+  under the loaded matrix — FIXED.** Completion was bimodal — ~8.7 s or
+  never — which said a lost race, not slowness. The device manager lost it:
+  with the driver store not yet served it parked for a hardware-tree bump that
+  nothing emits, so nothing autoloaded; it now retries under a bounded deadline
+  while the catalogue is unfetched. The netstack rows' second half, a peer
+  observer that never confirmed a guest that had succeeded, is D95. Neither
+  moved a ceiling. Detail below.
 
 - **D106 — the boot-floor volumes publish no I/O source (FIXED).** The fold
   behind the three per-volume queries now has one home
@@ -7381,15 +7422,21 @@ install — order-dependent, at about the right rate. It did not recur in 1200
 runs after the two fixes above, which settles nothing: it was seen at 1-in-500
 and 1200 clean runs cannot distinguish "fixed" from "not yet seen".
 
-**The 297-site sweep, not attempted.** 297 `#[test]` functions in
-`syscalls.rs` name the shared low identity, over 945 literal sites
-(`make_caps_record(2, …)` 260, `SecTaskId(2)` 309, `ProcessId(2)` 376). The
-cheap structural form is to make an isolated identity the *default* a test
-gets — one `principal()` helper returning this test's claimed id, used
-wherever a test means only "me" — so a case added later is isolated without
-its author knowing the hazard exists. Only a test that genuinely names a
-second party keeps a literal, and the seat case above shows those exist and
-must be found per test rather than assumed away.
+**The identity sweep, not attempted.** 300 of `syscalls.rs`'s 450 tests name
+the shared low identity, over 948 literal sites (`make_caps_record(2, …)` 259,
+`SecTaskId(2)` 310, `ProcessId(2)` 379). The structural form is to make an
+isolated identity the *default* a test gets, so a case added later is isolated
+without its author knowing the hazard exists. The helpers exist —
+`test_boot::claim_task` for "me" and `claim_peer_task` for each further party,
+from the same 16-id block (D147) — so what is left is the sweep itself. Only a
+test that genuinely names a second party keeps a literal, and the seat case
+above shows those exist and must be found per test rather than assumed away.
+Literals still key state the reclaim path scrubs, and are the sweep's first
+sites: `call_cancel_withdraws_the_posted_request` posts as `2` and the two
+`call_create_*` tests own an endpoint as `5`, safe only because every test
+that reclaims a literal holds the registry guard too — save
+`land_pending_kill_records_the_signalled_exit_and_reclaims`, which reclaims `9`
+holding none, safe only because nothing keys scrubbed state on `9`.
 
 **What a green run is worth here: nothing.** Observed rates are 1–3 failures
 per 500 runs, and long clean stretches appear either side of an unchanged tree
