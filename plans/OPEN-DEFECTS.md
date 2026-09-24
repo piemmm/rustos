@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 81 open, 144 closed, 225 total.
+**closed**, and a partial fix stays **open**. 83 open, 144 closed, 227 total.
 
-### Open (81)
+### Open (83)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -109,6 +109,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D225 | the DMA quarantine rests on premises the kernel does not enforce | a node can hold two live drivers (`AddressSpaceRegistry::set_loaded_node` never refuses a second load), and `dma_quiesced` frees everything below the caller's generation without checking for a live earlier instance, so one instance's reset can free memory another still programs; an orderly removal leaves a node's blocks under the id the next published device reuses (`hwtree_store` assigns `max + 1`); a surprise removal reads the generation high-water mark after the removal is already visible; and `DmaQuarantine::hold` allocates on the teardown path and leaks the block when that fails. Found reviewing D167's change; latent today, since nothing re-binds a DMA-carving node |
 | D226 | live drivers free DMA memory their device may still own, outside the quarantine | no `Drop` guard on `VirtioNet`, `VirtioSnd`, `VirtioInput`, `Genet` or `lib/usb`'s `UsbDevice`/`SlabBank`, so an early return from `lib/netchan`/`lib/audiochan` `serve`, `virtio_kbd` or the xHCI main frees their slabs through `dma_free` while the device runs; `vcmailbox` frees its property buffer when the firmware-revision probe added with D167 fails after posting; `virtio_snd`'s `release()` drops its periods after a failed `PCM_STOP`/`PCM_RELEASE`; and `lib/usb` releases a slot's region before Disable Slot and drops the `SlabBank` when `start` fails after Run/Stop. Found reviewing D167's change |
 | D227 | `virtio_blk` and `virtio_crypto` take any completion as the current request's once a chain is abandoned | after `DeviceOffline` the device may still own the abandoned chain and the next request reuses its staging, so the late completion is returned as the new request's success: the wrong LBA's data, or one caller's output to the next. Found reviewing D167's change |
+| D228 | a grab takes the seat without carrying the seat's state across it | while a menu chain or the lock holds the seat, modifier edges never reach the window manager's modifier copy (`drain_menu_chain` drops `ModifiersChanged`; `LockedDrain` hands the shell nothing), so a click after the grab ends can be stamped with a modifier already released; and a key held into a grab never sees its release at the window that saw its press, so an application holding a key keeps it held. Needs the grab-entry contract decided first — what the focused surface is told when the seat is taken mid-press. Noticed fixing `plans/NEW-MENUS.md` D34 |
+| D229 | the seat's pointer and keyboard channels carry no shared order or time | two independent rings in `kernel/core/src/seat.rs`, no per-seat sequence or arrival stamp: the desktop cannot restore their interleaving, so under load keys typed into one window before a click on another reach the window the click focused, and every timed gesture (hold, double-click, key-repeat start) is measured when the desktop processes it — a stalled desktop reads a tap as a hold. Fix: a sequence and arrival stamp per record on the `pointer_read`/`keyboard_read` drain, merged in order by the session. Noticed fixing `plans/NEW-MENUS.md` D34 |
 
 ### D140 — the loaded notification-icon set is never installed
 

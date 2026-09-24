@@ -190,6 +190,10 @@ nothing.
 
 While a chain is up the seat's pointer and keyboard route to it:
 
+- the grab starts **at the event that opens the chain** — the press itself for
+  the desktop's own menus, the served request for an application's — so an
+  event already queued behind it (a busy desktop drains several at once) goes
+  to the chain, drawn or not, never to what its plates cover;
 - a press **inside** the chain acts there;
 - a press **outside** dismisses the chain and is **consumed** — a dismissal
   never doubles as a click on whatever was behind the menu;

@@ -68,7 +68,7 @@ use crate::apps::{picker_cells, prefetch_bar_icons, resolve_library_icons, thumb
 use crate::desktop::Desktop;
 use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
-use crate::menu::{resolve_chain_icons, MenuChain, SurfaceKind};
+use crate::menu::{resolve_chain_icons, ChainAction, MenuChain, SurfaceKind};
 use crate::notify::{is_settings_surface, producer_of, NotifySources};
 use crate::presenter::{chrome_blur, TaskbarPresenter};
 use crate::session::DesktopSession;
@@ -131,6 +131,16 @@ pub enum ShellOutcome {
     /// shell does not hold — launching an application, opening the file
     /// manager — is the embedder's to perform.
     Taskbar(TaskbarResponse),
+}
+
+/// What one [`DesktopShell::pump`] drained.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Batch {
+    /// The batch's outcomes, in order.
+    pub outcomes: Vec<ShellOutcome>,
+    /// The batch ended at an edge rather than on an empty source, so the
+    /// source may still hold events for whichever holder routing it leaves.
+    pub at_edge: bool,
 }
 
 /// The desktop session frontend: the session state, the input router, the
@@ -1309,6 +1319,29 @@ impl DesktopShell {
         drawn
     }
 
+    /// Route one seat event into `chain`, which holds the seat, at the pointer
+    /// the shell tracks.
+    ///
+    /// Motion alone still reaches the shell, so the tracked pointer and the
+    /// cursor stay in step; its outcome is dropped, and nothing else the chain
+    /// takes reaches the shell at all.
+    pub fn route_to_chain(
+        &mut self,
+        compositor: &mut Compositor,
+        chain: &mut MenuChain,
+        event: &InputEvent,
+        now_ns: u64,
+    ) -> ChainAction {
+        if matches!(event, InputEvent::PointerMoved { .. }) {
+            let _ = self.apply(*event, compositor, now_ns);
+        }
+        chain.handle(
+            event,
+            self.router.pointer(),
+            &chain_geometry(&self.session, compositor),
+        )
+    }
+
     /// Record what `window` declared for a region of its own client area, or
     /// withdraw it when `text` is empty. Answers whether the screen changed.
     ///
@@ -2068,13 +2101,22 @@ impl DesktopShell {
         let _ = self.tasks.sync_focus(self.session.taskbar_mut(), focus);
     }
 
-    /// Drain every pending event from `source`, applying each against the
-    /// monotonic `now_ns`, and return their outcomes in order — folding an
-    /// adjacent run of one continuing gesture over the same window into a
-    /// single outcome.
+    /// Drain `source` up to and including its next edge, applying each event
+    /// against the monotonic `now_ns`, and return the outcomes in order —
+    /// folding an adjacent run of one continuing gesture over the same window
+    /// into a single outcome.
     ///
-    /// One drain is one instant: every event of this batch resolves against
-    /// the same `now_ns`, which the embedder read when the source woke it.
+    /// An edge is any event but a motion or scroll sample. Routing one can
+    /// hand the seat to another holder — a menu chain, the lock, another
+    /// session — so the batch ends there and says so ([`Batch::at_edge`]):
+    /// the embedder routes it, then drains the rest into whichever holder that
+    /// leaves. Samples never move the seat, so a burst of them still drains as
+    /// one batch.
+    ///
+    /// One wake is one instant: every event resolves against the same
+    /// `now_ns`, which the embedder read when the source woke it and passes to
+    /// each batch of that wake, so a queued press and release are timed alike
+    /// whether or not an edge split them.
     /// Every drained event is still applied in order, so the window
     /// manager's own hover, drag, and cursor state track the full sample
     /// stream; only the *returned* outcome list is compressed. That
@@ -2088,7 +2130,7 @@ impl DesktopShell {
     /// after each event, so a burst of N motion samples costs one taskbar
     /// present, one active-frame sync, and one cursor refresh instead of N of
     /// each. Nothing observes the intermediate passes — the embedder publishes
-    /// one frame per drain — and all three read current state, so the desktop
+    /// one frame per wake — and all three read current state, so the desktop
     /// this leaves is the one N settles would have left. A drain that found no
     /// event settles nothing, keeping an idle wake free.
     ///
@@ -2126,26 +2168,34 @@ impl DesktopShell {
         source: &mut S,
         compositor: &mut Compositor,
         now_ns: u64,
-    ) -> Result<Vec<ShellOutcome>, Errno>
+    ) -> Result<Batch, Errno>
     where
         S: InputSource + ?Sized,
     {
-        let mut outcomes: Vec<ShellOutcome> = Vec::new();
+        let mut batch = Batch::default();
         let mut applied = false;
         let drained = loop {
             match source.poll() {
                 Ok(Some(event)) => {
+                    let edge = !matches!(
+                        event,
+                        InputEvent::PointerMoved { .. } | InputEvent::PointerScrolled { .. }
+                    );
                     let outcome = self.apply(event, compositor, now_ns);
                     applied = true;
-                    let unfolded = match outcomes.last_mut() {
+                    let unfolded = match batch.outcomes.last_mut() {
                         Some(last) => fold_outcome(last, outcome),
                         None => Some(outcome),
                     };
                     if let Some(outcome) = unfolded {
-                        outcomes.push(outcome);
+                        batch.outcomes.push(outcome);
+                    }
+                    if edge {
+                        batch.at_edge = true;
+                        break Ok(batch);
                     }
                 }
-                Ok(None) => break Ok(outcomes),
+                Ok(None) => break Ok(batch),
                 Err(err) => break Err(err),
             }
         };

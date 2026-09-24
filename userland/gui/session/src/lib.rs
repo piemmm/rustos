@@ -287,7 +287,7 @@ pub use settings::{
     PinboardApplyRefusal,
 };
 pub use shell::{
-    DesktopShell, InputSource, ShellOutcome, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE,
+    Batch, DesktopShell, InputSource, ShellOutcome, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE,
 };
 pub use switchboard::{
     deliver_pending_open, drop_is_noteworthy, maybe_send_seat_report, open_tray, relay_power,

@@ -12773,9 +12773,8 @@ fn assert_settings_light_screendump(t: &QemuTest, path: &Path) -> Result<(), Str
 ///
 /// - The desktop's own reveal witness opens the script, so nothing is injected
 ///   before there is a bar to hit.
-/// - The row click follows its library click immediately — that press is what
-///   opens the popup, so the row is on screen by construction, and the guest
-///   applies injected events strictly in device order.
+/// - The row click waits on the popup's own [`LIBRARY_SHOWN_MARKER`], so the
+///   row is on screen before it is pressed.
 /// - Everything after the first launch waits on the fixture's own sample
 ///   record: until that record exists there is no opened window to sweep
 ///   inside.
@@ -13425,8 +13424,8 @@ fn fsmutate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 ///
 /// - The desktop's own reveal witness opens the script, so nothing is injected
 ///   before there is a bar to hit.
-/// - The library button and the viewer's row follow it immediately: the press
-///   is what opens the popup, so the row is on screen by construction.
+/// - The library button follows it, and the viewer's row waits on the popup's
+///   own [`LIBRARY_SHOWN_MARKER`], so the row is on screen before it is pressed.
 /// - The document's row waits on the session's own [`FILEPICK_PICKER_MARKER`]
 ///   — a frame carrying the picker *with its listing landed* reached the
 ///   display. Nothing earlier is honest: the viewer learns only that its
@@ -13611,35 +13610,6 @@ fn handover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     Ok(pen.steps())
 }
 
-/// Open the program library, right-click the slot the session gives its
-/// process on the bar, choose the *New window* row of the menu the application
-/// declared, then primary-click that same slot to take its declared default
-/// action.
-///
-/// The launch itself is [`reconstruct_bar_launch`]; the declared menu comes
-/// from the terminal's own `appbar` module, so the row this clicks is named
-/// once rather than restated by position.
-///
-/// Every gate is **causal** rather than timed, and each is the strongest fact
-/// the emitting side can honestly state:
-///
-/// - The desktop's own reveal witness opens the script, so nothing is
-///   injected before there is a bar to hit.
-/// - The two slot gestures wait on the session's per-window
-///   [`WINDOW_SHOWN_MARKER`]: the *first* occurrence for the
-///   right-click, the *second* for the final primary click. That witness
-///   follows a frame the session actually put on screen, so by then the
-///   application has declared its bar (it declares before it opens a window),
-///   the session has grouped that window under its attested owner, and the
-///   strip has been re-resolved and drawn. A create reply would say only that
-///   the window exists.
-/// - The menu row's click follows its right-click immediately — that press is
-///   what opens the menu, so the row is on screen by construction.
-///
-/// The final primary click is also what keeps the guest alive long enough to
-/// be photographed: it opens the third window, which is the create that
-/// completes the guest's PASS, and the runner sends no pointer step until
-/// every dump already asked for has been read back and parsed.
 /// Where a bar script parks the pointer while it waits on a marker.
 ///
 /// Clear of the bar along the bottom edge and of the window cascade in the
@@ -13654,6 +13624,37 @@ fn pointer_rest() -> tairix_geometry::Point {
     tairix_geometry::Point::new(width as i32 - 1, height as i32 / 2)
 }
 
+/// Open the program library, right-click the slot the session gives its
+/// process on the bar, choose the *New window* row of the menu the application
+/// declared, then primary-click that same slot to take its declared default
+/// action.
+///
+/// The launch itself is [`reconstruct_bar_launch`]; the declared menu comes
+/// from the terminal's own `appbar` module, so the row this clicks is named
+/// once rather than restated by position.
+///
+/// Every gate is **causal** rather than timed, and each is the strongest fact
+/// the emitting side can honestly state:
+///
+/// - The desktop's own reveal witness opens the script, so nothing is
+///   injected before there is a bar to hit, and the library row waits on the
+///   popup's own [`LIBRARY_SHOWN_MARKER`].
+/// - The two slot gestures wait on the session's per-window
+///   [`WINDOW_SHOWN_MARKER`]: the *first* occurrence for the
+///   right-click, the *second* for the final primary click. That witness
+///   follows a frame the session actually put on screen, so by then the
+///   application has declared its bar (it declares before it opens a window),
+///   the session has grouped that window under its attested owner, and the
+///   strip has been re-resolved and drawn. A create reply would say only that
+///   the window exists.
+/// - The menu row's click follows its right-click at once: the session routes
+///   every event queued behind the press that opens a chain into that chain,
+///   drawn or not, so the row is the chain's by construction.
+///
+/// The final primary click is also what keeps the guest alive long enough to
+/// be photographed: it opens the third window, which is the create that
+/// completes the guest's PASS, and the runner sends no pointer step until
+/// every dump already asked for has been read back and parsed.
 fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_input::PointerButton;
     use tairix_qemu::MouseButton;

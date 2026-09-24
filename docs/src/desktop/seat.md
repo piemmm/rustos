@@ -368,7 +368,13 @@ Both `Run` binaries hosting those halves are live (stages D7b–D7c):
   desktop shell from a `SeatInput` wait-set park: each wake drains the
   owned seat's pointer and keyboard channels through the fail-closed
   record path, pumps the decoded events through the compositor and
-  taskbar, and presents the composited damage by frame index. Losing
+  taskbar, and presents the composited damage by frame index. The
+  pointer drain stops at each button edge and the keyboard drain as soon
+  as the seat changes hands, because routing an edge can give the seat
+  to a menu chain or the lock. The rest of the pointer queue then goes to
+  the new holder in the same wake, against the same instant, so a
+  gesture an edge split is still timed as one; only what the lock is
+  handed waits for the lock's own wake. Losing
   the seat — the typed `SeatRevoked`/`SeatNotOwner` on any drain or
   present — tears the session down fail-loud (reason on `stderr`, a
   reserved exit code, an owner-checked release); it never spins or
