@@ -78,6 +78,9 @@ tairix-syshelp = { path = "../syshelp", version = "=0.0.0" }
 # crate keeps the test-execution contract (`isa-debug-exit`, strict
 # timeouts, no retries) in exactly one place.
 tairix-qemu = { path = "../qemu", version = "=0.0.0" }
+# The fatal-fault verticals name the record a fatal report ends with through
+# its one definition rather than restating it.
+tairix-arch-api = { path = "../../kernel/arch/api", version = "=0.0.0" }
 # The interactive login negative fixture derives its over-limit username from
 # the account database format's own bound, so production validation and the
 # QEMU script cannot drift.

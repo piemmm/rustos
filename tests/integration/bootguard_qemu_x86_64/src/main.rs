@@ -34,9 +34,7 @@ mod kernel {
 
     #[panic_handler]
     fn bootguard_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
-        let mut com1 = serial::Serial::init(serial::COM1_BASE);
-        let _ = writeln!(com1, "[bootguard] panic: {info}");
-        qemu_exit::exit_failure()
+        tairix_arch_x86_64::panic::handle_panic_via_serial(info)
     }
 
     #[no_mangle]

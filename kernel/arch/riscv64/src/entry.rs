@@ -20,10 +20,13 @@ extern "C" {
 
 /// The trampoline jumps here, exactly once, on the boot hart.
 ///
-/// There is no equivalent of x86_64's multiboot-magic validation: the
-/// SBI boot protocol carries no magic, and the DTB is validated by
-/// [`crate::fdt::Fdt`] when the boot pipeline parses it. This seam
-/// exists so the assembly hands off to Rust as early as possible.
+/// The trap vector is armed before `kernel_main` runs, so no binary can
+/// take a trap with `stvec` still holding whatever the firmware left there:
+/// every fault reaches the fatal path, and with no fault handler installed
+/// that path reports the cause rather than trapping silently. No interrupt
+/// source is enabled. There is no equivalent of x86_64's multiboot-magic
+/// validation: the SBI boot protocol carries no magic, and the DTB is
+/// validated by [`crate::fdt::Fdt`] when the boot pipeline parses it.
 ///
 /// # Safety
 ///
@@ -32,6 +35,10 @@ extern "C" {
 /// established). Calling from anywhere else is a kernel bug.
 #[no_mangle]
 pub extern "C" fn tairix_arch_riscv64_main(hartid: u64, dtb: u64) -> ! {
+    // SAFETY: the boot hart with a stack established, before any interrupt
+    // source is armed — the contract `install_trap_vector` states, which
+    // `boot.s` guarantees here.
+    unsafe { crate::trap::install_trap_vector() };
     // SAFETY: `kernel_main` is provided by the linked binary and is
     // documented `-> !` (see the `extern` block). Forwarding the
     // verbatim hand-off values once is the entire contract.

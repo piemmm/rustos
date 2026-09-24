@@ -13,7 +13,9 @@ use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use super::SheetScreen;
+use crate::effects::{Effects, FULL};
 use crate::profile::Profile;
+use crate::scheme::{Rgb, Scheme};
 use crate::settings::{preferred_extent, Settings};
 
 const SCALE: Scale = Scale::ONE;
@@ -126,9 +128,8 @@ fn an_invalidated_sheet_covers_itself_again() {
     assert_eq!(screen.paint(&sheet, viewport, SCALE, &theme), viewport);
     assert_eq!(screen.paint(&sheet, viewport, SCALE, &theme), Rect::EMPTY);
 
-    // A re-theme, a new scale, a profile adopted from the store, a frame
-    // region the session took back: no control reported any of them, so the
-    // whole sheet is owed.
+    // A re-theme, a new scale, a frame region the session took back: no
+    // control reported any of them, so the whole sheet is owed.
     screen.invalidate();
     assert_eq!(screen.paint(&sheet, viewport, SCALE, &theme), viewport);
 }
@@ -314,4 +315,73 @@ fn every_press_the_sheet_claims_repaints_what_it_changed() {
             );
         }
     }
+}
+
+/// A profile unlike the default in every setting the sheet shows, including
+/// the colour of the well that opens selected.
+fn every_setting_moved() -> Profile {
+    let mut profile = Profile {
+        scheme: Scheme::Custom,
+        font_size_px: Profile::default().font_size_px + 6,
+        effects: Effects {
+            opacity: FULL,
+            blur: 100,
+            scanlines: 300,
+            glow: 400,
+            fuzz: 500,
+            phosphor: 600,
+            wobble: 700,
+        },
+        ..Profile::default()
+    };
+    profile.custom.background = Rgb::new(0x12, 0x34, 0x56);
+    profile.custom.ansi[1] = Rgb::new(0x65, 0x43, 0x21);
+    profile
+}
+
+/// A profile from the store names no rectangle a control drew, so the sheet
+/// reports the rows whose value it moved; the retained picture must then be
+/// the one a whole repaint would leave, on either tab.
+#[test]
+fn adopting_a_profile_repaints_every_row_it_moved() {
+    reports_cover_the_gesture(
+        "adopting on appearance",
+        |sheet, viewport, theme, damage| {
+            sheet.adopt(every_setting_moved(), viewport, SCALE, theme, damage);
+        },
+    );
+    reports_cover_the_gesture("adopting on effects", |sheet, viewport, theme, damage| {
+        press_key(sheet, viewport, theme, damage, NamedKey::Right);
+        press_key(sheet, viewport, theme, damage, NamedKey::Enter);
+        sheet.adopt(every_setting_moved(), viewport, SCALE, theme, damage);
+    });
+}
+
+/// Adopting a change to one setting costs that setting's row, not the sheet —
+/// an answer lands once per settled edit, and a sheet repainted whole for each
+/// would be the cost a retained picture exists to avoid.
+#[test]
+fn adopting_one_setting_repaints_only_its_row() {
+    let (mut screen, mut sheet, viewport) = opened();
+    let theme = theme();
+    assert_eq!(screen.paint(&sheet, viewport, SCALE, &theme), viewport);
+
+    sheet.adopt(Profile::default(), viewport, SCALE, &theme, screen.sink());
+    assert_eq!(
+        screen.paint(&sheet, viewport, SCALE, &theme),
+        Rect::EMPTY,
+        "an answer the sheet already shows owes nothing"
+    );
+
+    let answer = Profile {
+        font_size_px: Profile::default().font_size_px + 3,
+        ..Profile::default()
+    };
+    sheet.adopt(answer, viewport, SCALE, &theme, screen.sink());
+    let painted = screen.paint(&sheet, viewport, SCALE, &theme);
+    assert!(!painted.is_empty(), "the text size row is owed");
+    assert!(
+        painted.height < viewport.height / 4,
+        "one setting costs its row: {painted:?} of {viewport:?}"
+    );
 }

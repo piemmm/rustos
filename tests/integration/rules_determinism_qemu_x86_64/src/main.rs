@@ -89,12 +89,7 @@ mod kernel {
 #[panic_handler]
 #[cfg(itest_x86_64)]
 fn rules_determinism_qemu_x86_64_panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    use core::fmt::Write as _;
-    use tairix_arch_x86_64::{qemu_exit, serial};
-
-    let mut com1 = serial::Serial::init(serial::COM1_BASE);
-    let _ = writeln!(com1, "[rules_determinism] panic: {info}");
-    qemu_exit::exit_failure();
+    tairix_arch_x86_64::panic::handle_panic_via_serial(info)
 }
 
 // Host stub. The crate is only meaningful on the bare-metal target; on the

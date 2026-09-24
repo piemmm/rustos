@@ -1,66 +1,61 @@
-//! Panic-handler bridge for the riscv64 boot binaries.
+//! The port's own fatal reports, for the boot binaries that link no kernel
+//! core and for a fault taken before one installed its handler.
 //!
-//! Rust forbids library-defined `#[panic_handler]`s, so each binary
-//! declares its own one-liner that forwards to
-//! [`handle_panic_via_serial`]. The bridge emits a single best-effort
-//! record through the SBI console and parks the hart forever
-//! (fail closed, never silently reset; — no
-//! panic recovery in production paths).
+//! Rust forbids library-defined `#[panic_handler]`s, so each binary declares
+//! its own one-liner that forwards to [`handle_panic_via_serial`]. Both
+//! reports are the shared [`tairix_arch_api::fatal`] shape, written through
+//! the synchronous SBI console, and both park the hart: never a silent
+//! reset. Their closing record is what ends a QEMU run at once rather than
+//! on its inactivity budget.
 //!
-//! This is the minimal park-on-panic helper the freestanding QEMU
-//! integration-test kernels use: a panic parks the hart, the QEMU test
-//! times out, and the harness reports `Outcome::Timeout` — the documented
-//! fail-loud behaviour. The *production* kernel does route its panic
-//! through `tairix_kernel_core::handle_panic` (a register snapshot + a
-//! bounded backtrace) via the bin-crate `panic_ctx` bridge; this helper is
-//! the test-harness path, not that one.
+//! The *production* kernel routes a panic and a kernel fault through
+//! `tairix_kernel_core`'s post-mortem (a register snapshot and a bounded
+//! backtrace) via the bin-crate bridge; these are the paths below it.
 
-use core::fmt::Write as _;
 use core::panic::PanicInfo;
 
-use tairix_arch_api::CpuStateCapture as _;
+use tairix_arch_api::fatal::{KernelFault, Reporter};
+use tairix_arch_api::{BootStackGuard, CpuStateCapture as _};
 
 use crate::kernel_arch::halt_current_hart;
 use crate::serial::SbiWriter;
 
-/// Shared `#[panic_handler]` body for the riscv64 boot binaries.
-///
-/// Always returns `!`: emits one record on the SBI console, then parks
-/// the hart via [`halt_current_hart`].
-pub fn handle_panic_via_serial(info: &PanicInfo<'_>) -> ! {
-    // The running hart's id, so a multi-hart post-mortem knows which hart
-    // faulted. Reading it has no side effects and is safe even mid-panic.
-    let hart = crate::smp::current_hartid();
-    let mut w = SbiWriter;
-    // A loud, unmistakable multi-line banner. A kernel panic halts the
-    // offending hart with no recovery (fail closed), so the record must
-    // carry everything a post-mortem needs: which hart, and the panic
-    // message plus source location that `PanicInfo`'s `Display` already
-    // formats (`file:line:col` and the message — for an allocation failure
-    // that message is the requested byte count). Terse and factual.
-    let _ = writeln!(
-        w,
-        "\n==================== TAIRiX KERNEL PANIC ===================="
-    );
-    let _ = writeln!(w, "[tairix-kernel] riscv64 panic on hart {hart}: {info}");
+const REPORTER: Reporter = Reporter {
+    port: "riscv64",
+    unit: "hart",
+};
 
-    // Whether the boot stack ran off its bottom. Without this a fault
-    // whose real cause was an overrun reads as an unexplained corruption
-    // of whatever sat below the stack — the failure that motivated the
-    // guard. The verdict rests on the stack pointer captured here, so it
-    // is taken from the same handle that reports it.
-    let bt = crate::backtrace::Backtracer::new();
-    let sp = bt.capture().sp;
-    if let Some(verdict) = bt.boot_stack_guard().map(|guard| guard.assess(sp)) {
-        let _ = writeln!(w, "boot-stack guard: {verdict}");
-    }
-    let _ = writeln!(
-        w,
-        "hart {hart} halted; the kernel is non-recoverable in production."
-    );
-    let _ = writeln!(
-        w,
-        "============================================================="
+/// Shared `#[panic_handler]` body for the riscv64 boot binaries: report the
+/// panic on the SBI console and park the hart.
+pub fn handle_panic_via_serial(info: &PanicInfo<'_>) -> ! {
+    let (hart, guard) = prologue();
+    REPORTER.panic(&mut SbiWriter, hart, info, info.location(), guard);
+    halt_current_hart()
+}
+
+/// Report a fatal trap no fault handler claimed and park the hart.
+pub(crate) fn report_unclaimed_fault(scause: u64, stval: u64, sepc: u64) -> ! {
+    let (hart, guard) = prologue();
+    REPORTER.fault(
+        &mut SbiWriter,
+        hart,
+        KernelFault {
+            syndrome: scause,
+            address: stval,
+            pc: sepc,
+        },
+        format_args!("scause {scause:#x}, stval {stval:#x}, sepc {sepc:#x}"),
+        guard,
     );
     halt_current_hart()
+}
+
+/// The running hart's id and the boot-stack guard's verdict the report names.
+fn prologue() -> (u32, Option<BootStackGuard>) {
+    let bt = crate::backtrace::Backtracer::new();
+    let sp = bt.capture().sp;
+    (
+        crate::smp::current_hartid(),
+        bt.boot_stack_guard().map(|guard| guard.assess(sp)),
+    )
 }

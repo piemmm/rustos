@@ -313,10 +313,16 @@ extern "C" {
 /// `exceptions::init_vectors`. A consumer that also wants to take
 /// asynchronous interrupts calls [`init_traps`] instead (the vector-install logic has one definition).
 ///
+/// The boot entry arms the boot hart before `kernel_main`; a binary arms each
+/// secondary hart it brings up, and may re-arm one — to re-establish the
+/// `sscratch == 0` invariant before it first enters U-mode, say — which is
+/// harmless: both writes store the value the vector expects.
+///
 /// # Safety
 ///
-/// Must be called on the boot hart after a stack is established. Writing
-/// `stvec`/`sscratch` has no memory side effects beyond the named CSRs.
+/// Must be called on the hart being armed, after a stack is established and
+/// while it runs S-mode code. Writing `stvec`/`sscratch` has no memory side
+/// effects beyond the named CSRs.
 /// The caller must have installed the syscall dispatch callback
 /// ([`crate::syscall_entry::set_dispatch_callback`]) before user code
 /// can `ecall`, or the handler fails closed.
@@ -840,9 +846,10 @@ unsafe fn trap_body(
 /// a running task; that, and every S-mode exception, is the kernel's own and
 /// genuinely unrecoverable, so the installed [`crate::fault::FaultHandlerFn`]
 /// gets it (the memory-isolation vertical installs one to confirm an attacker
-/// faulted on an isolated address) and otherwise the hart parks — never a
-/// silent reset. With no terminator installed a U-mode fault takes that same
-/// fatal path, so a missing install can only be safe (fail closed).
+/// faulted on an isolated address), and with none installed the port writes
+/// its own report and parks the hart — never a silent reset. With no
+/// terminator installed a U-mode fault takes that same fatal path, so a
+/// missing install can only be safe (fail closed).
 ///
 /// # Safety
 ///
@@ -869,7 +876,7 @@ unsafe fn fatal_exception(scause: u64, frame: *const TrapFrame) -> ! {
     if let Some(handler) = crate::fault::fault_handler() {
         handler(scause, stval, sepc);
     }
-    crate::kernel_arch::halt_current_hart();
+    crate::panic::report_unclaimed_fault(scause, stval, sepc)
 }
 
 /// The ordering invariant of this port's two `sret` sequences, pinned

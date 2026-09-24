@@ -117,6 +117,13 @@ impl SwatchGrid {
         }
     }
 
+    /// Show `scheme`'s twenty colours, keeping the selected well and any press
+    /// in progress: the colours can change under a user who is still editing
+    /// one of them.
+    pub fn adopt_scheme(&mut self, scheme: &ColorScheme) {
+        self.wells = wells_from_scheme(scheme);
+    }
+
     /// Write this grid's twenty colours back onto `scheme`, in the same
     /// fixed order [`from_scheme`](Self::from_scheme) reads them in.
     pub fn apply_to(&self, scheme: &mut ColorScheme) {

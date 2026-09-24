@@ -582,7 +582,13 @@ extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
             faulting_addr,
             rip,
         ),
-        None => crate::qemu_exit::exit_failure(),
+        None => crate::panic::report_unclaimed_fault(
+            PAGE_FAULT_VECTOR,
+            error_code,
+            is_user(error_code),
+            faulting_addr,
+            rip,
+        ),
     }
 }
 

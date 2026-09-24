@@ -234,14 +234,15 @@ mod program {
     }
 
     impl Overlay {
-        /// Hand the sheet a profile that came from somewhere other than its
-        /// own widgets — the store's lower layers, after a restore — so the
-        /// controls show what actually applies.
-        fn adopt_profile(&mut self, profile: &Profile) {
-            self.sheet.adopt(*profile);
-            // Every widget may now show something else, and none of them
-            // reported it: this came from the store, not from the pointer.
-            self.picture.invalidate();
+        /// Bring the sheet's own copy up to `profile` wherever it has fallen
+        /// behind — a store answer, an edit made in another window or from the
+        /// menu — reporting the rows that change.
+        fn follow(&mut self, profile: &Profile, theme: &Theme, scale: Scale) {
+            if self.sheet.profile() != profile {
+                let viewport = self.viewport();
+                self.sheet
+                    .adopt(*profile, viewport, scale, theme, self.picture.sink());
+            }
         }
 
         /// The popup-local viewport the overlay occupies.
@@ -1321,52 +1322,41 @@ mod program {
         })
     }
 
-    /// Adopt whatever the publisher has answered with: state anything it could
-    /// not use, re-seed every open sheet from the profile that actually
-    /// applies, and repaint.
+    /// Adopt whatever the publisher has answered with, state anything it could
+    /// not use, submit the write owed behind it, and bring every window and
+    /// sheet up to date.
     fn adopt_published(
         windows: &mut [TerminalWindow],
         client: &mut WindowClient<app::RtWindowTransport>,
         ctx: &mut AppContext<'_>,
     ) -> Applied {
-        let Some(answer) = ctx.publisher.collect() else {
-            return Applied::Running;
-        };
         let mut warnings = Vec::new();
-        let changed = ctx.publication.adopt(answer, &mut warnings);
+        // With no worker a submission runs here and its answer is already
+        // waiting, so the owed chain is followed until one is really in flight.
+        while let Some(answer) = ctx.publisher.collect() {
+            let owed = ctx.publication.adopt(answer, &mut warnings);
+            if !owed.is_some_and(|job| ctx.publisher.submit(job)) {
+                break;
+            }
+        }
         for warning in &warnings {
             let _ = write!(Stderr, "{warning}");
         }
-        let sheets = if changed {
-            // A sheet holds its own copy of what it is editing, so every open
-            // one is re-seeded from what the store actually holds.
-            let profile = *ctx.publication.live();
-            for open in windows.iter_mut() {
-                if let Some(held) = open.overlay.as_mut() {
-                    held.adopt_profile(&profile);
-                }
-            }
-            Sheets::Stale
-        } else {
-            Sheets::Current
-        };
-        // Always offered the windows, never skipped on `!changed`: a preview
-        // this answer did not move is still one the screen may owe, and the
-        // difference is measured against the screen rather than against the
-        // answer.
-        if apply_profile_change(windows, client, ctx, sheets).is_err() {
+        if apply_profile_change(windows, client, ctx).is_err() {
             return Applied::Lost("present refused");
         }
         Applied::Running
     }
 
-    /// Adopt what `changed` says a profile change made stale, in every window,
-    /// and repaint only if it asked for pixels.
+    /// Adopt what the profile change since the last call made stale, in every
+    /// window, and repaint only what it asked for.
     ///
     /// Every window is reached because the profile is the *user's* rather than
-    /// one window's, and every open sheet is re-presented for the same reason:
-    /// a second window's sheet showing values nothing is using would be as
-    /// wrong as the pixels behind it.
+    /// one window's, and every open sheet follows it for the same reason: a
+    /// second window's sheet showing values nothing is using would be as wrong
+    /// as the pixels behind it. A sheet presents only what it owes, so the one
+    /// the user is dragging in shows its knob move and the rest cost nothing
+    /// unless their copy fell behind.
     ///
     /// The scoping is what makes a drag smooth. A slider delivers one of these
     /// per motion sample, and the four kinds of work cost wildly different
@@ -1383,12 +1373,8 @@ mod program {
         windows: &mut [TerminalWindow],
         client: &mut WindowClient<app::RtWindowTransport>,
         ctx: &mut AppContext<'_>,
-        sheets: Sheets,
     ) -> Result<(), ()> {
         let changed = ctx.publication.take_pending();
-        if !changed.any() && sheets == Sheets::Current {
-            return Ok(());
-        }
         let profile = *ctx.publication.live();
         let theme = ctx.themes.active();
         let scale = ctx.desktop.scale();
@@ -1413,30 +1399,12 @@ mod program {
             if changed.repaints() {
                 open.present(client).map_err(|_| ())?;
             }
-            if sheets == Sheets::Stale {
-                if let Some(held) = open.overlay.as_mut() {
-                    present_overlay(held, theme, scale, client).map_err(|_| ())?;
-                }
+            if let Some(held) = open.overlay.as_mut() {
+                held.follow(&profile, theme, scale);
+                present_overlay(held, theme, scale, client).map_err(|_| ())?;
             }
         }
         Ok(())
-    }
-
-    /// Whether a profile change also left the open settings sheets' own pixels
-    /// stale.
-    ///
-    /// The two are not the same question, and answering only the window's
-    /// would freeze a slider under the pointer: the sheet draws the knob at
-    /// the permille the user is dragging, which moves far more finely than
-    /// anything the window can see — a blur the compositor rounds to the pixel
-    /// width it is already showing changes nothing behind the sheet and
-    /// everything on it.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Sheets {
-        /// The interaction was in a sheet, or re-seeded one: re-present it.
-        Stale,
-        /// Nothing touched a sheet's own pixels.
-        Current,
     }
 
     /// Re-derive every window from scratch and repaint it whole, for a change
@@ -1511,7 +1479,7 @@ mod program {
     }
 
     /// Apply one drained outcome to the window it names, or to the process,
-    /// then bring the screen up to date with whatever it left previewed.
+    /// then bring the screen up to date with whatever it left undrawn.
     fn apply_outcome(
         outcome: EventOutcome,
         windows: &mut Vec<TerminalWindow>,
@@ -1522,11 +1490,11 @@ mod program {
         if !matches!(applied, Applied::Running) {
             return applied;
         }
-        // The catch-up: anything an outcome previewed and did not draw is
+        // The catch-up: anything an outcome edited and did not draw is
         // drawn here, so the loop paints from the state a wake left behind
         // rather than each handler painting for itself. Costs nothing when
         // the screen is already current, which is the common case.
-        if apply_profile_change(windows, client, &mut ctx, Sheets::Current).is_err() {
+        if apply_profile_change(windows, client, &mut ctx).is_err() {
             return Applied::Lost("present refused");
         }
         applied
@@ -1655,8 +1623,13 @@ mod program {
                 // freeze this arrangement removes — and the write itself always
                 // happens on the publisher's worker, so no gesture waits for a
                 // store either way.
-                let ready = settled && ctx.publisher.submit(ctx.publication.request_save());
-                if apply_profile_change(windows, client, &mut *ctx, Sheets::Stale).is_err() {
+                let job = if settled {
+                    ctx.publication.settle()
+                } else {
+                    None
+                };
+                let ready = job.is_some_and(|job| ctx.publisher.submit(job));
+                if apply_profile_change(windows, client, &mut *ctx).is_err() {
                     return Applied::Lost("present refused");
                 }
                 if ready {
@@ -1668,16 +1641,17 @@ mod program {
                 // *Restore defaults* removes the user's opinions and adopts
                 // what the layers beneath them then imply — which only the
                 // store knows, so nothing changes on screen until it answers.
-                if ctx.publisher.submit(ctx.publication.restore()) {
+                let job = ctx.publication.restore();
+                if job.is_some_and(|job| ctx.publisher.submit(job)) {
                     return adopt_published(windows, client, &mut *ctx);
                 }
                 Applied::Running
             }
             EventOutcome::ProfilePublished => {
-                // The store answered. What it now holds is what applies, so a
-                // machine policy or a shipped default wins over the widget's
-                // guess and a refused write reverts the preview — stated on
-                // `stderr`, never silently kept.
+                // The store answered. What it now holds is what applies
+                // wherever the user is not editing, so a machine policy or a
+                // shipped default wins over the widget's guess and a refused
+                // write reverts — stated on `stderr`, never silently kept.
                 adopt_published(windows, client, &mut *ctx)
             }
             EventOutcome::Resized {
@@ -1830,9 +1804,10 @@ mod program {
     ) -> EventOutcome {
         // A menu row is one whole interaction, so each of these settles.
         let mut resize = |change: fn(&mut Profile)| {
-            let mut profile = *publication.live();
-            change(&mut profile);
-            publication.preview(profile);
+            let was = *publication.live();
+            let mut now = was;
+            change(&mut now);
+            publication.edit(&was, &now);
             EventOutcome::ProfileChanged { settled: true }
         };
         match command {
@@ -1869,16 +1844,12 @@ mod program {
         let Overlay { sheet, picture, .. } = overlay;
         let damage = picture.sink();
         for event in pointer_input_events(action, at) {
+            let was = *sheet.profile();
             let outcome = sheet.on_pointer(&event, viewport, scale, theme, damage);
             // Every edit shows at once; only a settled one asks to be written.
             // A drag delivers many samples per gesture, so `Edited` is what
             // keeps the store out of the pointer's path.
-            if matches!(
-                outcome,
-                SheetOutcome::Edited | SheetOutcome::Settled | SheetOutcome::Dismissed
-            ) {
-                publication.preview(*sheet.profile());
-            }
+            publication.edit(&was, sheet.profile());
             match outcome {
                 SheetOutcome::Ignored => {}
                 SheetOutcome::Changed => routing = OverlayRouting::Redraw,
@@ -1906,13 +1877,9 @@ mod program {
         let viewport = overlay.viewport();
         let Overlay { sheet, picture, .. } = overlay;
         let damage = picture.sink();
+        let was = *sheet.profile();
         let outcome = sheet.on_key(key, modifiers, viewport, scale, theme, damage);
-        if matches!(
-            outcome,
-            SheetOutcome::Edited | SheetOutcome::Settled | SheetOutcome::Dismissed
-        ) {
-            publication.preview(*sheet.profile());
-        }
+        publication.edit(&was, sheet.profile());
         match outcome {
             SheetOutcome::Ignored => OverlayRouting::Nothing,
             SheetOutcome::Changed => OverlayRouting::Redraw,

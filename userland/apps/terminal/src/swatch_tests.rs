@@ -5,7 +5,7 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_theme::Theme;
 
-use crate::scheme::{ColorScheme, Scheme};
+use crate::scheme::{ColorScheme, Rgb, Scheme};
 use crate::swatch::{SwatchAction, SwatchGrid, WELL_COUNT};
 
 const W: u32 = 400;
@@ -58,7 +58,7 @@ fn from_scheme_orders_the_twenty_wells_as_documented() {
 #[test]
 fn set_color_is_reflected_by_color_and_apply_to() {
     let mut grid = SwatchGrid::from_scheme(&scheme());
-    let orange = crate::scheme::Rgb::new(0xff, 0x80, 0x00);
+    let orange = Rgb::new(0xff, 0x80, 0x00);
     grid.set_color(0, orange);
     assert_eq!(grid.color(0), Some(orange));
     let mut applied = scheme();
@@ -121,6 +121,33 @@ fn releasing_over_a_different_well_does_not_select() {
         None
     );
     assert_eq!(grid.selected(), 0);
+}
+
+/// New colours arriving while a user is editing — an answer from the store —
+/// move neither the selection the channel sliders edit through nor a press
+/// that has yet to be released.
+#[test]
+fn adopting_colours_keeps_the_selection_and_a_press_in_progress() {
+    let mut grid = SwatchGrid::from_scheme(&scheme());
+    grid.adopt_selected(7);
+    let point = well_centre(4);
+    grid.on_pointer(&moved(point.x, point.y), bounds(), &mut damage::sink());
+    assert_eq!(grid.on_pointer(&PRESS, bounds(), &mut damage::sink()), None);
+
+    let mut other = scheme();
+    other.background = Rgb::new(0x12, 0x34, 0x56);
+    other.ansi[3] = Rgb::new(0x65, 0x43, 0x21);
+    grid.adopt_scheme(&other);
+
+    assert_eq!(grid.selected(), 7, "the well being edited stays selected");
+    let mut round_trip = scheme();
+    grid.apply_to(&mut round_trip);
+    assert_eq!(round_trip, other, "every colour is the adopted one");
+    assert_eq!(
+        grid.on_pointer(&RELEASE, bounds(), &mut damage::sink()),
+        Some(SwatchAction::Selected { index: 4 }),
+        "the press still completes on the well it armed"
+    );
 }
 
 #[test]

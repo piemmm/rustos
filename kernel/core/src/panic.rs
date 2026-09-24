@@ -47,6 +47,7 @@ use tairix_arch_api::backtrace::{
     walk, CpuStateCapture, StackReader, Translation, MAX_FRAMES as BACKTRACE_MAX_FRAMES,
     MAX_NAMED_REGS, MAX_TABLE_LEVELS,
 };
+use tairix_arch_api::fatal::{format_hex_word, KernelFault};
 use tairix_arch_api::quiesce_stop_others_best_effort;
 use tairix_arch_api::{BootStackGuard, CpuId, KernelStackRegion};
 use tairix_log::{log, Event, Field, FieldValue, Level, Sink};
@@ -207,36 +208,6 @@ pub fn handle_panic<A: KernelArch>(info: &PanicInfo<'_>, ctx: &PanicContext<'_, 
     panic_dump(info.location(), ctx)
 }
 
-/// A fatal CPU exception taken in **kernel** mode, as the port's
-/// synchronous-exception vector saw it.
-///
-/// The same three words on every port, spelled differently per
-/// architecture: `ESR_EL1` / `FAR_EL1` / `ELR_EL1` on aarch64, the `#PF`
-/// error code / faulting linear address / `RIP` on x86_64, and `scause` /
-/// `stval` / `sepc` on riscv64. The port's shim names them; everything
-/// above it reads the neutral triple.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct KernelFault {
-    /// The port's exception syndrome — why the CPU trapped.
-    pub syndrome: u64,
-    /// The address the faulting access could not reach.
-    pub address: u64,
-    /// The faulting instruction.
-    pub pc: u64,
-}
-
-impl core::fmt::Display for KernelFault {
-    /// One line, hex, in the field order the audit record uses, so the
-    /// pre-init console path and the structured dump read alike.
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "syndrome={:#018x} fault_addr={:#018x} fault_pc={:#018x}",
-            self.syndrome, self.address, self.pc
-        )
-    }
-}
-
 /// What brought the kernel down — the only thing that differs between the
 /// two entries into [`dump`].
 enum Fatal<'a> {
@@ -334,7 +305,7 @@ fn capture_into(
     let mut n_regs = 0usize;
     let mut push_reg = |name: &'static str, value: u64| {
         if n_regs < REG_CAP {
-            let _ = format_hex_u64(value, &mut bufs.regs[n_regs]);
+            let _ = format_hex_word(value, &mut bufs.regs[n_regs]);
             bufs.reg_names[n_regs] = name;
             n_regs += 1;
         }
@@ -368,7 +339,7 @@ fn capture_into(
 
     // Format each frame address as hex and its `frame_N` key.
     for (i, addr) in frame_addrs.iter().take(n_frames).enumerate() {
-        let _ = format_hex_u64(*addr, &mut bufs.frames[i]);
+        let _ = format_hex_word(*addr, &mut bufs.frames[i]);
         bufs.frame_key_lens[i] = format_frame_key(i, &mut bufs.frame_keys[i]);
     }
 
@@ -471,15 +442,15 @@ fn cause_fields<'b>(fatal: &Fatal<'b>, bufs: &'b mut CauseBufs) -> [Field<'b>; 3
         Fatal::Fault(fault) => [
             Field {
                 key: "syndrome",
-                value: FieldValue::Str(format_hex_u64(fault.syndrome, &mut bufs.syndrome)),
+                value: FieldValue::Str(format_hex_word(fault.syndrome, &mut bufs.syndrome)),
             },
             Field {
                 key: "fault_addr",
-                value: FieldValue::Str(format_hex_u64(fault.address, &mut bufs.address)),
+                value: FieldValue::Str(format_hex_word(fault.address, &mut bufs.address)),
             },
             Field {
                 key: "fault_pc",
-                value: FieldValue::Str(format_hex_u64(fault.pc, &mut bufs.pc)),
+                value: FieldValue::Str(format_hex_word(fault.pc, &mut bufs.pc)),
             },
         ],
     }
@@ -574,7 +545,7 @@ fn regime_fields<'b>(
     if let Some(root) = bt.active_root() {
         fields[n] = Field {
             key: "root",
-            value: FieldValue::Str(format_hex_u64(root, &mut bufs.root)),
+            value: FieldValue::Str(format_hex_word(root, &mut bufs.root)),
         };
         n += 1;
     }
@@ -594,7 +565,7 @@ fn regime_fields<'b>(
         if let Some(detail) = detail {
             fields[n] = Field {
                 key: "fault_par",
-                value: FieldValue::Str(format_hex_u64(detail, &mut bufs.detail)),
+                value: FieldValue::Str(format_hex_word(detail, &mut bufs.detail)),
             };
             n += 1;
         }
@@ -618,7 +589,7 @@ fn regime_fields<'b>(
                     n += 1;
                     fields[n] = Field {
                         key: "par_after_tlbi",
-                        value: FieldValue::Str(format_hex_u64(phys, &mut bufs.flushed)),
+                        value: FieldValue::Str(format_hex_word(phys, &mut bufs.flushed)),
                     };
                     n += 1;
                 }
@@ -630,7 +601,7 @@ fn regime_fields<'b>(
                     n += 1;
                     fields[n] = Field {
                         key: "par_after_tlbi",
-                        value: FieldValue::Str(format_hex_u64(status, &mut bufs.flushed)),
+                        value: FieldValue::Str(format_hex_word(status, &mut bufs.flushed)),
                     };
                     n += 1;
                 }
@@ -672,7 +643,7 @@ fn desc_fields<'b>(
     let mut descs = [0u64; MAX_TABLE_LEVELS];
     let read = bt.table_path(addr, &mut descs).min(MAX_TABLE_LEVELS);
     for (i, desc) in descs.iter().enumerate().take(read) {
-        let _ = format_hex_u64(*desc, &mut bufs.values[i]);
+        let _ = format_hex_word(*desc, &mut bufs.values[i]);
         bufs.key_lens[i] = format_desc_key(i, &mut bufs.keys[i]);
     }
     let mut fields = [Field {
@@ -832,7 +803,7 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     let mut overrun_buf = [0u8; 18];
     let overrun_str = match guard {
         Some(BootStackGuard::BelowStack { bytes, .. }) => {
-            Some(format_hex_u64(bytes, &mut overrun_buf))
+            Some(format_hex_word(bytes, &mut overrun_buf))
         }
         _ => None,
     };
@@ -913,29 +884,6 @@ fn format_u32(value: u32, buf: &mut [u8; 11]) -> &str {
         n /= 10;
     }
     core::str::from_utf8(&buf[i..]).unwrap_or("0")
-}
-
-/// Format a `u64` into `buf` as a fixed-width `0x`-prefixed 16-digit
-/// lowercase hex string and return a borrowed `&str` over the whole
-/// buffer.
-///
-/// Allocation-free and total; the buffer is exactly 18 bytes (`"0x"` plus
-/// 16 hex digits), so every `u64` fills it completely and the returned
-/// `&str` is always the full buffer. Fixed width (rather than minimal)
-/// keeps a column of register/frame addresses aligned in the dump and
-/// means no length bookkeeping. Used only by the panic path.
-fn format_hex_u64(value: u64, buf: &mut [u8; 18]) -> &str {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    buf[0] = b'0';
-    buf[1] = b'x';
-    let mut v = value;
-    let mut i = 18;
-    while i > 2 {
-        i -= 1;
-        buf[i] = HEX[(v & 0xf) as usize];
-        v >>= 4;
-    }
-    core::str::from_utf8(&buf[..]).unwrap_or("0x0000000000000000")
 }
 
 /// Format an indexed field key `<prefix><index>` into `buf` and return its
@@ -1097,21 +1045,6 @@ mod tests {
         assert_eq!(field("line"), Some("0"));
         assert_eq!(field("column"), Some("0"));
         assert_eq!(arch.halt_count(), 1);
-    }
-
-    #[test]
-    fn format_hex_u64_is_fixed_width_lowercase() {
-        let mut buf = [0u8; 18];
-        assert_eq!(format_hex_u64(0, &mut buf), "0x0000000000000000");
-        let mut buf = [0u8; 18];
-        assert_eq!(format_hex_u64(0xdead_beef, &mut buf), "0x00000000deadbeef");
-        let mut buf = [0u8; 18];
-        assert_eq!(format_hex_u64(u64::MAX, &mut buf), "0xffffffffffffffff");
-        let mut buf = [0u8; 18];
-        assert_eq!(
-            format_hex_u64(0xffff_8000_0000_1111, &mut buf),
-            "0xffff800000001111"
-        );
     }
 
     #[test]

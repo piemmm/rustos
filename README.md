@@ -70,7 +70,8 @@ for filesystems, the feature section below.
 | Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |
 | Memory tagging (software UAF floor) | ✓ | ✓ | ✓ | ✓ |
 | Kernel CSPRNG seeded at boot (mixed with jitter + boot seed) | ✓ RDSEED/RDRAND | ✓ RNDR | ✓ boot seed | ▢ host import |
-| Fatal kernel-fault report (registers, backtrace, stop-the-world) | ◐ `#PF` only | ✓ | ✓ | — |
+| Fatal kernel-fault report (registers, backtrace, stop-the-world) | ✓ | ✓ | ✓ | — |
+| Fault report with no handler installed (trap table armed at boot entry) | ✓ | ✓ | ✓ | — |
 | Interactive-stall report (frame budget + user backtrace, debug) | ✓ | ✓ | ✓ | ▢ |
 | CPU frequency scaling (governor + mechanism driver) | ▢ | ✓ firmware | ▢ | — |
 | Live core-frequency measurement (`cpu MHz`) | ✓ APERF | ✓ PMU | ✓ cycle | — |

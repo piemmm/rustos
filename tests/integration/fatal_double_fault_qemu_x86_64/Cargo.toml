@@ -1,0 +1,29 @@
+[package]
+name = "tairix-test-fatal-double-fault-qemu-x86_64"
+description = "QEMU integration test: an exception taken on an unusable stack in a minimal x86_64 kernel escalates to a double fault the port's boot tables deliver on a stack of its own, so it is reported and the run ends on that report's record, rather than triple-faulting into a silent exit."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding kernel ELF QEMU loads with `-kernel` on the x86_64 PC. It links
+# the port alone, for boot, console and panic report: the point is a kernel
+# with nothing behind the port.
+#
+# On the host target the crate has no test source and contributes nothing to
+# `cargo test`; the orchestrator is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-fatal-double-fault-qemu-x86_64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

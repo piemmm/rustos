@@ -19,9 +19,12 @@ extern "C" {
 
 /// The trampoline jumps here, exactly once, on the boot CPU.
 ///
-/// The DTB is validated by the boot pipeline if and when it parses it;
-/// this seam exists so the assembly hands off to Rust as early as
-/// possible.
+/// The EL1 vectors are armed before `kernel_main` runs, so no binary can
+/// take an exception with `VBAR_EL1` still pointing wherever the firmware
+/// left it: every fault reaches the fatal path, and with no fault handler
+/// installed that path reports the syndrome rather than re-faulting
+/// silently. The DTB is validated by the boot pipeline if and when it
+/// parses it.
 ///
 /// # Safety
 ///
@@ -30,6 +33,9 @@ extern "C" {
 /// established). Calling from anywhere else is a kernel bug.
 #[no_mangle]
 pub extern "C" fn tairix_arch_aarch64_main(dtb: u64) -> ! {
+    // SAFETY: the boot CPU, a stack established, interrupts masked — the
+    // contract `init_vectors` states, which `boot.s` guarantees here.
+    unsafe { crate::exceptions::init_vectors() };
     // SAFETY: `kernel_main` is provided by the linked binary and is
     // documented `-> !` (see the `extern` block). Forwarding the
     // verbatim hand-off value once is the entire contract.

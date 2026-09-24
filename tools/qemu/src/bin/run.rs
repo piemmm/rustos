@@ -158,6 +158,11 @@ fn report(result: std::io::Result<Outcome>) -> ExitCode {
             eprint!("{cpu_state}");
             ExitCode::from(2)
         }
+        Ok(Outcome::Fatal { record, serial }) => {
+            eprintln!("tairix-qemu-run: FATAL: the guest's kernel stopped: {record}");
+            eprint!("{serial}");
+            ExitCode::from(1)
+        }
         Err(e) => {
             eprintln!("tairix-qemu-run: could not spawn QEMU: {e}");
             ExitCode::from(3)

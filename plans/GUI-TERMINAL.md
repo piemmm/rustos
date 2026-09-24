@@ -85,16 +85,24 @@ AD5 migrated it.
   step, the sheet closing — asks for a write. Wiring the value to the write
   cost one store round trip and one disk commit per pointer-motion sample, and
   the window was frozen for each of them.
-- **The write happens on a worker, and its answer is what applies.** A settled
-  edit is submitted to the settings worker, which publishes and answers with
-  the profile the store then implies — so a machine policy or a shipped default
-  the user's document does not override still wins over what the widget asked
-  for, and *Restore defaults* needs no second mechanism. A refused write
-  reverts the preview and says why, so no window keeps showing a look the next
-  start would not restore. The desk coalesces latest-wins, so any number of
-  settled edits during one write cost one further write rather than one each.
-  With no worker granted, the write happens on the loop exactly as it used to —
-  slower under load, never wrong, and stated once.
+- **The write happens on a worker, and its answer is what applies** — to
+  every setting the user has not changed since that write was asked for. A
+  settled edit is submitted to the settings worker, which publishes and answers
+  with the profile the store then implies, so a machine policy or a shipped
+  default the user's document does not override still wins over what the
+  widget asked for, and *Restore defaults* needs no second mechanism. A setting
+  edited since the write was asked for keeps its value when the answer lands,
+  so an answer arriving mid-drag never moves the slider under the pointer, and
+  that setting's own settle writes it. A refused write reverts the settings it
+  carried and says why, so no window keeps showing a look the next start would
+  not restore.
+- **One write is outstanding at a time** (`Publication`). A settle or a restore
+  asked for while one is outstanding is owed until it answers, restore first,
+  so every answer describes the only write in flight, a restore is never
+  displaced by a later save, and no save writes back values a restore is about
+  to remove. Any number of settled edits during one write cost one further
+  write. With no worker granted, the write happens on the loop exactly as it
+  used to — slower under load, never wrong, and stated once.
 
 Defaults: system scheme, 14 px text, 80% opacity, the backdrop blurred at half
 strength, and the four pass effects off. Translucency is free (it is the alpha
@@ -277,10 +285,14 @@ plus the app-local colour-well grid, on its own popup surface.
 - Footer: *Restore defaults* and *Done*.
 
 Every edit clamps through `Profile::clamp`, so the sheet can never produce an
-invalid profile, and the program adopts the sheet's profile on every edit so
-exactly one copy of the settings is ever live. A change re-derives the colours
-and the face, re-applies the backdrop blur, reshapes the grid (the pty
-follows), and writes the document.
+invalid profile. The program applies only the settings an edit changed
+(`Publication::edit`, over the `ProfileKey` registry's typed per-key copy), so
+a sheet whose copy has fallen behind — another window's, or one open while the
+menu changed the size — cannot put stale values back, and every open sheet
+follows the live profile (`Settings::adopt`), reporting the rows that moved and
+leaving a drag, the selected well and the focus where they are. A change
+re-derives the colours and the face, re-applies the backdrop blur, reshapes the
+grid (the pty follows), and writes the document once it settles.
 
 The colour-well grid lives in the app rather than `lib/controls` because the
 control library takes a control only once two independent consumers need it
@@ -472,11 +484,12 @@ recomposite those two fields legitimately ask the compositor for, and the knob
 lagged the pointer. `SheetScreen::paint` clips the render to what was reported
 and answers that rectangle for `write_frame` and the present; `invalidate`
 covers the sheet for a change no control could have reported — a re-theme, a
-new scale, a profile adopted from the store, or a frame region the session took
-back, which holds none of the pixels a partial present would leave standing. A
-scoped paint is asserted byte-identical to the same band of a whole one, and
-the effect sliders' own reports are asserted to be a small part of the sheet,
-so neither half can pass by covering everything.
+new scale, or a frame region the session took back, which holds none of the
+pixels a partial present would leave standing. A profile adopted from the store
+or another window reports the rows it moved. A scoped paint is asserted
+byte-identical to the same band of a whole one, and the effect sliders' own
+reports are asserted to be a small part of the sheet, so neither half can pass
+by covering everything.
 
 **A control's own report is not the whole scope, and the sheet reports the
 rest.** The sheet composes state *above* its controls, and a scoped paint shows

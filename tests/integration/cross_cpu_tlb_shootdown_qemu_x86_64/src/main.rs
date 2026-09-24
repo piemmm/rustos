@@ -280,12 +280,10 @@ mod kernel {
         }
     }
 
-    /// Forward to a serial-logging panic that exits QEMU with failure.
+    /// The port reports the panic; the harness ends the run on its record.
     #[panic_handler]
     fn tairix_xtlb_x86_64_panic(info: &core::panic::PanicInfo<'_>) -> ! {
-        let mut com1 = serial::Serial::init(serial::COM1_BASE);
-        let _ = writeln!(com1, "[cross_cpu_tlb_shootdown_qemu_x86_64] panic: {info}");
-        qemu_exit::exit_failure();
+        tairix_arch_x86_64::panic::handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline

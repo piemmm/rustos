@@ -17,8 +17,8 @@
 //!   ([`crate::uaccess`]) to the copy's fix-up (the frame's ELR slot is
 //!   rewritten, so the copy returns an error instead of the CPU
 //!   halting), and routes any other synchronous exception to the
-//!   installed [`crate::fault`] handler (or fails closed by parking the
-//!   CPU).
+//!   installed [`crate::fault`] handler, or with none installed to the
+//!   port's own report, parking the CPU either way.
 //!
 //! # EL0 `svc` syscall dispatch
 //!
@@ -200,10 +200,15 @@ extern "C" {
 
 /// Point `VBAR_EL1` at the exception vector table.
 ///
+/// The boot entry arms the boot CPU before `kernel_main`; a binary arms each
+/// secondary CPU it brings up, and may re-arm one — after an address-space
+/// switch, say — which is harmless: every step writes the value it already
+/// holds.
+///
 /// # Safety
 ///
-/// Must be called once, on the boot CPU, after a stack is established
-/// and before interrupts are unmasked. The table is 2 KiB aligned by
+/// Must be called on the CPU being armed, after a stack is established and
+/// before interrupts are unmasked. The table is 2 KiB aligned by
 /// `vectors.s`, satisfying the `VBAR_EL1` alignment requirement.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn init_vectors() {
@@ -825,7 +830,8 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
 /// work. The terminator returns only when the exception cannot be
 /// attributed to a running task (none current, or none published), which —
 /// like a same-EL kernel fault — is genuinely unrecoverable and falls
-/// through to the fatal handler / halt (never a silent reset).
+/// through to the fatal handler, or with none installed to the port's own
+/// report; either way it parks the CPU having said why.
 ///
 /// # Safety
 ///
@@ -851,13 +857,14 @@ fn fatal_exception(kind: u64, esr: u64, frame: *const u64) -> ! {
         }
     }
     // A same-EL (kernel) exception, or a lower-EL one with no task to
-    // terminate: genuinely unrecoverable. Offer it to the installed fatal
-    // handler (which diverges) and otherwise park the CPU — never a silent
-    // reset.
+    // terminate: genuinely unrecoverable. The installed fatal handler owns
+    // the report; with none installed the port writes its own, so the
+    // syndrome is never lost.
+    let (far, elr) = (read_far(), read_elr());
     if let Some(handler) = crate::fault::fault_handler() {
-        handler(esr, read_far(), read_elr());
+        handler(esr, far, elr);
     }
-    crate::kernel_arch::halt_current_cpu();
+    crate::panic::report_unclaimed_fault(esr, far, elr)
 }
 
 /// The ordering invariant of this port's two `eret` sequences, pinned

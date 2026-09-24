@@ -10,7 +10,8 @@ use crate::effects::{Effects, FULL, MIN_OPACITY};
 use crate::scheme::{Rgb, Scheme, ANSI_COLORS};
 
 use super::{
-    Invalidation, Profile, ProfileKey, DEFAULT_FONT_SIZE_PX, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX,
+    field_value, Invalidation, Profile, ProfileKey, ProfileKeys, DEFAULT_FONT_SIZE_PX,
+    MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX,
 };
 
 /// The command word the terminal's bundle is installed under.
@@ -573,4 +574,74 @@ fn a_scheme_change_stales_only_the_colours() {
 fn an_unchanged_profile_stales_nothing() {
     let profile = Profile::default();
     assert!(!Invalidation::between(&profile, &profile).any());
+}
+
+// --- One profile's settings taken into another -------------------------------
+
+/// Taking every setting reproduces the source: the registry reaches every
+/// field, so nothing built on it can leave one behind.
+#[test]
+fn taking_every_setting_reproduces_the_source() {
+    let mut profile = Profile::default();
+    let changed = profile.set_from(&edited_profile(), ProfileKeys::ALL);
+    assert_eq!(profile, edited_profile());
+    assert_eq!(changed, ProfileKeys::ALL, "every setting differed");
+}
+
+/// Each key takes its own setting and no other, measured through the store
+/// spelling rather than through the bridge under test.
+#[test]
+fn each_key_takes_exactly_its_own_setting() {
+    for key in ProfileKey::ALL {
+        let only = ProfileKeys::EMPTY.with(key);
+        let mut profile = Profile::default();
+        assert_eq!(
+            profile.set_from(&edited_profile(), only),
+            only,
+            "{}",
+            key.name()
+        );
+        for other in ProfileKey::ALL {
+            let source = if other == key {
+                edited_profile()
+            } else {
+                Profile::default()
+            };
+            assert_eq!(
+                field_value(&profile, other),
+                field_value(&source, other),
+                "taking {} moved {}",
+                key.name(),
+                other.name()
+            );
+        }
+    }
+}
+
+#[test]
+fn differing_names_exactly_the_settings_that_differ() {
+    assert!(Profile::default().differing(&Profile::default()).is_empty());
+    for key in ProfileKey::ALL {
+        let mut one = Profile::default();
+        one.set_from(&edited_profile(), ProfileKeys::EMPTY.with(key));
+        let differing = Profile::default().differing(&one);
+        for other in ProfileKey::ALL {
+            assert_eq!(
+                differing.contains(other),
+                other == key,
+                "{} changed, {} asked",
+                key.name(),
+                other.name()
+            );
+        }
+    }
+}
+
+#[test]
+fn taking_a_setting_that_already_matches_reports_no_change() {
+    let mut profile = edited_profile();
+    assert!(profile
+        .set_from(&edited_profile(), ProfileKeys::ALL)
+        .is_empty());
+    assert_eq!(profile, edited_profile());
 }

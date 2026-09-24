@@ -189,9 +189,11 @@ render to them and presents only that rectangle. Without it a slider drag cost
 the whole sheet per pointer sample: a screen-sized surface allocated afresh,
 every tab, row, label and swatch re-rendered, and the whole popup presented,
 several dozen times a second, so the knob lagged the pointer. A change no
-control could have reported — a re-theme, a new scale, a profile adopted from
-the store, a frame region the session took back — covers the sheet instead,
-which is that change's true scope (`AGENTS.md` §28).
+control could have reported — a re-theme, a new scale, a frame region the
+session took back — covers the sheet instead, which is that change's true scope
+(`AGENTS.md` §28). A profile adopted from the store, or edited in another
+window, is reported row by row by the sheet itself, and leaves a drag, the
+selected well and the focus where they were.
 
 **A control's own report is never the whole scope.** An overlay composes state
 *above* its controls, and every such change is the overlay's to report or the
@@ -2217,6 +2219,15 @@ the registry refuses leaves that one field at its default and names the key on
 `stderr`; and a store the service cannot serve leaves the bundle's shipped
 defaults standing, also said on `stderr`. Colours are written as bare `rrggbb`
 because the format's comment marker would cut a `#`-prefixed value away.
+
+The settings sheet writes nothing while a control is still moving: a drag is
+shown live and saved once it settles, on a worker, one write at a time. The
+store's answer applies to every setting the user has not touched since that
+write was asked for, so a machine-wide policy still wins where the user is not
+editing and an answer landing mid-drag never moves the slider under the
+pointer. A *Restore defaults* asked for behind an outstanding write waits for
+it rather than being displaced, and a refused write says why on `stderr` and
+puts the settings it carried back to what the store holds.
 
 The screen effects are an ordered, typed pipeline (`effects::Pass`) rather
 than code inlined into the renderer, so a display that can composite hardware

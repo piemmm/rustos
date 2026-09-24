@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 50 open, 126 closed, 176 total.
+**closed**, and a partial fix stays **open**. 51 open, 128 closed, 179 total.
 
-### Open (50)
+### Open (51)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -65,7 +65,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D143 | no `rsa-sha2-*` SSH key support: the only pure-Rust RSA carries an unpatched advisory | noticed while landing `plans/SSH.md` S0a; the algorithm is absent rather than shipped weak. The `rsa` crate carries RUSTSEC-2023-0071 (Marvin timing attack) with `patched = []`: as of 2026-09-23, re-checked when `plans/SSH.md` S1 landed, it is unfixed on 0.9.10 and on every 0.10 release candidate through rc.18, the newest `rsa` release (April 2026). Its own advisory text says to avoid it where an attacker can observe timing over the network — which is exactly SSH. §19.3 blocks the dependency and §2.12 forbids hand-rolling the alternative; verify-only does not help, because `cargo deny` flags the crate rather than the call. The cost is a user whose only key is `~/.ssh/id_rsa`, and the rare RSA-only host key; stock OpenSSH host keys are Ed25519 by default. **Re-check trigger:** whenever `lib/crypto`'s pins are audited or `plans/SSH.md` advances a stage, confirm whether the advisory has gained a `patched` version — if it has, `plans/SSH.md` S15 unblocks as an ordinary increment |
 | D144 | `menu-qemu-aarch64` stalled once at its runtime ceiling with the terminal never launched, and the mechanism is not known | observed once in a full 182-test matrix run on `6f1895cc5`; has not reproduced (standalone 22.4 s, then 25.1 s, then green in a full gate). **Not** load: the guest was alive and idle at the kill (≈8 IPC/s, silent 1.98 s) and 600 s dwarfs the 22 s a pass needs, so it stalled rather than ran slow. Reached `desktop fully revealed` + `first input delivered kind=pointer`, then nothing: no `terminal.app` bundle load and so no `served window first frame on screen`, the gate the rest of the script waits on — the launch click had no effect. The recorded suspicion, that the row click raced the program-library popup, is **disproven**: the popup takes the pointer grab from `is_open()`, i.e. from the model, so a row click delivered before the popup's first present is still hit-tested against the open popup. Leading remaining candidate is `lib/virtio_input`'s documented silent-drop bound (the device discards events when no posted buffer is free; a press/release vanishing mid-burst was seen end to end before the pool went from 8 to 64), whose stated trigger — a click arriving while the desktop re-renders — is exactly what the old script produced by firing the row click during the popup's ~159 ms paint; weak, though, since a 64-deep pool should absorb a burst this small. The six library scripts now gate the row click on the popup's own `program-library popup on screen` witness (id 20015), so no script depends on the question and a recurrence records whether the popup ever reached the screen. Diagnosing it still needs the failing serial log copied aside: `persist_serial` rewrites one path per test |
 | D145 | `netstack`'s `accept` scans the whole socket table to find the next unaccepted child, and a spurious `accept` scans it all | noticed while converting the socket bound to measured bytes (`plans/SSH.md` S0b); not absorbed, because it is a second index's worth of design rather than part of that conversion. Every other owned-handle lookup is O(1) through a keyed index; this one is `sockets.iter().position(...)` over the entire table, so a server accepting *n* connections pays O(n²), and the common `WouldBlock` — an `accept` with nothing ready — pays a **full** scan. Remote peers decide how many connections there are to accept, so it is the same "cost follows the table" class the indices were added to remove, reached by a path the owner drives. It is not a correctness or containment defect: the bound still holds and no authority leaks. The fix is not a fifth index but a per-listener FIFO of unaccepted child ids living *inside* the `Proto::Listen` variant, so it is created, drained, and dropped with the listener that owns it and needs no reservation of its own; `accept` then pops a handle and resolves it through `by_id` in constant time. Touches `Proto::Listen`'s shape and every listener site (`to_record`, `defence_counters`, `close`, `listen`, `accept_socket`, `drive_listener`, `advance_listener`, `drain_listener_accepts`, `stream_next_deadline`, `committed_of`, the invariant check). **Re-check trigger:** `plans/SSH.md` S5, whose `sshd` is the tree's first real `accept` consumer and the first workload that would feel it |
-| D146 | a CPU fault in a minimal QEMU integration kernel is a silent hang: no vector table is installed and no fault handler is registered, so nothing reports the syndrome | found while diagnosing the `figure-determinism-qemu-aarch64` boot-stack overflow, which presented only as a 90 s silence with the transcript's last line being the step *before* the fault. These bins supply their own `kernel_main` and call at most `enable_fp_el1`; `tairix_arch_aarch64::exceptions::init_vectors` is never called, so `VBAR_EL1` stays 0 and a synchronous fault vectors to physical `0x200`, executes zeros as `UDF`, and re-faults forever — the guest is wedged rather than dead, so the harness can only kill it on the inactivity budget. The real syndrome (`Prefetch Abort, ESR 0x21/0x86000000, FAR/ELR 0x3ff0000000000000` — a branch to the f64 `1.0` from a corrupted vtable slot) was recoverable only by re-running the bin by hand under `qemu -d int`. Installing vectors alone is **not** the fix: `exceptions::fatal_exception` offers the trap to `fault::fault_handler()` and, finding none registered, falls through to `halt_current_cpu()` — still silent. The fix is a shared guest-side itest kernel helper (there is none today: `tests/integration/harness` is host-side build glue and `finisher` only provides `fail_point!`) that installs the vector table and registers a handler printing `ESR`/`FAR`/`ELR` through the serial sink before exiting with a failure code, wired into the itest bins on both bare-metal ports. riscv64 has the same gap by the same route. Until it lands, any fault in these bins costs a manual `-d int` re-run to diagnose. The boot-stack guard (D150) cannot help here yet: its verdict is read on the panic path, which a fault in these bins never reaches, so an overrun that faults rather than panics — the aarch64 case above — is still silence. x86_64 shows the same gap differently: an overrun there runs through the guard into `boot_pds` and triple-faults, which under `-no-reboot` ends QEMU at once with status 0 and nothing on the serial line — fast rather than a 90 s wait, and just as silent (seen when the figure grid outgrew the 64 KiB x86_64 boot stack) |
 | D152 | a panic raised inside the framebuffer console's renderer deadlocks its own report | aarch64, the one port whose kernel renders a framebuffer console, on a release build with a live framebuffer. `SerialSink::write_event` renders through `video::write_bytes`, whose shared `paint` body takes `RENDER_LOCK` blocking, so a fault inside `lib/fbcon` or `paint` with the lock held hangs silently on the record it is emitting; `video::reclaim_surface`'s `try_lock` steps around the hang without fixing the write path. See the Scope bullet |
 | D153 | the desktop session's on-screen witnesses are emitted at a rate an unprivileged client drives | noticed while adding `WINDOW_RETITLED` (`plans/NEW-DESKTOP-SETTINGS.md` DS13); not absorbed. A window opened and closed, a menu opened, or a title changed once per frame each costs one record through the session's `CAP_LOG_EMIT`, so a client holding no log authority can write the journal at frame rate. Each witness is honest and bounded by the frame pacer, and the bound belongs in the log path every service shares — a per-source record budget — rather than in one witness |
 | D154 | graphical drawing outside `lib/controls` still cuts a name where its room runs out, with no mark | noticed while moving every `lib/controls` site onto the shared recipe (`plans/NEW-DESKTOP-SETTINGS.md` DS13); not absorbed. `lib/greeter` (`layout.rs`), `lib/browse` (`render.rs`, three sites), `userland/apps/{widgets,view,terminal}`, `userland/gui/switchboard` (seven sites) and `userland/gui/taskbar` (`render.rs`) draw `truncate_to_width`'s prefix alone, against `plans/GUI-CONTROLS-DESIGN.md` §11A. Each becomes `elide_to_width` drawn through `tairix_controls::paint_run`, or through a `lib/font` home for the recipe where a crate sits below `lib/controls`, with a `testkit::marks_elision` regression test per site. The TUI programs' column cuts are the terminal convention and out of scope |
@@ -78,7 +77,9 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D171 | a dead address space is torn down with one TLB invalidation per page, broadcast on aarch64 | noticed while making `LiveSpace::drop`'s walk allocation-free (D167); not absorbed, because the fix is an Arch HAL contract on every port. See the section |
 | D172 | `usb_msd` reads the whole hardware tree into a fixed 8 KiB stack buffer to attribute a stall to a resetting ancestor, and no real tree fits it, so the attribution never runs | noticed while widening the node to sixteen resources (`plans/SOUND.md` SND5a), which shrank the buffer's reach from fourteen nodes to nine; not absorbed, because the fix is a kernel-side fold or a shared growing snapshot reader. See the section |
 | D175 | memory below a narrow DMA ceiling has no reserve: ordinary allocations drain it first-come, so a constrained carve late on a busy machine is refused while RAM above the ceiling is free | noticed while making constrained carves deterministic (D173); not absorbed, because the fix is address zones sized from discovery, with a reserve, on every port. See the section |
-| D179 | a store answer adopted mid-drag snaps the terminal's settings sheet back under the pointer | noticed while building the figure designer (`plans/FIGURE.md` FG7); not absorbed. `Publication::adopt` makes a write's answer the live profile unconditionally, and `adopt_published` then re-seeds every open sheet's sliders (`Sheet::adopt`). A write one settle asked for whose answer lands while the next drag is under way therefore resets that slider mid-drag, and released before the pointer moves again it settles on the reset value, losing the drag. `JobDesk` drops only answers a newer *submission* superseded, and a drag in progress has submitted nothing. The fix adopts an answer into the live profile and the sheets only while the live profile is still the one submitted, and otherwise records it as adopted alone; its regression test settles, starts a second drag, and lands the answer between two samples |
+| D180 | the three trap-path callback slots are copied into every port's `fault.rs` | noticed while closing D146. The fatal-fault handler, the user-fault resolver and the user-fault terminator are each a set-once `FnCell` slot with its `set_*`/getter pair and `SetFaultHandlerError`, identical in `kernel/arch/{aarch64,riscv64,x86_64}/src/fault.rs` but for the names of the three words. The fix hoists them into one `tairix_arch_api` module — the precedent is `uaccess`'s guarded-copy slot — typed over `fatal::KernelFault`'s neutral triple, and moves every consumer onto it: the three `panic_ctx` bridges, the user-fault wiring, and the verticals that install a handler |
+| D181 | the boot-stack guard reads a stack pointer on another stack as an overrun | noticed while closing D146. `BootStackGuardRegion::assess` reports `sp_below_stack` for any stack pointer below the boot stack's lowest byte, so a report taken on a kthread (or any other) stack placed below the boot stack carries a fabricated overrun and extent. No shipped layout places one there today. `kernel_core`'s dump knows the running task's stack (`kthread::running_stack`) and should judge the guard on its canary alone when the stack pointer lies in it, as x86_64's own report already does for an IST delivery; the ports' reports, which have no task registry, should state the limit |
+| D182 | the QEMU runner rescans the whole transcript for each unseen marker on every read | noticed while closing D146. `drain_stream` counts a marker with `matches(..).count()` over the entire captured log on every 4 KiB read until the marker is satisfied, so a marker that never arrives costs O(n²) in the transcript's length — on the failure path, where the transcript is longest. The fatal-record watch beside it scans each line once; the counts want a per-marker resume offset, past the last match and no earlier than one marker length short of the end, which reproduces a whole-log left-to-right count exactly |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -105,7 +106,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (126)
+### Closed (128)
 
 | ID | Subject |
 |---|---|
@@ -215,6 +216,7 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D130 | a thread killed while parked left its row in every wait queue, where a counted wake spent itself on it |
 | D137 | the blocking `wait` registered the calling thread's *process* on the wait queue and parked the *thread*, so a non-leader reaper slept for the rest of the boot |
 | D138 | `desktop-pressure-qemu-aarch64` photographed its artwork baseline on the desktop's reveal, which orders against neither the bar seating a slot nor that slot's artwork landing |
+| D146 | a CPU fault in a minimal QEMU integration kernel was a silent hang |
 | D147 | host tests hand-picked the task ids they keyed process-global registry state on, so a sibling test's `exit` scrubbed it by that id mid-assert |
 | D148 | the hover gate's damage bound was exhausted by a desktop that re-damaged its whole icon bar after every published frame |
 | D149 | icon artwork landing repainted the whole icon bar and the whole library popup, where only the slots and rows that gained a picture changed |
@@ -235,6 +237,7 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D176 | the userland runtime and its C stubs were outside the UB oracle, and three findings kept them there |
 | D177 | the I²C controller driver wrote its bind records to a log it had no authority to reach, so every one was refused |
 | D178 | a DMA window whose bus side starts at address 0 read as an untranslated limit, so its carves were named by their CPU address |
+| D179 | a store answer adopted mid-drag snapped the terminal's settings sheet back under the pointer |
 
 ## Scope
 
@@ -364,8 +367,9 @@ The open items, in priority order:
   `CpuStateCapture::boot_stack_guard` gives the panic record its verdict: an
   `sp` below the stack first, else the canary's `intact` or `disturbed`. The
   `bootguard_qemu_*` verticals prove reservation, fill and handle on all three
-  bare-metal ports. The verdict is read only on the panic path, which a
-  minimal itest kernel's CPU fault never reaches (D146). The record is
+  bare-metal ports. The panic path and the ports' own fault reports read
+  the verdict, so a minimal test kernel's CPU fault names it too (D146).
+  The record is
   `plans/FIX-PANICS.md`.
 - **D149 — icon artwork landing repainted the whole icon bar and the whole
   library popup — FIXED.** `ArtworkDesk::take_landed` answers a
@@ -8569,3 +8573,78 @@ A translated window now carries `HwResource::DMA_TRANSLATED` in its flags
 it, and translation keys on it; `lspci` renders the bus side on the same test.
 Regression test:
 `translate_device_addr_rebases_a_window_whose_bus_side_starts_at_zero`.
+
+## D179 — a store answer adopted mid-drag snapped the terminal's settings sheet back — FIXED
+
+`Publication::adopt` made a write's answer the live profile outright and every
+open sheet was then rebuilt from it, so the answer to one settle landing during
+the next drag reset that slider under the pointer, and a release before the
+pointer moved again settled on the reset value. Four more ways the same path
+lost an edit are closed with it:
+
+- **An answer applies only where the user is not editing.** `Publication`
+  records the settings each edit touched (`ProfileKeys`, over the registry's
+  typed `Profile::set_from`/`differing`) until a save carries them; the answer
+  — or on a refusal the last profile the store held — replaces every other
+  setting. A policy or a restore still wins there, and a setting dragged back
+  onto its written value is still the user's.
+- **One write is outstanding at a time.** `JobDesk` drops a superseded answer
+  only if a newer job is already waiting when it is delivered, so an answer
+  collected after the next submission was adopted as current, and its
+  latest-wins replacement let a later save displace a waiting restore or write
+  the pre-restore values back over it. A settle or restore asked for meanwhile
+  is owed and handed out when the answer lands, restore first.
+- **An edit applies only what it changed** (`Publication::edit(was, now)`), so
+  a sheet whose copy fell behind — another window's, or one open while the menu
+  changed the size — cannot put stale values back.
+- **A re-seeded sheet keeps the interaction.** `Settings::adopt` rebuilt the
+  swatch grid, moving the selected well, and the channel sliders editing it,
+  back to the background under a press. It takes the colours in place
+  (`SwatchGrid::adopt_scheme`) and reports the rows whose value moved rather
+  than invalidating the sheet.
+
+Regression tests: `publish::tests` (`an_answer_landing_mid_drag_leaves_the_dragged_setting_alone`
+and the restore, refusal, owed-write and stale-copy cases),
+`settings::tests::adopting_mid_drag_leaves_the_drag_in_hand`,
+`settings::tests::adopting_keeps_the_well_the_channel_sliders_edit`,
+`swatch::tests::adopting_colours_keeps_the_selection_and_a_press_in_progress`,
+`sheet::tests::adopting_a_profile_repaints_every_row_it_moved`.
+
+## D146 — a CPU fault in a minimal QEMU integration kernel was a silent hang — FIXED
+
+The minimal test kernels define their own `kernel_main` and never armed a
+trap table: on aarch64 `VBAR_EL1` stayed 0, so a fault vectored to `0x200`,
+executed zeros as `UDF` and re-faulted forever; riscv64 trapped through
+whatever `stvec` the firmware left; x86_64 had no IDT, so the first exception
+triple-faulted and QEMU exited with status 0 and nothing on serial. Even with
+vectors armed, a fatal exception with no fault handler parked the CPU without
+a word, and the harness could only kill the guest on its inactivity budget.
+
+- **Every port arms its trap table in its boot entry**, before
+  `kernel_main`: `init_vectors` on aarch64, `install_trap_vector` on
+  riscv64, and on x86_64 boot descriptor tables
+  (`percpu::install_boot_tables`) that route every vector to the fatal tail
+  and give `#DF` an IST stack of its own; the kernel replaces them with its
+  per-CPU tables. The test-only legacy `idt.rs` and its `static mut` are
+  deleted, and its two consumers observe faults through the fault slot.
+- **A fatal exception no handler claims is reported.** Each port's fatal
+  tail, and x86_64's `#PF` entry, which exited through QEMU's debug port,
+  writes the port's own report (`tairix_arch_api::fatal`): a banner naming
+  the port's registers, then the `4011` record with `cpu`, `syndrome`,
+  `fault_addr`, `fault_pc` and the boot-stack guard's verdict. The ports'
+  `handle_panic_via_serial` ends on the `4010` record the same way. The two
+  records, `KernelFault` and the record's hex spelling have one definition
+  there, which `kernel_core`'s audit ids and post-mortem read.
+- **The harness ends a run on the record** (`tairix_qemu::Outcome::Fatal`):
+  the serial drain watches each completed line, and the run ends the moment
+  one lands. An enrolment may expect it (`Expect::Fatal` with the fields the
+  record must name).
+
+Regression tests: `fatal_fault_qemu_{aarch64,riscv64,x86_64}` and
+`fatal_double_fault_qemu_x86_64` fault with no handler installed and pass
+only on a record naming their syndrome — aarch64 the defect's own
+`ESR 0x86000000` at `0x3ff0000000000000`; without the boot-entry install
+aarch64 and riscv64 fail on their budgets and x86_64 on a silent exit. Host
+tests pin the record (`tairix_arch_api::fatal`), the runner's watch and
+outcome (`tairix_qemu`), the enrolment verdict (`qemu_tests::fatal_verdict`)
+and the boot tables' IST mapping.

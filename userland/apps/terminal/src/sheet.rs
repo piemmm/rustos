@@ -33,8 +33,7 @@ pub struct SheetScreen {
     /// Whether the surface holds pixels no report describes, which is what
     /// makes the next paint cover the sheet: before the first paint, and after
     /// anything a control could not have reported — a re-theme, a scale
-    /// change, a profile adopted from the store, a frame region the session
-    /// took back.
+    /// change, a frame region the session took back.
     stale: bool,
 }
 
@@ -69,10 +68,9 @@ impl SheetScreen {
 
     /// Mark every pixel stale, so the next paint covers the sheet.
     ///
-    /// For a change no control could have reported: a re-theme, a new scale, a
-    /// profile adopted from somewhere other than these widgets, or a frame
-    /// region that was released and re-attached and so holds none of the
-    /// pixels a partial present would leave standing.
+    /// For a change no control could have reported: a re-theme, a new scale,
+    /// or a frame region that was released and re-attached and so holds none of
+    /// the pixels a partial present would leave standing.
     pub const fn invalidate(&mut self) {
         self.stale = true;
     }

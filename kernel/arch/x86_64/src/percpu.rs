@@ -379,34 +379,131 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
     // registered storage.
     let slot: &'static mut PerCpu = unsafe { &mut *slot_ptr };
 
-    let df_top = slot.df_stack_top();
-    let nmi_top = slot.nmi_stack_top();
-
-    slot.gdt.set_ist(IST_INDEX_DF, df_top)?;
-    slot.gdt.set_ist(IST_INDEX_NMI, nmi_top)?;
-    slot.gdt.finalize();
-
-    // Construct the IDT with the default thunk and the IST mapping the
-    // (c2) module documents.
-    let handler = crate::interrupts_default_isr_addr();
+    let ists = [
+        (IST_INDEX_DF, slot.df_stack_top()),
+        (IST_INDEX_NMI, slot.nmi_stack_top()),
+    ];
     let selector = PerCpuGdt::selectors().kernel_cs;
-    slot.idt = Idt::with_default_handler(handler, selector, ist_for_vector);
+    slot.idt = Idt::with_default_handler(
+        crate::interrupts_default_isr_addr(),
+        selector,
+        ist_for_vector,
+    );
+    let PerCpu { gdt, idt, .. } = slot;
+    // SAFETY: the slot is this CPU's alone for the whole call and lives for
+    // `'static`, and the caller's contract keeps interrupts disabled.
+    unsafe { load(gdt, idt, &ists) }
+}
 
-    // SAFETY: `slot` is borrowed from a `'static mut` arena, so the
-    // `'static` lifetime promised by `PerCpuGdt::install` and
-    // `Idt::load` is satisfied. The caller's contract guarantees this
-    // CPU runs the install path exactly once.
-    unsafe {
-        slot.gdt.install();
-        // Re-borrow the IDT shared: `install()` took a `&mut`, but
-        // `load()` takes a `&'static self`. Both are derived from the
-        // same `'static` arena slot; no aliasing because `install`
-        // returns first.
-        let idt_ref: &'static Idt = &*core::ptr::addr_of!(slot.idt);
-        idt_ref.load();
+/// Wire `ists` into `gdt`'s TSS, finalise it, and load it and `idt` on the
+/// running CPU — the one install sequence the per-CPU and the boot tables
+/// share.
+///
+/// # Safety
+///
+/// The tables must be the running CPU's alone, and its interrupts disabled.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+unsafe fn load(
+    gdt: &'static mut PerCpuGdt,
+    idt: &'static Idt,
+    ists: &[(u8, u64)],
+) -> Result<(), InitError> {
+    for &(index, top) in ists {
+        gdt.set_ist(index, top)?;
     }
-
+    gdt.finalize();
+    // SAFETY: forwarded from the caller — `'static` tables this CPU owns,
+    // installed with interrupts disabled.
+    unsafe {
+        gdt.install();
+        idt.load();
+    }
     Ok(())
+}
+
+/// The boot CPU's descriptor tables, from the trampoline until the kernel
+/// installs its per-CPU ones through [`init`].
+///
+/// Only `#DF` gets a stack of its own: a double fault is what an exception
+/// raised on an unusable stack becomes, and nothing at boot can take an
+/// `#NMI` onto a stack it cannot trust. The stack comes first so the
+/// struct's own alignment is the stack top's.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[repr(C, align(16))]
+struct BootTables {
+    df_stack: [u8; IST_STACK_BYTES],
+    gdt: PerCpuGdt,
+    idt: Idt,
+}
+
+/// The boot tables and their one-shot latch.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+struct BootCell {
+    tables: UnsafeCell<BootTables>,
+    installed: AtomicBool,
+}
+
+// SAFETY: the tables are written once, by `install_boot_tables` on the boot
+// CPU behind the latch, before any other CPU runs; afterwards only that
+// CPU's own descriptor registers read them.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+unsafe impl Sync for BootCell {}
+
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+static BOOT_TABLES: BootCell = BootCell {
+    tables: UnsafeCell::new(BootTables {
+        df_stack: [0; IST_STACK_BYTES],
+        gdt: PerCpuGdt::new(),
+        idt: Idt::empty(),
+    }),
+    installed: AtomicBool::new(false),
+};
+
+/// The IST index each vector's gate takes in the boot tables.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+const fn boot_ist_for_vector(vector: u8) -> u8 {
+    if vector == 8 {
+        IST_INDEX_DF
+    } else {
+        0
+    }
+}
+
+/// Install the boot CPU's descriptor tables: every exception routed to the
+/// fatal path, `#DF` on a stack of its own.
+///
+/// The boot entry calls this before `kernel_main`, so no binary takes an
+/// exception through the invalid IDTR `boot.s` leaves — a triple fault that
+/// ends QEMU with nothing said.
+///
+/// # Errors
+///
+/// [`InitError::AlreadyInitialised`] on a second call, and
+/// [`InitError::Ist`] if the `#DF` stack top were rejected.
+///
+/// # Safety
+///
+/// On the boot CPU, before interrupts are enabled.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub(crate) unsafe fn install_boot_tables() -> Result<(), InitError> {
+    if BOOT_TABLES.installed.swap(true, Ordering::AcqRel) {
+        return Err(InitError::AlreadyInitialised);
+    }
+    // SAFETY: the latch makes this the one access, and nothing reads the
+    // tables until they are loaded below.
+    let tables: &'static mut BootTables = unsafe { &mut *BOOT_TABLES.tables.get() };
+    let BootTables { df_stack, gdt, idt } = tables;
+    let df_top = df_stack.as_ptr_range().end as u64;
+    let selector = PerCpuGdt::selectors().kernel_cs;
+    *idt = Idt::with_default_handler(
+        crate::interrupts_default_isr_addr(),
+        selector,
+        boot_ist_for_vector,
+    );
+    crate::exceptions::route_exceptions(idt, selector, boot_ist_for_vector);
+    // SAFETY: the boot CPU's own `'static` tables, with interrupts disabled
+    // per the caller's contract.
+    unsafe { load(gdt, idt, &[(IST_INDEX_DF, df_top)]) }
 }
 
 /// Install a per-CPU IDT vector after `init` has finalised the CPU.
@@ -555,6 +652,17 @@ mod tests {
             if vector != 2 && vector != 8 {
                 assert_eq!(ist_for_vector(vector), 0, "vector {vector}");
             }
+        }
+    }
+
+    /// The boot tables give only `#DF` a stack, so no boot gate may name the
+    /// `#NMI` IST: a TSS slot left empty would load a null `RSP` and turn the
+    /// delivery itself into a double fault.
+    #[test]
+    fn the_boot_tables_route_only_the_double_fault_through_an_ist() {
+        assert_eq!(boot_ist_for_vector(8), IST_INDEX_DF);
+        for vector in (0u8..=255).filter(|&vector| vector != 8) {
+            assert_eq!(boot_ist_for_vector(vector), 0, "vector {vector}");
         }
     }
     use core::sync::atomic::Ordering;

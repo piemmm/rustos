@@ -29,8 +29,9 @@ use core::fmt::Arguments;
 use core::panic::PanicInfo;
 
 use tairix_arch_api::backtrace::CpuStateCapture;
+use tairix_arch_api::fatal::KernelFault;
 use tairix_kernel_core::{
-    fault_dump, handle_panic, ConsoleDevice, KernelArch, KernelFault, PanicContext, NO_CONSOLES,
+    fault_dump, handle_panic, ConsoleDevice, KernelArch, PanicContext, NO_CONSOLES,
 };
 use tairix_log::Sink;
 

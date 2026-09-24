@@ -72,13 +72,35 @@ keys. A fault carries no `file`/`line`/`column`, and a panic carries no
 syndrome — neither is fabricated for the other, which is why the two are
 distinct event ids rather than one record with optional halves.
 
-Coverage per port follows each port's fatal tail. aarch64 and riscv64 fan
-*every* unhandled synchronous exception (plus FIQ / `SError` / AArch32
-entries on aarch64) into one tail, so every kernel-mode exception is
-reported. On x86_64 only the dedicated page-fault entry reaches the
-handler today: the other exception vectors still point at the fail-closed
-default IDT thunk, which has no per-vector stub and so cannot name a
-syndrome — tracked as an open defect in `plans/OPEN-DEFECTS.md`.
+Every kernel-mode exception is reported, on every port. aarch64 and riscv64
+fan every unhandled synchronous exception (plus FIQ / `SError` / AArch32
+entries on aarch64) into one tail, and x86_64 gives every exception vector
+its own stub into its tail, the resumable page-fault entry reaching the same
+handler.
+
+## Before a fault handler is installed
+
+Every port arms its exception vectors in its boot entry, before
+`kernel_main` runs — aarch64's `VBAR_EL1`, riscv64's `stvec`, and on x86_64
+a set of boot descriptor tables that route every vector to the fatal tail
+and give `#DF` a stack of its own — so no binary can take an exception with
+nowhere to go. The kernel later arms each CPU for itself, and on x86_64
+replaces the boot tables with its per-CPU ones.
+
+A fatal exception with no handler installed — a minimal QEMU test kernel,
+or a fault before the production boot installs its own — gets the port's
+own report instead (`tairix_arch_api::fatal`): a prose banner naming the
+port's own registers, then the same `4011` record carrying `cpu`,
+`syndrome`, `fault_addr`, `fault_pc` and the boot-stack guard's verdict. A
+port's own panic report (`handle_panic_via_serial`) ends with the `4010`
+record the same way. The register snapshot and backtrace are the kernel's
+post-mortem to add. Every fatal report therefore ends on one of the two
+records, and the QEMU harness ends a run the moment either lands rather
+than waiting out its inactivity budget.
+
+On x86_64 a vector delivered on an IST stack (`#DF`, `#NMI`) says nothing
+about where the interrupted code's stack pointer was, so its report judges
+the boot-stack guard on the canary alone.
 
 ### Why the report names the active root and re-probes
 

@@ -137,6 +137,37 @@ struct QemuTest {
     /// failure. Used by the aarch64 interactive-session vertical to hold a
     /// deterministic multi-exchange dialogue with the blocked login.
     serial: &'static [(&'static str, Duration, &'static str)],
+    /// The verdict the run must reach.
+    expect: Expect,
+}
+
+/// The verdict an enrolment must reach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Expect {
+    /// The guest reports success through its debug-exit device.
+    Pass,
+    /// The guest's kernel stops on its fatal record, and the record names
+    /// every one of these fields. The runner ends a run the moment that
+    /// record lands, so reaching it also proves the stop was reported rather
+    /// than left to the inactivity budget.
+    Fatal(&'static [&'static str]),
+}
+
+/// Whether a run that must stop on its kernel's fatal record did, and the
+/// record names every field `fields` lists.
+fn fatal_verdict(package: &str, fields: &[&str], outcome: &Outcome) -> Result<(), String> {
+    let Outcome::Fatal { record, .. } = outcome else {
+        return Err(format!(
+            "test --qemu ({package}) FAILED: the guest never wrote its kernel's fatal record\n--- serial ---\n{}\n--- end ---",
+            outcome.serial()
+        ));
+    };
+    match fields.iter().find(|field| !record.contains(**field)) {
+        None => Ok(()),
+        Some(missing) => Err(format!(
+            "test --qemu ({package}) FAILED: the fatal record does not name `{missing}`: {record}"
+        )),
+    }
 }
 
 /// Builds an enrolment's ordered pointer script at run time (the click
@@ -1264,6 +1295,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // ramzip b3 (`plans/SWAPSWAPSWAP.md`, `plans/SWAPSWAPSWAP.md`):
     // the x86_64 hardware referenced (Accessed) bit read and cleared
@@ -1290,6 +1322,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // ramzip b3 aarch64 (`plans/SWAPSWAPSWAP.md`,
     // `plans/SWAPSWAPSWAP.md`): the software-managed Access Flag
@@ -1329,6 +1362,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WinterSun's world generator on riscv64 (`plans/WINTERSUN.md` WS2).
     // The whole seed-pure pipeline runs in the guest and folds its output
@@ -1358,6 +1392,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WinterSun's world generator on x86_64 (`plans/WINTERSUN.md` WS2).
     // The whole seed-pure pipeline runs in the guest and folds its output
@@ -1387,6 +1422,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WinterSun's figure engine on aarch64 (`plans/FIGURE.md` FG5). The
     // shipped rig, the shipped motion set, the skinned meshes, the planting
@@ -1398,6 +1434,126 @@ static TESTS: &[QemuTest] = &[
     // differently from another, which no single-target run can see. Pure
     // computation over the boot heap — no device, no disk, one CPU — so the
     // 90-second inactivity budget is generous for a debug-profile guest.
+    // D146 (`plans/OPEN-DEFECTS.md`): a fault in a kernel that links only the
+    // port and installs no fault handler is reported, and the run ends on the
+    // report's record the moment it lands — never on the inactivity budget.
+    // aarch64 takes the branch the defect was found on, so the record must
+    // name exactly its syndrome, address and PC.
+    QemuTest {
+        package: "tairix-test-fatal-fault-qemu-aarch64",
+        binary: "tairix-test-fatal-fault-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+        expect: Expect::Fatal(&[
+            tairix_arch_api::fatal::KERNEL_FAULT.message,
+            "cpu=0",
+            "syndrome=0x0000000086000000",
+            "fault_addr=0x3ff0000000000000",
+            "fault_pc=0x3ff0000000000000",
+            "boot_stack_guard=intact",
+        ]),
+    },
+    // D146 on riscv64: an `ebreak` with no fault handler installed, which the
+    // record must name by its cause.
+    QemuTest {
+        package: "tairix-test-fatal-fault-qemu-riscv64",
+        binary: "tairix-test-fatal-fault-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+        expect: Expect::Fatal(&[
+            tairix_arch_api::fatal::KERNEL_FAULT.message,
+            "cpu=0",
+            "syndrome=0x0000000000000003",
+            "boot_stack_guard=intact",
+        ]),
+    },
+    // D146 on x86_64: a read past the boot identity window with no fault
+    // handler installed; the record names `#PF` (vector 14, error code 0) and
+    // the faulting address from `CR2`.
+    QemuTest {
+        package: "tairix-test-fatal-fault-qemu-x86_64",
+        binary: "tairix-test-fatal-fault-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+        expect: Expect::Fatal(&[
+            tairix_arch_api::fatal::KERNEL_FAULT.message,
+            "cpu=0",
+            "syndrome=0x0000000e00000000",
+            "fault_addr=0x0000000100000000",
+            "boot_stack_guard=intact",
+        ]),
+    },
+    // D146 on x86_64: an exception taken on an unusable stack escalates to
+    // `#DF` (vector 8), which the boot tables deliver on a stack of their own;
+    // without it the machine triple-faults and QEMU exits saying nothing.
+    QemuTest {
+        package: "tairix-test-fatal-double-fault-qemu-x86_64",
+        binary: "tairix-test-fatal-double-fault-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+        expect: Expect::Fatal(&[
+            tairix_arch_api::fatal::KERNEL_FAULT.message,
+            "cpu=0",
+            "syndrome=0x0000000800000000",
+            "boot_stack_guard=intact",
+        ]),
+    },
     QemuTest {
         package: "tairix-test-figure-determinism-qemu-aarch64",
         binary: "tairix-test-figure-determinism-qemu-aarch64",
@@ -1417,6 +1573,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WinterSun's figure engine on riscv64 (`plans/FIGURE.md` FG5). The
     // shipped rig, the shipped motion set, the skinned meshes, the planting
@@ -1447,6 +1604,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WinterSun's figure engine on x86_64 (`plans/FIGURE.md` FG5). The
     // shipped rig, the shipped motion set, the skinned meshes, the planting
@@ -1477,6 +1635,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WinterSun's authoritative simulation on aarch64
     // (`plans/WINTERSUN.md` WS3). A scripted session runs in the guest and
@@ -1506,6 +1665,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WinterSun's authoritative simulation on riscv64
     // (`plans/WINTERSUN.md` WS3). A scripted session runs in the guest and
@@ -1535,6 +1695,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WinterSun's authoritative simulation on x86_64
     // (`plans/WINTERSUN.md` WS3). A scripted session runs in the guest and
@@ -1564,6 +1725,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WinterSun's client frame on aarch64 (`plans/WINTERSUN.md` WS5). Two
     // composited frames are drawn in the guest from a fixed seed and every
@@ -1594,6 +1756,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WinterSun's client frame on riscv64 (`plans/WINTERSUN.md` WS5). Two
     // composited frames are drawn in the guest from a fixed seed and every
@@ -1624,6 +1787,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WinterSun's client frame on x86_64 (`plans/WINTERSUN.md` WS5). Two
     // composited frames are drawn in the guest from a fixed seed and every
@@ -1654,6 +1818,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     QemuTest {
         package: "tairix-test-accessed-bit-qemu-aarch64",
@@ -1674,6 +1839,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // ramzip b3 riscv64 (`plans/SWAPSWAPSWAP.md`,
     // `plans/SWAPSWAPSWAP.md`): the software-managed Accessed bit
@@ -1711,6 +1877,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     QemuTest {
         package: "tairix-test-bootguard-qemu-aarch64",
@@ -1731,6 +1898,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     QemuTest {
         package: "tairix-test-bootguard-qemu-x86_64",
@@ -1751,6 +1919,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     QemuTest {
         package: "tairix-test-accessed-bit-qemu-riscv64",
@@ -1771,6 +1940,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
     // (emulated) cores. The host-side `tairix-test-scheduler-stress`
@@ -1796,6 +1966,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 3a (c7-bin) deliverable: boot the production
     // `tairix-kernel` boot pipeline (Multiboot2 → ACPI/MADT →
@@ -1829,6 +2000,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/OPEN-DEFECTS.md` D55 deliverable: boot the production
     // `tairix-kernel` pipeline on a guest whose RAM tops the boot
@@ -1889,6 +2061,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     QemuTest {
         package: "tairix-test-physmap-qemu-riscv64",
@@ -1909,6 +2082,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     QemuTest {
         package: "tairix-test-physmap-qemu-x86_64",
@@ -1929,6 +2103,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 2.7 follow-up (f6) deliverable: boot the production
     // `tairix-kernel` boot pipeline and, on observing
@@ -1963,6 +2138,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the per-native-
     // target QEMU round-trip for the C-callable syscall stub runtime
@@ -1999,6 +2175,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the riscv64
     // half of the `lib/abi-sys` syscall-stub round-trip. riscv64 has no
@@ -2036,6 +2213,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the aarch64
     // half of the `lib/abi-sys` syscall-stub round-trip. Like riscv64,
@@ -2074,6 +2252,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
     // ring-3 exercise for the Arch HAL "enter user mode" primitive
@@ -2113,6 +2292,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // x86_64 `syscall` register-preservation regression vertical
     // (`kernel/arch/x86_64/src/syscall_entry.rs`): the IA32_LSTAR entry
@@ -2147,6 +2327,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the riscv64
     // crt0-linked-program spawn round-trip. The build script compiles the
@@ -2186,6 +2367,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the aarch64
     // crt0-linked-program spawn round-trip — the EL0 analogue of the riscv64
@@ -2226,6 +2408,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
     // crt0-linked-program spawn round-trip — the ring-3 analogue of the
@@ -2269,6 +2452,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the riscv64
     // end-to-end C-program round-trip — the headline CC5 work. The build
@@ -2307,6 +2491,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the aarch64
     // end-to-end C-program round-trip — the EL0 analogue of the riscv64
@@ -2346,6 +2531,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the x86_64
     // end-to-end C-program round-trip — the ring-3 analogue of the
@@ -2388,6 +2574,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 4 deliverable: boot the production kernel pipeline, instantiate
     // `tairix_drvhost::Host`, load a baked-in signed mock `.rxe` image,
@@ -2413,6 +2600,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 4 first-driver vertical: boot the production kernel
     // pipeline, then on `AuditEvent::BootCompleted` load the signed
@@ -2454,6 +2642,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
     // kernel pipeline, then drive a real hardware-interrupt round
@@ -2488,6 +2677,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 4.D Item 4: `tairix-test-virtio-blk-pci-x86-64` performs a
     // full real virtio-blk-pci round-trip — boot → `mechanism_one`
@@ -2524,6 +2714,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 5 end-to-end FAT32 vertical:
     // `tairix-test-fat32-virtio-blk-pci-x86-64` reuses the exact
@@ -2553,6 +2744,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 5 end-to-end arxfs vertical:
     // `tairix-test-arxfs-virtio-blk-pci-x86-64` reuses the exact
@@ -2583,6 +2775,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 4.D Item 4: `tairix-test-kernel-arch-boot-riscv64` boots
     // the riscv64 `virt`-board pipeline (OpenSBI → S-mode entry →
@@ -2611,6 +2804,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NEW-SUPERVISOR.md` §9 Stage E:
     // `tairix-test-supervisor-memtest-takeover-qemu-riscv64` boots the
@@ -2656,6 +2850,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NEW-SUPERVISOR.md` §9 Stage E (aarch64 sibling of the riscv64
     // takeover above): `tairix-test-supervisor-memtest-takeover-qemu-aarch64`
@@ -2699,6 +2894,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NEW-SUPERVISOR.md` §9 Stage E (x86_64 sibling of the riscv64 /
     // aarch64 takeovers above): `tairix-test-supervisor-memtest-takeover-qemu-x86-64`
@@ -2740,6 +2936,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage RV-P3 (`plans/PI.md`): `tairix-test-spawn-init-qemu-riscv64`
     // boots the *production* riscv64 `tairix-kernel` pipeline
@@ -2777,6 +2974,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 3c: `tairix-test-timer-preempt-qemu-riscv64` is the riscv64
     // half of the Stage-3 "timer interrupt drives the scheduler"
@@ -2809,6 +3007,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 3c: `tairix-test-ipi-smp-qemu-riscv64` is the riscv64
     // multi-hart SMP deliverable. It boots the `virt` board with two
@@ -2842,6 +3041,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the aarch64 multi-core SMP
     // deliverable — the EL1/GICv2 analogue of `ipi_smp_qemu_riscv64`. It
@@ -2874,6 +3074,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 3c: `tairix-test-sched-drive-qemu-riscv64` is the riscv64
     // "arch primitives drive the live scheduler" deliverable — the wiring
@@ -2913,6 +3114,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WIRING Stage W7 (`plans/WIRING.md` §3): the aarch64 "arch
     // primitives drive the live scheduler" deliverable — the EL1/GICv2
@@ -2955,6 +3157,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the `kernel/core` kthread
     // runtime proven on real silicon — two kernel-thread tasks ping-pong
@@ -2991,6 +3194,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the riscv64 sibling of the
     // aarch64 kthread-switch vertical above — the same "two kthreads
@@ -3026,6 +3230,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the x86_64 sibling of the
     // kthread-switch vertical — the same "two kthreads ping-pong through
@@ -3061,6 +3266,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the cross-CPU TLB-shootdown
     // HAL slice (`tairix_arch_api::CrossCpuTlbShootdown`) proven on real
@@ -3089,6 +3295,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WIRING Stage W6: the aarch64 cross-CPU TLB-shootdown vertical. The
     // boot core starts a second core via PSCI `CPU_ON`, then
@@ -3116,6 +3323,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WIRING Stage W6: the x86_64 cross-CPU TLB-shootdown vertical — the
     // port whose cross-CPU invalidation is entirely hand-written software
@@ -3147,6 +3355,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 3c: `tairix-test-memory-isolation-qemu-riscv64` is the riscv64
     // half of the Stage-3 "memory-isolation test passes" per-sub-stage
@@ -3180,6 +3389,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `tests/SECURITY.md` §5 / `PLAN.md` Stage 7 item E — the per-port
     // `copy_from_user` hardware fault fix-up verticals. Each takes a
@@ -3212,6 +3422,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     QemuTest {
         package: "tairix-test-uaccess-fault-qemu-aarch64",
@@ -3232,6 +3443,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The x86_64 member boots the **production** `tairix-kernel` pipeline
     // (the dedicated `#PF` entry install + guarded-copy arm live on the
@@ -3255,6 +3467,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/OPEN-DEFECTS.md` D83: every kernel-mode exception vector on
     // x86_64 carries a stub that names it and reaches the fatal report.
@@ -3282,6 +3495,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/OPEN-DEFECTS.md` D42 + D86: a ring-3 exception the kernel
     // cannot resolve kills the faulting task and leaves the CPU running.
@@ -3314,6 +3528,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/OPEN-DEFECTS.md` D82, riscv64: the sibling of
     // `tairix-test-stack-overrun-qemu-aarch64`. It reserves the kernel remap
@@ -3353,6 +3568,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 4.D Item 4: `tairix-test-virtio-blk-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-blk-pci
@@ -3385,6 +3601,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 4 first-driver vertical (display class):
     // `tairix-test-framebuffer-display-qemu-riscv64` boots the riscv64
@@ -3418,6 +3635,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 4 first-driver vertical (display class, x86_64 sibling of the
     // framebuffer vertical): `tairix-test-vesa-qemu-x86-64` boots the
@@ -3452,6 +3670,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage P6c-2 (`plans/PI.md`): `tairix-test-kernel-arch-boot-aarch64`
     // boots the *production* aarch64 `tairix-kernel` pipeline
@@ -3494,6 +3713,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage P6c-3 (`plans/PI.md`): `tairix-test-spawn-init-qemu-aarch64`
     // boots the *production* aarch64 `tairix-kernel` pipeline
@@ -3530,6 +3750,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // SPAWN Stage SP3b (`plans/SPAWN.md`) + `plans/PI.md` P11:
     // `tairix-test-spawn-session-qemu-aarch64` boots the *production*
@@ -3593,6 +3814,7 @@ static TESTS: &[QemuTest] = &[
             ("Password", Duration::ZERO, "wrong\n"),
             ("1 failed attempt", Duration::ZERO, OVERLONG_USERNAME),
         ],
+        expect: Expect::Pass,
     },
     // PI Design D P-3 (`plans/PI.md`):
     // `tairix-test-devmgr-hwtree-qemu-aarch64` boots the *production* aarch64
@@ -3649,6 +3871,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // SPAWN Stage SP2c (`plans/SPAWN.md` §1): the aarch64 EL0↔EL0 timeshare
     // vertical — the first proof that two **user** (EL0) tasks timeshare one
@@ -3685,6 +3908,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage D2b-2b-A P-1 (`plans/PI.md`): the aarch64 involuntary-preemption
     // vertical — the proof that the production generic-timer IRQ preempts a
@@ -3726,6 +3950,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Regression vertical for the interrupt-return-to-EL0 need-resched fix: prove
     // a **non-timer** interrupt taken from EL0 involuntarily preempts a **sole**,
@@ -3766,6 +3991,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Deterministic regression for the syscall-return continuation boundary:
     // a real EL0 parent completes an ordinary `clock_get` with a pending
@@ -3793,6 +4019,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage D2b-2b-A P-1b (`plans/PI.md`): the riscv64 involuntary-preemption
     // vertical — the cross-port sibling of the aarch64 preempt test, proving the
@@ -3837,6 +4064,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage D2b-2b-A P-1c (`plans/PI.md`): the x86_64 involuntary-preemption
     // vertical — the cross-port sibling of the aarch64/riscv64 preempt tests,
@@ -3886,6 +4114,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PLAN.md P-5 (2026-06-23 amendment): the aarch64
     // in-kernel interrupt-delivery / non-preemption vertical — the dual of the
@@ -3929,6 +4158,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // plans/WATCHDOG.md B3 (plans/OPEN-DEFECTS.md D13): the aarch64
     // non-maskable-FIQ masked-section watchdog self-sample vertical — the
@@ -3972,6 +4202,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PLAN.md Stage 4.HW: the aarch64 driver-spawn handshake vertical — the
     // proving slice of the kernel-side production driver spawner. The build
@@ -4015,6 +4246,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // plans/USB.md U1: the aarch64 driver-*unload* vertical — the symmetric
     // partner of the driver-spawn handshake above. It reuses the same signed
@@ -4052,6 +4284,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the aarch64 `mem_map`/
     // `mem_unmap` vertical — the first proof that an EL0 process obtains and
@@ -4090,6 +4323,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // M1 file-mapping remainder (`docs/src/architecture/memory.md` §7o): the
     // aarch64 demand-paged `file_map` vertical — the end-to-end proof of the
@@ -4130,6 +4364,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The riscv64 twin of the file-map vertical above: the same four-role
     // fixture program and production `KernelDispatchHook` chassis, driven on
@@ -4155,6 +4390,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The SP11c demand-grown user-stack vertical
     // (`docs/src/architecture/memory.md` §7c): the end-to-end proof that a
@@ -4197,6 +4433,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The STRESSTEST ST2 memory-pinning plus one-vCPU IPC control: end-to-end
     // proof of
@@ -4236,6 +4473,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     QemuTest {
         package: "tairix-test-mem-pin-migration-qemu-aarch64",
@@ -4256,6 +4494,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The USERS U4 service-ceiling vertical: the end-to-end proof that a
     // service account's compiled capability ceiling binds a lying manifest
@@ -4295,6 +4534,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The FIX-IO IO2 block-transport fault vertical: the live-kernel proof
     // that the bounded submit/reap block seam contains a wedged device
@@ -4335,6 +4575,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The riscv64 twin of the stack-grow vertical above: the same
     // four-role fixture program and production `KernelDispatchHook`
@@ -4360,6 +4601,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The x86_64 twin of the stack-grow verticals above (SP11e): the same
     // four-role fixture program and production `KernelDispatchHook`
@@ -4389,6 +4631,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The THREADS `T3b-u` lightweight-thread vertical (aarch64): prove threads
     // end to end over the production `KernelDispatchHook` chassis, which here
@@ -4428,6 +4671,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The riscv64 twin of the threads vertical above: the same fixture
     // program and production chassis, driven on the riscv64 `virt` board through
@@ -4452,6 +4696,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The x86_64 twin of the threads verticals above: the same fixture
     // program, driven through the shared production board bring-up
@@ -4477,6 +4722,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The S8b parser-sandbox vertical (`docs/src/security/sandbox.md`;
     // `plans/APPS.md` S8b): prove the `lib/sandbox` seam end
@@ -4522,6 +4768,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage 5d-0-ii (b′)-2 (`plans/PI.md`): the aarch64 `mmio_map` vertical —
     // the first proof that an EL0 driver maps a **granted device MMIO window**
@@ -4565,6 +4812,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the riscv64 `mem_map`/
     // `mem_unmap` vertical — the riscv64 sibling of the aarch64 vertical above,
@@ -4606,6 +4854,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The riscv64 trap-entry thread-pointer discipline
     // (`kernel/arch/riscv64/src/trap.s`). `tp` is both the RISC-V psABI thread
@@ -4642,6 +4891,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage RV-X1 (`plans/PI.md` §X tail): the riscv64 single-resumable-
     // user-kthread vertical — the first proof that a U-mode task is admitted as
@@ -4684,6 +4934,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage RV-X2 (`plans/PI.md` §X tail): the riscv64 two-task EL0
     // timeshare vertical — the first proof that TWO U-mode tasks timeshare one
@@ -4727,6 +4978,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // The `plans/OPEN-DEFECTS.md` D37 regression witness: two U-mode tasks fill
     // the whole floating-point register file with different patterns and
@@ -4757,6 +5009,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage RV-X3 (`plans/PI.md` §X tail): the riscv64 runtime-`spawn`
     // concurrent-producer vertical — the cross-port sibling of
@@ -4799,6 +5052,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the x86_64 `mem_map`/
     // `mem_unmap` vertical — the x86_64 sibling of the aarch64/riscv64
@@ -4842,6 +5096,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/OPEN-DEFECTS.md` D82, x86_64: the sibling of
     // `stack_overrun_qemu_aarch64`. x86_64 long-mode bring-up (GDT, the
@@ -4880,6 +5135,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage X1 (`plans/PI.md` §X): the x86_64 single-resumable-user-kthread
     // vertical — the first proof that a ring-3 task is admitted as a *resumable*
@@ -4922,6 +5178,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage X2 (`plans/PI.md` §X): the x86_64 two-task EL0 timeshare — the
     // cross-port sibling of the aarch64 SP2c timeshare, and the exerciser for
@@ -4970,6 +5227,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage X3a (`plans/PI.md` §X): the x86_64 PID 1 (`init`) ring-3
     // bring-up vertical — the cross-port sibling of the aarch64
@@ -5010,6 +5268,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage X3b + X4 follow-on (`plans/PI.md` §X): the x86_64 runtime
     // `spawn` concurrent producer **and** `init` session-supervision vertical —
@@ -5067,6 +5326,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[("Username:", Duration::ZERO, OVERLONG_USERNAME)],
+        expect: Expect::Pass,
     },
     // PI Stage P6e-3b prerequisite (`plans/PI.md`): the aarch64 heap-allocator
     // vertical — the proof that the `tairix-rt` `mem_map`-backed
@@ -5110,6 +5370,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // SPAWN Stage SP6b (`plans/SPAWN.md` §1): the aarch64 `wait` vertical —
     // the proof that a parent process can block on, reap, and read back the
@@ -5148,6 +5409,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // SPAWN Stage SP7b (`plans/SPAWN.md` §1): the aarch64 `signal` vertical —
     // the proof that a parent process can deliver a control signal
@@ -5198,6 +5460,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage X4 (`plans/PI.md`): the x86_64 `wait` vertical — the cross-port
     // sibling of the aarch64 `wait_qemu_aarch64`, proving a parent ring-3
@@ -5240,6 +5503,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage RV-X4 (`plans/PI.md` §X tail): the riscv64 `wait` vertical —
     // the cross-port sibling of the aarch64 `wait_qemu_aarch64` / x86_64
@@ -5281,6 +5545,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // PI Stage P2 (`plans/PI.md`): `tairix-test-uart-console-qemu-aarch64`
     // is the runtime proof of the board-discovered console. It boots the
@@ -5317,6 +5582,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage W11 (`plans/WIRING.md` §3):
     // `tairix-test-virtio-blk-mmio-aarch64` is the aarch64 `virt`-board
@@ -5351,6 +5617,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/PI.md` P11 (root-volume read path at boot):
     // `tairix-test-users-db-qemu-aarch64` reuses the exact virtio-blk-mmio
@@ -5384,6 +5651,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/ARCHSUPPORT.md` A2: the x86_64 sibling of the users-database
     // vertical above — the first *live-boot* exercise of the x86_64 boot-time
@@ -5422,6 +5690,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/PI.md` P11 Chunk B-2 (root-mount->login): the
     // `tairix-test-root-unlock-login-qemu-aarch64` vertical reuses the
@@ -5461,6 +5730,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/ARCHSUPPORT.md` A2: the x86_64 sibling of the root-mount->login
     // vertical above — the first *live-boot* exercise of the x86_64 unlock
@@ -5503,6 +5773,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/PI.md` P11 Chunk B-2 INCREMENT (2): the
     // `tairix-test-root-unlock-admission-qemu-aarch64` vertical boots the
@@ -5568,6 +5839,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE)],
+        expect: Expect::Pass,
     },
     // `plans/NEW-SUPERVISOR.md` §7: the pre-boot **Supervisor** ESC vertical.
     // `tairix-test-supervisor-esc-qemu-aarch64` boots the *production* aarch64
@@ -5623,6 +5895,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: SUPERVISOR_ESC_SCRIPT,
+        expect: Expect::Pass,
     },
     // `plans/NEW-SUPERVISOR.md` §7 (item 1): the pre-boot **Supervisor**
     // entered at the *live passphrase prompt* rather than the announcement
@@ -5660,6 +5933,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
+        expect: Expect::Pass,
     },
     // `plans/NEW-SUPERVISOR.md` §7 (item 1): the pre-boot **Supervisor**
     // `mount`-from-REPL path — the Supervisor performing the *real* root unlock
@@ -5694,6 +5968,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: SUPERVISOR_MOUNT_SCRIPT,
+        expect: Expect::Pass,
     },
     // `plans/OPEN-DEFECTS.md` D7 + D8: the x86_64 disk-completion-interrupt
     // and two-kthread-admission regression. It boots the *production* x86_64
@@ -5743,6 +6018,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE)],
+        expect: Expect::Pass,
     },
     // `plans/NEW-SUPERVISOR.md` §7 / `plans/ARCHSUPPORT.md`: the x86_64 sibling
     // of the aarch64 pre-boot **Supervisor** ESC vertical above.
@@ -5784,6 +6060,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: SUPERVISOR_ESC_SCRIPT,
+        expect: Expect::Pass,
     },
     // `plans/CAPABILITY_USE.md` CU3: the session-ceiling acceptance vertical.
     // `tairix-test-session-ceiling-qemu-aarch64` boots the *production*
@@ -5885,6 +6162,7 @@ static TESTS: &[QemuTest] = &[
                 "exit\n",
             ),
         ],
+        expect: Expect::Pass,
     },
     // `plans/ALIAS.md` §6.2: the value-pipe vertical.
     // `tairix-test-value-pipe-qemu-aarch64` boots the *production* aarch64
@@ -5984,6 +6262,7 @@ static TESTS: &[QemuTest] = &[
             ),
             (VALUE_PIPE_WRITE_REFUSED_MARKER, Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/APPS.md` "Immediate work" I2/I3: the memory-stability vertical.
     // `tairix-test-memsoak-qemu-aarch64` boots the *production* aarch64
@@ -6035,6 +6314,7 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, "memsoak\n"),
             (MEMSOAK_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/FIX-STALLTRACE.md`: the stall-trace vertical.
     // `tairix-test-stalltrace-qemu-aarch64` boots the *production* aarch64
@@ -6088,6 +6368,7 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, STALLTRACE_COMMAND_LINE),
             (STALLTRACE_PROVOKED_MARKER, Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N5c: the stream-socket (TCP) vertical.
     // `tairix-test-netstack-stream-qemu-aarch64` boots the *production*
@@ -6142,6 +6423,7 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, "tcpecho\n"),
             (TCPECHO_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/SOUND.md` SND4: the aarch64 end-to-end audio vertical.
     // `tairix-test-audio-virtio-qemu-aarch64` boots the production aarch64
@@ -6188,6 +6470,7 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, "audiotone\n"),
             (AUDIOTONE_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/SOUND.md` SND4: the riscv64 end-to-end audio vertical.
     // `tairix-test-audio-virtio-qemu-riscv64` boots the production riscv64
@@ -6234,6 +6517,7 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, "audiotone\n"),
             (AUDIOTONE_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/SOUND.md` SND4: the x86_64 end-to-end audio vertical.
     // `tairix-test-audio-virtio-qemu-x86-64` boots the production x86_64
@@ -6280,6 +6564,7 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, "audiotone\n"),
             (AUDIOTONE_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N13: the RFC 3168 ECN vertical.
     // `tairix-test-netstack-ecn-qemu-aarch64` boots the *production* aarch64
@@ -6329,6 +6614,7 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, "tcpecho\n"),
             (TCPECHO_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N6b-2-β-2: the TCP-**listener** vertical — the
     // role-swapped mirror of the stream vertical above.
@@ -6384,6 +6670,7 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, "tcpserve\n"),
             (TCPSERVE_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N16b: the connection-exhaustion vertical — the
     // listener vertical above, run against a *hostile* peer.
@@ -6443,6 +6730,7 @@ static TESTS: &[QemuTest] = &[
             (SYN_COOKIES_MARKER, Duration::ZERO, ""),
             (TCPSERVE_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N8b-2b-β: the ICMP-echo (`ping`) vertical.
     // `tairix-test-netstack-ping-qemu-aarch64` boots the *production* aarch64
@@ -6497,6 +6785,7 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, PING_COMMAND_LINE),
             (PING_REPLY_MARKER, Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/TELNET.md`: the live telnet vertical.
     // `tairix-test-netstack-telnet-qemu-aarch64` boots the *production*
@@ -6581,6 +6870,7 @@ static TESTS: &[QemuTest] = &[
             ),
             ("root@tairix ~% ", Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b: the static-addressing
     // (`match.node`) live-boot vertical.
@@ -6631,6 +6921,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/DHCP.md` D3: the live DHCPv4 vertical.
     // `tairix-test-netstack-dhcp-qemu-aarch64` boots the *production* aarch64
@@ -6679,6 +6970,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/TIMESYNC.md` TS-2: the live clock-establishment vertical.
     // `tairix-test-timed-qemu-aarch64` boots the *production* aarch64 pipeline
@@ -6741,6 +7033,7 @@ static TESTS: &[QemuTest] = &[
             // the run would fail as an unfinished script.
             ("root@tairix ~% ", Duration::ZERO, ""),
         ],
+        expect: Expect::Pass,
     },
     // `plans/TIMESYNC.md` TS-7: the live DHCP-supplied-time-server vertical.
     // `tairix-test-timed-dhcp-qemu-aarch64` boots the *production* aarch64
@@ -6793,6 +7086,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/TIMESYNC.md` TS-3: the live clock-chip vertical.
     // `tairix-test-rtc-pl031-qemu-aarch64` boots the *production* aarch64
@@ -6837,6 +7131,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/TIMESYNC.md` TS-3: the live clock-chip vertical's riscv64 half.
     // Same `rtc-root` disk and same witness as the aarch64 run, over this
@@ -6865,6 +7160,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/TIMESYNC.md` TS-3: the live clock-chip vertical's x86_64 half.
     // Same `rtc-root` disk and same value-gated witness as its two siblings,
@@ -6893,6 +7189,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NEW-SERVICEMANAGER.md` SVC-8 / `plans/TIMESYNC.md` TS-5: the live
     // service-control vertical. `tairix-test-servicectl-qemu-aarch64` boots
@@ -6948,6 +7245,7 @@ static TESTS: &[QemuTest] = &[
             // control path without tearing the session down.
             ("root@tairix ~% ", Duration::ZERO, "servicectl stop timed\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/NEW-SERVICEMANAGER.md` SVC-8: the live liveness-watchdog
     // vertical. `tairix-test-watchdog-qemu-aarch64` boots the *production*
@@ -6997,6 +7295,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/TIMESYNC.md` TS-5b: the live *enrolment* vertical.
     // `tairix-test-enrol-qemu-aarch64` boots the same production aarch64
@@ -7056,6 +7355,7 @@ static TESTS: &[QemuTest] = &[
                 "servicectl enable timed\n",
             ),
         ],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the live bond-failover
     // vertical. `tairix-test-netstack-bond-qemu-aarch64` boots the
@@ -7103,6 +7403,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b: the x86_64 static-addressing
     // (`match.node`) live-config vertical — the virtio-**PCI** analogue of
@@ -7150,6 +7451,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/DHCP.md` D3: the x86_64 live DHCPv4 vertical — the virtio-**PCI**
     // analogue of `tairix-test-netstack-dhcp-qemu-aarch64`. It boots the
@@ -7198,6 +7500,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the x86_64 bond-failover
     // live-config vertical — the virtio-**PCI** analogue of
@@ -7240,6 +7543,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b: the riscv64 static-addressing
     // (`match.node`) live-config vertical — the virtio-**MMIO** analogue of
@@ -7288,6 +7592,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/DHCP.md` D3: the riscv64 live DHCPv4 vertical — the
     // virtio-**MMIO** analogue of `tairix-test-netstack-dhcp-qemu-aarch64` on
@@ -7351,6 +7656,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/DHCP.md` D4c: the live DHCPv6 vertical, one per Tier-1 arch — the
     // IPv6 peer of the D3 DHCPv4 verticals. Each boots the *production*
@@ -7401,6 +7707,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/DHCP.md` D4c: the x86_64 DHCPv6 vertical — the virtio-**PCI**
     // sibling of the aarch64 one, binding the NIC by its config-window BAR
@@ -7424,6 +7731,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/DHCP.md` D4c: the riscv64 DHCPv6 vertical — the virtio-**MMIO**
     // sibling of the aarch64 one on the QEMU riscv64 `virt` board. See the
@@ -7447,6 +7755,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the riscv64 bond-failover
     // live-config vertical — the virtio-**MMIO** analogue of
@@ -7490,6 +7799,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/SPAWN.md` SP10b: the pipeline/redirection acceptance vertical.
     // `tairix-test-pipeline-qemu-aarch64` boots the *production* aarch64
@@ -7575,6 +7885,7 @@ static TESTS: &[QemuTest] = &[
             ),
             ("776005", Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/STRESSTEST.md` ST4: the `sysmon` monitor acceptance vertical.
     // `tairix-test-sysmon-qemu-aarch64` boots the *production* aarch64
@@ -7630,6 +7941,7 @@ static TESTS: &[QemuTest] = &[
             // restored screen.
             ("root@tairix ~% ", Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/STRESSTEST.md` ST5: the `stress` load-generator acceptance
     // vertical. `tairix-test-stress-qemu-aarch64` boots the *production*
@@ -7693,6 +8005,7 @@ static TESTS: &[QemuTest] = &[
             // witness lands last, so the full run is still required.
             ("root@tairix ~% ", Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
     },
     // `plans/PI.md` design B / B2 + `plans/DISPLAY.md` D7d (first stage): the
     // pre-unlock driver-loading-by-discovery autoload vertical, booted as a
@@ -7847,6 +8160,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(autoload_desktop_pointer_script),
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NEW-TASKBAR.md`: the desktop **icon-bar** vertical. A
     // deliberately short, dedicated sibling of the autoload desktop vertical
@@ -7933,6 +8247,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(appbar_pointer_script),
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/CAPABILITY_USE.md` CU6 / `plans/APPWIN.md` AW5: the
     // **picker-delegation** vertical — the only test that drives a
@@ -7996,6 +8311,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(filepick_pointer_script),
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/VIEW.md` / `plans/APPWIN.md` AW5: the **three-principal
     // hand-over** vertical — the only test in which a document's authority
@@ -8082,6 +8398,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(handover_pointer_script),
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NEW-FILEMANAGER.md` FM9: the **filesystem-mutation** vertical —
     // the only test in which a user's own gesture reaches a write syscall and
@@ -8142,6 +8459,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(fsmutate_pointer_script),
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NEW-MENUS.md` D17: the desktop **menu chain** vertical — the
     // first thing on the system ever to put a menu plate on a screen. A
@@ -8208,6 +8526,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(menu_pointer_script),
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Elevated Date & Time launch: right-click the taskbar clock, choose
     // *Set Date & Time…*, authenticate as the fixture root account through
@@ -8246,6 +8565,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(datetime_elevate_pointer_script),
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NEW-DESKTOP-SETTINGS.md` DS13: the **Settings** vertical. A short
     // sibling of the autoload desktop vertical rather than a further stage on
@@ -8331,6 +8651,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(settings_pointer_script),
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/SMARTRAM.md` + `plans/ICONS.md`: the desktop keeps drawing its
     // real icon artwork while the machine is genuinely short of memory.
@@ -8408,6 +8729,7 @@ static TESTS: &[QemuTest] = &[
         // screendumps, neither reachable without it.
         bounded_pointer_script: true,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/FIX-DESKTOP-SPEEDUP.md` A.4: the desktop **hover** vertical — the
     // regression gate on what a gesture costs the compositor, and the only
@@ -8463,6 +8785,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(desktop_hover_pointer_script),
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/SVG.md` S23/S24: the SVG-text vertical — the only test in which a
     // sandboxed decode's glyphs travel from a live font service, over the
@@ -8549,6 +8872,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NEW-DESKTOP-LOGIN.md` G7.1: a display-capable machine that
     // nobody has configured boots to the **graphical** login screen on its
@@ -8595,6 +8919,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N4e-riscv64 (first stage): the riscv64
     // driver-loading-by-discovery autoload vertical — the `virt`-board
@@ -8645,6 +8970,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/ARCHSUPPORT.md` A4: the x86_64 driver-loading-by-discovery
     // autoload vertical — the virtio-**PCI** analogue of the aarch64 /
@@ -8694,6 +9020,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N4e-β: the aarch64 **two-process** live-boot
     // netstack vertical.
@@ -8744,6 +9071,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/FIX-SLEEPLOCK.md` S6: the same chain on **four** CPUs. Every
     // enrolment of the unlock -> driver-store scan -> autoload chain ran
@@ -8785,6 +9113,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N4e-riscv64: the riscv64 **two-process** live-boot
     // netstack vertical — the `virt`-board
@@ -8834,6 +9163,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N4e / `plans/ARCHSUPPORT.md` A4: the x86_64
     // **two-process** live-boot netstack vertical — the virtio-**PCI**
@@ -8878,6 +9208,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 display vertical —
     // the EL1/GICv2 + ramfb analogue of the riscv64 framebuffer-display
@@ -8913,6 +9244,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 3b: `tairix-test-timer-preempt-qemu-aarch64` is the aarch64
     // half of the Stage-3 "timer interrupt drives the scheduler"
@@ -8941,6 +9273,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage 3b: `tairix-test-memory-isolation-qemu-aarch64` is the
     // aarch64 half of the Stage-3 "memory-isolation test passes"
@@ -8973,6 +9306,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/FIX-KHEAP.md` slab tier: `tairix-test-kslab-qemu-aarch64` proves
     // the kernel heap's page accounting on real hardware. It enables the MMU
@@ -9007,6 +9341,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/OPEN-DEFECTS.md` D82: kthread kernel stacks are window-backed
     // with an unmapped guard slot. `tairix-test-stack-overrun-qemu-aarch64`
@@ -9047,6 +9382,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WIRING Stage W3-B (`plans/WIRING.md` §3): the aarch64 device-IRQ
     // vertical — the EL1/GICv2-SPI analogue of `tairix-test-irq-qemu-x86-64`.
@@ -9083,6 +9419,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // P11 Chunk B-2 INCREMENT (1) (`plans/PI.md`): the aarch64 device-SPI
     // -> parked-kthread vertical, the proof that the production aarch64
@@ -9125,6 +9462,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 input vertical —
     // the `virt`-board virtio-input analogue of the x86_64 PS/2 vertical,
@@ -9162,6 +9500,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NEW-SWITCHBOARD.md` D1: the aarch64 **accelerator-class**
     // vertical — the first member of the accelerator driver class driven on
@@ -9194,6 +9533,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NEW-FILEMANAGER.md` FM9-c: the aarch64 virtio-input
     // **pointer-button** vertical — the mouse-button sibling of the
@@ -9233,6 +9573,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(pointer_button_script),
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
     // WIRING (`plans/WIRING.md` §1/§3): the riscv64 input vertical —
     // the `virt`-board virtio-input MMIO analogue of the aarch64 input
@@ -9271,6 +9612,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         serial: &[],
+        expect: Expect::Pass,
     },
 ];
 
@@ -14586,19 +14928,44 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     // like one that completed. Keeping the transcript is what lets a reader
     // check a suspicious pass instead of having to re-derive it.
     persist_serial(t.package, &serial_log, outcome.serial())?;
-    let run_result = match outcome {
+    let run_result = match t.expect {
+        Expect::Fatal(fields) => fatal_verdict(t.package, fields, &outcome)
+            .map_err(|e| format!("{e} (full serial: {})", serial_log.display())),
+        Expect::Pass => pass_verdict(
+            t,
+            outcome,
+            &serial_log,
+            &hang_state,
+            &screendump_paths,
+            audio_capture.as_deref(),
+        ),
+    };
+    fold_peer_verdict(t.package, &serial_log, run_result, peer_verdict)
+}
+
+/// Judge a run that must pass: its outcome, then the screendump and audio
+/// assertions a pass still owes before it is a verified run.
+fn pass_verdict(
+    t: &QemuTest,
+    outcome: Outcome,
+    serial_log: &Path,
+    hang_state: &Path,
+    screendump_paths: &[(PathBuf, ScreendumpAssert)],
+    audio_capture: Option<&Path>,
+) -> Result<(), String> {
+    match outcome {
         Outcome::Pass { .. } => {
             // The guest passed, but the run is not verified until its dumps
             // agree too.
             let mut verified = Ok(());
-            for (path, assert) in &screendump_paths {
+            for (path, assert) in screendump_paths {
                 if let Err(e) = assert(t, path) {
                     verified = Err(format!("{e} (full serial: {})", serial_log.display()));
                     break;
                 }
             }
             if verified.is_ok() {
-                if let Some(path) = &audio_capture {
+                if let Some(path) = audio_capture {
                     verified = assert_audio_capture(t, path)
                         .map_err(|e| format!("{e} (full serial: {})", serial_log.display()));
                 }
@@ -14617,7 +14984,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
             serial,
             cpu_state,
         } => {
-            let hang = persist_hang_state(t.package, &hang_state, &cpu_state)?;
+            let hang = persist_hang_state(t.package, hang_state, &cpu_state)?;
             Err(format!(
                 "test --qemu ({}) HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point (no retries per AGENTS.md §7; full serial: {}; guest cpu state: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{cpu_state}\n--- end ---",
                 t.package,
@@ -14636,15 +15003,19 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
             // service retrying on a timer), while a silence close to the
             // ceiling means the guest went quiet early and stalled — the
             // transcript's last line is then the stall point.
-            let hang = persist_hang_state(t.package, &hang_state, &cpu_state)?;
+            let hang = persist_hang_state(t.package, hang_state, &cpu_state)?;
             Err(format!(
                 "test --qemu ({}) UNFINISHED at the {ceiling:?} runtime ceiling: the guest was still alive and never completed; silent for {silent_for:?} at the kill (no retries per AGENTS.md §7; full serial: {}; guest cpu state: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{cpu_state}\n--- end ---",
                 t.package,
                 serial_log.display()
             ))
         }
-    };
-    fold_peer_verdict(t.package, &serial_log, run_result, peer_verdict)
+        Outcome::Fatal { record, serial } => Err(format!(
+            "test --qemu ({}) FATAL: the guest's kernel stopped: {record} (full serial: {})\n--- serial ---\n{serial}\n--- end ---",
+            t.package,
+            serial_log.display()
+        )),
+    }
 }
 
 /// Combine a run's own result with its link peer's verdict.
@@ -14736,21 +15107,23 @@ fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use tairix_qemu::screendump::Rgb;
+    use tairix_qemu::Outcome;
 
     use super::{
         appbar_pointer_script, autoload_desktop_pointer_script, build_targets,
-        desktop_hover_pointer_script, filepick_pointer_script, fold_peer_verdict,
+        desktop_hover_pointer_script, fatal_verdict, filepick_pointer_script, fold_peer_verdict,
         handover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
-        qemu_job_weight, row_holds_track, settings_pointer_script, sidecar_path, FsDisk, PrimePlan,
-        QemuTest, AUDIOTONE_PASS_PREFIX, AUTOLOAD_INPUT_ARMED_OCCURRENCES,
-        AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER,
-        DESKTOP_PRESSURE_ICONS_DRAWN_DUMP, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
-        KEYBOARD_ONLY_ARMED_OCCURRENCES, MEMSOAK_PASS_PREFIX, STALLTRACE_COMMAND_LINE,
-        STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
-        SUPERVISOR_MOUNT_SCRIPT, SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX,
-        TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
-        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
-        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER,
+        qemu_job_weight, row_holds_track, settings_pointer_script, sidecar_path, Expect, FsDisk,
+        PrimePlan, QemuTest, AARCH64_TARGET, AUDIOTONE_PASS_PREFIX,
+        AUTOLOAD_INPUT_ARMED_OCCURRENCES, AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER,
+        BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
+        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, KEYBOARD_ONLY_ARMED_OCCURRENCES, MEMSOAK_PASS_PREFIX,
+        RISCV64_TARGET, STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER,
+        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
+        SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
+        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
+        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
+        VALUE_PIPE_WRITE_REFUSED_MARKER,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -16292,6 +16665,71 @@ mod tests {
             assert_eq!(
                 folded, "guest exploded",
                 "an agreeing peer adds nothing to the report"
+            );
+        }
+    }
+
+    fn fatal(record: &str) -> Outcome {
+        Outcome::Fatal {
+            record: record.to_string(),
+            serial: String::from("boot\n"),
+        }
+    }
+
+    #[test]
+    fn a_fatal_vertical_passes_on_a_record_naming_every_field() {
+        let record = "[ERROR] id=4011 fatal kernel fault cpu=0 syndrome=0x0000000000000003";
+        assert!(fatal_verdict(
+            "pkg",
+            &["cpu=0", "syndrome=0x0000000000000003"],
+            &fatal(record)
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_fatal_vertical_names_the_field_its_record_lacks() {
+        let record = "[ERROR] id=4011 fatal kernel fault cpu=0 syndrome=0x0000000000000002";
+        let err = fatal_verdict(
+            "pkg",
+            &["cpu=0", "syndrome=0x0000000000000003"],
+            &fatal(record),
+        )
+        .expect_err("the syndrome differs");
+        assert!(err.contains("`syndrome=0x0000000000000003`"), "{err}");
+    }
+
+    /// A vertical that must stop on its record fails on any other ending —
+    /// including a pass, which would mean the fault never happened.
+    #[test]
+    fn a_fatal_vertical_fails_when_the_run_ends_any_other_way() {
+        for outcome in [
+            Outcome::Pass {
+                serial: String::from("boot\n"),
+            },
+            Outcome::Fail {
+                status: 1,
+                serial: String::from("boot\n"),
+            },
+        ] {
+            let err = fatal_verdict("pkg", &["cpu=0"], &outcome).expect_err("no record");
+            assert!(
+                err.contains("never wrote its kernel's fatal record"),
+                "{err}"
+            );
+        }
+    }
+
+    /// The fatal verticals are enrolled on every bare-metal port, each
+    /// expecting the fault record rather than a pass.
+    #[test]
+    fn every_bare_metal_port_enrols_a_fatal_fault_vertical() {
+        for target in [AARCH64_TARGET, RISCV64_TARGET, "x86_64-unknown-none"] {
+            assert!(
+                TESTS.iter().any(|t| t.target == target
+                    && matches!(t.expect, Expect::Fatal(fields)
+                        if fields.contains(&tairix_arch_api::fatal::KERNEL_FAULT.message))),
+                "{target} enrols no fatal-fault vertical"
             );
         }
     }

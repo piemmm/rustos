@@ -13,6 +13,8 @@
 //! binary-supplied `extern "C" fn kernel_main() -> !`. Every test binary
 //! defines that symbol exactly once.
 
+use core::fmt::Write as _;
+
 use crate::{bootinfo, pic, pio, pvh, qemu_exit, MULTIBOOT2_BOOTLOADER_MAGIC};
 
 extern "C" {
@@ -44,12 +46,14 @@ extern "C" {
 ///    hand-off (`SeaBIOS` in front of PVH direct boot, or a real
 ///    legacy-boot machine) leaves them unmasked at vector base 8, where
 ///    the first PIT tick taken with `IF=1` would be decoded as `#DF`.
-/// 4. Transfers to the binary-supplied `kernel_main`.
-///
-/// IDT installation is deferred to `kernel_main` because each test
-/// installs its *own* page-fault handler. This avoids the alternative
-/// (a kernel-side IDT that has to be re-pointed) which would touch a
-/// `static mut` from two call sites — forbidden by.
+/// 4. Installs the boot descriptor tables
+///    ([`crate::percpu::install_boot_tables`]), so every exception reaches
+///    the fatal path — and a binary that installed no fault handler gets the
+///    port's own report — instead of triple-faulting through the invalid
+///    IDTR `boot.s` leaves. A binary observes its own faults through the
+///    fault-handler slot, and the kernel replaces the tables with its
+///    per-CPU ones.
+/// 5. Transfers to the binary-supplied `kernel_main`.
 ///
 /// # Safety
 ///
@@ -66,17 +70,30 @@ pub extern "C" fn tairix_arch_x86_64_main(magic: u64, boot_info: u64) -> ! {
     let protocol = match magic32 {
         MULTIBOOT2_BOOTLOADER_MAGIC => bootinfo::BootProtocol::Multiboot2,
         pvh::PVH_BOOT_MAGIC => bootinfo::BootProtocol::Pvh,
-        // Entered by something other than the two supported loaders;
-        // fail closed.
-        _ => qemu_exit::exit_failure(),
+        _ => refuse("entered by neither of the two supported loaders"),
     };
     if bootinfo::record(protocol).is_err() {
-        // The boot path runs exactly once; a second record is a defect.
-        qemu_exit::exit_failure();
+        refuse("the boot protocol was recorded twice");
     }
     pic::remap_and_mask_all(&pio::x86_port_io8());
+    // SAFETY: the boot CPU with interrupts disabled — the contract
+    // `install_boot_tables` states, which `boot.s` guarantees here.
+    if unsafe { crate::percpu::install_boot_tables() }.is_err() {
+        refuse("the boot descriptor tables were refused");
+    }
     // SAFETY: `kernel_main` is provided by the linked test binary and is
     // documented as `-> !` (see `extern` block above). Calling it once
     // with the verbatim boot-info pointer is the entire contract.
     unsafe { kernel_main(boot_info) }
+}
+
+/// Refuse the boot, saying why: nothing that could report it is installed
+/// yet, so the reason goes straight to COM1 before QEMU is told the boot
+/// failed (on hardware, the CPU halts).
+fn refuse(reason: &str) -> ! {
+    let _ = writeln!(
+        crate::serial::Serial::at(crate::serial::COM1_BASE),
+        "[tairix-kernel] x86_64 boot refused: {reason}"
+    );
+    qemu_exit::exit_failure()
 }

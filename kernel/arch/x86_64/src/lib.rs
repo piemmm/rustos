@@ -248,9 +248,9 @@ pub mod uaccess;
 #[cfg(feature = "sched-arch")]
 pub mod userentry;
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub mod idt;
 pub mod paging;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub mod panic;
 
 /// x86_64 machine-takeover mechanism (`plans/NEW-SUPERVISOR.md` §9): the Arch
 /// HAL [`tairix_arch_api::MachineTakeover`] body driving the pre-boot

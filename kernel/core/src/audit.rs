@@ -62,6 +62,7 @@
 //! this file and updating the table in
 //! `docs/src/architecture/kernel.md`.
 
+use tairix_arch_api::fatal;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 /// Audit event identifiers emitted by `kernel/core`.
@@ -665,8 +666,8 @@ impl AuditEvent {
             Self::PhaseFailed => 4003,
             Self::BootCompleted => 4004,
             Self::RamSelfTest => 4005,
-            Self::Panic => 4010,
-            Self::KernelFault => 4011,
+            Self::Panic => fatal::KERNEL_PANIC.id.0,
+            Self::KernelFault => fatal::KERNEL_FAULT.id.0,
             Self::SyscallFeatureUnavailable => 4020,
             Self::SyscallNoCallerContext => 4021,
             Self::ProcessSpawned => 4030,
@@ -738,8 +739,8 @@ impl AuditEvent {
             Self::PhaseFailed => "kernel init phase failed",
             Self::BootCompleted => "kernel boot completed",
             Self::RamSelfTest => "ram self-test completed",
-            Self::Panic => "kernel panic",
-            Self::KernelFault => "fatal kernel fault",
+            Self::Panic => fatal::KERNEL_PANIC.message,
+            Self::KernelFault => fatal::KERNEL_FAULT.message,
             Self::SyscallFeatureUnavailable => "syscall feature unavailable",
             Self::SyscallNoCallerContext => "syscall has no caller context",
             Self::ProcessSpawned => "process spawned",

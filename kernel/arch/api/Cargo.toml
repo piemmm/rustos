@@ -65,6 +65,10 @@ tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 # (`fdtwalk`), so the ports contribute only their interrupt specifier and
 # their board augmentation rather than a copy of the walk each.
 tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+# The fatal report's closing record is a diagnostic line (`fatal`), written in
+# the one line shape the kernel's own post-mortem uses. Allocator-free, so the
+# freestanding test kernels still link no global allocator.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 # The stack-unwinder fuzz harness (`tests/fuzz_backtrace.rs`) drives
 # `backtrace::walk` over adversarial frame chains. It uses

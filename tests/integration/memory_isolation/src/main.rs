@@ -28,8 +28,9 @@
 //!    byte is intact (proves the mapping was actually set up).
 //! 2. Switches to the *attacker* CR3 and reads the secret VA.
 //! 3. The CPU raises `#PF` (vector 14) with `error_code = 0` (page
-//!    not-present, supervisor mode, read). The IDT routes the fault
-//!    into `page_fault_handler` (below), which: (a) validates that the error
+//!    not-present, supervisor mode, read). The port's boot tables route
+//!    the fault through the fault-handler slot into `page_fault_handler`
+//!    (below), which: (a) validates that the error
 //!    code is exactly the not-present supervisor-mode read it expects
 //!    (no other class of fault is acceptable); (b) validates that the
 //!    *victim's* secret frame is still readable via its identity-mapped
@@ -52,7 +53,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(itest_x86_64)]
 use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
 #[cfg(itest_x86_64)]
-use tairix_arch_x86_64::{idt, paging, qemu_exit, serial};
+use tairix_arch_x86_64::{fault, paging, qemu_exit, serial};
 
 /// Virtual address only the *victim* address space maps: the first byte
 /// past the boot trampoline's identity window, so no root reaches it
@@ -101,11 +102,13 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
     let _ = writeln!(com1, "[memory_isolation] booted on x86_64");
 
-    // SAFETY: `IDT` is installed exactly once on the boot CPU before any
-    // exception can fire; `page_fault_handler` is `-> !` so re-entry is
-    // impossible.
-    unsafe { idt::init(page_fault_handler) };
-    let _ = writeln!(com1, "[memory_isolation] idt installed");
+    // The boot tables route every exception to the fault slot; this binary
+    // claims it before anything can fault.
+    if fault::set_fault_handler(page_fault_handler).is_err() {
+        let _ = writeln!(com1, "[memory_isolation] FAIL: fault handler slot taken");
+        qemu_exit::exit_failure();
+    }
+    let _ = writeln!(com1, "[memory_isolation] fault handler installed");
 
     // ---- Build the victim address space and stash the secret byte. ----
     // `SECRET_FRAME` is a higher-half kernel static (the kernel is linked
@@ -199,23 +202,22 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     qemu_exit::exit_failure();
 }
 
-/// IDT-registered `#PF` handler. The trap frame layout for `#PF` is:
-///
-/// ```text
-/// rsp+0   error_code   (already popped into %rdi by the thunk)
-/// rsp+8   rip          (already popped into %rsi by the thunk)
-/// ```
-///
-/// The handler treats anything other than the expected supervisor-mode
-/// not-present read at the secret VA (and from inside the attacker
-/// context) as a kernel bug.
+/// The fault handler: every fatal exception reaches it, and anything other
+/// than the expected supervisor-mode not-present read at the secret VA (from
+/// inside the attacker context) is a kernel bug.
 #[cfg(itest_x86_64)]
-fn page_fault_handler(error_code: u64, rip: u64) -> ! {
+extern "C" fn page_fault_handler(syndrome: u64, faulting_addr: u64, rip: u64) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
+    let vector = fault::syndrome_vector(syndrome);
+    let error_code = fault::syndrome_error_code(syndrome);
     let _ = writeln!(
         com1,
-        "[memory_isolation] #PF: error=0x{error_code:x} rip=0x{rip:x}"
+        "[memory_isolation] vector {vector}: error=0x{error_code:x} rip=0x{rip:x}"
     );
+    if vector != fault::PAGE_FAULT_VECTOR {
+        let _ = writeln!(com1, "[memory_isolation] FAIL: an exception other than #PF");
+        qemu_exit::exit_failure();
+    }
 
     if !ATTACKER_ACTIVE.load(Ordering::SeqCst) {
         let _ = writeln!(
@@ -244,19 +246,13 @@ fn page_fault_handler(error_code: u64, rip: u64) -> ! {
     }
 
     // The fault must have come from our deliberate read of the secret VA.
-    // We confirm the CR2 register (faulting linear address) below. We
-    // *cannot* trust `rip` to point exactly at the load instruction
-    // because the compiler chooses how to materialise the `read_volatile`,
-    // so we use CR2 (architecturally guaranteed to hold the faulting LA).
-    let cr2: u64;
-    // SAFETY: `mov rax, cr2` is well-defined in ring 0.
-    unsafe {
-        core::arch::asm!("mov {x}, cr2", x = out(reg) cr2, options(nostack, preserves_flags));
-    }
-    if cr2 != secret_vaddr() {
+    // `rip` cannot say so, because the compiler chooses how to materialise
+    // the `read_volatile`; the faulting address is `CR2`, which the entry
+    // hands over, architecturally the faulting linear address.
+    if faulting_addr != secret_vaddr() {
         let _ = writeln!(
             com1,
-            "[memory_isolation] FAIL: CR2 was 0x{cr2:x}, expected 0x{:x}",
+            "[memory_isolation] FAIL: CR2 was 0x{faulting_addr:x}, expected 0x{:x}",
             secret_vaddr()
         );
         qemu_exit::exit_failure();
@@ -283,15 +279,12 @@ fn page_fault_handler(error_code: u64, rip: u64) -> ! {
     qemu_exit::exit_success();
 }
 
-/// Panic handler for the freestanding binary. Reports failure to QEMU
-/// rather than entering an infinite loop, so a buggy test never
-/// silently hangs (no flaky tests, strict timeouts).
+/// Panic handler for the freestanding binary: the port reports the panic
+/// and the harness ends the run on its record.
 #[panic_handler]
 #[cfg(itest_x86_64)]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    let mut com1 = serial::Serial::init(serial::COM1_BASE);
-    let _ = writeln!(com1, "[memory_isolation] panic: {info}");
-    qemu_exit::exit_failure();
+    tairix_arch_x86_64::panic::handle_panic_via_serial(info)
 }
 
 // Host-target stubs. The crate is *only* meaningful on the bare-metal

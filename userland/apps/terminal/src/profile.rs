@@ -64,10 +64,11 @@ pub const FONT_SIZE_STEP_PX: u16 = 1;
 /// One key of the closed profile registry.
 ///
 /// Adding a key means adding a variant here, its row in [`ProfileKey::ALL`],
-/// and its arms in this module's private `set_field` and `field_value`
-/// bridges — the compiler then forces every consumer to state what the new
-/// key means. The store's key namespace is open, but this application's is
-/// closed: a key outside the registry is one this profile does not read.
+/// and its arms in this module's private `set_field`, `field_value` and
+/// `copy_field` bridges — the compiler then forces every consumer to state
+/// what the new key means. The store's key namespace is open, but this
+/// application's is closed: a key outside the registry is one this profile
+/// does not read.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ProfileKey {
     /// `scheme` — which colour scheme is in force.
@@ -141,6 +142,57 @@ impl ProfileKey {
             Self::CustomAnsi => "custom.ansi",
         }
     }
+
+    /// This key's member of a [`ProfileKeys`] set.
+    const fn bit(self) -> u16 {
+        1 << self as u16
+    }
+}
+
+const _: () = assert!(ProfileKey::ALL.len() <= u16::BITS as usize);
+
+/// A set of registry keys: the settings one change touched.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProfileKeys(u16);
+
+impl ProfileKeys {
+    /// No setting.
+    pub const EMPTY: Self = Self(0);
+
+    /// Every setting in the registry.
+    pub const ALL: Self = {
+        let mut bits = 0;
+        let mut index = 0;
+        while index < ProfileKey::ALL.len() {
+            bits |= ProfileKey::ALL[index].bit();
+            index += 1;
+        }
+        Self(bits)
+    };
+
+    /// Whether the set names no setting.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether the set names `key`.
+    #[must_use]
+    pub const fn contains(self, key: ProfileKey) -> bool {
+        self.0 & key.bit() != 0
+    }
+
+    /// Every setting either set names.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// This set with `key` added.
+    #[must_use]
+    pub const fn with(self, key: ProfileKey) -> Self {
+        Self(self.0 | key.bit())
+    }
 }
 
 /// The user's terminal profile.
@@ -203,6 +255,28 @@ impl Profile {
             .font_size_px
             .saturating_sub(FONT_SIZE_STEP_PX)
             .max(MIN_FONT_SIZE_PX);
+    }
+
+    /// Take the settings `keys` names from `from`, leaving every other one as
+    /// it is, and answer which of them changed.
+    ///
+    /// Each field valid in `from` stays valid here: the registry's bounds are
+    /// per setting, so no combination of two valid profiles can break one.
+    pub fn set_from(&mut self, from: &Self, keys: ProfileKeys) -> ProfileKeys {
+        let mut changed = ProfileKeys::EMPTY;
+        for key in ProfileKey::ALL {
+            if keys.contains(key) && copy_field(self, from, key) {
+                changed = changed.with(key);
+            }
+        }
+        changed
+    }
+
+    /// The settings whose value differs between `self` and `other`.
+    #[must_use]
+    pub fn differing(&self, other: &Self) -> ProfileKeys {
+        let mut probe = *self;
+        probe.set_from(other, ProfileKeys::ALL)
     }
 
     /// The profile the store's layers imply, and the keys whose stored value
@@ -361,6 +435,39 @@ fn set_field(profile: &mut Profile, key: ProfileKey, value: &str) -> bool {
         },
     }
     true
+}
+
+/// Copy `key`'s setting from `from` onto `to`, answering whether `to` changed.
+fn copy_field(to: &mut Profile, from: &Profile, key: ProfileKey) -> bool {
+    match key {
+        ProfileKey::Scheme => overwrite(&mut to.scheme, from.scheme),
+        ProfileKey::FontSize => overwrite(&mut to.font_size_px, from.font_size_px),
+        ProfileKey::Opacity => overwrite(&mut to.effects.opacity, from.effects.opacity),
+        ProfileKey::Blur => overwrite(&mut to.effects.blur, from.effects.blur),
+        ProfileKey::ScanLines => overwrite(&mut to.effects.scanlines, from.effects.scanlines),
+        ProfileKey::Glow => overwrite(&mut to.effects.glow, from.effects.glow),
+        ProfileKey::Fuzz => overwrite(&mut to.effects.fuzz, from.effects.fuzz),
+        ProfileKey::Phosphor => overwrite(&mut to.effects.phosphor, from.effects.phosphor),
+        ProfileKey::Wobble => overwrite(&mut to.effects.wobble, from.effects.wobble),
+        ProfileKey::CustomBackground => {
+            overwrite(&mut to.custom.background, from.custom.background)
+        }
+        ProfileKey::CustomForeground => {
+            overwrite(&mut to.custom.foreground, from.custom.foreground)
+        }
+        ProfileKey::CustomCursor => overwrite(&mut to.custom.cursor, from.custom.cursor),
+        ProfileKey::CustomCursorText => {
+            overwrite(&mut to.custom.cursor_text, from.custom.cursor_text)
+        }
+        ProfileKey::CustomAnsi => overwrite(&mut to.custom.ansi, from.custom.ansi),
+    }
+}
+
+/// Store `value` in `slot`, answering whether that changed it.
+fn overwrite<T: Copy + PartialEq>(slot: &mut T, value: T) -> bool {
+    let changed = *slot != value;
+    *slot = value;
+    changed
 }
 
 /// The current value of `key` on `profile`, in its canonical spelling.

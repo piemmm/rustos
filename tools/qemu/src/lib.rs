@@ -178,6 +178,16 @@ pub enum Outcome {
         /// names resolved against the kernel ELF.
         cpu_state: String,
     },
+    /// The guest's kernel wrote the record a fatal panic or fault report
+    /// ends with ([`tairix_arch_api::fatal`]), and the run was ended at that
+    /// instant: a kernel that has written it has stopped for good, so
+    /// waiting out the inactivity budget would only delay the verdict.
+    Fatal {
+        /// The record, the one line naming the cause.
+        record: String,
+        /// Captured QEMU stdout up to the kill, best-effort.
+        serial: String,
+    },
 }
 
 impl Outcome {
@@ -215,7 +225,8 @@ impl Outcome {
             Outcome::Pass { serial }
             | Outcome::Fail { serial, .. }
             | Outcome::Timeout { serial, .. }
-            | Outcome::RuntimeCeilingExceeded { serial, .. } => serial,
+            | Outcome::RuntimeCeilingExceeded { serial, .. }
+            | Outcome::Fatal { serial, .. } => serial,
         }
     }
 }
@@ -1660,6 +1671,7 @@ fn supervise(
         pointer_markers_seen,
         screendump_markers_seen,
         monitor_markers_seen,
+        fatal,
         reader,
     } = spawn_serial_drain(&mut child, spec);
     let mut reader = Some(reader);
@@ -1679,7 +1691,7 @@ fn supervise(
     let err_reader = {
         let captured_err = Arc::clone(&captured_err);
         let stderr = child.stderr.take();
-        std::thread::spawn(move || drain_stream(stderr, &captured_err, &[]))
+        std::thread::spawn(move || drain_stream(stderr, &captured_err, &[], None))
     };
     let mut err_reader = Some(err_reader);
 
@@ -1710,6 +1722,7 @@ fn supervise(
         serial_script: &mut serial_script,
         heartbeat: &mut heartbeat,
         run_start,
+        fatal: &fatal,
     })?;
 
     // The child has exited (or been killed); the reader thread sees
@@ -1720,9 +1733,13 @@ fn supervise(
     drop(serial_stdin);
     let drain_failure = finish_drain(reader.take(), "serial output")
         .or_else(|| finish_drain(err_reader.take(), "qemu stderr"));
-    let done = match drain_failure {
-        Some(reason) => DoneReason::DrainFailed(reason),
-        None => done,
+    // Decided only once the drain has joined, so a record the guest wrote
+    // just before it exited is not missed: a kernel that wrote one died,
+    // whatever the run did afterwards.
+    let done = match (fatal.record(), drain_failure) {
+        (Some(record), _) => DoneReason::Fatal(record.to_owned()),
+        (None, Some(reason)) => DoneReason::DrainFailed(reason),
+        (None, None) => done,
     };
     let mut serial = captured
         .lock()
@@ -1761,6 +1778,8 @@ struct WaitLoop<'a> {
     heartbeat: &'a mut ProgressClock,
     /// Absolute run start, against which the runtime ceiling is measured.
     run_start: Instant,
+    /// The fatal record, once the guest has written one.
+    fatal: &'a FatalWatch,
 }
 
 /// How a gated run should end given its observer's current verdict, or `None`
@@ -1798,6 +1817,7 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
         serial_script,
         heartbeat,
         run_start,
+        fatal,
     } = cx;
     // Poll for completion in short ticks so the deadline is precise to
     // the millisecond. We deliberately do *not* sleep until the deadline
@@ -1806,6 +1826,13 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
     let tick = Duration::from_millis(25);
     let mut serial_closed = false;
     loop {
+        // A kernel that wrote its fatal record has stopped for good, so the
+        // verdict is in: nothing further the guest does can change it.
+        if let Some(record) = fatal.record() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(DoneReason::Fatal(record.to_owned()));
+        }
         // The out-of-guest observer has reached a verdict. Act on it before
         // waiting on the guest: in this mode the guest never self-exits, so
         // the gate is the only signal that can end the run on time.
@@ -2012,6 +2039,7 @@ fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outco
             note_on_transcript(&mut serial, Some(&reason));
             Outcome::Fail { status: -1, serial }
         }
+        DoneReason::Fatal(record) => Outcome::Fatal { record, serial },
     }
 }
 
@@ -2194,6 +2222,9 @@ enum DoneReason {
     /// A QEMU output drain failed, panicked, or closed before the child;
     /// the child was killed. The message identifies the failed channel.
     DrainFailed(String),
+    /// The guest wrote a fatal record ([`FatalWatch`]); the child was
+    /// killed. Carries the record.
+    Fatal(String),
 }
 
 /// Longest a single monitor read may block while the hang report is being
@@ -2452,8 +2483,46 @@ struct SerialDrain {
     /// marker has appeared the required number of times. Index-aligned
     /// with [`Spec::monitor_commands`].
     monitor_markers_seen: Vec<Arc<AtomicBool>>,
+    /// The first fatal record the guest wrote, if any.
+    fatal: Arc<FatalWatch>,
     /// The drain thread, joined once the child has exited.
     reader: std::thread::JoinHandle<io::Result<()>>,
+}
+
+/// Watches the serial stream for the record a fatal kernel report ends with
+/// ([`tairix_arch_api::fatal`]): the diagnostic line whose `id=` token names
+/// [`KERNEL_PANIC`](tairix_arch_api::fatal::KERNEL_PANIC) or
+/// [`KERNEL_FAULT`](tairix_arch_api::fatal::KERNEL_FAULT).
+///
+/// The drain offers it each line as the line completes, so every line is
+/// looked at once however long the run; the first record is kept.
+struct FatalWatch {
+    /// The two records' `id=` tokens, as they follow the level tag.
+    needles: [String; 2],
+    record: std::sync::OnceLock<String>,
+}
+
+impl FatalWatch {
+    fn new() -> Self {
+        use tairix_arch_api::fatal::{FatalRecord, KERNEL_FAULT, KERNEL_PANIC};
+        let needle = |record: FatalRecord| format!("] id={} ", record.id.0);
+        Self {
+            needles: [needle(KERNEL_PANIC), needle(KERNEL_FAULT)],
+            record: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Keep `line` if it is the first fatal record offered.
+    fn offer(&self, line: &str) {
+        if self.record.get().is_none() && self.needles.iter().any(|needle| line.contains(needle)) {
+            let _ = self.record.set(line.trim_end_matches('\r').to_owned());
+        }
+    }
+
+    /// The first fatal record seen, if the guest wrote one.
+    fn record(&self) -> Option<&str> {
+        self.record.get().map(String::as_str)
+    }
 }
 
 /// Start the background stdout drain for a spawned QEMU child.
@@ -2490,8 +2559,10 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
         .iter()
         .map(|_| Arc::new(AtomicBool::new(false)))
         .collect();
+    let fatal = Arc::new(FatalWatch::new());
     let reader = {
         let captured = Arc::clone(&captured);
+        let fatal = Arc::clone(&fatal);
         let stdout = child.stdout.take();
         let mut markers: Vec<(String, u32, Arc<AtomicBool>)> = Vec::new();
         if let Some(k) = &spec.input_keyboard {
@@ -2529,7 +2600,7 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
                 Arc::clone(seen),
             ));
         }
-        std::thread::spawn(move || drain_stream(stdout, &captured, &markers))
+        std::thread::spawn(move || drain_stream(stdout, &captured, &markers, Some(&fatal)))
     };
     SerialDrain {
         captured,
@@ -2538,6 +2609,7 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
         pointer_markers_seen,
         screendump_markers_seen,
         monitor_markers_seen,
+        fatal,
         reader,
     }
 }
@@ -2560,9 +2632,15 @@ fn drain_stream(
     stream: Option<impl Read>,
     captured: &Mutex<String>,
     markers: &[(String, u32, Arc<AtomicBool>)],
+    fatal: Option<&FatalWatch>,
 ) -> io::Result<()> {
     let Some(mut r) = stream else { return Ok(()) };
     let mut buf = [0u8; 4096];
+    // Where the text no line boundary has closed yet begins.
+    let mut unscanned = captured
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len();
     loop {
         match r.read(&mut buf) {
             Ok(0) => return Ok(()),
@@ -2579,6 +2657,13 @@ fn drain_stream(
                         && guard.matches(marker.as_str()).count() >= *needed as usize
                     {
                         seen.store(true, Ordering::Release);
+                    }
+                }
+                if let Some(watch) = fatal {
+                    let open = &guard[unscanned..];
+                    if let Some(end) = open.rfind('\n') {
+                        open[..end].split('\n').for_each(|line| watch.offer(line));
+                        unscanned += end + 1;
                     }
                 }
             }
@@ -3894,7 +3979,7 @@ mod tests {
         let markers = [(String::from("ready marker"), 1, Arc::clone(&seen))];
         let reader = InterruptedOnceReader { step: 0 };
 
-        drain_stream(Some(reader), &captured, &markers).expect("drain after interruption");
+        drain_stream(Some(reader), &captured, &markers, None).expect("drain after interruption");
 
         assert!(seen.load(Ordering::Acquire));
         assert_eq!(
@@ -3917,7 +4002,8 @@ mod tests {
     #[test]
     fn drain_stream_propagates_a_hard_read_error() {
         let captured = Mutex::new(String::new());
-        let err = drain_stream(Some(FailedReader), &captured, &[]).expect_err("hard read error");
+        let err =
+            drain_stream(Some(FailedReader), &captured, &[], None).expect_err("hard read error");
         assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
         assert!(err.to_string().contains("fixture failure"));
     }
@@ -3949,7 +4035,7 @@ mod tests {
             (String::from("tairix$ "), 1, Arc::clone(&second)),
         ];
         let feed: &[u8] = b"boot ok\nqueue armed\nbanner\ntairix$ ";
-        drain_stream(Some(feed), &captured, &markers).expect("drain markers");
+        drain_stream(Some(feed), &captured, &markers, None).expect("drain markers");
         assert!(first.load(Ordering::Acquire));
         assert!(second.load(Ordering::Acquire));
         assert_eq!(
@@ -3971,14 +4057,100 @@ mod tests {
         let seen = Arc::new(AtomicBool::new(false));
         let markers = [(String::from("sc=irq_bind"), 2, Arc::clone(&seen))];
         let first_only: &[u8] = b"boot\nsc=irq_bind task=5\n";
-        drain_stream(Some(first_only), &captured, &markers).expect("drain first marker");
+        drain_stream(Some(first_only), &captured, &markers, None).expect("drain first marker");
         assert!(
             !seen.load(Ordering::Acquire),
             "one occurrence must not satisfy a two-occurrence marker"
         );
         let second: &[u8] = b"more\nsc=irq_bind task=8\n";
-        drain_stream(Some(second), &captured, &markers).expect("drain second marker");
+        drain_stream(Some(second), &captured, &markers, None).expect("drain second marker");
         assert!(seen.load(Ordering::Acquire));
+    }
+
+    /// Serial output as the guest's pipe delivers it: in arbitrary pieces.
+    struct Pieces(Vec<&'static [u8]>);
+
+    impl Read for Pieces {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.0.is_empty() {
+                return Ok(0);
+            }
+            let piece = self.0.remove(0);
+            buf[..piece.len()].copy_from_slice(piece);
+            Ok(piece.len())
+        }
+    }
+
+    fn watched(pieces: Vec<&'static [u8]>) -> FatalWatch {
+        let watch = FatalWatch::new();
+        drain_stream(
+            Some(Pieces(pieces)),
+            &Mutex::new(String::new()),
+            &[],
+            Some(&watch),
+        )
+        .expect("drain");
+        watch
+    }
+
+    #[test]
+    fn a_fatal_record_split_across_reads_is_kept_once_its_line_completes() {
+        let watch = watched(vec![
+            b"boot\n[ERROR] id=40",
+            b"11 fatal kernel fault cpu=0 syndrome=0x0000000002000000\r\nafter\n",
+        ]);
+        assert_eq!(
+            watch.record(),
+            Some("[ERROR] id=4011 fatal kernel fault cpu=0 syndrome=0x0000000002000000")
+        );
+    }
+
+    #[test]
+    fn a_record_behind_a_coloured_level_tag_and_a_stamp_is_kept() {
+        let watch = watched(vec![
+            b"[  1.250] [\x1b[1;31mERROR\x1b[0m] id=4010 kernel panic cpu=1 file=x line=2\n",
+        ]);
+        assert!(watch
+            .record()
+            .is_some_and(|record| record.contains("id=4010 kernel panic")));
+    }
+
+    #[test]
+    fn prose_and_other_records_are_not_fatal() {
+        let watch = watched(vec![
+            b"==================== TAIRiX KERNEL FAULT ====================\n",
+            b"[tairix-kernel] a line quoting id=4011 in prose\n",
+            b"[ERROR] id=4012 fatal-looking but another record\n",
+            b"[ERROR] id=4011 with no line end yet",
+        ]);
+        assert_eq!(watch.record(), None);
+    }
+
+    #[test]
+    fn the_first_fatal_record_is_the_one_kept() {
+        let watch = watched(vec![
+            b"[ERROR] id=4011 fatal kernel fault cpu=0\n[ERROR] id=4010 kernel panic cpu=0\n",
+        ]);
+        assert_eq!(
+            watch.record(),
+            Some("[ERROR] id=4011 fatal kernel fault cpu=0")
+        );
+    }
+
+    #[test]
+    fn a_fatal_record_ends_the_run_as_a_fatal_outcome() {
+        let spec = Spec::for_aarch64_kernel("/tmp/k");
+        let outcome = outcome_from_done(
+            DoneReason::Fatal(String::from("[ERROR] id=4011 fatal kernel fault")),
+            &spec,
+            String::from("boot\n"),
+        );
+        assert!(!outcome.is_pass());
+        assert_eq!(outcome.serial(), "boot\n");
+        assert!(matches!(
+            outcome,
+            Outcome::Fatal { ref record, .. } if record == "[ERROR] id=4011 fatal kernel fault"
+        ));
     }
 
     #[test]

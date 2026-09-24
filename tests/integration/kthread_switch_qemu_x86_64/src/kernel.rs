@@ -227,7 +227,5 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 
 #[panic_handler]
 fn tairix_kthread_switch_x86_64_panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    let mut com1 = serial::Serial::init(serial::COM1_BASE);
-    let _ = writeln!(com1, "[kthread_switch_qemu_x86_64] panic: {info}");
-    qemu_exit::exit_failure();
+    tairix_arch_x86_64::panic::handle_panic_via_serial(info)
 }

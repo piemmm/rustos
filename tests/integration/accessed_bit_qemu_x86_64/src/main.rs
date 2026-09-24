@@ -45,7 +45,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(itest_x86_64)]
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlags};
 #[cfg(itest_x86_64)]
-use tairix_arch_x86_64::{idt, paging, qemu_exit, serial};
+use tairix_arch_x86_64::{fault, paging, qemu_exit, serial};
 
 /// Virtual address the test maps its single 4 KiB probe page at: the first
 /// byte past the boot trampoline's identity window, so the mapping is a
@@ -108,11 +108,13 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
     let _ = writeln!(com1, "[accessed_bit] booted on x86_64");
 
-    // SAFETY: `IDT` is installed exactly once on the boot CPU before any
-    // exception can fire; `unexpected_fault` is `-> !` so re-entry is
-    // impossible.
-    unsafe { idt::init(unexpected_fault) };
-    let _ = writeln!(com1, "[accessed_bit] idt installed");
+    // The boot tables route every exception to the fault slot; this test
+    // provokes none, so one arriving is a kernel bug.
+    if fault::set_fault_handler(unexpected_fault).is_err() {
+        let _ = writeln!(com1, "[accessed_bit] FAIL: fault handler slot taken");
+        qemu_exit::exit_failure();
+    }
+    let _ = writeln!(com1, "[accessed_bit] fault handler installed");
 
     // Seed the probe frame with a known byte so the accesses read real
     // data. `PROBE_FRAME` is a higher-half kernel static; its physical
@@ -222,10 +224,10 @@ fn touch(vaddr: u64) {
     core::hint::black_box(byte);
 }
 
-/// IDT-registered fault handler. This test provokes no fault, so any
-/// fault is a kernel bug — report it and exit with failure.
+/// The fault handler. This test provokes no fault, so any fault is a
+/// kernel bug — report it and exit with failure.
 #[cfg(itest_x86_64)]
-fn unexpected_fault(error_code: u64, rip: u64) -> ! {
+extern "C" fn unexpected_fault(syndrome: u64, faulting_addr: u64, rip: u64) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
     let phase = if SETUP_DONE.load(Ordering::SeqCst) {
         "after setup"
@@ -234,19 +236,19 @@ fn unexpected_fault(error_code: u64, rip: u64) -> ! {
     };
     let _ = writeln!(
         com1,
-        "[accessed_bit] FAIL: unexpected #PF {phase} error=0x{error_code:x} rip=0x{rip:x}"
+        "[accessed_bit] FAIL: unexpected vector {} {phase} error=0x{:x} addr=0x{faulting_addr:x} rip=0x{rip:x}",
+        fault::syndrome_vector(syndrome),
+        fault::syndrome_error_code(syndrome)
     );
     qemu_exit::exit_failure();
 }
 
-/// Panic handler for the freestanding binary. Reports failure to QEMU
-/// rather than hanging, so a buggy test never silently stalls.
+/// Panic handler for the freestanding binary: the port reports the panic
+/// and the harness ends the run on its record.
 #[panic_handler]
 #[cfg(itest_x86_64)]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    let mut com1 = serial::Serial::init(serial::COM1_BASE);
-    let _ = writeln!(com1, "[accessed_bit] panic: {info}");
-    qemu_exit::exit_failure();
+    tairix_arch_x86_64::panic::handle_panic_via_serial(info)
 }
 
 // Host-target stubs. The crate is *only* meaningful on the bare-metal

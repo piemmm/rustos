@@ -1329,26 +1329,60 @@ impl Settings {
         damage.add(row);
     }
 
-    /// Show `profile` instead of the one being edited, rebuilding every
-    /// control to reflect it.
+    /// Show `profile` in place of the one being edited, reporting every row
+    /// whose value moved.
     ///
-    /// The caller uses this after acting on [`SheetOutcome::Restore`]: the
-    /// profile the store's remaining layers imply is the store's answer to
-    /// give, not the sheet's to guess, so the sheet is told what it is rather
-    /// than assuming this application's own compiled defaults.
-    pub fn adopt(&mut self, profile: Profile) {
+    /// The profile came from somewhere other than these widgets — the store's
+    /// answer to a write, or an edit made in another window — so it can arrive
+    /// while the user is still dragging one of them. The interaction itself is
+    /// left alone: a drag, the selected well and the focus carry on over the
+    /// new values.
+    pub fn adopt(
+        &mut self,
+        profile: Profile,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let style = Style::new(scale, theme);
+        let layout = self
+            .layout(viewport, scale, theme, style.font)
+            .unwrap_or_else(Layout::nowhere);
+        let was = self.profile;
         self.profile = profile;
-        self.sync_scheme_radios(&Layout::nowhere(), &mut damage::sink());
-        self.text_size.set_value(permille_from_bounded(
-            self.profile.font_size_px,
-            MIN_FONT_SIZE_PX,
-            MAX_FONT_SIZE_PX,
-        ));
-        self.swatches = SwatchGrid::from_scheme(&self.profile.custom);
-        self.sync_channel_sliders();
-        let effects = self.profile.effects;
-        for (slider, key) in self.effect_sliders.iter_mut().zip(EffectKey::ALL) {
-            slider.set_value(effect_permille(key, key.of(effects)));
+        self.profile.clamp();
+        let now = self.profile;
+
+        self.sync_scheme_radios(&layout, damage);
+        if was.font_size_px != now.font_size_px {
+            self.text_size.set_value(permille_from_bounded(
+                now.font_size_px,
+                MIN_FONT_SIZE_PX,
+                MAX_FONT_SIZE_PX,
+            ));
+            damage.add(layout.rect_of(Focus::TextSize));
+        }
+        // The editor's caption says whether the custom scheme is the one in
+        // force, so a scheme change alone reaches that row too.
+        if was.custom != now.custom || was.scheme != now.scheme {
+            let well = self.swatches.selected();
+            let edited = self.swatches.color(well);
+            self.swatches.adopt_scheme(&now.custom);
+            damage.add(layout.rect_of(Focus::Swatches));
+            if self.swatches.color(well) != edited {
+                self.adopt_selected_well(&layout, damage);
+            }
+        }
+        for (index, key) in EffectKey::ALL.into_iter().enumerate() {
+            let value = key.of(now.effects);
+            if key.of(was.effects) == value {
+                continue;
+            }
+            if let Some(slider) = self.effect_sliders.get_mut(index) {
+                slider.set_value(effect_permille(key, value));
+            }
+            damage.add(layout.rect_of(Focus::Effect(index)));
         }
     }
 }

@@ -16,7 +16,7 @@ use tairix_theme::Theme;
 
 use crate::effects::{EffectKey, Effects, FULL, MIN_OPACITY};
 use crate::profile::{Profile, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX};
-use crate::scheme::Scheme;
+use crate::scheme::{Rgb, Scheme};
 
 use super::{footer_split, panel_bounds, split_row, Focus, Settings, SheetOutcome, EFFECTS_TAB};
 
@@ -586,6 +586,11 @@ fn restore_defaults_asks_the_caller_rather_than_resetting_the_sheet() {
     );
 }
 
+/// Adopt `profile` into `sheet` as the caller does once the store answers.
+fn adopt(sheet: &mut Settings, profile: Profile) {
+    sheet.adopt(profile, CLIENT, SCALE, &theme(), &mut damage::sink());
+}
+
 #[test]
 fn adopting_a_profile_rebuilds_every_control_to_match() {
     // What the caller does once the store has answered: the sheet is told the
@@ -595,11 +600,97 @@ fn adopting_a_profile_rebuilds_every_control_to_match() {
     click_at(&mut sheet, CLIENT, centre(row));
     assert_ne!(*sheet.profile(), Profile::default());
 
-    sheet.adopt(Profile::default());
+    adopt(&mut sheet, Profile::default());
     assert_eq!(*sheet.profile(), Profile::default());
     assert!(
         sheet.scheme_radios[0].is_selected(),
         "the controls follow the adopted profile"
+    );
+}
+
+/// An answer that lands while a slider is still under the pointer re-seeds
+/// the sheet without taking the drag out of the user's hand: the rest of the
+/// gesture keeps driving the same slider, and the edit it settles on carries
+/// the adopted values of everything else.
+#[test]
+fn adopting_mid_drag_leaves_the_drag_in_hand() {
+    let mut sheet = sheet();
+    let row = visible_row(&sheet, CLIENT, Focus::TextSize);
+    assert_eq!(
+        press_at(&mut sheet, CLIENT, slider_point(row, 0)),
+        SheetOutcome::Edited
+    );
+    let dragged = *sheet.profile();
+
+    let answer = Profile {
+        scheme: Scheme::Contrast,
+        effects: Effects {
+            opacity: FULL,
+            ..dragged.effects
+        },
+        ..dragged
+    };
+    adopt(&mut sheet, answer);
+
+    assert_eq!(
+        sheet.on_pointer(
+            &moved(slider_point(row, 1000)),
+            CLIENT,
+            SCALE,
+            &theme(),
+            &mut damage::sink()
+        ),
+        SheetOutcome::Edited,
+        "the drag is still live after the answer"
+    );
+    assert_eq!(
+        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage::sink()),
+        SheetOutcome::Settled
+    );
+    let settled = *sheet.profile();
+    assert_eq!(settled.font_size_px, MAX_FONT_SIZE_PX);
+    assert_eq!(settled.scheme, Scheme::Contrast);
+    assert_eq!(settled.effects.opacity, FULL);
+}
+
+/// The colours arriving from the store do not move the selected well, so a
+/// channel slider being edited keeps editing the colour the user chose.
+#[test]
+fn adopting_keeps_the_well_the_channel_sliders_edit() {
+    let mut sheet = sheet();
+    sheet.swatches.adopt_selected(5);
+    sheet.sync_channel_sliders();
+    // The channel rows sit at the end of the body.
+    focus_on(&mut sheet, CLIENT, Focus::Scroll);
+    key(&mut sheet, CLIENT, Key::Named(NamedKey::End));
+    let row = visible_row(&sheet, CLIENT, Focus::Channel(0));
+    assert_eq!(
+        press_at(&mut sheet, CLIENT, slider_point(row, 0)),
+        SheetOutcome::Edited
+    );
+
+    let mut answer = *sheet.profile();
+    answer.custom.background = Rgb::new(0x21, 0x43, 0x65);
+    adopt(&mut sheet, answer);
+    assert_eq!(sheet.swatches.selected(), 5);
+
+    sheet.on_pointer(
+        &moved(slider_point(row, 1000)),
+        CLIENT,
+        SCALE,
+        &theme(),
+        &mut damage::sink(),
+    );
+    sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage::sink());
+    let settled = *sheet.profile();
+    assert_eq!(
+        settled.custom.ansi[1].r,
+        u8::MAX,
+        "well 5 is the second ANSI colour"
+    );
+    assert_eq!(
+        settled.custom.background, answer.custom.background,
+        "the background well only took the adopted colour"
     );
 }
 

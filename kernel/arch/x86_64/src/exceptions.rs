@@ -131,10 +131,10 @@ const fn origin_of(vector: u8) -> Origin {
 /// happened *last* — a fabricated field is worse than an absent one, so
 /// the syndrome names the vector and the address field stays empty.
 ///
-/// With no handler installed — a window the boot path closes before the
-/// IDT can deliver anything — the CPU parks. Never a silent reset, and
-/// never through QEMU's debug-exit port: a fatal decision in a production
-/// kernel does not run through a test-harness affordance.
+/// With no handler installed the port writes its own report and parks the
+/// CPU. Never a silent reset, and never through QEMU's debug-exit port: a
+/// fatal decision in a production kernel does not run through a
+/// test-harness affordance.
 ///
 /// # Safety
 ///
@@ -168,7 +168,7 @@ unsafe fn fatal_exception(
     if let Some(handler) = crate::fault::fault_handler() {
         handler(syndrome, 0, rip);
     }
-    crate::reset::park_cpu()
+    crate::panic::report_unclaimed_fault(vector, error_code, from_user, 0, rip)
 }
 
 /// Rust dispatcher every generated exception stub calls.
@@ -333,6 +333,27 @@ pub unsafe fn install_exception_vectors(cpu_index: usize) -> Result<(), crate::p
         unsafe { crate::percpu::install_vector(cpu_index, vector, handler)? };
     }
     Ok(())
+}
+
+/// Route every exception vector of a table not yet loaded — each generated
+/// stub, and the resumable `#PF` entry on vector 14 — through the fatal
+/// tail, each gate on the IST `ist_for` names.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub(crate) fn route_exceptions(
+    idt: &mut crate::interrupts::Idt,
+    selector: u16,
+    ist_for: fn(u8) -> u8,
+) {
+    use crate::interrupts::IdtEntry;
+    let fault = crate::fault::PAGE_FAULT_VECTOR;
+    let stubs = EXCEPTION_STUBS
+        .iter()
+        .map(|&(vector, stub)| (vector, stub as *const () as usize as u64))
+        .chain([(fault, crate::fault::page_fault_isr_addr())]);
+    for (vector, handler) in stubs {
+        idt.entries[usize::from(vector)] =
+            IdtEntry::interrupt_gate(handler, selector, ist_for(vector));
+    }
 }
 
 #[cfg(test)]

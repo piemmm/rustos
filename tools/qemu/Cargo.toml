@@ -32,3 +32,7 @@ tairix-binfmt = { path = "../../lib/binfmt", version = "=0.0.0" }
 # proleptic-Gregorian calendar. Spelling the operand through it keeps the
 # harness and the guest on the same instant.
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
+# The record a fatal kernel report ends with is defined once, beside the
+# writer every port and the kernel's own post-mortem share; the runner ends a
+# run on it rather than restating its id.
+tairix-arch-api = { path = "../../kernel/arch/api", version = "=0.0.0" }

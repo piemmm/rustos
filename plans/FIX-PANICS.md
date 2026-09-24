@@ -65,9 +65,13 @@ one before the port's boot stack — a kthread stack is what a post-boot
 fault lands on, and no port can identify one. This is stronger than the sketched per-arch
 `unwind_one`: the one dangerous dereference site is shared and fuzzed, not
 copied three times. wasm32 is an honest `Unsupported`. The arch-crate
-`handle_panic_via_serial` is retained as the QEMU integration-test
-harnesses' minimal park-on-panic helper (live code, ~40 consumers), not
-the production path.
+`handle_panic_via_serial` is the QEMU integration-test kernels' own panic
+report, not the production path. It and the
+port's report of a fault no handler claimed write the shared
+`tairix_arch_api::fatal` shape and end on the same `4010`/`4011` record the
+production dump does, which the QEMU harness ends a run on; every port arms
+its exception vectors in its boot entry, so such a fault always reaches a
+report (`plans/OPEN-DEFECTS.md` D146).
 
 Binding under `AGENTS.md`. This plan makes a kernel panic dump a rich,
 structured post-mortem — a register snapshot and a bounded stack

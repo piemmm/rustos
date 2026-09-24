@@ -106,13 +106,12 @@
 //! # Why `no_std` and dependency-light
 //!
 //! the charter permits `kernel/arch/api` to depend on `lib/*` only. The crate
-//! is `no_std` and names a single `lib/*` dependency — `tairix_abi`,
-//! itself `no_std`, dependency-free, and allocator-free — so the
-//! [`PlatformDiscovery`] slice can speak in the one hardware-tree ABI
-//! rather than re-defining it. An architecture port
-//! implementing the HAL therefore still acquires no transitive edge to a
-//! concrete kernel crate, and the architecture-neutral kernel can name
-//! the HAL without inheriting an arch dependency.
+//! is `no_std` and allocator-free, and names `lib/*` crates alone — the
+//! hardware-tree ABI the [`PlatformDiscovery`] slice speaks in, the log line
+//! shape the [`fatal`] report is written in — so an architecture port
+//! implementing the HAL acquires no transitive edge to a concrete kernel
+//! crate, and the architecture-neutral kernel can name the HAL without
+//! inheriting an arch dependency.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -131,6 +130,7 @@ pub mod coreclock;
 pub mod cpucycles;
 pub mod cpufeatures;
 pub mod entropy;
+pub mod fatal;
 pub mod fdtwalk;
 pub mod frames;
 pub mod irq;

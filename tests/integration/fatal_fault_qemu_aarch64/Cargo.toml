@@ -1,0 +1,29 @@
+[package]
+name = "tairix-test-fatal-fault-qemu-aarch64"
+description = "QEMU integration test: a CPU fault in a minimal aarch64 kernel that installs no fault handler is reported — the port's boot entry armed the vectors, its fatal path names the syndrome — and the run ends on that report's record at once, rather than re-faulting silently until the harness gives up."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding kernel ELF QEMU loads with `-kernel` on the aarch64 `virt`
+# board. It links the port alone, for boot, console and panic report: the
+# point is a kernel with nothing behind the port.
+#
+# On the host target the crate has no test source and contributes nothing to
+# `cargo test`; the orchestrator is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-fatal-fault-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
