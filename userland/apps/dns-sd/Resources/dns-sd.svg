@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>dns-sd</title>
+  <!-- Three hosts on one link answering a question: a ring of wave fronts
+       around the asker, drawn as filled bands because the desktop's SVG
+       subset draws fills rather than strokes. -->
+
+  <!-- Tile: rounded square, corners cut as integer line segments -->
+  <polygon fill="#24466B" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <polygon fill="#2F5A88" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,92 20,92"/>
+
+  <!-- The link every host sits on -->
+  <polygon fill="#9CC3E8" points="40,184 216,184 216,194 40,194"/>
+
+  <!-- The wave fronts the question goes out on -->
+  <polygon fill="#F5C542" points="92,128 96,112 106,99 119,90 128,88 137,90 150,99 160,112 164,128 152,128 149,117 142,107 134,102 128,100 122,102 114,107 107,117 104,128"/>
+  <polygon fill="#F5C542" points="68,128 73,103 88,80 108,66 128,62 148,66 168,80 183,103 188,128 176,128 172,108 160,89 144,77 128,74 112,77 96,89 84,108 80,128"/>
+
+  <!-- The asker, and the hosts that answer -->
+  <polygon fill="#F2F5F3" points="116,128 140,128 140,184 116,184"/>
+  <polygon fill="#F2F5F3" points="44,150 76,150 76,184 44,184"/>
+  <polygon fill="#F2F5F3" points="180,150 212,150 212,184 180,184"/>
+  <polygon fill="#24466B" points="50,158 70,158 70,164 50,164"/>
+  <polygon fill="#24466B" points="186,158 206,158 206,164 186,164"/>
+  <polygon fill="#24466B" points="122,138 134,138 134,144 122,144"/>
+</svg>

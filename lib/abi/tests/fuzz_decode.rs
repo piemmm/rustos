@@ -51,8 +51,8 @@ use tairix_abi::font_ipc::{
 use tairix_abi::fs::{DirEntries, DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::net::{
-    decode_bind_reply, decode_send_reply, decode_socket_reply, SocketDatagram, SocketRequest,
-    SocketStreamEvent,
+    decode_bind_reply, decode_send_reply, decode_socket_reply, SocketDatagram, SocketDelivery,
+    SocketRequest, SocketStreamEvent,
 };
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
@@ -560,6 +560,67 @@ fn exercise_net_socket(bytes: &[u8]) {
     let _ = decode_send_reply(bytes);
 }
 
+/// Drive the link-local discovery decoders on `bytes` (one arm of
+/// [`exercise`]): the call a client sends, the collect reply and doorbell a
+/// client parses from the service, the grant store the service parses from
+/// disk, a manifest's browsed types, and the link event the stack delivers.
+/// An accepted frame must round-trip; a corrupt one must refuse cleanly.
+fn exercise_discovery(bytes: &[u8]) {
+    use tairix_abi::discovery_ipc::{
+        decode_doorbell, decode_id_reply, CollectReply, CollectWriter, DiscoveryRequest, Entry,
+        DISCOVERY_MAX_REPLY, DISCOVERY_MAX_REQUEST,
+    };
+    if let Ok(request) = DiscoveryRequest::decode(bytes) {
+        let mut buf = [0u8; DISCOVERY_MAX_REQUEST];
+        let len = request
+            .encode(&mut buf)
+            .expect("an accepted discovery request must re-encode");
+        assert_eq!(&buf[..len], bytes, "an accepted request is canonical");
+    }
+    if let Ok(reply) = CollectReply::parse(bytes) {
+        let mut buf = vec![0u8; DISCOVERY_MAX_REPLY.max(bytes.len())];
+        let mut writer = CollectWriter::new(&mut buf).expect("room for a header");
+        for entry in reply.entries() {
+            writer
+                .push(&entry)
+                .expect("an accepted entry re-encodes into as much room");
+        }
+        let len = writer.finish(reply.more);
+        assert_eq!(&buf[..len], bytes, "an accepted collect reply is canonical");
+    }
+    if let Ok(entry) = Entry::decode(bytes) {
+        let mut buf = vec![0u8; entry.wire_len()];
+        entry
+            .encode(&mut buf)
+            .expect("an accepted entry re-encodes");
+        assert_eq!(buf, bytes);
+    }
+    let _ = decode_doorbell(bytes);
+    let _ = decode_id_reply(bytes);
+    let _ = tairix_abi::discovery_policy::read_grants(bytes, &mut |grant| {
+        let mut line = [0u8; 256];
+        let len = grant
+            .write_line(&mut line)
+            .expect("an accepted grant re-writes");
+        let mut again = None;
+        tairix_abi::discovery_policy::read_grants(&line[..len], &mut |read| {
+            again = Some((read.publisher, read.service.name.len()));
+            assert_eq!(read.bundle_id, grant.bundle_id);
+            Ok(())
+        })
+        .expect("a written grant reads back");
+        assert_eq!(again, Some((grant.publisher, grant.service.name.len())));
+        Ok(())
+    });
+    for index in 0..4 {
+        let _ = tairix_abi::browse_type_at(bytes, 0, 0, index);
+    }
+    if let Ok(SocketDelivery::Link(event)) = SocketDelivery::parse(bytes) {
+        let encoded = event.encode().expect("an accepted link event re-encodes");
+        assert_eq!(&encoded[..], bytes);
+    }
+}
+
 /// Drive the cross-process NIC device-channel decoders on `bytes` (one arm
 /// of [`exercise`]): an accepted control request or receive-notify must
 /// round-trip through its encoder, and the two reply decoders — untrusted
@@ -958,6 +1019,7 @@ fn exercise(bytes: &[u8]) {
     exercise_switchboard_ipc(bytes);
     exercise_net_socket(bytes);
     exercise_net_channel(bytes);
+    exercise_discovery(bytes);
     exercise_elevate(bytes);
     exercise_session_ipc(bytes);
     if let Ok(time) = Time64::from_bytes(bytes) {
@@ -1296,6 +1358,79 @@ fn structured_inputs_with_corrupted_fields_never_panic() {
             base[byte] ^= 1 << bit;
             exercise(&base);
             base[byte] ^= 1 << bit;
+        }
+    }
+}
+
+#[test]
+fn structured_discovery_inputs_with_corrupted_fields_never_panic() {
+    use tairix_abi::discovery_ipc::{
+        Answer, Change, CollectWriter, DiscoveryRequest, Entry, Families, Query, ServiceTypeField,
+        Transport,
+    };
+    let mut seeds: Vec<Vec<u8>> = Vec::new();
+    for request in [
+        DiscoveryRequest::Open { deliver_port: 9 },
+        DiscoveryRequest::Start {
+            session: 1,
+            query: Query::Browse {
+                service: ServiceTypeField {
+                    name: b"ipp",
+                    transport: Transport::Tcp,
+                },
+            },
+        },
+        DiscoveryRequest::Start {
+            session: 1,
+            query: Query::Host {
+                name: b"\x07printer\x05local\x00",
+                families: Families::BOTH,
+            },
+        },
+        DiscoveryRequest::Collect {
+            session: 1,
+            capacity: 8192,
+        },
+    ] {
+        let mut buf = vec![0u8; 512];
+        let len = request.encode(&mut buf).expect("encodes");
+        buf.truncate(len);
+        seeds.push(buf);
+    }
+    let mut reply = vec![0u8; 512];
+    let mut writer = CollectWriter::new(&mut reply).expect("room");
+    let mut interface = [0u8; 16];
+    interface[..4].copy_from_slice(b"eth0");
+    writer
+        .push(&Entry::Answer {
+            request: 2,
+            interface,
+            change: Change::Added,
+            ttl: 120,
+            answer: Answer::Instance { label: b"Hall" },
+        })
+        .expect("fits");
+    writer
+        .push(&Entry::Flush {
+            request: 2,
+            interface,
+        })
+        .expect("fits");
+    let len = writer.finish(true);
+    reply.truncate(len);
+    seeds.push(reply);
+    seeds.push(
+        b"browse os.tairix.dns-sd 0101010101010101010101010101010101010101010101010101010101010101 _ipp._tcp\n"
+            .to_vec(),
+    );
+    for mut seed in seeds {
+        exercise(&seed);
+        for byte in 0..seed.len() {
+            for bit in 0..8u32 {
+                seed[byte] ^= 1 << bit;
+                exercise(&seed);
+                seed[byte] ^= 1 << bit;
+            }
         }
     }
 }

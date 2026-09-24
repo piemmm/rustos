@@ -1,6 +1,6 @@
 //! Console-input producer for a boot-protocol keyboard (`plans/PI.md` P11).
 //!
-//! [`BootKeyboard`](crate::BootKeyboard) decodes the device's reports into
+//! [`BootKeyboard`] decodes the device's reports into
 //! [`InputEvent`] key edges whose `code` is the raw HID usage ID. This module
 //! is the second half of the producer: it tracks the held modifiers and the
 //! caps-/num-lock state and resolves each printable or named key edge into the
@@ -24,7 +24,8 @@ use tairix_abi::input::KeyInput;
 use tairix_abi::DriverError;
 use tairix_input::{Key, ModifierKey, ModifierSide, ModifierState, NamedKey};
 
-use crate::keyboard::MODIFIER_USAGE_BASE;
+use crate::keyboard::{BootKeyboard, MODIFIER_USAGE_BASE};
+use crate::ReportSource;
 use tairix_keymap::{key_input, modifier_change};
 
 /// HID usage of the Caps Lock key (HID Usage Tables, page `0x07`).
@@ -180,12 +181,44 @@ pub fn pump_once<I: Input, S: ConsoleSink>(
 ) -> Result<usize, DriverError> {
     let mut events = [crate::EVENT_ZERO; EVENT_BATCH];
     let drained = keyboard.poll(&mut events)?;
-    for event in &events[..drained] {
+    deliver(&events[..drained], console, sink)?;
+    Ok(drained)
+}
+
+/// Deliver the release of every key `keyboard` last reported held, through
+/// `console` into `sink`: what a keyboard driver says before it exits, so a
+/// key held as its device went away does not stay down.
+///
+/// # Errors
+///
+/// Propagates a [`DriverError`] from the decoder or the `sink`.
+pub fn release_held<S: ReportSource, K: ConsoleSink>(
+    keyboard: &mut BootKeyboard<S>,
+    console: &mut KeyboardConsole,
+    sink: &mut K,
+) -> Result<(), DriverError> {
+    let mut events = [crate::EVENT_ZERO; EVENT_BATCH];
+    loop {
+        let drained = keyboard.release_all(&mut events)?;
+        if drained == 0 {
+            return Ok(());
+        }
+        deliver(&events[..drained], console, sink)?;
+    }
+}
+
+/// Resolve each of `events` through `console` and inject what it produces.
+fn deliver<S: ConsoleSink>(
+    events: &[InputEvent],
+    console: &mut KeyboardConsole,
+    sink: &mut S,
+) -> Result<(), DriverError> {
+    for event in events {
         if let Some(record) = console.feed(*event) {
             sink.write(&record.to_le_bytes())?;
         }
     }
-    Ok(drained)
+    Ok(())
 }
 
 /// Events drained from the keyboard per [`pump_once`] call.

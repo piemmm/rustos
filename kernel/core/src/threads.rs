@@ -43,6 +43,7 @@ use tairix_sync::RwLock;
 
 use crate::aspace::{AddressSpaceRegistry, OwnedThreadStack, StackSpan};
 use crate::bootinfo::KernelArch;
+use crate::peerwatch::PeerWatch;
 use crate::procspace::ProcessSpace;
 use crate::rlimit::DEFAULT_STACK_LIMIT_BYTES;
 use crate::syscalls::KernelSyscallHandlers;
@@ -373,9 +374,13 @@ where
 pub fn retire(
     caps: &RwLock<CapTable>,
     aspaces: &RwLock<AddressSpaceRegistry>,
+    peer_watch: Option<&PeerWatch>,
     thread: SecTaskId,
 ) -> usize {
     crate::procsignal::clear_intake(thread.0);
+    if let Some(peers) = peer_watch {
+        peers.forget_watcher(thread.0);
+    }
     crate::procsignal::clear_kill_gate(thread.0);
     // A thread killed inside the kernel never unwinds to its own park site's
     // `deregister`, and a row left at a queue's FIFO head makes the next
@@ -513,7 +518,7 @@ mod tests {
         let (caps, aspaces) = group_with_a_sibling(sibling);
 
         // The leader goes first; the sibling keeps the process alive.
-        assert_eq!(retire(&caps, &aspaces, SecTaskId(LEADER)), 1);
+        assert_eq!(retire(&caps, &aspaces, None, SecTaskId(LEADER)), 1);
         assert!(
             tairix_kernel_sched_api::task_id_reserved(LEADER),
             "a live process's id returned to the draw"
@@ -528,7 +533,7 @@ mod tests {
         // The group's last thread lands, which is what returns the number:
         // the same per-thread rule owns both halves, so no teardown path can
         // hold an id without releasing it.
-        assert_eq!(retire(&caps, &aspaces, SecTaskId(sibling)), 0);
+        assert_eq!(retire(&caps, &aspaces, None, SecTaskId(sibling)), 0);
         assert!(
             !tairix_kernel_sched_api::task_id_reserved(LEADER),
             "the last thread out left the leader id withheld from the draw"
@@ -547,7 +552,7 @@ mod tests {
         tairix_kernel_sched_api::release_task_id(sibling);
         let (caps, aspaces) = group_with_a_sibling(sibling);
 
-        assert_eq!(retire(&caps, &aspaces, SecTaskId(sibling)), 1);
+        assert_eq!(retire(&caps, &aspaces, None, SecTaskId(sibling)), 1);
         assert!(!tairix_kernel_sched_api::task_id_reserved(sibling));
     }
 

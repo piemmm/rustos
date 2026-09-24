@@ -34,12 +34,15 @@ The shared device-tree walk reads the generic DMA binding for every FDT port.
   channels the tree leaves to this system (`dma-channel-mask`, numbered from
   the node's own first channel, or a port's vendor spelling converted to
   that numbering). The duty records whether the tree stated a mask at all.
-- **Its windows**: one `Dma` resource per entry of its parent bus's
-  `dma-ranges`, translated to CPU addresses, carrying the bus address it
-  starts at, and flagged `DMA_TRANSLATED` so a window starting at bus `0` is
-  never read as an untranslated limit. A controller with no bus between it and the root, or on a bus
-  whose property is empty, reaches memory untranslated and gets one
-  unconstrained window; a bus with no property maps nothing.
+- **Its windows**: one `Dma` resource per window its buses compose to
+  (`tairix_fdt::dma_reach`): each bus's `dma-ranges` clips and rebases the
+  windows of the buses below it, splitting where an entry boundary changes the
+  offset, and an empty property is the identity at its own bus only. Each
+  window carries the bus address it starts at and is flagged `DMA_TRANSLATED`,
+  so one starting at bus `0` is never read as an untranslated limit. A
+  controller with nothing on the way that translates reaches memory
+  untranslated and gets one unconstrained window; a bus with no property maps
+  nothing.
 - **A consumer's request lines**: each `dmas` entry becomes a `DmaRequest`
   naming its controller's endpoint, the specifier in the controller's own
   binding (up to two cells — a wider entry is dropped, never truncated), the

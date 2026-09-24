@@ -156,3 +156,35 @@ fn renaming_past_the_name_bound_is_refused_rather_than_truncated() {
         .expect("just inside the bound");
     assert!(rename(&long, NameKind::Instance).is_err());
 }
+
+#[test]
+fn only_a_name_under_local_or_a_link_local_address_is_the_links() {
+    use super::{is_link_local_address, is_link_local_name};
+    use crate::{IpAddr, Ipv4Addr, Ipv6Addr};
+    for (name, links) in [
+        ("printer.local", true),
+        ("a.b.LOCAL", true),
+        ("local", false),
+        ("printer.localhost", false),
+        ("printer.example.com", false),
+        ("local.example", false),
+    ] {
+        assert_eq!(
+            is_link_local_name(&Name::encode(name).expect("a name")),
+            links,
+            "{name}"
+        );
+    }
+    for (address, links) in [
+        (IpAddr::V4(Ipv4Addr::new(169, 254, 1, 2)), true),
+        (IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), false),
+        (IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)), true),
+        (IpAddr::V6(Ipv6Addr::new(0xfebf, 0, 0, 0, 0, 0, 0, 1)), true),
+        (
+            IpAddr::V6(Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 1)),
+            false,
+        ),
+    ] {
+        assert_eq!(is_link_local_address(address), links, "{address}");
+    }
+}

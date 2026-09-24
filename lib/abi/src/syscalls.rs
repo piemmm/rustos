@@ -3204,6 +3204,29 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::PEER_WATCH,
+        name: "peer_watch",
+        arg_count: 3,
+        args: [
+            // The `PeerWatchOp` discriminant; the dispatcher rejects an
+            // unknown value before the handler runs.
+            AbiType::U32,
+            // One 16-byte `ProcId`: read for a watch or unwatch, written for
+            // a take.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Watching grants nothing: the watch says only that a process has
+        // gone. Not audited: a service watches once per client it holds
+        // state for, and an exit is the audit trail's own record already.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

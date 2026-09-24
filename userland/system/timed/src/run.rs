@@ -54,7 +54,7 @@ mod program {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use tairix_abi::net::{SocketAddr, SocketDatagram, SocketId};
+    use tairix_abi::net::{SocketAddr, SocketDatagram, SocketDelivery, SocketId};
     use tairix_abi::net_ipc::{ip_from_parts, NetAddrFamily};
     use tairix_abi::rtc_ipc::{self, RtcOp, RtcReading, RTC_ENDPOINT};
     use tairix_abi::time::{Duration64, Time64};
@@ -310,7 +310,7 @@ mod program {
                 addr,
                 port: PORT,
             };
-            tairix_rt::net::send(socket, Some(dest), packet)
+            tairix_rt::net::send(socket, Some(dest), None, packet)
         }
     }
 
@@ -524,8 +524,12 @@ mod program {
                 // A datagram is waiting. Drain what the stack delivered —
                 // the receive discards any other sender's post — then fall
                 // through to the deadline check.
-                while let Ok(datagram) = tairix_rt::net::recv(deliver, &mut scratch) {
-                    service.on_datagram(woken, datagram.payload);
+                while let Ok(delivery) = tairix_rt::net::recv(deliver, &mut scratch) {
+                    // Its sockets join no group, so a link edge never
+                    // arrives; were one to, it carries nothing for the clock.
+                    if let SocketDelivery::Datagram(datagram) = delivery {
+                        service.on_datagram(woken, datagram.payload);
+                    }
                 }
             } else if Errno::from_syscall(waited) != Errno::TimedOut {
                 // A dead wait-set would degrade the loop into a busy poll;

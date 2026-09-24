@@ -92,6 +92,10 @@ pub enum UaccessError {
     /// The backing frame is outside the kernel's direct physical map, so
     /// the kernel cannot reach its bytes.
     PhysUnmapped,
+    /// A page in the range is mapped other than as ordinary cacheable RAM.
+    /// The copy reaches it through the cacheable direct map, and that alias
+    /// would lose coherence with the device the page is mapped for.
+    NotCacheable,
     /// A hardware data fault interrupted the byte move and was absorbed
     /// by the architecture port's fault window. The validated software
     /// walk should make this unreachable; observing it means the walk's
@@ -241,6 +245,9 @@ where
         }
         if !flags.contains(required) {
             return Err(missing_perm);
+        }
+        if flags & MapFlags::NOT_CACHEABLE != MapFlags::empty() {
+            return Err(UaccessError::NotCacheable);
         }
 
         let offset_in_page = addr - page_start;
@@ -473,6 +480,32 @@ mod tests {
             copy_in(&space, &sim, VirtAddr::new(0x4000), &mut dst),
             Err(UaccessError::NotReadable)
         );
+    }
+
+    #[test]
+    fn a_page_mapped_uncached_is_never_copied_through_the_cacheable_alias() {
+        for attribute in [
+            MapFlags::DMA_COHERENT,
+            MapFlags::NO_CACHE,
+            MapFlags::WRITE_COMBINE,
+        ] {
+            let sim = sim();
+            let frame = Frame(SIM_BASE_FRAME);
+            let flags = MapFlags::READ | MapFlags::WRITE | MapFlags::USER | attribute;
+            let space = space_with(&[(0x4000, frame, flags)]);
+            let mut dst = [0u8; 4];
+            assert_eq!(
+                copy_in(&space, &sim, VirtAddr::new(0x4000), &mut dst),
+                Err(UaccessError::NotCacheable),
+                "{attribute:?}"
+            );
+            assert_eq!(
+                copy_out(&space, &sim, VirtAddr::new(0x4000), &[1, 2, 3]),
+                Err(UaccessError::NotCacheable),
+                "{attribute:?}"
+            );
+            assert_eq!(read_frame(&sim, frame, 0, 3), [0, 0, 0], "{attribute:?}");
+        }
     }
 
     #[test]

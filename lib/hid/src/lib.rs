@@ -71,7 +71,7 @@ pub mod report;
 #[cfg(test)]
 mod tests;
 
-pub use console::{pump_once, ConsoleSink, KeyboardConsole};
+pub use console::{pump_once, release_held, ConsoleSink, KeyboardConsole};
 pub use keyboard::BootKeyboard;
 pub use mouse::BootMouse;
 pub use report::{
@@ -165,6 +165,19 @@ impl<const N: usize> PendingEvents<N> {
     pub(crate) const fn is_empty(&self) -> bool {
         self.next == self.len
     }
+
+    /// Move what fits of the latch into `out`, returning how many.
+    pub(crate) fn drain_into(&mut self, out: &mut [InputEvent]) -> usize {
+        let mut written = 0;
+        for slot in out.iter_mut() {
+            let Some(event) = self.pop() else {
+                break;
+            };
+            *slot = event;
+            written += 1;
+        }
+        written
+    }
 }
 
 /// Per-device decoder state: turn one validated report into events.
@@ -195,15 +208,7 @@ pub(crate) fn poll_source<S: ReportSource, D: ReportDecode<N>, const N: usize>(
     if events.is_empty() {
         return Err(DriverError::BufferTooSmall);
     }
-    let mut written = 0;
-    while written < events.len() {
-        if let Some(event) = pending.pop() {
-            events[written] = event;
-            written += 1;
-        } else {
-            break;
-        }
-    }
+    let mut written = pending.drain_into(events);
     let mut budget = REPORT_POLL_BUDGET;
     while written < events.len() && pending.is_empty() && budget > 0 {
         budget -= 1;
@@ -216,14 +221,7 @@ pub(crate) fn poll_source<S: ReportSource, D: ReportDecode<N>, const N: usize>(
             return Err(DriverError::DeviceFault);
         }
         state.decode(&buf[..len], pending)?;
-        while written < events.len() {
-            if let Some(event) = pending.pop() {
-                events[written] = event;
-                written += 1;
-            } else {
-                break;
-            }
-        }
+        written += pending.drain_into(&mut events[written..]);
     }
     Ok(written)
 }

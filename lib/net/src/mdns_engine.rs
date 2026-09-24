@@ -34,12 +34,15 @@ use crate::dns::{Name, RecordType};
 use crate::rate::PeerBudgets;
 use crate::timeutil::{from_nanos, nanos, NEVER};
 
-use super::cache::{Learned, RecordCache};
+use super::cache::{expires_at, CachedRecord, Learned, RecordCache};
 use super::codec::{Message, MessageWriter, Question, Section};
 use super::{
     rename, NameKind, QuestionType, RData, Record, TypeBitmap, MAX_PUBLISHED, MAX_QUESTIONS,
     MAX_RENAMES, PORT, TTL_GOODBYE_SECS,
 };
+
+// A question index is a bit in the per-poll due set.
+const _: () = assert!(MAX_QUESTIONS <= 256);
 
 /// One millisecond in the engine's nanosecond time base.
 const MS: u128 = 1_000_000;
@@ -196,15 +199,47 @@ pub enum ServiceState {
     Withdrawn,
 }
 
-/// Why a publication was refused.
+/// Why a publication or a question was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublishError {
-    /// [`MAX_PUBLISHED`] records are already published on this interface.
+    /// [`MAX_PUBLISHED`] records, or [`MAX_QUESTIONS`] questions, are
+    /// already held on this interface.
     TooMany,
     /// A publication must carry at least one record.
     NoRecords,
     /// The allocator refused the publication.
     NoMemory,
+    /// That name and type is already being asked. One question per pair:
+    /// consumers wanting the same answer share the one that exists.
+    Duplicate,
+}
+
+/// How one question's answer set moved.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnswerChange {
+    /// A record answering the question is now held.
+    Added,
+    /// A held answer was asserted again, renewing its lifetime.
+    Refreshed,
+    /// A held answer left the cache: its lifetime ran out, a goodbye or its
+    /// owner's cache-flush retired it, the bounds evicted it, or the link
+    /// went down.
+    Retired,
+}
+
+/// One edge in one question's answer set.
+///
+/// Every record a question has been told was [`AnswerChange::Added`] is
+/// later told [`AnswerChange::Retired`] exactly once, unless the question
+/// is stopped first — so a consumer's set never outlives the cache's.
+#[derive(Clone, Copy, Debug)]
+pub struct Answer<'a> {
+    /// The question the record answers.
+    pub question: QuestionId,
+    /// What happened to it.
+    pub change: AnswerChange,
+    /// The record, who sent it, and the lifetime the cache holds it for.
+    pub record: &'a CachedRecord,
 }
 
 /// Something the caller must know about: every one is an audit-worthy edge
@@ -269,13 +304,42 @@ struct Group {
 }
 
 /// One continuous question this host asks.
+///
+/// A record type, never `ANY`: an answer set is kept by name and type, and
+/// `ANY` is the query type a probe asks with, not a question with a set.
 #[derive(Clone, Debug)]
 struct Asked {
     id: QuestionId,
     name: Name,
-    qtype: QuestionType,
+    record_type: RecordType,
+    /// The cache's index key for the pair, so an arriving record is matched
+    /// by one integer comparison before any name.
+    key: u64,
     next_at: u128,
     interval: u128,
+}
+
+impl Asked {
+    fn is(&self, key: u64, record: &Record) -> bool {
+        self.key == key && self.record_type == record.record_type() && self.name == record.name
+    }
+}
+
+/// Tell `answers` of the question `record` answers, if one asks for it.
+fn announce(
+    questions: &[Asked],
+    key: u64,
+    change: AnswerChange,
+    record: &CachedRecord,
+    answers: &mut dyn FnMut(&Answer<'_>),
+) {
+    if let Some(asked) = questions.iter().find(|asked| asked.is(key, &record.record)) {
+        answers(&Answer {
+            question: asked.id,
+            change,
+            record,
+        });
+    }
 }
 
 /// A multicast response being accumulated before it is sent.
@@ -496,17 +560,32 @@ impl MdnsEngine {
     /// Ask a continuous question, re-asked on the RFC 6762 §5.2 backoff and
     /// refreshed before a matching cached record expires.
     ///
+    /// The answer set starts with what is already cached: each matching
+    /// record is told to `answers` as [`AnswerChange::Added`] before this
+    /// returns, and every later edge arrives through [`Self::on_message`],
+    /// [`Self::poll`], and [`Self::on_link_down`].
+    ///
     /// # Errors
     ///
-    /// [`PublishError::TooMany`] past [`MAX_QUESTIONS`],
+    /// [`PublishError::Duplicate`] when the pair is already asked,
+    /// [`PublishError::TooMany`] past [`MAX_QUESTIONS`], and
     /// [`PublishError::NoMemory`] when the allocator refuses.
     pub fn ask(
         &mut self,
         now: Duration64,
         name: Name,
-        qtype: QuestionType,
+        record_type: RecordType,
         rng: &mut dyn FnMut() -> u32,
+        answers: &mut dyn FnMut(&Answer<'_>),
     ) -> Result<QuestionId, PublishError> {
+        let key = self.cache.key_of(&name, record_type);
+        if self
+            .questions
+            .iter()
+            .any(|asked| asked.key == key && asked.record_type == record_type && asked.name == name)
+        {
+            return Err(PublishError::Duplicate);
+        }
         if self.questions.len() >= MAX_QUESTIONS {
             return Err(PublishError::TooMany);
         }
@@ -518,32 +597,32 @@ impl MdnsEngine {
         self.questions.push(Asked {
             id,
             name,
-            qtype,
+            record_type,
+            key,
             next_at: nanos(now).saturating_add(jitter(rng, 0, QUERY_FIRST_DELAY_MAX)),
             interval: QUERY_INITIAL_INTERVAL,
         });
-        if let QuestionType::Record(record_type) = qtype {
-            self.cache.set_watched(&name, record_type, true);
+        self.cache.set_watched(&name, record_type, true);
+        for cached in self.cache.lookup(&name, record_type) {
+            answers(&Answer {
+                question: id,
+                change: AnswerChange::Added,
+                record: &cached,
+            });
         }
         Ok(id)
     }
 
     /// Stop asking a question, which also stops refreshing the records it
-    /// was keeping alive.
+    /// was keeping alive. Its answer set simply ends: no edge is told for it.
     pub fn stop_asking(&mut self, id: QuestionId) {
         let Some(index) = self.questions.iter().position(|q| q.id == id) else {
             return;
         };
         let asked = self.questions.remove(index);
-        if let QuestionType::Record(record_type) = asked.qtype {
-            let still_watched = self
-                .questions
-                .iter()
-                .any(|q| q.name == asked.name && q.qtype.matches(record_type));
-            if !still_watched {
-                self.cache.set_watched(&asked.name, record_type, false);
-            }
-        }
+        // One question per pair, so nothing else was watching it.
+        self.cache
+            .set_watched(&asked.name, asked.record_type, false);
     }
 
     /// The next instant [`Self::poll`] has work to do, or `None`.
@@ -565,18 +644,22 @@ impl MdnsEngine {
     }
 
     /// Perform whatever `now` has reached, writing at most one datagram into
-    /// `out`.
+    /// `out`, and telling `answers` of every answer that expired.
     ///
     /// Call repeatedly until it answers `None`: one call emits one datagram,
-    /// so a caller with one buffer never has two half-built messages.
+    /// so a caller with one buffer never has two half-built messages. A
+    /// datagram `out` has no room for is not retried: its round is spent as
+    /// though sent, so every schedule moves on and [`Self::next_deadline`]
+    /// never stays in the past.
     pub fn poll(
         &mut self,
         now: Duration64,
         rng: &mut dyn FnMut() -> u32,
         out: &mut [u8],
+        answers: &mut dyn FnMut(&Answer<'_>),
     ) -> Option<Emit> {
         let now_ns = nanos(now);
-        self.expire_cache(now);
+        self.expire_cache(now, answers);
 
         if !self.pending.is_idle() && self.pending.due <= now_ns {
             if let Some(emit) = self.send_pending(now_ns, out) {
@@ -590,7 +673,8 @@ impl MdnsEngine {
     }
 
     /// Fold one received datagram, answering immediately where the protocol
-    /// asks for an immediate answer.
+    /// asks for an immediate answer, and telling `answers` of every edge it
+    /// moved in a question's answer set.
     ///
     /// A delayed multicast answer is scheduled rather than returned; it goes
     /// out through [`Self::poll`] when its jitter elapses, which is what lets
@@ -602,6 +686,7 @@ impl MdnsEngine {
         sender: Sender,
         rng: &mut dyn FnMut() -> u32,
         out: &mut [u8],
+        answers: &mut dyn FnMut(&Answer<'_>),
     ) -> Option<Emit> {
         // Off-link first, before a single byte is parsed: a sender that is
         // not on this link has no business asking this host anything.
@@ -613,16 +698,23 @@ impl MdnsEngine {
             return None;
         }
         if message.response {
-            self.on_response(now, &message, sender.addr);
+            self.on_response(now, &message, sender.addr, answers);
             return None;
         }
         self.on_query(now, &message, sender.addr, sender.port, rng, out)
     }
 
     /// Drop everything learned on this link, which is what a link going down
-    /// means: a record learned there says nothing about anywhere else.
-    pub fn on_link_down(&mut self) {
-        self.cache.clear();
+    /// means: a record learned there says nothing about anywhere else. Every
+    /// answer a question held is told to `answers` as retired; the questions
+    /// themselves are the caller's to keep or stop.
+    pub fn on_link_down(&mut self, answers: &mut dyn FnMut(&Answer<'_>)) {
+        let Self {
+            cache, questions, ..
+        } = self;
+        cache.clear(&mut |key, gone| {
+            announce(questions, key, AnswerChange::Retired, gone, answers);
+        });
         self.pending = Pending::idle();
     }
 
@@ -630,7 +722,13 @@ impl MdnsEngine {
 
     /// Fold a response: cache what it asserts, notice what it claims of
     /// ours, and drop from the pending answer anything it has just said.
-    fn on_response(&mut self, now: Duration64, message: &Message<'_>, from: IpAddr) {
+    fn on_response(
+        &mut self,
+        now: Duration64,
+        message: &Message<'_>,
+        from: IpAddr,
+        answers: &mut dyn FnMut(&Answer<'_>),
+    ) {
         for (section, record) in message.records() {
             if section == Section::Authority {
                 continue;
@@ -639,9 +737,29 @@ impl MdnsEngine {
                 self.on_conflict(now, &record);
                 continue;
             }
-            let learned = self.cache.learn(now, &record, from);
-            if learned == Learned::Ignored {
-                continue;
+            let Self {
+                cache, questions, ..
+            } = self;
+            let learned = cache.learn(now, &record, from, &mut |key, gone| {
+                announce(questions, key, AnswerChange::Retired, gone, answers);
+            });
+            let change = match learned {
+                Learned::Ignored => continue,
+                // A goodbye's record stays held for its final second, and
+                // leaves through the expiry that ends it.
+                Learned::Retired => None,
+                Learned::Added => Some(AnswerChange::Added),
+                Learned::Refreshed => Some(AnswerChange::Refreshed),
+            };
+            if let Some(change) = change.filter(|_| !self.questions.is_empty()) {
+                let held = CachedRecord {
+                    record,
+                    source: from,
+                    received: now,
+                    expires: from_nanos(expires_at(nanos(now), record.ttl)),
+                };
+                let key = self.cache.key_of(&record.name, record.record_type());
+                announce(&self.questions, key, change, &held, answers);
             }
             // RFC 6762 §7.4: a record another responder has just sent needs
             // not be sent again by us.
@@ -919,7 +1037,9 @@ impl MdnsEngine {
     fn suppress_duplicate_questions(&mut self, now_ns: u128, message: &Message<'_>) {
         for question in message.questions() {
             for asked in &mut self.questions {
-                if asked.name != question.name || asked.qtype != question.qtype {
+                if QuestionType::Record(asked.record_type) != question.qtype
+                    || asked.name != question.name
+                {
                     continue;
                 }
                 // Treated exactly as if we had sent it: the round is spent
@@ -1018,7 +1138,8 @@ impl MdnsEngine {
     }
 
     /// Advance the probe, announce, and goodbye schedules, emitting at most
-    /// one datagram.
+    /// one datagram. A round whose datagram `out` has no room for is spent
+    /// all the same, and the walk moves on to the next group.
     fn advance_groups(
         &mut self,
         now_ns: u128,
@@ -1036,7 +1157,7 @@ impl MdnsEngine {
                     self.groups[index].next_at = now_ns;
                 }
                 ServiceState::Probing => {
-                    let len = self.build_probe(index, out)?;
+                    let built = self.build_probe(index, out);
                     let group = &mut self.groups[index];
                     group.remaining -= 1;
                     if group.remaining == 0 {
@@ -1050,14 +1171,16 @@ impl MdnsEngine {
                         group.next_at = now_ns.saturating_add(PROBE_INTERVAL);
                     }
                     let _ = rng;
-                    return Some(Emit {
-                        len,
-                        to: Destination::Group,
-                    });
+                    if let Some(len) = built {
+                        return Some(Emit {
+                            len,
+                            to: Destination::Group,
+                        });
+                    }
                 }
                 ServiceState::Announcing | ServiceState::Retiring => {
                     let retiring = matches!(group.state, ServiceState::Retiring);
-                    let len = self.build_announcement(index, now_ns, out, retiring)?;
+                    let built = self.build_announcement(index, now_ns, out, retiring);
                     let group = &mut self.groups[index];
                     group.remaining -= 1;
                     if group.remaining == 0 {
@@ -1077,10 +1200,12 @@ impl MdnsEngine {
                         group.next_at = now_ns.saturating_add(step);
                         group.interval = group.interval.saturating_mul(2);
                     }
-                    return Some(Emit {
-                        len,
-                        to: Destination::Group,
-                    });
+                    if let Some(len) = built {
+                        return Some(Emit {
+                            len,
+                            to: Destination::Group,
+                        });
+                    }
                 }
                 ServiceState::Live | ServiceState::Withdrawn => {}
             }
@@ -1088,46 +1213,81 @@ impl MdnsEngine {
         None
     }
 
-    /// Send the query whose schedule `now_ns` has reached, carrying what we
-    /// already know so responders can stay quiet (RFC 6762 §7.1).
+    /// Send every question whose schedule `now_ns` has reached, as many as
+    /// one message holds, carrying what we already know so responders can
+    /// stay quiet (RFC 6762 §7.1).
+    ///
+    /// Questions raised together travel together (RFC 6762 §5.2); a question
+    /// the message had no room for stays due and leads the next one. A round
+    /// `out` cannot hold even one question of is spent unsent, so a caller
+    /// that gave no room is never left with a deadline in the past.
     fn send_query(&mut self, now_ns: u128, out: &mut [u8]) -> Option<Emit> {
-        let index = self
-            .questions
-            .iter()
-            .position(|asked| asked.next_at <= now_ns)?;
-        let (name, qtype) = {
-            let asked = &self.questions[index];
-            (asked.name, asked.qtype)
-        };
-        let mut writer = MessageWriter::new(out, 0, false)?;
-        if !writer.push_question(&Question::new(name, qtype)) {
+        let mut due = BitSet256::new();
+        for (index, asked) in self.questions.iter().enumerate() {
+            if let (true, Ok(bit)) = (asked.next_at <= now_ns, u16::try_from(index)) {
+                due.insert(bit);
+            }
+        }
+        if due.is_empty() {
             return None;
         }
-        if let QuestionType::Record(record_type) = qtype {
-            for cached in self.cache.lookup(&name, record_type) {
+        let built = self.build_query(now_ns, out, &due);
+        let spent = built.as_ref().map_or(due, |(_, sent)| *sent);
+        for bit in &spent {
+            if let Some(asked) = self.questions.get_mut(usize::from(bit)) {
+                asked.next_at = now_ns.saturating_add(asked.interval);
+                asked.interval = asked.interval.saturating_mul(2).min(QUERY_MAX_INTERVAL);
+            }
+        }
+        built.map(|(len, _)| Emit {
+            len,
+            to: Destination::Group,
+        })
+    }
+
+    /// Build one query from the `due` questions that fit, followed by their
+    /// known answers, returning its length and which questions it carries.
+    fn build_query(
+        &self,
+        now_ns: u128,
+        out: &mut [u8],
+        due: &BitSet256,
+    ) -> Option<(usize, BitSet256)> {
+        let mut writer = MessageWriter::new(out, 0, false)?;
+        let mut sent = BitSet256::new();
+        for bit in due {
+            let asked = self.questions.get(usize::from(bit))?;
+            let question = Question::new(asked.name, QuestionType::Record(asked.record_type));
+            if !writer.push_question(&question) {
+                break;
+            }
+            sent.insert(bit);
+        }
+        if sent.is_empty() {
+            return None;
+        }
+        'known: for bit in &sent {
+            let asked = self.questions.get(usize::from(bit))?;
+            for cached in self.cache.lookup(&asked.name, asked.record_type) {
+                // RFC 6762 §7.1: a record past half its lifetime is not one a
+                // responder would stay quiet for, so it only costs room.
+                let left = nanos(cached.expires).saturating_sub(now_ns);
+                if left.saturating_mul(2) <= expires_at(0, cached.record.ttl) {
+                    continue;
+                }
                 let mut known = cached.record;
                 // A known answer carries the lifetime *left*, not the one it
                 // arrived with, or a responder would suppress on a record we
                 // are about to lose.
                 known.ttl = remaining_secs(cached.expires, now_ns);
                 known.cache_flush = false;
-                if known.ttl == 0 {
-                    continue;
-                }
                 if !writer.push_record(Section::Answer, &known) {
                     writer.set_truncated();
-                    break;
+                    break 'known;
                 }
             }
         }
-        let len = writer.finish();
-        let asked = &mut self.questions[index];
-        asked.next_at = now_ns.saturating_add(asked.interval);
-        asked.interval = asked.interval.saturating_mul(2).min(QUERY_MAX_INTERVAL);
-        Some(Emit {
-            len,
-            to: Destination::Group,
-        })
+        Some((writer.finish(), sent))
     }
 
     /// Build a probe: the name asked about as `ANY`, with the records we
@@ -1234,16 +1394,31 @@ impl MdnsEngine {
 
     /// Expire cached records and pull forward the questions whose answers
     /// are about to go stale (RFC 6762 §5.2).
-    fn expire_cache(&mut self, now: Duration64) {
+    fn expire_cache(&mut self, now: Duration64, answers: &mut dyn FnMut(&Answer<'_>)) {
         let now_ns = nanos(now);
-        let questions = &mut self.questions;
-        self.cache.advance(now, &mut |name, record_type| {
-            for asked in questions.iter_mut() {
-                if asked.name == *name && asked.qtype.matches(record_type) {
-                    asked.next_at = asked.next_at.min(now_ns);
+        let Self {
+            cache, questions, ..
+        } = self;
+        // Both callbacks read the questions, so the refreshes they call for
+        // are applied once the walk is over.
+        let mut refresh = BitSet256::new();
+        cache.advance(
+            now,
+            &mut |name, record_type| {
+                let index = questions
+                    .iter()
+                    .position(|asked| asked.record_type == record_type && asked.name == *name);
+                if let Some(Ok(bit)) = index.map(u16::try_from) {
+                    refresh.insert(bit);
                 }
+            },
+            &mut |key, gone| announce(questions, key, AnswerChange::Retired, gone, answers),
+        );
+        for bit in &refresh {
+            if let Some(asked) = questions.get_mut(usize::from(bit)) {
+                asked.next_at = asked.next_at.min(now_ns);
             }
-        });
+        }
     }
 
     /// Drop a record from the pending answer because another responder has

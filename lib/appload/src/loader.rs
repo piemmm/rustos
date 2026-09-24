@@ -587,6 +587,8 @@ mod tests {
             flags: 0,
             capability_count: u16::try_from(caps.len()).unwrap(),
             mime_count: 1,
+            browse_count: 0,
+            reserved: 0,
             id_len: u8::try_from("com.example.app".len()).unwrap(),
             name_len: u8::try_from("Example".len()).unwrap(),
             version_len: u8::try_from("1.0".len()).unwrap(),

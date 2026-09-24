@@ -20,6 +20,10 @@
 //!    admits, and `get` answers with the first occurrence of a repeated one.
 //! 8. A record the builder produces reads back as exactly the attributes it
 //!    accepted.
+//! 9. The answer edges a question is told mirror the cache exactly: a record
+//!    is added once, renewed or retired only while held, retired exactly
+//!    once, and a question that was never asked, or has been stopped, is
+//!    told nothing.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from
 //! the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -33,8 +37,9 @@ use tairix_net::dnssd::{
     ServiceInstance, ServiceType, TxtAttributes, TxtBuilder, TxtValue, MAX_TXT_STRING_LEN,
 };
 use tairix_net::mdns::{
-    Destination, MdnsEngine, NameKind, QuestionType, RData, Record, RecordCache, Sender, Service,
-    TxtRecord, MAX_RECORDS, MAX_RECORDS_PER_SOURCE, MAX_TXT_LEN, PORT,
+    Answer, AnswerChange, Destination, MdnsEngine, NameKind, QuestionId, QuestionType, RData,
+    Record, RecordCache, Sender, Service, TxtRecord, MAX_RECORDS, MAX_RECORDS_PER_SOURCE,
+    MAX_TXT_LEN, PORT,
 };
 use tairix_net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -188,12 +193,12 @@ fn exercise_cache(rng: &mut Prng) {
         if !sources.contains(&source) {
             sources.push(source);
         }
-        cache.learn(now, &record, source);
+        cache.learn(now, &record, source, &mut |_, _| {});
         if rng.next_u64().is_multiple_of(8) {
             cache.set_watched(&record.name, record.record_type(), rng.next_u64() & 1 == 0);
         }
         if rng.next_u64().is_multiple_of(8) {
-            cache.advance(now, &mut |_, _| {});
+            cache.advance(now, &mut |_, _| {}, &mut |_, _| {});
         }
         let _ = cache.holds_fresher(now, &record);
         let _ = cache.lookup(&record.name, record.record_type()).count();
@@ -211,13 +216,113 @@ fn exercise_cache(rng: &mut Prng) {
     }
 }
 
+/// What each asked question has been told it holds.
+struct Asked {
+    id: QuestionId,
+    name: Name,
+    record_type: RecordType,
+    held: Vec<Record>,
+}
+
+/// Invariant 9 for one edge.
+fn check_answer(asked: &mut [Asked], stopped: &[QuestionId], answer: &Answer<'_>) {
+    assert!(
+        !stopped.contains(&answer.question),
+        "a stopped question is told nothing"
+    );
+    let question = asked
+        .iter_mut()
+        .find(|asked| asked.id == answer.question)
+        .expect("only an asked question is told anything");
+    let record = answer.record.record;
+    assert_eq!(record.record_type(), question.record_type);
+    assert_eq!(record.name, question.name);
+    let position = question
+        .held
+        .iter()
+        .position(|held| held.same_record(&record));
+    match answer.change {
+        AnswerChange::Added => {
+            assert!(position.is_none(), "a record is added once");
+            question.held.push(record);
+        }
+        AnswerChange::Refreshed => {
+            assert!(position.is_some(), "only a held record is renewed");
+        }
+        AnswerChange::Retired => {
+            let index = position.expect("only a held record is retired");
+            question.held.swap_remove(index);
+        }
+    }
+}
+
 /// Drive the whole engine with arbitrary datagrams at arbitrary times.
 fn exercise_engine(rng: &mut Prng) {
     let mut csprng = Prng::new(rng.next_u64());
     let mut rand = || csprng.next_u32();
     let mut engine = engine();
     let mut buf = [0u8; BUF];
+    let mut asked = seed_engine(rng, &mut engine, &mut rand);
+    let mut stopped: Vec<QuestionId> = Vec::new();
 
+    let mut millis = 0u64;
+    for _ in 0..48 {
+        millis = millis.saturating_add(u64::from(rng.next_u32() % 3_000));
+        let now = Duration64::from_nanos(millis.saturating_mul(1_000_000));
+        engine_step(
+            rng,
+            &mut engine,
+            &mut rand,
+            &mut buf,
+            now,
+            &mut asked,
+            &mut stopped,
+        );
+        while engine.take_event().is_some() {}
+        if let Some(deadline) = engine.next_deadline() {
+            assert!(deadline.secs() >= 0);
+        }
+        assert!(engine.cache().len() <= MAX_RECORDS);
+        for question in &asked {
+            let cached = engine
+                .cache()
+                .lookup(&question.name, question.record_type)
+                .count();
+            assert_eq!(
+                question.held.len(),
+                cached,
+                "the told set mirrors the cache"
+            );
+        }
+    }
+
+    // An off-link source changes nothing at all: not the cache, not a
+    // schedule, not a reply, not an answer.
+    let before = engine.cache().len();
+    let deadline_before = engine.next_deadline();
+    let built = build_message(rng);
+    let off_link = Sender {
+        addr: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
+        port: PORT,
+        on_link: false,
+    };
+    let now = Duration64::from_nanos(millis.saturating_mul(1_000_000));
+    assert!(engine
+        .on_message(now, &built, off_link, &mut rand, &mut buf, &mut |_| {
+            panic!("an off-link sender moves no answer")
+        })
+        .is_none());
+    assert_eq!(engine.cache().len(), before);
+    assert_eq!(engine.next_deadline(), deadline_before);
+}
+
+/// Publish a few records and ask a few questions, returning each question
+/// with what it was told it starts from.
+fn seed_engine(
+    rng: &mut Prng,
+    engine: &mut MdnsEngine,
+    rand: &mut dyn FnMut() -> u32,
+) -> Vec<Asked> {
     for _ in 0..=rng.below(3) {
         let data = [draw_rdata(rng)];
         let kind = if rng.next_u64() & 1 == 0 {
@@ -231,80 +336,89 @@ fn exercise_engine(rng: &mut Prng) {
             kind,
             rng.next_u64() & 1 == 0,
             &data,
-            &mut rand,
+            rand,
         );
     }
-    for _ in 0..rng.below(3) {
-        let qtype = if rng.next_u64() & 1 == 0 {
-            QuestionType::Any
-        } else {
-            QuestionType::Record(RecordType::Ptr)
-        };
-        let _ = engine.ask(Duration64::from_secs(0), draw_name(rng), qtype, &mut rand);
+    let mut asked = Vec::new();
+    for _ in 0..rng.below(4) {
+        let name = draw_name(rng);
+        let record_type = *rng.pick(&[RecordType::Ptr, RecordType::A, RecordType::Srv]);
+        let mut told = Vec::new();
+        if let Ok(id) = engine.ask(
+            Duration64::from_secs(0),
+            name,
+            record_type,
+            rand,
+            &mut |answer| told.push(answer.record.record),
+        ) {
+            asked.push(Asked {
+                id,
+                name,
+                record_type,
+                held: told,
+            });
+        }
     }
+    asked
+}
 
-    let mut millis = 0u64;
-    let mut datagram = [0u8; 512];
-    for _ in 0..48 {
-        millis = millis.saturating_add(u64::from(rng.next_u32() % 3_000));
-        let now = Duration64::from_nanos(millis.saturating_mul(1_000_000));
-        match rng.next_u64() % 3 {
-            0 => {
-                let size = rng.below(datagram.len() + 1);
-                rng.fill(&mut datagram[..size]);
-                let source = peer(u8::try_from(rng.below(8)).unwrap_or(0));
-                let port = if rng.next_u64() & 1 == 0 {
-                    PORT
-                } else {
-                    rng.next_u16()
-                };
-                let emitted = engine.on_message(
-                    now,
-                    &datagram[..size],
-                    on_link(source, port),
-                    &mut rand,
-                    &mut buf,
-                );
-                check_emit(emitted.map(|emit| (emit.to, emit.len)), &buf);
-            }
-            1 => {
-                // A structurally valid message, so the deeper paths are
-                // reached rather than only the parser's rejection.
-                let built = build_message(rng);
-                let source = peer(u8::try_from(rng.below(8)).unwrap_or(0));
-                let emitted =
-                    engine.on_message(now, &built, on_link(source, PORT), &mut rand, &mut buf);
-                check_emit(emitted.map(|emit| (emit.to, emit.len)), &buf);
-            }
-            _ => {
-                while let Some(emit) = engine.poll(now, &mut rand, &mut buf) {
-                    check_emit(Some((emit.to, emit.len)), &buf);
-                }
+/// One arbitrary event at `now`: a datagram of noise or a well-formed
+/// message, a poll, a lost link, or a question stopped.
+fn engine_step(
+    rng: &mut Prng,
+    engine: &mut MdnsEngine,
+    rand: &mut dyn FnMut() -> u32,
+    buf: &mut [u8; BUF],
+    now: Duration64,
+    asked: &mut Vec<Asked>,
+    stopped: &mut Vec<QuestionId>,
+) {
+    let mut sink = |answer: &Answer<'_>| check_answer(asked, stopped, answer);
+    match rng.next_u64() % 4 {
+        0 => {
+            let mut datagram = [0u8; 512];
+            let size = rng.below(datagram.len() + 1);
+            rng.fill(&mut datagram[..size]);
+            let source = peer(u8::try_from(rng.below(8)).unwrap_or(0));
+            let port = if rng.next_u64() & 1 == 0 {
+                PORT
+            } else {
+                rng.next_u16()
+            };
+            let emitted = engine.on_message(
+                now,
+                &datagram[..size],
+                on_link(source, port),
+                rand,
+                buf,
+                &mut sink,
+            );
+            check_emit(emitted.map(|emit| (emit.to, emit.len)), buf);
+        }
+        1 => {
+            // A structurally valid message, so the deeper paths are reached
+            // rather than only the parser's rejection.
+            let built = build_message(rng);
+            let source = peer(u8::try_from(rng.below(8)).unwrap_or(0));
+            let emitted =
+                engine.on_message(now, &built, on_link(source, PORT), rand, buf, &mut sink);
+            check_emit(emitted.map(|emit| (emit.to, emit.len)), buf);
+        }
+        2 => {
+            while let Some(emit) = engine.poll(now, rand, buf, &mut sink) {
+                check_emit(Some((emit.to, emit.len)), buf);
             }
         }
-        while engine.take_event().is_some() {}
-        if let Some(deadline) = engine.next_deadline() {
-            assert!(deadline.secs() >= 0);
+        _ => {
+            if rng.next_u64() & 1 == 0 {
+                engine.on_link_down(&mut sink);
+            } else if !asked.is_empty() {
+                let question = asked.swap_remove(rng.below(asked.len()));
+                engine.stop_asking(question.id);
+                stopped.push(question.id);
+            }
         }
-        assert!(engine.cache().len() <= MAX_RECORDS);
     }
-
-    // An off-link source changes nothing at all: not the cache, not a
-    // schedule, not a reply.
-    let before = engine.cache().len();
-    let deadline_before = engine.next_deadline();
-    let built = build_message(rng);
-    let off_link = Sender {
-        addr: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
-        port: PORT,
-        on_link: false,
-    };
-    let now = Duration64::from_nanos(millis.saturating_mul(1_000_000));
-    assert!(engine
-        .on_message(now, &built, off_link, &mut rand, &mut buf)
-        .is_none());
-    assert_eq!(engine.cache().len(), before);
-    assert_eq!(engine.next_deadline(), deadline_before);
 }
 
 /// Drive the DNS-SD grammar with names and attributes a peer chose.

@@ -516,6 +516,16 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn peer_watch(
+        &self,
+        _c: &CallerContext<'_>,
+        _op: tairix_abi::PeerWatchOp,
+        _proc_id: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn resource_grants(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         self.bump();
         Ok(0)

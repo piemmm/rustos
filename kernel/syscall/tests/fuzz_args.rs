@@ -476,6 +476,16 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn peer_watch(
+        &self,
+        _c: &CallerContext<'_>,
+        _op: tairix_abi::PeerWatchOp,
+        _proc_id: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn resource_grants(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -1075,6 +1085,29 @@ fn filelock_operands_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) 
     true
 }
 
+/// One `U32` operand the dispatcher runs through a closed enum's decode, which
+/// refuses any value outside the set: the syscall, the argument, the decode.
+type ClosedArg = (SyscallNumber, usize, fn(u32) -> bool);
+
+/// Every [`ClosedArg`] the dispatcher applies.
+const CLOSED_U32_ARGS: &[ClosedArg] = &[
+    (SyscallNumber::SIGNAL, 1, |raw| {
+        tairix_abi::Signal::from_u32(raw).is_ok()
+    }),
+    (SyscallNumber::SIGNAL_INTAKE, 0, |raw| {
+        tairix_abi::SignalIntakeOp::from_u32(raw).is_ok()
+    }),
+    (SyscallNumber::SCHED_SET_PRIORITY, 1, |raw| {
+        tairix_abi::SchedPriority::from_u32(raw).is_ok()
+    }),
+    (SyscallNumber::SYSTEM_POWER, 0, |raw| {
+        PowerAction::from_u32(raw).is_ok()
+    }),
+    (SyscallNumber::PEER_WATCH, 0, |raw| {
+        tairix_abi::PeerWatchOp::from_u32(raw).is_ok()
+    }),
+];
+
 /// Whether the dispatcher's **per-operand** decodes accept `args`.
 ///
 /// [`would_accept`] answers the shape question — the number is in range, the
@@ -1124,43 +1157,10 @@ fn operand_semantics_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) 
             return false;
         }
     }
-    // `signal`'s signal argument (arg 1) carries an extra semantic check the
-    // per-`AbiType` validator cannot express: the dispatcher runs the raw
-    // `U32` through `Signal::from_u32`, which rejects any value outside the
-    // closed signal set (including the reserved 0). Mirror that here.
-    if spec.number == SyscallNumber::SIGNAL {
-        let raw = u32::try_from(args[1] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
-        if tairix_abi::Signal::from_u32(raw).is_err() {
-            return false;
-        }
-    }
-    // `signal_intake`'s op argument (arg 0) carries the same extra semantic
-    // check: the dispatcher runs the raw `U32` through
-    // `SignalIntakeOp::from_u32`, which rejects any value outside the
-    // closed op set. Mirror that here.
-    if spec.number == SyscallNumber::SIGNAL_INTAKE {
-        let raw = u32::try_from(args[0] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
-        if tairix_abi::SignalIntakeOp::from_u32(raw).is_err() {
-            return false;
-        }
-    }
-    // `sched_set_priority`'s level argument (arg 1) carries the same extra
-    // semantic check: the dispatcher runs the raw `U32` through
-    // `SchedPriority::from_u32`, which rejects any value outside the closed
-    // level set (including the reserved 0). Mirror that here.
-    if spec.number == SyscallNumber::SCHED_SET_PRIORITY {
-        let raw = u32::try_from(args[1] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
-        if tairix_abi::SchedPriority::from_u32(raw).is_err() {
-            return false;
-        }
-    }
-    // `system_power`'s action argument (arg 0) carries the same extra
-    // semantic check: the dispatcher runs the raw `U32` through
-    // `PowerAction::from_u32`, which rejects any value outside the closed
-    // action set (including the reserved 0). Mirror that here.
-    if spec.number == SyscallNumber::SYSTEM_POWER {
-        let raw = u32::try_from(args[0] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
-        if PowerAction::from_u32(raw).is_err() {
+    for &(number, arg, admits) in CLOSED_U32_ARGS {
+        if spec.number == number
+            && !admits(u32::try_from(args[arg] & 0xFFFF_FFFF).unwrap_or(u32::MAX))
+        {
             return false;
         }
     }

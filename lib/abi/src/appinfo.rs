@@ -49,6 +49,9 @@ pub const APPINFO_MAX_CAPABILITIES: u16 = 64;
 /// Maximum number of MIME / file-type associations a bundle may declare.
 pub const APPINFO_MAX_MIME: u16 = 32;
 
+/// Maximum number of service types a bundle may declare it browses for.
+pub const APPINFO_MAX_BROWSE: u16 = 16;
+
 /// Maximum length, in bytes, of a bundle identifier.
 pub const BUNDLE_ID_MAX: usize = 64;
 
@@ -83,13 +86,19 @@ pub const MIME_TYPE_MAX: usize = 64;
 /// fixed [`MIME_TYPE_MAX`] buffer.
 pub const MIME_ENTRY_LEN: usize = 1 + MIME_TYPE_MAX;
 
+/// Encoded length of one browsed service type in the body: the transport,
+/// the name's length, and a fixed
+/// [`SERVICE_NAME_MAX`](crate::discovery_ipc::SERVICE_NAME_MAX) buffer.
+pub const BROWSE_ENTRY_LEN: usize = 2 + crate::discovery_ipc::SERVICE_NAME_MAX;
+
 /// Largest possible encoded `AppInfo` manifest: the fixed header plus the
 /// maximal capability and MIME bodies. A longer file cannot be a valid
 /// manifest, so every reader bounds its manifest read here and refuses a
 /// bigger file before decoding a byte of it.
 pub const APPINFO_WIRE_MAX: usize = AppInfoHeader::WIRE_LEN
     + APPINFO_MAX_CAPABILITIES as usize * 2
-    + APPINFO_MAX_MIME as usize * MIME_ENTRY_LEN;
+    + APPINFO_MAX_MIME as usize * MIME_ENTRY_LEN
+    + APPINFO_MAX_BROWSE as usize * BROWSE_ENTRY_LEN;
 
 /// Maximum length, in bytes, of the library icon asset name a manifest may
 /// declare — a plain file name inside the bundle's own `Resources/`
@@ -823,7 +832,9 @@ fn is_within(path: &str, dir: &str) -> bool {
 /// is the requested capability-id list (`capability_count` little-endian
 /// `u16`s, decoded by [`crate::decode_capability_ids`]) immediately followed
 /// by the MIME-type table (`mime_count` entries of [`MIME_ENTRY_LEN`] bytes,
-/// read by [`mime_type_at`]). The Ed25519 signature covers the **whole
+/// read by [`mime_type_at`]) and the browsed service types (`browse_count`
+/// entries of [`BROWSE_ENTRY_LEN`] bytes, read by [`browse_type_at`]). The
+/// Ed25519 signature covers the **whole
 /// manifest except the signature field itself**:
 /// `bytes[signed_range()] ‖ bytes[WIRE_LEN..]` — the header prefix
 /// concatenated with the capability/MIME body — so a tampered capability
@@ -845,6 +856,13 @@ pub struct AppInfoHeader {
     /// Number of declared MIME-type associations in the body. Capped at
     /// [`APPINFO_MAX_MIME`].
     pub mime_count: u16,
+    /// Number of service types the bundle declares it browses for — the most
+    /// link-local discovery may ever grant it. Capped at
+    /// [`APPINFO_MAX_BROWSE`].
+    pub browse_count: u16,
+    /// Always zero, so the header has no padding and its in-memory image is
+    /// its wire image; a non-zero value is refused.
+    pub reserved: u16,
     /// Valid byte count of the inline `id` buffer (`<= BUNDLE_ID_MAX`).
     pub id_len: u8,
     /// Valid byte count of the inline `name` buffer (`<= BUNDLE_NAME_MAX`).
@@ -925,15 +943,17 @@ pub struct AppInfoHeader {
 impl AppInfoHeader {
     const OFF_CAP_COUNT: usize = 12;
     const OFF_MIME_COUNT: usize = 14;
-    const OFF_ID_LEN: usize = 16;
-    const OFF_NAME_LEN: usize = 17;
-    const OFF_VERSION_LEN: usize = 18;
-    const OFF_LIBRARY_ICON_LEN: usize = 19;
-    const OFF_LIBRARY: usize = 20;
-    const OFF_PURPOSE_LEN: usize = 21;
-    const OFF_AUTHOR_LEN: usize = 22;
-    const OFF_TITLE_LEN: usize = 23;
-    const OFF_ID: usize = 24;
+    const OFF_BROWSE_COUNT: usize = 16;
+    const OFF_RESERVED: usize = 18;
+    const OFF_ID_LEN: usize = 20;
+    const OFF_NAME_LEN: usize = 21;
+    const OFF_VERSION_LEN: usize = 22;
+    const OFF_LIBRARY_ICON_LEN: usize = 23;
+    const OFF_LIBRARY: usize = 24;
+    const OFF_PURPOSE_LEN: usize = 25;
+    const OFF_AUTHOR_LEN: usize = 26;
+    const OFF_TITLE_LEN: usize = 27;
+    const OFF_ID: usize = 28;
     const OFF_NAME: usize = Self::OFF_ID + BUNDLE_ID_MAX;
     const OFF_VERSION: usize = Self::OFF_NAME + BUNDLE_NAME_MAX;
     const OFF_LIBRARY_ICON: usize = Self::OFF_VERSION + BUNDLE_VERSION_MAX;
@@ -973,6 +993,10 @@ impl AppInfoHeader {
             .copy_from_slice(&self.capability_count.to_le_bytes());
         out[Self::OFF_MIME_COUNT..Self::OFF_MIME_COUNT + 2]
             .copy_from_slice(&self.mime_count.to_le_bytes());
+        out[Self::OFF_BROWSE_COUNT..Self::OFF_BROWSE_COUNT + 2]
+            .copy_from_slice(&self.browse_count.to_le_bytes());
+        out[Self::OFF_RESERVED..Self::OFF_RESERVED + 2]
+            .copy_from_slice(&self.reserved.to_le_bytes());
         out[Self::OFF_ID_LEN] = self.id_len;
         out[Self::OFF_NAME_LEN] = self.name_len;
         out[Self::OFF_VERSION_LEN] = self.version_len;
@@ -1008,12 +1032,13 @@ impl AppInfoHeader {
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the magic word does not match, or if `flags`
-    ///   sets a bit outside [`APPINFO_FLAG_MASK`].
+    /// * [`Errno::BadMagic`] if the magic word does not match, if `flags`
+    ///   sets a bit outside [`APPINFO_FLAG_MASK`], or if `reserved` is not
+    ///   zero.
     /// * [`Errno::AbiVersionUnsupported`] if `abi_version` is not
     ///   [`crate::ABI_VERSION_CURRENT`].
-    /// * [`Errno::LengthOutOfRange`] if `capability_count`, `mime_count`, or
-    ///   any inline string length exceeds its cap.
+    /// * [`Errno::LengthOutOfRange`] if `capability_count`, `mime_count`,
+    ///   `browse_count`, or any inline string length exceeds its cap.
     /// * [`Errno::OutOfRange`] if a mandatory identity string (`id`, `name`,
     ///   `version`) is empty or is not valid UTF-8, if `id` is outside the
     ///   [`validate_bundle_id`] grammar, if the `library` byte is outside the
@@ -1048,6 +1073,14 @@ impl AppInfoHeader {
         if mime_count > APPINFO_MAX_MIME {
             return Err(Errno::LengthOutOfRange);
         }
+        let browse_count = read_u16(bytes, Self::OFF_BROWSE_COUNT);
+        if browse_count > APPINFO_MAX_BROWSE {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let reserved = read_u16(bytes, Self::OFF_RESERVED);
+        if reserved != 0 {
+            return Err(Errno::BadMagic);
+        }
         let id_len = bytes[Self::OFF_ID_LEN];
         let name_len = bytes[Self::OFF_NAME_LEN];
         let version_len = bytes[Self::OFF_VERSION_LEN];
@@ -1064,6 +1097,8 @@ impl AppInfoHeader {
             flags,
             capability_count,
             mime_count,
+            browse_count,
+            reserved,
             id_len,
             name_len,
             version_len,
@@ -1269,7 +1304,7 @@ impl AppInfoHeader {
     }
 
     /// Number of body bytes a manifest with these counts must carry: the
-    /// capability list followed by the MIME-type table.
+    /// capability list, the MIME-type table, then the browsed service types.
     ///
     /// # Errors
     ///
@@ -1278,24 +1313,93 @@ impl AppInfoHeader {
         body_len(
             usize::from(self.capability_count),
             usize::from(self.mime_count),
+            usize::from(self.browse_count),
         )
     }
 }
 
-/// Number of body bytes a manifest with `capability_count` capability ids
-/// and `mime_count` MIME entries carries.
+/// Number of body bytes a manifest with `capability_count` capability ids,
+/// `mime_count` MIME entries, and `browse_count` browsed types carries.
 ///
 /// # Errors
 ///
 /// [`Errno::LengthOutOfRange`] if the computation overflows `usize`.
-pub fn body_len(capability_count: usize, mime_count: usize) -> Result<usize, Errno> {
+pub fn body_len(
+    capability_count: usize,
+    mime_count: usize,
+    browse_count: usize,
+) -> Result<usize, Errno> {
     let caps = capability_count
         .checked_mul(2)
         .ok_or(Errno::LengthOutOfRange)?;
     let mimes = mime_count
         .checked_mul(MIME_ENTRY_LEN)
         .ok_or(Errno::LengthOutOfRange)?;
-    caps.checked_add(mimes).ok_or(Errno::LengthOutOfRange)
+    let browses = browse_count
+        .checked_mul(BROWSE_ENTRY_LEN)
+        .ok_or(Errno::LengthOutOfRange)?;
+    caps.checked_add(mimes)
+        .and_then(|len| len.checked_add(browses))
+        .ok_or(Errno::LengthOutOfRange)
+}
+
+/// Read the `index`-th browsed service type from a manifest `body`, which
+/// follows the capability list and the MIME table.
+///
+/// Only the entry's structure is judged — a known transport, a name of
+/// `1..=SERVICE_NAME_MAX` octets, and nothing past it; the RFC 6335 grammar is
+/// `tairix_net::dnssd`'s, which the image builder applies before it signs.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] if `body` is too short to hold the entry.
+/// * [`Errno::LengthOutOfRange`] for a name length out of bounds, or an
+///   offset computation that overflows.
+/// * [`Errno::OutOfRange`] for an unknown transport.
+/// * [`Errno::BadMagic`] for a non-zero byte past the name.
+pub fn browse_type_at(
+    body: &[u8],
+    capability_count: usize,
+    mime_count: usize,
+    index: usize,
+) -> Result<crate::discovery_ipc::ServiceTypeField<'_>, Errno> {
+    let entry = body_len(capability_count, mime_count, index)?;
+    let end = entry
+        .checked_add(BROWSE_ENTRY_LEN)
+        .ok_or(Errno::LengthOutOfRange)?;
+    let bytes = body.get(entry..end).ok_or(Errno::BufferTooSmall)?;
+    let transport = crate::discovery_ipc::Transport::from_u8(bytes[0])?;
+    let len = usize::from(bytes[1]);
+    if len == 0 || len > crate::discovery_ipc::SERVICE_NAME_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    if bytes[2 + len..].iter().any(|&byte| byte != 0) {
+        return Err(Errno::BadMagic);
+    }
+    Ok(crate::discovery_ipc::ServiceTypeField {
+        name: &bytes[2..2 + len],
+        transport,
+    })
+}
+
+/// Encode one browsed service type as its [`BROWSE_ENTRY_LEN`] body entry.
+///
+/// # Errors
+///
+/// [`Errno::LengthOutOfRange`] for a name of no octets or more than
+/// [`SERVICE_NAME_MAX`](crate::discovery_ipc::SERVICE_NAME_MAX).
+pub fn browse_entry(
+    service: &crate::discovery_ipc::ServiceTypeField<'_>,
+) -> Result<[u8; BROWSE_ENTRY_LEN], Errno> {
+    let len = service.name.len();
+    if len == 0 || len > crate::discovery_ipc::SERVICE_NAME_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let mut entry = [0u8; BROWSE_ENTRY_LEN];
+    entry[0] = service.transport.as_u8();
+    entry[1] = u8::try_from(len).map_err(|_| Errno::LengthOutOfRange)?;
+    entry[2..2 + len].copy_from_slice(service.name);
+    Ok(entry)
 }
 
 /// Read the `index`-th MIME-type string from a manifest `body`.
@@ -1486,6 +1590,8 @@ pub fn manifest_header(id: &str, name: &str) -> AppInfoHeader {
         flags: 0,
         capability_count: 0,
         mime_count: 0,
+        browse_count: 0,
+        reserved: 0,
         id_len,
         name_len,
         version_len,
@@ -1513,11 +1619,12 @@ pub fn manifest_header(id: &str, name: &str) -> AppInfoHeader {
 #[cfg(test)]
 mod tests {
     use super::{
-        body_len, digest_bundle_contents, mime_type_at, resolve_library, validate_bundle_layout,
-        AppInfoHeader, BundleEntry, BundleFileDigest, BundleLayoutError, LibraryCategory,
-        LibraryError, LibraryScope, ProgramKind, PublisherBinding, PublisherId, APPINFO_FLAG_MASK,
-        APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC,
-        APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX,
+        body_len, browse_entry, browse_type_at, digest_bundle_contents, mime_type_at,
+        resolve_library, validate_bundle_layout, AppInfoHeader, BundleEntry, BundleFileDigest,
+        BundleLayoutError, LibraryCategory, LibraryError, LibraryScope, ProgramKind,
+        PublisherBinding, PublisherId, APPINFO_FLAG_MASK, APPINFO_FLAG_MULTI_INSTANCE,
+        APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES,
+        APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX,
         HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN, MIME_TYPE_MAX,
         PUBLISHER_CERT_CONTEXT, PUBLISHER_CERT_MESSAGE_LEN, PUBLISHER_ID_CONTEXT, PUBLISHER_ID_LEN,
         PUBLISHER_ID_PREIMAGE_LEN, SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE,
@@ -1547,6 +1654,8 @@ mod tests {
             flags: 0,
             capability_count: 2,
             mime_count: 1,
+            browse_count: 1,
+            reserved: 0,
             id_len,
             name_len,
             version_len,
@@ -1736,7 +1845,7 @@ mod tests {
 
     #[test]
     fn header_wire_size_is_frozen() {
-        assert_eq!(AppInfoHeader::WIRE_LEN, 728);
+        assert_eq!(AppInfoHeader::WIRE_LEN, 732);
         assert_eq!(
             AppInfoHeader::WIRE_LEN,
             core::mem::size_of::<AppInfoHeader>()
@@ -2016,7 +2125,7 @@ mod tests {
     #[test]
     fn body_len_and_mime_read() {
         // 2 caps + 1 mime entry.
-        assert_eq!(body_len(2, 1), Ok(4 + MIME_ENTRY_LEN));
+        assert_eq!(body_len(2, 1, 0), Ok(4 + MIME_ENTRY_LEN));
         // Build a body: two cap ids then one mime entry "text/plain".
         let mut body = [0u8; 4 + MIME_ENTRY_LEN];
         let mime = b"text/plain";
@@ -2025,6 +2134,55 @@ mod tests {
         assert_eq!(mime_type_at(&body, 2, 0), Ok("text/plain"));
         // Out-of-range index is a short buffer.
         assert_eq!(mime_type_at(&body, 2, 1), Err(Errno::BufferTooSmall));
+    }
+
+    #[test]
+    fn a_browsed_type_follows_the_mime_table_and_is_read_whole() {
+        use crate::discovery_ipc::{ServiceTypeField, Transport};
+        let ipp = ServiceTypeField {
+            name: b"ipp",
+            transport: Transport::Tcp,
+        };
+        assert_eq!(
+            body_len(1, 1, 2),
+            Ok(2 + MIME_ENTRY_LEN + 2 * BROWSE_ENTRY_LEN)
+        );
+        let mut body = [0u8; 2 + MIME_ENTRY_LEN + 2 * BROWSE_ENTRY_LEN];
+        let first = 2 + MIME_ENTRY_LEN;
+        body[first..first + BROWSE_ENTRY_LEN].copy_from_slice(&browse_entry(&ipp).unwrap());
+        assert_eq!(browse_type_at(&body, 1, 1, 0), Ok(ipp));
+        // A zeroed entry names no transport.
+        assert_eq!(browse_type_at(&body, 1, 1, 1), Err(Errno::OutOfRange));
+        assert_eq!(browse_type_at(&body, 1, 1, 2), Err(Errno::BufferTooSmall));
+        let mut dirty = body;
+        dirty[first + 2 + 3] = b'x';
+        assert_eq!(browse_type_at(&dirty, 1, 1, 0), Err(Errno::BadMagic));
+        let mut long = body;
+        long[first + 1] = 16;
+        assert_eq!(browse_type_at(&long, 1, 1, 0), Err(Errno::LengthOutOfRange));
+        assert_eq!(
+            browse_entry(&ServiceTypeField {
+                name: b"",
+                transport: Transport::Udp
+            }),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_manifest_declaring_too_many_browsed_types_is_refused() {
+        let mut h = sample();
+        h.browse_count = APPINFO_MAX_BROWSE + 1;
+        assert_eq!(
+            AppInfoHeader::from_bytes(&h.to_le_bytes()),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut h = sample();
+        h.reserved = 1;
+        assert_eq!(
+            AppInfoHeader::from_bytes(&h.to_le_bytes()),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]
@@ -2211,6 +2369,8 @@ mod tests {
             flags => 8,
             capability_count => AppInfoHeader::OFF_CAP_COUNT,
             mime_count => AppInfoHeader::OFF_MIME_COUNT,
+            browse_count => AppInfoHeader::OFF_BROWSE_COUNT,
+            reserved => AppInfoHeader::OFF_RESERVED,
             id_len => AppInfoHeader::OFF_ID_LEN,
             name_len => AppInfoHeader::OFF_NAME_LEN,
             version_len => AppInfoHeader::OFF_VERSION_LEN,

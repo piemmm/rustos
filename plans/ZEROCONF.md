@@ -19,7 +19,7 @@ and keeps LLMNR and NetBIOS permanently out (§1 below).
 | Z1 | `lib/net::mdns` pure engine: `SRV`/`TXT`/mDNS-`NSEC` record types, responder/querier state machine, per-interface cache, fuzz harness | done |
 | Z2 | `lib/net::dnssd` DNS-SD vocabulary: the instance/type/domain triple, TXT key-value grammar, service-type grammar | done |
 | Z3 | `discoveryd` split process: a capability-empty sandboxed decoder, a front owning the sockets and every authority, the `lib/sandbox` supervised session | done |
-| Z4 | Browse + resolve, scoped by grant; `.local` routing in `lib/resolver`; `lib/discovery` client | planned |
+| Z4 | Browse + resolve, scoped by grant; `.local` routing in `lib/resolver`; `lib/discovery` client | done |
 | Z5 | Publication: the three-gate authority check (attested / granted / owned), manifest `publishes` section, grant store | planned |
 | Z6 | Per-interface `discovery.mode` posture, per-network identity, service-manager advertise/goodbye lifecycle | planned |
 | Z7 | Attested records over TOFU host keys — **decision pending**, may be dropped | planned |
@@ -405,7 +405,10 @@ lib/net/src/mdns.rs         pure engine: state machine, cache, suppression
 lib/net/src/dnssd.rs        instance/type/domain triple, TXT grammar
 lib/sandbox/src/supervise.rs  the supervised streaming session
 lib/discovery/              userland client (mirrors lib/resolver)
+lib/abi/src/discovery_ipc.rs     the discovery-v1 session ABI
+lib/abi/src/discovery_policy.rs  the grant store codec
 userland/net/discoveryd/    front + decoder
+userland/apps/dns-sd/       the command app
 ```
 
 `lib/net/src/rxfilter.rs` needs **no change**: it gates group destinations on
@@ -504,8 +507,8 @@ re-derive:
   and so conflict, which is what Z5's uniqueness check needs; the owner's
   spelling survives for Z9 to draw. `Hash` is deliberately absent — there is
   no caller, and a derived one beside the manual `PartialEq` is a
-  compile-time error rather than a silent trap, so Z4 writes the consistent
-  one when it needs a map key.
+  compile-time error rather than a silent trap, so the first increment that
+  needs a map key writes the consistent one.
 - **Structure is validated; drawability is not.** The §6.6 display-safety
   policy is one shared definition above this crate, so `dnssd` implements
   the RFC's length / character / encoding MUSTs and stops. It adds no
@@ -523,31 +526,27 @@ re-derive:
   reads back its own partial rdata through the one string walker rather
   than growing a private copy.
 - **Subtypes (RFC 6763 §7.1 `_sub`) are deliberately out.** A subtype is
-  selective *enumeration*, not part of the instance-name abstraction; Z4
-  adds it in place if browse needs it. RFC 6763 §9's service-enumeration
+  selective *enumeration*, not part of the instance-name abstraction, and
+  browse does not need it; an increment that does adds it in place. RFC 6763 §9's service-enumeration
   name needs nothing: it is instance-shaped and the ordinary triple reads
   it.
 
 ### Z3 — `discoveryd`: the split process — **done**
 
 `userland/net/discoveryd/` is the front and the decoder (§4) in one bundle,
-`/System/Services/discoveryd.app`, requesting `CAP_NET`, `CAP_SANDBOX_SPAWN`,
-and `CAP_LOG_EMIT` and nothing more. `lib/sandbox/src/supervise.rs` is the
-streaming seam it runs the decoder under. Nothing publishes or asks through
-the service yet, so it transmits nothing and nothing enrols it: it is
-installed but not started until Z4 gives it a client.
+`/System/Services/discoveryd.app`. `lib/sandbox/src/supervise.rs` is the
+streaming seam it runs the decoder under.
 
 What it now guarantees, and the decisions a later increment must not
 re-derive:
 
 - **The decoder never holds a socket** — the §4 inversion, because the
   sandbox spawn mode forbids IPC. The front relays datagrams over the
-  session; the decoder answers with its next deadline and nothing else.
+  session, and reads back only fixed, bounds-checked fields.
 - **The channel is fixed-shape and both readers fail closed** (`wire`). Every
   frame is one layout behind a tag; either side refuses a frame whose tag,
-  length, or any field an honest peer would not send, and the front reads
-  from its decoder only a presence flag and an instant. A configuration
-  comes first and exactly once, and anything else ends the decoder.
+  length, or any field an honest peer would not send. A configuration comes
+  first and exactly once, and anything else ends the decoder.
 - **Admission before relay, in a fixed order.** The stack's on-link verdict
   first, then the sender's own budget, then the shared one (§8), all before a
   byte is encoded.
@@ -565,9 +564,6 @@ re-derive:
   it is dropped, and its replacement starts after the paced delay under keys
   drawn afresh. A random source that cannot key a decoder stops the service
   rather than run one under predictable keys.
-- **Until Z4 the engines transmit nothing:** they are given no room to build
-  a datagram in. Records reach the front, and anything leaves the host, only
-  as the answers to the questions Z4 introduces.
 - **Events are `25_000..26_000`:** service started (with which families
   joined), decoder started (with its generation), service unavailable (with
   its reason).
@@ -580,18 +576,101 @@ re-derive:
   replacement starts only after the paced delay on a real one-shot wait and
   serves on a fresh pipe pair.
 
-### Z4 — browse, resolve, `.local` routing
+### Z4 — browse, resolve, `.local` routing — **done**
 
-`lib/discovery` client; grant-scoped browse; `CAP_NET_DISCOVER_ALL` with its
-enforcement point; `.local` and link-local reverse routing in `lib/resolver`;
-per-interface answer scoping. A live two-process QEMU vertical, the N4e-β
-precedent, which is also the first to run `discoveryd`'s own reactor.
+A program browses, resolves, and looks up link-local services through
+`lib/discovery` and the `discovery-v1` session ABI (`lib/abi::discovery_ipc`)
+on `discoveryd`'s reserved endpoint; `lib/resolver` routes every `.local` name
+and link-local address there; `dns-sd` is the command app. `discoveryd` runs
+under its own account (uid 20, `lib/users::provision`) with
+`DISCOVERYD_CEILING` equal to its manifest, and PID 1 starts it at boot.
 
-It also carries what Z3 left for it by design: a `discoveryd` service account
-and on-demand enrolment with the service manager; the transmit path — an
-egress interface on the send request, and unicast answered only to on-link
-askers seen recently; and records streaming from the decoder to the front as
-answers to questions, bounded per question.
+Decisions (binding):
+
+- **Browse authority is declared ∩ granted.** A bundle's signed `AppInfo`
+  carries a `browses` table of service types (the `mime_count` table
+  precedent); the grant is recorded for the kernel-attested
+  `AppIdentity { bundle_id, publisher }` in a fail-closed, line-oriented store
+  at `/System/Security/Policy/Discovery` (`lib/abi::discovery_policy`). That
+  path is on the read-only `/System` volume, which no projection shadows, and
+  the image builder is its only writer: for every bundle it plants whose
+  verified manifest declares `browses`, it records exactly that set. Every
+  other identity, and every caller with no `AppIdentity`, holds nothing. The
+  service reads the store once at start and takes it whole or not at all. The
+  administrator's layer in `/System/Settings` and its grant/revoke surface land
+  with Z5, whose reserved publish types are their first writer; the store grows
+  `publish` lines there, never a second store.
+- **`CAP_NET_DISCOVER_ALL` is administrative.** It is in `ADMINISTRATIVE_SET`
+  beside `CAP_SYSINFO_GLOBAL`, because enumerating a whole segment is the same
+  reconnaissance class as listing every process. Its live holder is the
+  `dns-sd` command app, and its enforcement point is the front's request
+  admission: it unlocks every browse and resolve, and is the only thing that
+  unlocks the RFC 6763 §9 type enumeration. A caller without it gets exactly
+  its granted types and a refusal (`25_004`) naming what it lacked, never
+  whether another principal holds the type. `files.app` never holds it.
+- **UDP 5353 and the groups are reserved to the service account.** The stack
+  refuses, audited, a bind of 5353 in either transport and a connect or send
+  to `224.0.0.251:5353` or `[ff02::fb]:5353` from any principal but the
+  `discoveryd` account, keyed on the attested uid, so no capability is added.
+  Unicast to one peer's 5353 stays open: it names a host, not the segment.
+- **Enrolled at boot, restart on failure, only while the stack is up.** The
+  service listens from boot — caching what the segment volunteers costs no
+  transmission — and transmits only the questions live clients are asking. It
+  requires `network-up`, which `netstack` provides once its endpoints are
+  bound, so it never races the stack's start, and because its sockets live in
+  the stack, a stack relaunch withdraws the condition, stops it, and brings it
+  back against the new stack instead of leaving it deaf.
+- **A dead client's questions end with it.** The kernel's `peer_watch` exit
+  feed (one wait-set source, drained like signal intake, its registry owned by
+  the kernel state) is what both `discoveryd` and `netstack` release a dead
+  principal's state on; `netstack` reclaims a dead owner's sockets, groups, and
+  ports, so a restarted `discoveryd` can rebind 5353. SVC-9's connection sink
+  is the next consumer.
+- **A socket learns where its membership is live.** The stack holds each group
+  once per logical interface however many sockets join it, carries every
+  membership onto an interface as it is added or composed into a bond, and
+  tells each member socket every interface where its family can speak — the
+  link up and a source address of the family held — and every edge, a flap as
+  down then up. A socket is told from a remembered view, so an edge a full
+  port had no room for is told later rather than lost. The port space is per
+  family, so the service holds 5353 in both.
+
+What it now guarantees:
+
+- **Questions are shared and replayed.** Each distinct question is asked once
+  on every up link however many requests share it; a request joining one
+  already asked is brought up to date by a replay from the decoder's cache.
+- **The front holds the decoder to its word.** It keeps keyed fingerprints of
+  what each question holds per link: an answer is added once, renewed or
+  retired only while held, never past `MAX_RECORDS` for one question on one
+  link. Stale answers (across a stop, a flush, or an edge in flight) are
+  dropped; impossible ones condemn the decoder.
+- **Nothing crosses a link edge.** The decoder acknowledges every link edge
+  (`Linked`); an answer about a link is believed, and a datagram built for it
+  sent, only once every edge told has been acknowledged.
+- **Transmit is bounded and link-pinned.** `SocketRequest::Send` names its
+  egress interface. The front sends to the group within a per-interface budget
+  (a burst of 32 at 8 per second), or directly to a peer it relayed from on
+  that interface in the last second, once per datagram relayed and at most four
+  owed at once.
+- **Clients are bounded (§8).** 8 sessions per account, 16 requests per
+  session, 64 KiB of queued answers per session (then one `Lost` notice), 256
+  sessions in all; one doorbell outstanding per session, authenticated by the
+  service's uid.
+- **Every answer names its interface; caches never merge.**
+- **`.local` never leaves the link, and absence is not an error.** A build
+  without discovery answers a link name with nothing.
+- **Proven by test:** host tests for the ABI codecs, the grant store, the
+  front, the decoder, the question table, the sessions, the planner, the
+  client, the resolver routing, and `dns-sd`; `fuzz_decode` and
+  `fuzz_discoveryd` over the new frames; `fuzz_net_sockabi` over link edges,
+  flaky ports, and reclaim; and the live `tairix-test-discovery-qemu-aarch64`
+  vertical, where `dns-sd` browses, resolves, and looks up a host-side
+  responder's service through the whole path and the responder requires that
+  the guest asked the wire for every record. x86_64 and riscv64 build the
+  same service and command into their boot floor and start it in every
+  production boot; their live client vertical rides the net-tool shell world
+  those targets do not yet have, as `ping` and `telnet` do.
 
 ### Z5 — publication and the three gates
 
@@ -599,9 +678,9 @@ answers to questions, bounded per question.
 grant store and the reserved-type data set; the netstack ownership query; the
 audit events. The increment this plan exists for.
 
-The gates bind only what reaches the wire through `discoveryd`, so the stack
-must reserve UDP 5353 to the service: today any `CAP_NET` process may bind it
-while `discoveryd` is not running and speak multicast DNS around every gate.
+The gates bind only what reaches the wire through `discoveryd`, which is why
+Z4 reserves UDP 5353 to the service account: no other principal can speak
+multicast DNS around them.
 
 ### Z6 — posture, privacy, lifecycle
 

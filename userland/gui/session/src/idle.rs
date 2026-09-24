@@ -6,9 +6,15 @@
 //! and one whose policy names neither never wakes for idleness.
 
 use tairix_abi::time::Duration64;
+use tairix_util::retry::RestartPacer;
 use tairix_wallpaper::DesktopSettings;
 
 use crate::switchuser::park_within;
+
+/// How soon a refused lock is asked for again: a second, doubling while it
+/// keeps failing, up to a minute, and never abandoned.
+const LOCK_RETRY_BASE_NS: u64 = 1_000_000_000;
+const LOCK_RETRY_CAP_NS: u64 = 60_000_000_000;
 
 /// When the idle actions happen, as spans of idleness.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -48,6 +54,9 @@ pub struct IdleClock {
     last_input_ns: u64,
     locked: bool,
     saving: bool,
+    /// When a refused lock may be asked for again.
+    lock_retry_at: Option<u64>,
+    lock_retry: RestartPacer,
 }
 
 impl IdleClock {
@@ -62,6 +71,8 @@ impl IdleClock {
             last_input_ns: now_ns,
             locked: false,
             saving: false,
+            lock_retry_at: None,
+            lock_retry: RestartPacer::new(LOCK_RETRY_BASE_NS, LOCK_RETRY_CAP_NS, LOCK_RETRY_CAP_NS),
         }
     }
 
@@ -75,6 +86,15 @@ impl IdleClock {
         self.last_input_ns = now_ns;
         self.locked = false;
         self.saving = false;
+        self.lock_retry_at = None;
+    }
+
+    /// The lock [`due`](Self::due) asked for could not engage at `now_ns`:
+    /// ask again on the retry pace, never at once, so a screen that must lock
+    /// keeps trying without spinning.
+    pub fn lock_refused(&mut self, now_ns: u64) {
+        self.locked = false;
+        self.lock_retry_at = Some(self.lock_retry.failed(now_ns).at);
     }
 
     /// The next action whose deadline has passed at `now_ns`, marked as done.
@@ -82,8 +102,11 @@ impl IdleClock {
     /// A lock is answered before a screensaver due at the same moment, so the
     /// screensaver is raised over the lock rather than the reverse.
     pub fn due(&mut self, now_ns: u64) -> Option<IdleAction> {
-        if !self.locked && self.passed(self.policy.lock, now_ns) {
+        if !self.locked && self.lock_deadline().is_some_and(|at| now_ns >= at) {
             self.locked = true;
+            if self.lock_retry_at.take().is_some() {
+                self.lock_retry.started(now_ns);
+            }
             return Some(IdleAction::Lock);
         }
         if !self.saving && self.passed(self.policy.screensaver, now_ns) {
@@ -93,17 +116,34 @@ impl IdleClock {
         None
     }
 
+    /// Whether an action is due at `now_ns`, without taking it.
+    #[must_use]
+    pub fn is_due(&self, now_ns: u64) -> bool {
+        let lock = !self.locked && self.lock_deadline().is_some_and(|at| now_ns >= at);
+        lock || !self.saving && self.passed(self.policy.screensaver, now_ns)
+    }
+
     /// `park_ns` shortened to the nearest pending deadline, or left as it is
     /// when none is pending.
     #[must_use]
     pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
-        let pending = |span: Option<Duration64>, done: bool| {
-            span.filter(|_| !done)
-                .map(|span| self.deadline(span).saturating_sub(now_ns))
-        };
-        let lock = pending(self.policy.lock, self.locked);
-        let saver = pending(self.policy.screensaver, self.saving);
+        let lock = self
+            .lock_deadline()
+            .filter(|_| !self.locked)
+            .map(|at| at.saturating_sub(now_ns));
+        let saver = self
+            .policy
+            .screensaver
+            .filter(|_| !self.saving)
+            .map(|span| self.deadline(span).saturating_sub(now_ns));
         park_within(park_within(park_ns, lock), saver)
+    }
+
+    /// When the lock is next due: its idle deadline, or a refused lock's
+    /// retry if that is later.
+    fn lock_deadline(&self) -> Option<u64> {
+        let idle = self.deadline(self.policy.lock?);
+        Some(self.lock_retry_at.map_or(idle, |retry| retry.max(idle)))
     }
 
     fn passed(&self, span: Option<Duration64>, now_ns: u64) -> bool {
@@ -202,5 +242,47 @@ mod tests {
             Some(Duration64::from_secs(60))
         );
         assert_eq!(IdlePolicy::of(&settings, true).screensaver, None);
+    }
+
+    #[test]
+    fn a_refused_lock_is_asked_for_again_on_a_paced_retry_never_at_once() {
+        const SEC: u64 = 1_000_000_000;
+        let mut clock = IdleClock::new(0);
+        clock.set_policy(policy(None, Some(15)));
+        assert_eq!(clock.due(15 * MIN), Some(IdleAction::Lock));
+
+        clock.lock_refused(15 * MIN);
+        assert_eq!(clock.due(15 * MIN), None, "no retry in the same instant");
+        assert_eq!(clock.park_deadline_ns(15 * MIN, u64::MAX), SEC);
+        assert_eq!(clock.due(15 * MIN + SEC), Some(IdleAction::Lock));
+
+        // Refused again, it waits longer, and it never gives up.
+        clock.lock_refused(15 * MIN + SEC);
+        assert_eq!(clock.park_deadline_ns(15 * MIN + SEC, u64::MAX), 2 * SEC);
+        assert_eq!(clock.due(15 * MIN + 2 * SEC), None);
+        assert_eq!(clock.due(15 * MIN + 3 * SEC), Some(IdleAction::Lock));
+    }
+
+    #[test]
+    fn is_due_says_what_due_would_take_without_taking_it() {
+        let mut clock = IdleClock::new(0);
+        clock.set_policy(policy(Some(5), Some(15)));
+        assert!(!clock.is_due(5 * MIN - 1));
+        assert!(clock.is_due(5 * MIN));
+        assert!(clock.is_due(5 * MIN), "asking takes nothing");
+        assert_eq!(clock.due(5 * MIN), Some(IdleAction::StartScreensaver));
+        assert!(!clock.is_due(5 * MIN));
+        assert!(clock.is_due(15 * MIN));
+    }
+
+    #[test]
+    fn input_forgets_a_refused_lock() {
+        let mut clock = IdleClock::new(0);
+        clock.set_policy(policy(None, Some(15)));
+        assert_eq!(clock.due(15 * MIN), Some(IdleAction::Lock));
+        clock.lock_refused(15 * MIN);
+        clock.input(16 * MIN);
+        assert_eq!(clock.due(30 * MIN), None);
+        assert_eq!(clock.due(31 * MIN), Some(IdleAction::Lock));
     }
 }

@@ -1,0 +1,38 @@
+[package]
+name = "tairix-dns-sd"
+description = "TAIRiX `dns-sd` CLI: browse, resolve, and look up link-local services through `discoveryd` (`plans/ZEROCONF.md` Z4)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The freestanding runtime and the discovery client's program glue are an
+# optional, on-by-default feature, as for every command app: host tooling
+# builds only the pure parse-and-render library.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt", "tairix-discovery/program"]
+
+[[bin]]
+name = "tairix-dns-sd-run"
+path = "src/run.rs"
+
+[dependencies]
+# The discovery channel's vocabulary: typed queries, entries, answers.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The discovery client: sessions, the doorbell park, and its error type.
+tairix-discovery = { path = "../../../lib/discovery", version = "=0.0.0" }
+# The one help engine behind `-?`/`--help`.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The DNS-SD grammar operands are held to, and the one presentation spelling
+# peer-authored names are printed in.
+tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

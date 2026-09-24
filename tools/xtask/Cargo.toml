@@ -53,6 +53,9 @@ tairix-devids = { path = "../../lib/devids", version = "=0.0.0" }
 tairix-fsmeta = { path = "../../lib/fsmeta", version = "=0.0.0" }
 tairix-kernel-syscall = { path = "../../kernel/syscall", version = "=0.0.0" }
 tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+# The one derivation of the publisher identity a bundle's grants are recorded
+# under — the identity the load gate attests it by.
+tairix-appload = { path = "../../lib/appload", version = "=0.0.0" }
 # `test --qemu` cross-builds the CCOMPAT end-to-end C programs, whose build
 # scripts locate `clang`/`ld.lld` through the audited `tairix-cc` wrapper. xtask
 # resolves that toolchain *once* up front and exports its path so each build

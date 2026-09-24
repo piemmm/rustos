@@ -31,14 +31,27 @@ the same event-driven wait-set loop. Each socket request is dispatched by
 - keys every socket to the creating principal's unforgeable `ProcId`, so a
   handle is meaningless — and reported absent (`NotFound`) — to any other
   principal even if observed;
-- binds ports **globally uniquely** (no silent reuse); a `port` of `0`
+- binds each family's ports **uniquely** across every socket (no silent
+  reuse) — a socket has one family and never receives the other's traffic,
+  so an IPv4 and an IPv6 socket may hold the same port; a `port` of `0`
   draws a CSPRNG ephemeral port from the kernel random subsystem;
 - bounds the socket table per principal and globally, failing closed with
   `LimitExceeded` at capacity; and
 - demultiplexes each inbound `StackEvent::UdpDatagram` to the owning
   socket, honouring a connected socket's peer filter and multicast
   membership, and delivers it as a `SocketDatagram` to that socket's
-  delivery port.
+  delivery port;
+- holds each multicast group once on every logical interface however many
+  sockets join it, including an interface added or composed into a bond
+  later, and bounds the groups a family may hold to what an engine can;
+- reserves the multicast DNS port (in either transport) and the multicast DNS
+  groups to the discovery service's account, refusing anyone else with
+  `PermissionDenied`: a query sent to the group draws unicast replies from
+  every responder on the segment, and a second listener would hear its answers
+  without the service's checks; and
+- releases everything a principal held when it exits — its groups left, its
+  connections aborted, its ports freed — because it watches every principal
+  holding a socket through the kernel's peer-exit watch.
 
 Multicast **transmit** rides the same path: a datagram addressed to a group
 is sent straight to the group MAC with a link-local scope (TTL/hop-limit 1),
@@ -91,7 +104,7 @@ never taught about an object it does not own. This is an in-place evolution of
 
 ## Requests (`SocketRequest`)
 
-Each request is one fixed 44-byte header; only `Send` carries a trailing
+Each request is one fixed 60-byte header; only `Send` carries a trailing
 payload (at most `SOCKET_MAX_DATAGRAM` bytes). Every field a given operation
 does not use must be zero — a dirty reserved field is refused as
 `Errno::BadMagic`, so no operation can smuggle authority through another's
@@ -102,7 +115,7 @@ fields.
 | `Socket` | family, `SocketType`, delivery-port endpoint id | `SocketId` (`encode_socket_reply`) |
 | `Bind` | socket, local `SocketAddr` (port `0` ⇒ CSPRNG ephemeral) | bound port (`encode_bind_reply`) |
 | `Connect` | socket, peer `SocketAddr` | status |
-| `Send` | socket, optional dest (`None` ⇒ connected peer), payload | status |
+| `Send` | socket, optional dest (`None` ⇒ connected peer), optional egress interface, payload | status |
 | `Close` | socket | status |
 | `Shutdown` | socket (a connected stream socket), `ShutdownHow` | status |
 | `JoinMulticast` / `LeaveMulticast` | socket, group `SocketAddr` (port must be `0`) | status |
@@ -122,6 +135,14 @@ cannot spell it three different ways. For a stream socket `Send` carries no dest
 count (`encode_send_reply`), since a stream `send` is flow-controlled and may
 accept fewer bytes than offered; a datagram `Send` is all-or-nothing and
 replies bare status.
+
+A datagram `Send` may name the one logical interface it leaves by. A
+link-scoped protocol names it, because a link-local destination names no link
+by itself and a message built from one link's state must not reach another's;
+a named interface that cannot carry the datagram refuses it rather than
+choosing another. With none named the stack chooses: the first interface that
+reaches a unicast destination, every interface for a multicast group. Only a
+send may carry the field; on any other operation it is reserved.
 
 ## Stream sockets (TCP, N5c)
 
@@ -238,7 +259,7 @@ neighbour resolution, request, reply demux — is proven live by the
 N8b-2b-β): a guest `ping` answered by a host passive ICMP echo responder over
 the shared IPv6 link-local wire.
 
-## Delivery (`SocketDatagram` / `SocketEcho`)
+## Delivery (`SocketDatagram` / `SocketLinkEvent` / `SocketEcho`)
 
 A `SocketDatagram` is the 52-byte-header-plus-payload frame the stack
 `ipc_send`s to a datagram socket's delivery port: the receiving `SocketId`,
@@ -248,7 +269,21 @@ arrival interface's own link, and the payload. The on-link verdict is the
 stack's: the peer is link-local, or reached through one of that interface's
 routes with no gateway. A link-scoped protocol such as multicast DNS takes
 it from here rather than keeping its own copy of the interface's prefixes,
-which would go stale when they change. A `SocketEcho` is the equivalent
+which would go stale when they change.
+
+A socket holding group memberships is also told where they are live: a
+`SocketLinkEvent` (magic `"NSKL"`) names the socket, a logical interface, and
+whether the socket's family can speak there: the link is up and the interface
+holds a source address of that family, so an IPv4 socket is never told a link
+with no IPv4 address and an IPv6 one waits for its link-local to pass duplicate
+address detection. It is sent for each interface at the first join, as each
+later one is added, and on every edge after; each family's edges are its own,
+and an edge that flaps is told as down then up, so a reader drops what it
+learned before the flap. The
+edges are never lost to a full port: the stack remembers what each socket was
+last told and tells it the rest once the port has room. `SocketDelivery::parse`
+tells the two datagram-socket frames apart by magic, and `tairix_rt::net::recv`
+returns it. A `SocketEcho` is the equivalent
 36-byte-header frame for an echo socket: the receiving
 `SocketId`, the source `SocketAddr` (no port), the echoed sequence number,
 and the echoed payload. The client decodes either after `ipc_recv`.

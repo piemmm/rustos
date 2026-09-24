@@ -37,8 +37,8 @@ use tairix_abi::driver::net::MAC_ADDRESS_LEN;
 use tairix_abi::hwtree::BUS_CHILD_ENDPOINTS;
 use tairix_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
 use tairix_fdt::{
-    bus_level, dma_ranges, name_stem, phandle_ref, read_cells, reg_entry_count, translate_dma,
-    translated_reg, BusLevel, Fdt, Node, NodeIter, MAX_WALK_DEPTH,
+    bus_level, dma_reach, name_stem, phandle_ref, read_cells, reg_entry_count, translated_reg,
+    BusLevel, Fdt, Node, NodeIter, MAX_WALK_DEPTH,
 };
 
 use crate::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
@@ -312,44 +312,34 @@ fn children_interrupt_parent(node: &Node<'_>, own: Option<u32>) -> Option<u32> {
     }
 }
 
-/// Push the windows a DMA controller at `depth` reaches memory through: one
-/// per entry of its parent bus's `dma-ranges`, each translated to CPU
-/// addresses and carrying the bus address it starts at. A controller with no
-/// bus between it and the root, or on a bus whose property is empty, reaches
-/// memory untranslated: one unconstrained window. A bus with no property maps
-/// nothing, so the controller gets no window.
+/// Push the windows a DMA controller at `depth` reaches memory through, each
+/// composed through every bus between it and the root and carrying the bus
+/// address it starts at. With nothing on the way that translates, it reaches
+/// memory untranslated: one unconstrained window. A bus that maps nothing
+/// leaves it no window.
 fn push_dma_windows(depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) {
-    let Some(bus_depth) = depth.checked_sub(1) else {
-        return;
-    };
-    let Some(above_depth) = bus_depth.checked_sub(1) else {
-        let _ = hw.push_resource(HwResource::dma(0, 0));
-        return;
-    };
-    let (Some(bus), Some(above)) = (levels.get(bus_depth), levels.get(above_depth)) else {
-        return;
-    };
-    let Some(value) = bus.dma_ranges else {
-        return;
-    };
-    if value.is_empty() {
-        let _ = hw.push_resource(HwResource::dma(0, 0));
+    if depth == 0 {
         return;
     }
-    let Some(ranges) = dma_ranges(value, bus.addr_cells, above.addr_cells, bus.size_cells) else {
+    let Some(reach) = dma_reach(levels, depth) else {
         return;
     };
-    for range in ranges {
-        let Some(top) = translate_dma(levels, bus_depth, range.parent)
-            .and_then(|cpu| cpu.checked_add(range.size))
-        else {
-            continue;
-        };
-        if hw
-            .push_resource(HwResource::dma_translated(top, range.size, range.child))
-            .is_err()
-        {
-            return;
+    match reach.windows() {
+        None => {
+            let _ = hw.push_resource(HwResource::dma(0, 0));
+        }
+        Some(windows) => {
+            for window in windows {
+                let Some(top) = window.cpu.checked_add(window.size) else {
+                    continue;
+                };
+                if hw
+                    .push_resource(HwResource::dma_translated(top, window.size, window.bus))
+                    .is_err()
+                {
+                    return;
+                }
+            }
         }
     }
 }
@@ -1325,6 +1315,51 @@ mod tests {
             .resources()
             .iter()
             .any(|r| r.kind() == Some(HwResourceKind::Mmio) && r.base() == 0xfe00_7000));
+    }
+
+    #[test]
+    fn a_controller_below_an_identity_bus_reaches_memory_through_the_soc_above_it() {
+        let cells =
+            |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 1);
+        b.begin_node("soc");
+        b.prop_str("compatible", "simple-bus");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.prop("ranges", &[]);
+        b.prop("dma-ranges", &cells(&[0xc000_0000, 0, 0, 0x4000_0000]));
+        b.begin_node("sub");
+        b.prop_str("compatible", "simple-bus");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.prop("ranges", &[]);
+        b.prop("dma-ranges", &[]);
+        b.begin_node("dma-controller@7e007000");
+        b.prop_str("compatible", "brcm,bcm2835-dma");
+        b.prop("reg", &cells(&[0x7e00_7000, 0xb00]));
+        b.prop_u32("#dma-cells", 1);
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        let nodes = discover(&b.build());
+        let windows: Vec<HwResource> = by_key(&nodes, b"brcm,bcm2835-dma")
+            .resources()
+            .iter()
+            .copied()
+            .filter(|r| r.kind() == Some(HwResourceKind::Dma))
+            .collect();
+        assert_eq!(
+            windows,
+            std::vec![HwResource::dma_translated(
+                0x4000_0000,
+                0x4000_0000,
+                0xc000_0000
+            )]
+        );
     }
 
     #[test]

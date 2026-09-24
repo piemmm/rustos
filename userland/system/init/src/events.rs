@@ -140,13 +140,17 @@ pub const SERVICE_ENROLMENT_DENIED: EventId = EventId(9_027);
 /// until the override document on the encrypted root can be read; this records
 /// the moment that narrowing is applied.
 pub const SERVICE_ENROLMENT_REVOKED: EventId = EventId(9_028);
+/// A named readiness condition was withdrawn: the last ready service
+/// providing it stopped being ready, so what requires it is stopped until it
+/// holds again.
+pub const CONDITION_WITHDRAWN: EventId = EventId(9_029);
 
 /// Every event id this crate emits, in numeric order.
 ///
 /// One list, so the uniqueness/range checks and the message table's coverage
 /// check cannot disagree about which ids exist — an id missing from here would
 /// otherwise render as the generic fallback with nothing to catch it.
-pub const ALL: [EventId; 27] = [
+pub const ALL: [EventId; 28] = [
     SERVICE_STARTED,
     SERVICE_START_FAILED,
     SERVICE_SKIPPED,
@@ -174,6 +178,7 @@ pub const ALL: [EventId; 27] = [
     SERVICE_ENROLMENT_CHANGED,
     SERVICE_ENROLMENT_DENIED,
     SERVICE_ENROLMENT_REVOKED,
+    CONDITION_WITHDRAWN,
 ];
 
 #[cfg(test)]

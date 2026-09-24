@@ -1,0 +1,31 @@
+[package]
+name = "tairix-test-discovery-qemu-aarch64"
+description = "plans/ZEROCONF.md Z4 live discovery QEMU vertical: boot the production aarch64 tairix-kernel pipeline (boot_aarch64::boot) on the virt board with the shared net-tool encrypted-root disk carrying the standard signed store bundles (the real dns-sd command and the discoveryd service) plus the signed virtio-net driver, with a virtio-net device attached and the harness-side multicast DNS responder on its dgram netdev. It unlocks the root, authenticates root/root, and runs three dns-sd lookups from the scripted shell, each typed only once the one before printed the peer's answer: a browse of the peer's service type, a resolve of the instance it found, and a lookup of the host the resolve named. PASS once the three dns-sd processes have exited and the shell's scripted exit follows; the harness additionally requires the peer's verdict that the guest asked the wire for every record those lookups need, so neither side can pass alone."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-discovery-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 pipeline with the planted
+# encrypted-root disk and prove link-local discovery end to end" test. It
+# reuses the whole production boot — the unlock, PID 1 and the discoveryd it
+# starts, netstack, devmgr's driver autoload, login, the shell, and the
+# disk-backed bundle spawn — and only swaps the audit sink, in a dedicated bin so
+# the QEMU-exit shortcut can never reach a production build.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

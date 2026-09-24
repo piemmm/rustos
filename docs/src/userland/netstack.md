@@ -313,7 +313,26 @@ of every connection key and an unkeyed hash would be collision-floodable. A data
 member that carried it) and the stack's verdict on whether the source is on
 that interface's link — link-local, or reached by a route with no gateway —
 which a link-scoped protocol such as multicast DNS takes rather than keeping a
-copy of the prefixes that goes stale. A socket bound to the wildcard address (or to a broadcast
+copy of the prefixes that goes stale.
+
+Multicast memberships are counted once per group in `Netstack`, which joins a
+group on every logical interface when its first socket joins it, on each
+interface added or bond composed later, and on a bond's members silently so a
+released member resumes holding exactly what sockets hold; it leaves at the
+last. After every wake the service republishes, for each logical interface and
+family, whether that family can speak there — the link up and a source address
+held — under an epoch that moves on each edge, and tells each member socket
+what changed in its own family since it was last told (`SocketLinkEvent`), a
+flap as down then up. A
+socket whose port had no room keeps its place: the service waits on that port's
+room and tells it the rest, so no edge is lost to a full mailbox. A principal's
+first socket asks the kernel's `peer_watch` for its exit, and the exit releases
+everything the principal held — groups, connections, listeners, ports — so a
+crashed process never holds a port for the rest of the boot. The multicast DNS
+port and groups are reserved to the discovery service's account
+(`docs/src/abi/net-sockets.md`).
+
+A socket bound to the wildcard address (or to a broadcast
 address) receives IPv4 broadcast on its port, and after every socket
 operation the service republishes the set of bound IPv4 datagram ports to
 every interface engine, which is what admits broadcast to those ports
@@ -392,11 +411,14 @@ supply them — a reserve that never seeded — makes the service exit with
 predictable sequence numbers, cookies, ports, or identifiers; every other
 start-up refusal is recorded under the same id with its own reason.
 
-## Crash containment
+## Readiness and crash containment
 
-`netstack` dying resets network state but never the system: the
-kernel holds only endpoint plumbing, never protocol state, and PID 1
-supervises and relaunches the service.
+`netstack` is `notify`-ready: once its endpoints are bound it announces
+readiness, which provides `network-up` and carries back its watchdog
+interval. Dying resets network state but never the system: the kernel holds
+only endpoint plumbing, never protocol state, and PID 1 supervises and
+relaunches the service. The relaunch withdraws `network-up`, so every service
+that requires it is stopped and started again against the new stack.
 
 ## Tests
 

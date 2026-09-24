@@ -423,6 +423,7 @@ mod program {
                         "consecutive_hex",
                         u64::from(consecutive_pump_errors),
                     );
+                    let _ = tairix_hid::release_held(&mut keyboard, &mut console, &mut sink);
                     return 0;
                 }
                 Err(err) => {
@@ -449,6 +450,7 @@ mod program {
                             "consecutive_hex",
                             u64::from(consecutive_pump_errors),
                         );
+                        let _ = tairix_hid::release_held(&mut keyboard, &mut console, &mut sink);
                         return EXIT_NO_TRANSPORT;
                     }
                 }

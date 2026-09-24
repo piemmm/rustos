@@ -243,14 +243,13 @@ impl Cursor<'_> {
                 0x0C => self.raw(b"\\f")?,
                 0x0D => self.raw(b"\\r")?,
                 0x00..=0x1F => {
-                    const HEX: &[u8; 16] = b"0123456789abcdef";
                     self.raw(&[
                         b'\\',
                         b'u',
                         b'0',
                         b'0',
-                        HEX[usize::from(byte >> 4)],
-                        HEX[usize::from(byte & 0x0F)],
+                        crate::hex::LOWER[usize::from(byte >> 4)],
+                        crate::hex::LOWER[usize::from(byte & 0x0F)],
                     ])?;
                 }
                 _ => self.raw(&[byte])?,

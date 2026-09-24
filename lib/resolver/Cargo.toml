@@ -46,3 +46,8 @@ tairix-rng = { path = "../rng", version = "=0.0.0", optional = true }
 # The `program`-feature production sysinfo transport (`IpcTransport`) the
 # server-set fetch uses is behind `tairix-procinfo`'s own `program` feature.
 tairix-procinfo = { path = "../procinfo", version = "=0.0.0", features = ["program"] }
+# Fallible allocation for the transport's receive buffer.
+tairix-util = { path = "../util", version = "=0.0.0" }
+# The link-local discovery client a `.local` name and a link-local address
+# are resolved through.
+tairix-discovery = { path = "../discovery", version = "=0.0.0", features = ["program"] }

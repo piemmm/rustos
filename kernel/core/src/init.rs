@@ -46,6 +46,7 @@ use crate::aspace::AddressSpaceRegistry;
 use crate::audit::{emit, AuditEvent};
 use crate::bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch};
 use crate::dispatch_slot::AlreadyInstalledError;
+use crate::peerwatch::PeerWatch;
 use crate::procwait::{KernelProcessWait, ProcessWait};
 use crate::random::{BootReserve, RandomReserve};
 use crate::rlimit::{default_file_lock_records, default_pinned_limit_bytes, LimitSet};
@@ -394,6 +395,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
             audit_sink,
             &state.scheduler,
             &state.caps,
+            &state.peer_watch,
             &state.aspaces,
             state.arch.as_ref(),
             process_wait,
@@ -1054,6 +1056,9 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     audit: &'static (dyn Sink + Sync),
     scheduler: &'a Scheduler<A>,
     caps: &'a RwLock<CapTable>,
+    /// The watches on `caps`' records, fired as a torn-down driver's record
+    /// leaves the table.
+    peer_watch: &'a PeerWatch,
     aspaces: &'a RwLock<AddressSpaceRegistry>,
     arch: &'a A,
     /// The scheduler-side process-wait producer a driver spawned through
@@ -1091,7 +1096,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
     /// as the `'static` page-table frame source for a spawned child);
     /// `audit` is the boot audit sink; `scheduler` / `caps` / `aspaces` /
     /// `arch` are the live registries a freshly built task is registered
-    /// with; `process_wait` is the producer a spawned driver's parent/child
+    /// with; `peer_watch` holds the watches on `caps`' records; `process_wait` is the producer a spawned driver's parent/child
     /// wait link is recorded with (the fail-closed
     /// [`crate::NULL_PROCESS_WAIT`] when none is wired).
     #[must_use]
@@ -1101,6 +1106,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
         audit: &'static (dyn Sink + Sync),
         scheduler: &'a Scheduler<A>,
         caps: &'a RwLock<CapTable>,
+        peer_watch: &'a PeerWatch,
         aspaces: &'a RwLock<AddressSpaceRegistry>,
         arch: &'a A,
         process_wait: &'static (dyn ProcessWait + 'static),
@@ -1112,6 +1118,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             audit,
             scheduler,
             caps,
+            peer_watch,
             aspaces,
             arch,
             process_wait,
@@ -1919,7 +1926,12 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             } else {
                 // Down now: retire its per-thread state so the group's count can
                 // reach zero and a deferred sibling's landing knows it was last.
-                let _ = crate::threads::retire(self.caps, self.aspaces, SecTaskId(thread));
+                let _ = crate::threads::retire(
+                    self.caps,
+                    self.aspaces,
+                    Some(self.peer_watch),
+                    SecTaskId(thread),
+                );
             }
         }
         if deferred {
@@ -1977,7 +1989,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // this teardown never observes a task whose caps vanished while the
         // scheduler still believed it lived — the same ordering the `exit`
         // syscall keeps.
-        let _ = self.caps.write().remove(sec_id);
+        let _ = crate::peerwatch::remove_record(Some(self.peer_watch), self.caps, sec_id);
 
         let mut handle_buf = [0u8; 16];
         emit(
@@ -2200,6 +2212,7 @@ fn run_phases<A: KernelArch>(
         frame_allocator,
         scheduler,
         caps: RwLock::new(CapTable::new()),
+        peer_watch: PeerWatch::new(),
         ipc: RwLock::new(PortRegistry::new()),
         aspaces: RwLock::new(AddressSpaceRegistry::new()),
         // The kernel random output reserve boots **unseeded** over the
@@ -2523,6 +2536,7 @@ fn run_phases<A: KernelArch>(
         // `NULL_FILE_MAP` keeps both syscalls (and every fault) fail-closed
         // until installed.
         .with_file_map(file_map)
+        .with_peer_watch(&state.peer_watch)
         // Serve the users database the boot path loaded off the mounted
         // root volume (`plans/PI.md` P11); the default `NULL_USERS_DB`
         // keeps `users_db_read` fail-closed when no root volume was
@@ -2672,6 +2686,7 @@ fn run_phases<A: KernelArch>(
         app_store,
         &state.aspaces,
         &state.caps,
+        &state.peer_watch,
         process_wait,
         image_builder,
     );
@@ -2779,6 +2794,9 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// Reader-preferring `RwLock` so the syscall hot path takes only a shared
     /// lock (mirrors `Scheduler::tasks`'s composition strategy).
     pub(crate) caps: RwLock<CapTable>,
+    /// The peer-exit watches on `caps`' records, fired as each record leaves
+    /// the table.
+    pub(crate) peer_watch: PeerWatch,
     /// Named-port registry. The `KernelDispatchHook` reads this on
     /// every `ipc_send` / `ipc_recv` to resolve the endpoint carried
     /// in the syscall against the live, kernel-owned [`PortRegistry`];
@@ -3023,6 +3041,7 @@ mod tests {
             audit_sink,
             &state.scheduler,
             &state.caps,
+            &state.peer_watch,
             &state.aspaces,
             state.arch.as_ref(),
             process_wait,
@@ -3159,6 +3178,7 @@ mod tests {
             audit_sink,
             &state.scheduler,
             &state.caps,
+            &state.peer_watch,
             &state.aspaces,
             state.arch.as_ref(),
             process_wait,
@@ -3212,6 +3232,7 @@ mod tests {
             audit_sink,
             &state.scheduler,
             &state.caps,
+            &state.peer_watch,
             &state.aspaces,
             state.arch.as_ref(),
             process_wait,
@@ -3287,6 +3308,7 @@ mod tests {
             audit_sink,
             &state.scheduler,
             &state.caps,
+            &state.peer_watch,
             &state.aspaces,
             state.arch.as_ref(),
             process_wait,
@@ -3345,6 +3367,7 @@ mod tests {
             audit_sink,
             &state.scheduler,
             &state.caps,
+            &state.peer_watch,
             &state.aspaces,
             state.arch.as_ref(),
             process_wait,

@@ -56,7 +56,7 @@ fn address(last: u8) -> RData {
 fn poll(engine: &mut MdnsEngine, now: Duration64) -> Option<(Destination, Vec<u8>)> {
     let mut rng = lowest();
     let mut buf = [0u8; BUF];
-    let emit = engine.poll(now, &mut rng, &mut buf)?;
+    let emit = engine.poll(now, &mut rng, &mut buf, &mut |_| {})?;
     Some((emit.to, buf[..emit.len].to_vec()))
 }
 
@@ -220,7 +220,14 @@ fn a_unique_publication_gains_an_nsec_asserting_what_it_does_not_hold() {
     let mut buf = [0u8; BUF];
     let asked = query(&name("printer.local"), QuestionType::Any, true);
     let emit = engine
-        .on_message(at(5000), &asked, on_link(9), &mut rng, &mut buf)
+        .on_message(
+            at(5000),
+            &asked,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {},
+        )
         .expect("answers");
     let given = answers(&buf[..emit.len]);
     let nsec = given
@@ -287,7 +294,14 @@ fn a_peer_claiming_our_live_name_renames_us_and_restarts_probing() {
     });
     let mut buf = [0u8; BUF];
     assert!(engine
-        .on_message(at(5000), &theirs, on_link(9), &mut rng, &mut buf)
+        .on_message(
+            at(5000),
+            &theirs,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {}
+        )
         .is_none());
 
     assert_eq!(engine.take_event(), Some(MdnsEvent::Renamed { id }));
@@ -322,7 +336,7 @@ fn the_same_data_at_our_name_is_not_a_conflict() {
         ));
     });
     let mut buf = [0u8; BUF];
-    engine.on_message(at(5000), &echo, on_link(9), &mut rng, &mut buf);
+    engine.on_message(at(5000), &echo, on_link(9), &mut rng, &mut buf, &mut |_| {});
     assert_eq!(engine.take_event(), None);
     assert_eq!(engine.name_of(id), Some(name("printer.local")));
 }
@@ -359,6 +373,7 @@ fn the_rename_budget_runs_out_and_the_name_fails_closed_to_unpublished() {
             on_link(9),
             &mut rng,
             &mut buf,
+            &mut |_| {},
         );
         while let Some(event) = engine.take_event() {
             if event == (MdnsEvent::ConflictBudgetExhausted { id }) {
@@ -376,7 +391,14 @@ fn the_rename_budget_runs_out_and_the_name_fails_closed_to_unpublished() {
     // Nothing is published under it any more: a query gets no answer.
     let asked = query(&name("printer-9.local"), QuestionType::Any, true);
     assert!(engine
-        .on_message(at(9000), &asked, on_link(9), &mut rng, &mut buf)
+        .on_message(
+            at(9000),
+            &asked,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {}
+        )
         .is_none());
     assert_eq!(engine.next_deadline(), None);
 }
@@ -406,7 +428,7 @@ fn losing_a_simultaneous_probe_defers_rather_than_races() {
         assert!(writer.push_record(Section::Authority, &proposed));
     });
     let mut buf = [0u8; BUF];
-    engine.on_message(at(10), &theirs, on_link(9), &mut rng, &mut buf);
+    engine.on_message(at(10), &theirs, on_link(9), &mut rng, &mut buf, &mut |_| {});
     assert_eq!(engine.state_of(id), Some(ServiceState::Deferred));
     assert!(poll(&mut engine, at(500)).is_none(), "still waiting");
     assert_eq!(engine.state_of(id), Some(ServiceState::Deferred));
@@ -438,7 +460,7 @@ fn winning_a_simultaneous_probe_carries_on() {
         assert!(writer.push_record(Section::Authority, &proposed));
     });
     let mut buf = [0u8; BUF];
-    engine.on_message(at(10), &theirs, on_link(9), &mut rng, &mut buf);
+    engine.on_message(at(10), &theirs, on_link(9), &mut rng, &mut buf, &mut |_| {});
     assert_eq!(engine.state_of(id), Some(ServiceState::Probing));
 }
 
@@ -469,7 +491,14 @@ fn a_multicast_query_is_answered_after_the_jitter_and_not_before() {
     let mut rng = highest();
     assert!(
         engine
-            .on_message(at(5000), &asked, on_link(9), &mut rng, &mut buf)
+            .on_message(
+                at(5000),
+                &asked,
+                on_link(9),
+                &mut rng,
+                &mut buf,
+                &mut |_| {}
+            )
             .is_none(),
         "a multicast answer is delayed, never immediate"
     );
@@ -504,7 +533,14 @@ fn a_unicast_question_is_answered_straight_back_to_the_asker() {
     );
     let mut buf = [0u8; BUF];
     let emit = engine
-        .on_message(at(5000), &asked, on_link(9), &mut rng, &mut buf)
+        .on_message(
+            at(5000),
+            &asked,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {},
+        )
         .expect("answers at once");
     assert_eq!(
         emit.to,
@@ -548,7 +584,7 @@ fn a_legacy_resolver_gets_its_question_echoed_and_a_short_ttl() {
         on_link: true,
     };
     let emit = engine
-        .on_message(at(5000), &asked, legacy, &mut rng, &mut buf)
+        .on_message(at(5000), &asked, legacy, &mut rng, &mut buf, &mut |_| {})
         .expect("answers a legacy resolver");
     assert_eq!(
         emit.to,
@@ -597,7 +633,14 @@ fn a_known_answer_the_asker_already_holds_is_not_repeated() {
     let mut buf = [0u8; BUF];
     assert!(
         engine
-            .on_message(at(5000), &asked, on_link(9), &mut rng, &mut buf)
+            .on_message(
+                at(5000),
+                &asked,
+                on_link(9),
+                &mut rng,
+                &mut buf,
+                &mut |_| {}
+            )
             .is_none(),
         "a fresh known answer suppresses ours"
     );
@@ -613,7 +656,14 @@ fn a_known_answer_the_asker_already_holds_is_not_repeated() {
         assert!(writer.push_record(Section::Answer, &stale));
     });
     assert!(engine
-        .on_message(at(5100), &asked, on_link(9), &mut rng, &mut buf)
+        .on_message(
+            at(5100),
+            &asked,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {}
+        )
         .is_some());
 }
 
@@ -635,7 +685,14 @@ fn a_query_for_something_we_do_not_publish_is_not_answered() {
     let asked = query(&name("scanner.local"), QuestionType::Any, true);
     let mut buf = [0u8; BUF];
     assert!(engine
-        .on_message(at(5000), &asked, on_link(9), &mut rng, &mut buf)
+        .on_message(
+            at(5000),
+            &asked,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {}
+        )
         .is_none());
     assert_eq!(engine.next_deadline(), None);
 }
@@ -658,7 +715,7 @@ fn a_name_still_being_probed_for_is_not_answered_with() {
     let mut buf = [0u8; BUF];
     assert!(
         engine
-            .on_message(at(10), &asked, on_link(9), &mut rng, &mut buf)
+            .on_message(at(10), &asked, on_link(9), &mut rng, &mut buf, &mut |_| {})
             .is_none(),
         "the name is not ours until the probe succeeds"
     );
@@ -690,7 +747,7 @@ fn a_query_from_off_link_is_never_answered() {
         on_link: false,
     };
     assert!(engine
-        .on_message(at(5000), &asked, off_link, &mut rng, &mut buf)
+        .on_message(at(5000), &asked, off_link, &mut rng, &mut buf, &mut |_| {})
         .is_none());
     assert_eq!(engine.next_deadline(), None, "nothing was even scheduled");
 }
@@ -711,7 +768,7 @@ fn a_response_from_off_link_never_reaches_the_cache() {
         port: PORT,
         on_link: false,
     };
-    engine.on_message(at(0), &theirs, off_link, &mut rng, &mut buf);
+    engine.on_message(at(0), &theirs, off_link, &mut rng, &mut buf, &mut |_| {});
     assert!(engine.cache().is_empty());
 }
 
@@ -740,7 +797,14 @@ fn a_record_is_multicast_at_most_once_a_second() {
     );
     let mut buf = [0u8; BUF];
     let mut rng = highest();
-    engine.on_message(at(10_000), &asked, on_link(9), &mut rng, &mut buf);
+    engine.on_message(
+        at(10_000),
+        &asked,
+        on_link(9),
+        &mut rng,
+        &mut buf,
+        &mut |_| {},
+    );
     let due = engine.next_deadline().expect("scheduled");
     assert!(
         poll(&mut engine, due).is_some(),
@@ -748,7 +812,14 @@ fn a_record_is_multicast_at_most_once_a_second() {
     );
 
     // A second identical query inside the same second produces nothing.
-    engine.on_message(at(10_200), &asked, on_link(9), &mut rng, &mut buf);
+    engine.on_message(
+        at(10_200),
+        &asked,
+        on_link(9),
+        &mut rng,
+        &mut buf,
+        &mut |_| {},
+    );
     let due = engine.next_deadline().expect("scheduled again");
     assert!(
         poll(&mut engine, due).is_none(),
@@ -756,7 +827,14 @@ fn a_record_is_multicast_at_most_once_a_second() {
     );
 
     // A second later it may go again.
-    engine.on_message(at(12_000), &asked, on_link(9), &mut rng, &mut buf);
+    engine.on_message(
+        at(12_000),
+        &asked,
+        on_link(9),
+        &mut rng,
+        &mut buf,
+        &mut |_| {},
+    );
     let due = engine.next_deadline().expect("scheduled again");
     assert!(poll(&mut engine, due).is_some());
 }
@@ -782,7 +860,14 @@ fn unicast_replies_to_one_peer_are_budgeted() {
     let mut answered = 0usize;
     for _ in 0..40 {
         if engine
-            .on_message(at(5000), &asked, on_link(9), &mut rng, &mut buf)
+            .on_message(
+                at(5000),
+                &asked,
+                on_link(9),
+                &mut rng,
+                &mut buf,
+                &mut |_| {},
+            )
             .is_some()
         {
             answered += 1;
@@ -817,11 +902,25 @@ fn a_peer_past_its_reply_budget_cannot_spend_the_interfaces() {
     let asked = query(&name("printer.local"), QuestionType::Any, true);
     let mut buf = [0u8; BUF];
     for _ in 0..1_000 {
-        let _ = engine.on_message(at(5000), &asked, on_link(9), &mut rng, &mut buf);
+        let _ = engine.on_message(
+            at(5000),
+            &asked,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {},
+        );
     }
     assert!(
         engine
-            .on_message(at(5000), &asked, on_link(10), &mut rng, &mut buf)
+            .on_message(
+                at(5000),
+                &asked,
+                on_link(10),
+                &mut rng,
+                &mut buf,
+                &mut |_| {}
+            )
             .is_some(),
         "a second peer on the link is still answered"
     );
@@ -848,7 +947,14 @@ fn defending_our_own_name_is_never_charged_to_a_budget() {
     let unicast = query(&name("printer.local"), QuestionType::Any, true);
     let mut buf = [0u8; BUF];
     for _ in 0..200 {
-        engine.on_message(at(5000), &unicast, on_link(9), &mut rng, &mut buf);
+        engine.on_message(
+            at(5000),
+            &unicast,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {},
+        );
     }
 
     let probe = message(0, false, |writer| {
@@ -860,7 +966,14 @@ fn defending_our_own_name_is_never_charged_to_a_budget() {
         assert!(writer.push_record(Section::Authority, &proposed));
     });
     let emit = engine
-        .on_message(at(5000), &probe, on_link(9), &mut rng, &mut buf)
+        .on_message(
+            at(5000),
+            &probe,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {},
+        )
         .expect("a probe for our name is always defended");
     assert_eq!(emit.to, Destination::Group, "and defended to everyone");
     assert!(answers(&buf[..emit.len])
@@ -897,7 +1010,14 @@ fn withdrawing_sends_goodbyes_and_then_publishes_nothing() {
     let asked = query(&name("printer.local"), QuestionType::Any, true);
     let mut buf = [0u8; BUF];
     assert!(engine
-        .on_message(at(6000), &asked, on_link(9), &mut rng, &mut buf)
+        .on_message(
+            at(6000),
+            &asked,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {}
+        )
         .is_none());
 }
 
@@ -955,7 +1075,14 @@ fn withdrawing_one_publication_leaves_the_others_answerable() {
     let asked = query(&name("scanner.local"), QuestionType::Any, true);
     let mut buf = [0u8; BUF];
     let emit = engine
-        .on_message(at(6000), &asked, on_link(9), &mut rng, &mut buf)
+        .on_message(
+            at(6000),
+            &asked,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {},
+        )
         .expect("the survivor still answers");
     assert!(answers(&buf[..emit.len])
         .iter()
@@ -972,8 +1099,9 @@ fn a_question_is_asked_then_re_asked_on_a_doubling_backoff() {
         .ask(
             at(0),
             name("_ipp._tcp.local"),
-            QuestionType::Record(RecordType::Ptr),
+            RecordType::Ptr,
             &mut rng,
+            &mut |_| {},
         )
         .expect("asks");
     let (to, bytes) = poll(&mut engine, at(0)).expect("the first query");
@@ -996,8 +1124,9 @@ fn a_query_carries_what_we_already_know_so_responders_can_stay_quiet() {
         .ask(
             at(0),
             name("_ipp._tcp.local"),
-            QuestionType::Record(RecordType::Ptr),
+            RecordType::Ptr,
             &mut rng,
+            &mut |_| {},
         )
         .expect("asks");
     let theirs = message(0, true, |writer| {
@@ -1007,7 +1136,7 @@ fn a_query_carries_what_we_already_know_so_responders_can_stay_quiet() {
         ));
     });
     let mut buf = [0u8; BUF];
-    engine.on_message(at(0), &theirs, on_link(9), &mut rng, &mut buf);
+    engine.on_message(at(0), &theirs, on_link(9), &mut rng, &mut buf, &mut |_| {});
 
     let (_, bytes) = poll(&mut engine, at(0)).expect("the first query");
     let known = answers(&bytes);
@@ -1028,8 +1157,9 @@ fn a_question_another_host_has_just_asked_slides_to_the_next_round() {
         .ask(
             at(0),
             name("_ipp._tcp.local"),
-            QuestionType::Record(RecordType::Ptr),
+            RecordType::Ptr,
             &mut rng,
+            &mut |_| {},
         )
         .expect("asks");
     let theirs = query(
@@ -1038,7 +1168,7 @@ fn a_question_another_host_has_just_asked_slides_to_the_next_round() {
         false,
     );
     let mut buf = [0u8; BUF];
-    engine.on_message(at(0), &theirs, on_link(9), &mut rng, &mut buf);
+    engine.on_message(at(0), &theirs, on_link(9), &mut rng, &mut buf, &mut |_| {});
     assert!(
         poll(&mut engine, at(0)).is_none(),
         "someone else asked it for us"
@@ -1054,8 +1184,9 @@ fn a_cached_answer_about_to_expire_pulls_its_question_forward() {
         .ask(
             at(0),
             name("_ipp._tcp.local"),
-            QuestionType::Record(RecordType::Ptr),
+            RecordType::Ptr,
             &mut rng,
+            &mut |_| {},
         )
         .expect("asks");
     let mut record = Record::shared(name("_ipp._tcp.local"), RData::Ptr(instance()));
@@ -1064,7 +1195,7 @@ fn a_cached_answer_about_to_expire_pulls_its_question_forward() {
         assert!(writer.push_record(Section::Answer, &record));
     });
     let mut buf = [0u8; BUF];
-    engine.on_message(at(0), &theirs, on_link(9), &mut rng, &mut buf);
+    engine.on_message(at(0), &theirs, on_link(9), &mut rng, &mut buf, &mut |_| {});
 
     // Let the doubling backoff run out to its 127 s point.
     for millis in [0u64, 1_000, 3_000, 7_000, 15_000, 31_000, 63_000] {
@@ -1085,8 +1216,9 @@ fn dropping_a_question_stops_the_refreshing() {
         .ask(
             at(0),
             name("_ipp._tcp.local"),
-            QuestionType::Record(RecordType::Ptr),
+            RecordType::Ptr,
             &mut rng,
+            &mut |_| {},
         )
         .expect("asks");
     let mut record = Record::shared(name("_ipp._tcp.local"), RData::Ptr(instance()));
@@ -1095,7 +1227,7 @@ fn dropping_a_question_stops_the_refreshing() {
         assert!(writer.push_record(Section::Answer, &record));
     });
     let mut buf = [0u8; BUF];
-    engine.on_message(at(0), &theirs, on_link(9), &mut rng, &mut buf);
+    engine.on_message(at(0), &theirs, on_link(9), &mut rng, &mut buf, &mut |_| {});
     drain(&mut engine, at(0));
 
     engine.stop_asking(id);
@@ -1113,11 +1245,17 @@ fn questions_past_the_bound_are_refused() {
     for index in 0..super::MAX_QUESTIONS {
         let owner = alloc::format!("q{index}.local");
         engine
-            .ask(at(0), name(&owner), QuestionType::Any, &mut rng)
+            .ask(at(0), name(&owner), RecordType::A, &mut rng, &mut |_| {})
             .expect("asks");
     }
     assert_eq!(
-        engine.ask(at(0), name("one-more.local"), QuestionType::Any, &mut rng),
+        engine.ask(
+            at(0),
+            name("one-more.local"),
+            RecordType::A,
+            &mut rng,
+            &mut |_| {}
+        ),
         Err(PublishError::TooMany)
     );
 }
@@ -1148,8 +1286,9 @@ fn the_deadline_is_the_earliest_of_everything_pending() {
         .ask(
             at(500),
             name("_ipp._tcp.local"),
-            QuestionType::Any,
+            RecordType::Ptr,
             &mut rng,
+            &mut |_| {},
         )
         .expect("asks");
     // The probe is due at zero and the question at 500 ms, so the earliest
@@ -1170,9 +1309,9 @@ fn a_link_going_down_forgets_what_was_learned_there() {
         ));
     });
     let mut buf = [0u8; BUF];
-    engine.on_message(at(0), &theirs, on_link(9), &mut rng, &mut buf);
+    engine.on_message(at(0), &theirs, on_link(9), &mut rng, &mut buf, &mut |_| {});
     assert_eq!(engine.cache().len(), 1);
-    engine.on_link_down();
+    engine.on_link_down(&mut |_| {});
     assert!(engine.cache().is_empty());
 }
 
@@ -1201,7 +1340,14 @@ fn another_responder_answering_first_drops_our_pending_answer() {
     );
     let mut buf = [0u8; BUF];
     let mut rng = highest();
-    engine.on_message(at(10_000), &asked, on_link(9), &mut rng, &mut buf);
+    engine.on_message(
+        at(10_000),
+        &asked,
+        on_link(9),
+        &mut rng,
+        &mut buf,
+        &mut |_| {},
+    );
     assert!(engine.next_deadline().is_some(), "an answer is scheduled");
 
     // Another host on the segment sends the same record before our jitter
@@ -1212,7 +1358,14 @@ fn another_responder_answering_first_drops_our_pending_answer() {
             &Record::shared(name("_ipp._tcp.local"), RData::Ptr(instance())),
         ));
     });
-    engine.on_message(at(10_010), &theirs, on_link(8), &mut rng, &mut buf);
+    engine.on_message(
+        at(10_010),
+        &theirs,
+        on_link(8),
+        &mut rng,
+        &mut buf,
+        &mut |_| {},
+    );
     assert!(
         drain(&mut engine, at(10_200)).is_empty(),
         "the answer was already given"
@@ -1246,7 +1399,14 @@ fn a_service_instance_publishes_its_srv_and_txt_together() {
     let asked = query(&instance(), QuestionType::Any, true);
     let mut buf = [0u8; BUF];
     let emit = engine
-        .on_message(at(5000), &asked, on_link(9), &mut rng, &mut buf)
+        .on_message(
+            at(5000),
+            &asked,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {},
+        )
         .expect("answers");
     let given = answers(&buf[..emit.len]);
     assert!(given
@@ -1255,4 +1415,257 @@ fn a_service_instance_publishes_its_srv_and_txt_together() {
     assert!(given
         .iter()
         .any(|record| record.record_type() == RecordType::Txt));
+}
+
+// -- answers -------------------------------------------------------------
+
+/// The edges a question was told, in order.
+type Told = Vec<(QuestionId, AnswerChange, Record)>;
+
+fn into(told: &mut Told) -> impl FnMut(&Answer<'_>) + '_ {
+    move |answer| told.push((answer.question, answer.change, answer.record.record))
+}
+
+fn browse() -> Name {
+    name("_ipp._tcp.local")
+}
+
+fn pointer(ttl: u32) -> Record {
+    let mut record = Record::shared(browse(), RData::Ptr(instance()));
+    record.ttl = ttl;
+    record
+}
+
+fn announced(records: &[Record]) -> Vec<u8> {
+    message(0, true, |writer| {
+        for record in records {
+            assert!(writer.push_record(Section::Answer, record));
+        }
+    })
+}
+
+fn hear(engine: &mut MdnsEngine, now: Duration64, bytes: &[u8], told: &mut Told) {
+    let mut rng = lowest();
+    let mut buf = [0u8; BUF];
+    engine.on_message(now, bytes, on_link(9), &mut rng, &mut buf, &mut into(told));
+}
+
+fn tick(engine: &mut MdnsEngine, now: Duration64, told: &mut Told) {
+    let mut rng = lowest();
+    let mut buf = [0u8; BUF];
+    while engine
+        .poll(now, &mut rng, &mut buf, &mut into(told))
+        .is_some()
+    {}
+}
+
+fn ask_browse(engine: &mut MdnsEngine, told: &mut Told) -> QuestionId {
+    let mut rng = lowest();
+    engine
+        .ask(at(0), browse(), RecordType::Ptr, &mut rng, &mut into(told))
+        .expect("asks")
+}
+
+#[test]
+fn a_question_is_told_each_answer_as_it_arrives_is_renewed_and_expires() {
+    let mut engine = engine();
+    let mut told = Told::new();
+    let id = ask_browse(&mut engine, &mut told);
+    assert!(told.is_empty(), "nothing is cached yet");
+
+    hear(&mut engine, at(0), &announced(&[pointer(100)]), &mut told);
+    hear(
+        &mut engine,
+        at(10_000),
+        &announced(&[pointer(100)]),
+        &mut told,
+    );
+    tick(&mut engine, at(110_000), &mut told);
+    let changes: Vec<_> = told.iter().map(|(q, change, _)| (*q, *change)).collect();
+    assert_eq!(
+        changes,
+        [
+            (id, AnswerChange::Added),
+            (id, AnswerChange::Refreshed),
+            (id, AnswerChange::Retired),
+        ]
+    );
+    assert!(told
+        .iter()
+        .all(|(_, _, record)| record.same_record(&pointer(100))));
+}
+
+#[test]
+fn a_question_starts_with_what_the_cache_already_holds() {
+    let mut engine = engine();
+    let mut told = Told::new();
+    hear(&mut engine, at(0), &announced(&[pointer(4500)]), &mut told);
+    assert!(told.is_empty(), "no one asked yet");
+    let id = ask_browse(&mut engine, &mut told);
+    assert_eq!(told.len(), 1);
+    assert_eq!((told[0].0, told[0].1), (id, AnswerChange::Added));
+}
+
+#[test]
+fn a_goodbye_retires_its_answer_once_its_final_second_is_over() {
+    let mut engine = engine();
+    let mut told = Told::new();
+    ask_browse(&mut engine, &mut told);
+    hear(&mut engine, at(0), &announced(&[pointer(4500)]), &mut told);
+    hear(&mut engine, at(5_000), &announced(&[pointer(0)]), &mut told);
+    assert_eq!(told.len(), 1, "a goodbye's record is held one more second");
+    tick(&mut engine, at(6_000), &mut told);
+    assert_eq!(told.len(), 2);
+    assert_eq!(told[1].1, AnswerChange::Retired);
+}
+
+#[test]
+fn the_link_going_down_retires_every_answer_and_the_question_survives_it() {
+    let mut engine = engine();
+    let mut told = Told::new();
+    let id = ask_browse(&mut engine, &mut told);
+    hear(&mut engine, at(0), &announced(&[pointer(100)]), &mut told);
+    engine.on_link_down(&mut into(&mut told));
+    assert_eq!(told.len(), 2);
+    assert_eq!((told[1].0, told[1].1), (id, AnswerChange::Retired));
+
+    // Still asked, so what the link teaches next arms its refresh.
+    hear(
+        &mut engine,
+        at(200_000),
+        &announced(&[pointer(100)]),
+        &mut told,
+    );
+    assert_eq!(told.len(), 3);
+    assert!(engine.next_deadline().is_some_and(|at_| at_ <= at(280_000)));
+}
+
+#[test]
+fn an_answer_the_bounds_evict_is_retired() {
+    let mut engine = engine();
+    let mut told = Told::new();
+    ask_browse(&mut engine, &mut told);
+    hear(&mut engine, at(0), &announced(&[pointer(4500)]), &mut told);
+    // The same source past its share: its own oldest record, the answer,
+    // makes room for the newest.
+    for index in 0..crate::mdns::MAX_RECORDS_PER_SOURCE {
+        let owner = alloc::format!("h{index}.local");
+        let mut filler = Record::unique(name(&owner), address(5));
+        filler.ttl = 4500;
+        hear(
+            &mut engine,
+            at(u64::try_from(index + 1).expect("small")),
+            &announced(&[filler]),
+            &mut told,
+        );
+    }
+    assert_eq!(told.len(), 2);
+    assert_eq!(told[1].1, AnswerChange::Retired);
+}
+
+#[test]
+fn a_record_no_question_asks_for_is_never_told() {
+    let mut engine = engine();
+    let mut told = Told::new();
+    ask_browse(&mut engine, &mut told);
+    let mut other = Record::unique(name("printer.local"), address(5));
+    other.ttl = 1;
+    hear(&mut engine, at(0), &announced(&[other]), &mut told);
+    tick(&mut engine, at(2_000), &mut told);
+    assert!(told.is_empty());
+}
+
+#[test]
+fn a_stopped_question_is_told_nothing_more() {
+    let mut engine = engine();
+    let mut told = Told::new();
+    let id = ask_browse(&mut engine, &mut told);
+    hear(&mut engine, at(0), &announced(&[pointer(100)]), &mut told);
+    engine.stop_asking(id);
+    tick(&mut engine, at(110_000), &mut told);
+    assert_eq!(told.len(), 1, "only the edge from before it stopped");
+}
+
+#[test]
+fn asking_a_name_and_type_already_asked_is_refused() {
+    let mut engine = engine();
+    let mut told = Told::new();
+    ask_browse(&mut engine, &mut told);
+    let mut rng = lowest();
+    assert_eq!(
+        engine.ask(
+            at(0),
+            browse(),
+            RecordType::Ptr,
+            &mut rng,
+            &mut into(&mut told)
+        ),
+        Err(PublishError::Duplicate)
+    );
+    // The same name with another type is another question.
+    assert!(engine
+        .ask(
+            at(0),
+            browse(),
+            RecordType::Txt,
+            &mut rng,
+            &mut into(&mut told)
+        )
+        .is_ok());
+}
+
+#[test]
+fn questions_due_together_travel_in_one_query() {
+    let mut engine = engine();
+    let mut rng = lowest();
+    for owner in ["_ipp._tcp.local", "_http._tcp.local", "_smb._tcp.local"] {
+        engine
+            .ask(at(0), name(owner), RecordType::Ptr, &mut rng, &mut |_| {})
+            .expect("asks");
+    }
+    let (_, bytes) = poll(&mut engine, at(0)).expect("one query");
+    assert_eq!(questions(&bytes).len(), 3);
+    assert!(poll(&mut engine, at(0)).is_none(), "and only one");
+}
+
+#[test]
+fn a_query_leaves_out_a_known_answer_past_half_its_life() {
+    let mut engine = engine();
+    let mut told = Told::new();
+    ask_browse(&mut engine, &mut told);
+    hear(&mut engine, at(0), &announced(&[pointer(100)]), &mut told);
+    let (_, fresh) = poll(&mut engine, at(0)).expect("the first query");
+    assert_eq!(answers(&fresh).len(), 1, "a fresh answer is known");
+    for millis in [1_000u64, 3_000, 7_000, 15_000, 31_000] {
+        drain(&mut engine, at(millis));
+    }
+    // The next round, at 63 s, finds the answer with 37 s of its 100 left.
+    let (_, stale) = poll(&mut engine, at(63_000)).expect("a later query");
+    assert!(answers(&stale).is_empty());
+}
+
+#[test]
+fn a_poll_with_no_room_still_moves_every_schedule_on() {
+    let mut engine = engine();
+    let mut rng = lowest();
+    engine
+        .publish(
+            at(0),
+            name("printer.local"),
+            NameKind::Host,
+            true,
+            &[address(5)],
+            &mut rng,
+        )
+        .expect("publishes");
+    engine
+        .ask(at(0), browse(), RecordType::Ptr, &mut rng, &mut |_| {})
+        .expect("asks");
+    for _ in 0..8 {
+        assert!(engine.poll(at(0), &mut rng, &mut [], &mut |_| {}).is_none());
+    }
+    assert!(
+        engine.next_deadline().is_some_and(|next| next > at(0)),
+        "nothing is left due at an instant already reached"
+    );
 }

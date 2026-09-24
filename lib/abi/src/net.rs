@@ -266,6 +266,8 @@ const FAMILY_OFFSET: usize = 13;
 const SEQUENCE_OFFSET: usize = 14;
 /// Byte offset of the delivery-port field (`Socket` only).
 const DELIVER_OFFSET: usize = 36;
+/// Byte offset of the egress-interface field (`Send` only).
+const INTERFACE_OFFSET: usize = 44;
 
 /// Wire operation discriminant of [`SocketRequest::Socket`].
 const OP_SOCKET: u16 = 1;
@@ -338,6 +340,16 @@ pub enum SocketRequest<'a> {
         socket: SocketId,
         /// The destination, or [`None`] to use the connected peer.
         dest: Option<SocketAddr>,
+        /// The one logical interface the datagram leaves by, or [`None`] for
+        /// the stack's own choice: the first interface that reaches a unicast
+        /// destination, every interface for a multicast group.
+        ///
+        /// A link-scoped protocol names it, because a link-local destination
+        /// names no link by itself and a message built from one link's state
+        /// must not reach another's. A named interface that cannot carry the
+        /// datagram refuses it rather than choosing another. Only a datagram
+        /// socket names one; a connected stream is bound to its link.
+        interface: Option<[u8; IF_NAME_LEN]>,
         /// The datagram payload (at most [`SOCKET_MAX_DATAGRAM`] bytes).
         payload: &'a [u8],
     },
@@ -421,7 +433,7 @@ pub enum SocketRequest<'a> {
 
 impl<'a> SocketRequest<'a> {
     /// Byte length of the fixed request header preceding any payload.
-    pub const HEADER_LEN: usize = 44;
+    pub const HEADER_LEN: usize = INTERFACE_OFFSET + IF_NAME_LEN;
 
     /// Largest request the [`NETSTACK_SOCKET_ENDPOINT`] accepts: the header
     /// plus a maximum-size datagram payload.
@@ -434,6 +446,8 @@ impl<'a> SocketRequest<'a> {
     /// * [`Errno::BufferTooSmall`] — `out` cannot hold the encoding.
     /// * [`Errno::LengthOutOfRange`] — a [`Send`](Self::Send) payload beyond
     ///   [`SOCKET_MAX_DATAGRAM`].
+    /// * [`Errno::OutOfRange`] — a [`Send`](Self::Send) interface outside the
+    ///   interface-name grammar.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
         let payload = match self {
             Self::Send { payload, .. } | Self::SendEcho { payload, .. } => *payload,
@@ -475,6 +489,7 @@ impl<'a> SocketRequest<'a> {
             Self::Send {
                 socket,
                 dest,
+                interface,
                 payload,
             } => {
                 put_u16(out, 6, OP_SEND);
@@ -482,6 +497,7 @@ impl<'a> SocketRequest<'a> {
                 if let Some(dest) = dest {
                     dest.write(&mut out[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN]);
                 }
+                write_interface(&mut out[INTERFACE_OFFSET..Self::HEADER_LEN], interface)?;
                 out[Self::HEADER_LEN..total].copy_from_slice(payload);
             }
             Self::Close { socket } => {
@@ -545,6 +561,10 @@ impl<'a> SocketRequest<'a> {
     /// * [`Errno::LengthOutOfRange`] — a payload beyond
     ///   [`SOCKET_MAX_DATAGRAM`], or a non-empty payload on a non-`Send`
     ///   operation.
+    ///
+    /// An interface field on any operation but `Send`, or one outside the
+    /// interface-name grammar, is [`Errno::BadMagic`] or
+    /// [`Errno::OutOfRange`] respectively.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::HEADER_LEN {
             return Err(Errno::BufferTooSmall);
@@ -567,7 +587,23 @@ impl<'a> SocketRequest<'a> {
         }
         let socket = read_u32(bytes, SOCKET_OFFSET);
         let addr_block = &bytes[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN];
-        Self::dispatch(op, bytes, addr_block, socket, payload)
+        let interface = read_interface(&bytes[INTERFACE_OFFSET..Self::HEADER_LEN])?;
+        match Self::dispatch(op, bytes, addr_block, socket, payload)? {
+            Self::Send {
+                socket,
+                dest,
+                payload,
+                ..
+            } => Ok(Self::Send {
+                socket,
+                dest,
+                interface,
+                payload,
+            }),
+            // Only a send names an egress; the field is reserved elsewhere.
+            _ if interface.is_some() => Err(Errno::BadMagic),
+            other => Ok(other),
+        }
     }
 
     /// Route a validated request header to its operation decoder.
@@ -620,6 +656,7 @@ impl<'a> SocketRequest<'a> {
                 Ok(Self::Send {
                     socket,
                     dest,
+                    interface: None,
                     payload,
                 })
             }
@@ -734,6 +771,27 @@ impl<'a> SocketRequest<'a> {
             deliver_port: read_u64(bytes, DELIVER_OFFSET),
         })
     }
+}
+
+/// Write an optional interface name into its all-zero-when-absent block.
+fn write_interface(block: &mut [u8], interface: Option<[u8; IF_NAME_LEN]>) -> Result<(), Errno> {
+    if let Some(name) = interface {
+        validate_if_name(&name)?;
+        block.copy_from_slice(&name);
+    }
+    Ok(())
+}
+
+/// Read the block [`write_interface`] wrote, refusing a name outside the
+/// interface-name grammar.
+fn read_interface(block: &[u8]) -> Result<Option<[u8; IF_NAME_LEN]>, Errno> {
+    if block.iter().all(|&b| b == 0) {
+        return Ok(None);
+    }
+    let mut name = [0u8; IF_NAME_LEN];
+    name.copy_from_slice(block);
+    validate_if_name(&name)?;
+    Ok(Some(name))
 }
 
 /// Refuse an address-bearing operation whose type/family bytes or delivery
@@ -978,6 +1036,118 @@ impl<'a> SocketDatagram<'a> {
             source_on_link: flags & DATAGRAM_SOURCE_ON_LINK != 0,
             payload,
         })
+    }
+}
+
+/// Magic number identifying a membership link event (`"NSKL"`
+/// little-endian).
+pub const SOCKET_LINK_MAGIC: u32 = u32::from_le_bytes(*b"NSKL");
+
+/// Where a socket's multicast memberships are live, delivered to its async
+/// port as that changes.
+///
+/// A socket holding group memberships is told each logical interface where
+/// its family can speak — the link is up and the interface holds a source
+/// address of that family — at its first join for the interfaces that exist,
+/// as each later one is added, and on every edge after, and told when that
+/// ends. It is the one authority a link-scoped protocol has for
+/// which links it is speaking on, so it needs neither the stack's address book
+/// nor a poll to follow them.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SocketLinkEvent {
+    /// The socket told.
+    pub socket: SocketId,
+    /// The logical interface, NUL-padded as
+    /// [`crate::net_ipc::validate_if_name`] requires.
+    pub interface: [u8; IF_NAME_LEN],
+    /// Whether the memberships are now live on it (`true`) or its link went
+    /// down (`false`).
+    pub up: bool,
+}
+
+/// [`SocketLinkEvent`] flag bit: the link is up.
+const LINK_UP: u8 = 0x01;
+
+impl SocketLinkEvent {
+    /// Byte length of the event: magic, version, flags, a reserved byte,
+    /// the socket, a reserved word, and the interface.
+    pub const WIRE_LEN: usize = 16 + IF_NAME_LEN;
+
+    /// Encode the event.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an interface outside the name grammar.
+    pub fn encode(&self) -> Result<[u8; Self::WIRE_LEN], Errno> {
+        validate_if_name(&self.interface)?;
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, SOCKET_LINK_MAGIC);
+        put_u16(&mut out, 4, SOCKET_VERSION_V1);
+        if self.up {
+            out[6] = LINK_UP;
+        }
+        put_u32(&mut out, 8, self.socket);
+        out[16..].copy_from_slice(&self.interface);
+        Ok(out)
+    }
+
+    /// Decode an event, failing closed.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for another length, [`Errno::BadMagic`] for
+    /// the wrong magic, an undefined flag, or a dirty reserved field,
+    /// [`Errno::AbiVersionUnsupported`] for another version, and
+    /// [`Errno::OutOfRange`] for a malformed interface name.
+    pub fn parse(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() != Self::WIRE_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if read_u32(bytes, 0) != SOCKET_LINK_MAGIC {
+            return Err(Errno::BadMagic);
+        }
+        if read_u16(bytes, 4) != SOCKET_VERSION_V1 {
+            return Err(Errno::AbiVersionUnsupported);
+        }
+        if bytes[6] & !LINK_UP != 0 || bytes[7] != 0 || read_u32(bytes, 12) != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let mut interface = [0u8; IF_NAME_LEN];
+        interface.copy_from_slice(&bytes[16..]);
+        validate_if_name(&interface)?;
+        Ok(Self {
+            socket: read_u32(bytes, 8),
+            interface,
+            up: bytes[6] & LINK_UP != 0,
+        })
+    }
+}
+
+/// What the stack delivers to a datagram socket's async port: a datagram, or
+/// a change in where its memberships are live.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SocketDelivery<'a> {
+    /// A received datagram.
+    Datagram(SocketDatagram<'a>),
+    /// A membership link edge.
+    Link(SocketLinkEvent),
+}
+
+impl<'a> SocketDelivery<'a> {
+    /// Decode whichever delivery `bytes` holds, by its magic.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] for a frame too short to carry a magic,
+    /// [`Errno::BadMagic`] for one that is neither, or the chosen decoder's
+    /// refusal.
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, Errno> {
+        let magic = bytes.get(..4).ok_or(Errno::BufferTooSmall)?;
+        match read_u32(magic, 0) {
+            SOCKET_DATAGRAM_MAGIC => SocketDatagram::parse(bytes).map(Self::Datagram),
+            SOCKET_LINK_MAGIC => SocketLinkEvent::parse(bytes).map(Self::Link),
+            _ => Err(Errno::BadMagic),
+        }
     }
 }
 
@@ -1391,6 +1561,106 @@ mod tests {
         }
     }
 
+    fn if_name(name: &[u8]) -> [u8; IF_NAME_LEN] {
+        let mut out = [0u8; IF_NAME_LEN];
+        out[..name.len()].copy_from_slice(name);
+        out
+    }
+
+    #[test]
+    fn only_a_send_names_an_egress_and_only_a_well_formed_one() {
+        let send = SocketRequest::Send {
+            socket: 2,
+            dest: Some(v6(5353)),
+            interface: Some(if_name(b"wlan0")),
+            payload: b"q",
+        };
+        let mut buf = [0u8; SocketRequest::MAX_WIRE_LEN];
+        let n = send.encode(&mut buf).expect("encode");
+        assert_eq!(SocketRequest::from_bytes(&buf[..n]), Ok(send));
+        // An interface outside the grammar, spelled onto the wire directly.
+        let mut upper = buf;
+        upper[INTERFACE_OFFSET] = b'W';
+        assert_eq!(
+            SocketRequest::from_bytes(&upper[..n]),
+            Err(Errno::OutOfRange)
+        );
+        // Refused by the encoder too, so none is ever written.
+        let bad = SocketRequest::Send {
+            socket: 2,
+            dest: None,
+            interface: Some(if_name(b"Eth0")),
+            payload: &[],
+        };
+        assert_eq!(bad.encode(&mut buf), Err(Errno::OutOfRange));
+        // Any other operation carrying one is corrupt.
+        let close = SocketRequest::Close { socket: 3 };
+        let mut header = [0u8; SocketRequest::HEADER_LEN];
+        close.encode(&mut header).expect("encode");
+        header[INTERFACE_OFFSET..INTERFACE_OFFSET + 4].copy_from_slice(b"eth0");
+        assert_eq!(SocketRequest::from_bytes(&header), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn a_link_event_round_trips_and_is_told_apart_from_a_datagram() {
+        for up in [true, false] {
+            let event = SocketLinkEvent {
+                socket: 9,
+                interface: if_name(b"eth0"),
+                up,
+            };
+            let bytes = event.encode().expect("encode");
+            assert_eq!(SocketLinkEvent::parse(&bytes), Ok(event));
+            assert_eq!(
+                SocketDelivery::parse(&bytes),
+                Ok(SocketDelivery::Link(event))
+            );
+        }
+        let datagram = SocketDatagram {
+            socket: 1,
+            interface: if_name(b"eth0"),
+            source: v4(10, 0, 0, 1, 5353),
+            source_on_link: true,
+            payload: b"x",
+        };
+        let mut buf = [0u8; SocketDatagram::MAX_WIRE_LEN];
+        let n = datagram.encode(&mut buf).expect("encode");
+        assert_eq!(
+            SocketDelivery::parse(&buf[..n]),
+            Ok(SocketDelivery::Datagram(datagram))
+        );
+        assert_eq!(SocketDelivery::parse(b"abc"), Err(Errno::BufferTooSmall));
+        assert_eq!(SocketDelivery::parse(b"abcdefgh"), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn a_malformed_link_event_is_refused_whole() {
+        let event = SocketLinkEvent {
+            socket: 9,
+            interface: if_name(b"eth0"),
+            up: true,
+        };
+        let good = event.encode().expect("encode");
+        for (at, value) in [(6usize, 0x02u8), (7, 1), (12, 1), (16, b'E')] {
+            let mut bad = good;
+            bad[at] = value;
+            assert!(SocketLinkEvent::parse(&bad).is_err(), "offset {at}");
+        }
+        let mut version = good;
+        version[4] = 2;
+        assert_eq!(
+            SocketLinkEvent::parse(&version),
+            Err(Errno::AbiVersionUnsupported)
+        );
+        assert_eq!(
+            SocketLinkEvent::parse(&good[..SocketLinkEvent::WIRE_LEN - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut bad_name = event;
+        bad_name.interface = [0u8; IF_NAME_LEN];
+        assert_eq!(bad_name.encode(), Err(Errno::OutOfRange));
+    }
+
     fn round_trip(request: SocketRequest<'_>) {
         let mut buf = [0u8; SocketRequest::MAX_WIRE_LEN];
         let n = request.encode(&mut buf).expect("request encodes");
@@ -1534,16 +1804,19 @@ mod tests {
         round_trip(SocketRequest::Send {
             socket: 2,
             dest: Some(v4(10, 0, 2, 2, 53)),
+            interface: None,
             payload: b"hello",
         });
         round_trip(SocketRequest::Send {
             socket: 2,
             dest: None,
+            interface: None,
             payload: b"connected",
         });
         round_trip(SocketRequest::Send {
             socket: 2,
             dest: Some(v6(123)),
+            interface: Some(if_name(b"eth0")),
             payload: &[],
         });
         round_trip(SocketRequest::Close { socket: 3 });
@@ -1771,6 +2044,7 @@ mod tests {
         let request = SocketRequest::Send {
             socket: 1,
             dest: Some(v4(1, 1, 1, 1, 1)),
+            interface: None,
             payload: &payload,
         };
         let mut buf = vec![0u8; SocketRequest::MAX_WIRE_LEN + 64];

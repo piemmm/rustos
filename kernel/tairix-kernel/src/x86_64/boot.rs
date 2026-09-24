@@ -222,15 +222,6 @@ pub enum BootError {
     /// Surfaces a defect in the per-CPU bootstrap latch or an
     /// out-of-range vector.
     IrqIdtInstall,
-    /// `percpu::install_vector` rejected the dedicated page-fault
-    /// (`#PF`, vector 14) IDT install. Surfaces a defect in the per-CPU
-    /// bootstrap latch.
-    PageFaultIsrInstall,
-    /// `exceptions::install_exception_vectors` rejected one of the
-    /// architecturally-defined exception vectors. Surfaces a defect in the
-    /// per-CPU bootstrap latch; the boot refuses rather than run with a
-    /// kernel-mode exception that would park the CPU without a diagnosis.
-    ExceptionIsrInstall,
     /// `percpu::install_tss_rsp0` rejected the ring-3-trap `RSP0`
     /// install. Surfaces a defect in the per-CPU bootstrap latch or an
     /// invalid kernel stack top.
@@ -296,8 +287,6 @@ impl BootError {
             Self::NoIoApic => "no_io_apic",
             Self::IrqVectorExhausted => "irq_vector_exhausted",
             Self::IrqIdtInstall => "irq_idt_install_failed",
-            Self::PageFaultIsrInstall => "page_fault_isr_install_failed",
-            Self::ExceptionIsrInstall => "exception_isr_install_failed",
             Self::TssRsp0Install => "tss_rsp0_install_failed",
             Self::IrqRoutingPublish => "irq_routing_publish_failed",
             Self::IrqProgramPin => "irq_program_pin_failed",
@@ -538,15 +527,9 @@ pub fn bring_up_bsp(
     // disabled, satisfying `percpu::init`'s SAFETY contract.
     unsafe { percpu::init(0).map_err(|_| BootError::PercpuInit)? };
 
-    // 1b. Point every exception vector at an entry that can report it,
-    //     arm the guarded user copy the `#PF` entry redirects into, and
-    //     publish the one fatal policy — all before anything further can
-    //     fault.
-    //
-    // SAFETY: BSP after `percpu::init(0)`; interrupts are still disabled
-    // (the boot trampoline leaves `IF=0` and nothing has `sti`'d), so an
-    // IDT write cannot race a delivery.
-    unsafe { install_fault_entries()? };
+    // 1b. Arm the guarded user copy the `#PF` entry redirects into and
+    //     publish the one fatal policy before anything further can fault.
+    install_fault_entries();
 
     // 1c. Enable `IA32_EFER.NXE` so the W^X No-Execute leaf bit the
     //     process-image builder sets on a ring-3 program's data/rodata
@@ -809,60 +792,18 @@ pub fn bring_up_bsp(
     })
 }
 
-/// Point every exception vector at an entry that can report it, arm the
-/// guarded user copy, and publish the machine's one fatal policy.
+/// Arm the guarded user copy and publish the machine's one fatal policy.
 ///
-/// Split out of [`bring_up_bsp`] because it is one coherent step — "an
-/// exception from here on is diagnosable" — rather than three unrelated
-/// installs, and because the caller reads better as a list of bring-up
-/// phases than as their bodies.
-///
-/// * Every architecturally-defined vector (`0..=31`, less `#PF`) gets its
-///   own stub. `percpu::init` filled the whole table with the
-///   vector-agnostic default thunk, which can say neither which exception
-///   fired nor what error code the CPU pushed for the subset that push
-///   one — so a kernel-mode `#GP`, `#UD`, `#DF` or machine check parked
-///   the CPU with no diagnosis at all.
-/// * `#PF` (14) gets the dedicated, error-code-aware, *resumable* entry
-///   instead: it decodes the error code, captures the faulting address
-///   (`CR2`), and is the one exception this kernel can resolve.
-/// * The fault-windowed user copy is armed beside it, because the `#PF`
-///   entry's kernel-fault window check is what redirects an in-window
-///   fault to the copy's fix-up — the two are one mechanism (the
-///   riscv64/aarch64 ports pair them inside their trap-vector installers).
-/// * The fatal handler slot is filled last. It is set-once and this never
-///   overrides an occupant: a QEMU vertical that observes its own
-///   deliberate faults publishes ahead of `boot` and keeps it. Either way
-///   the machine has exactly one fatal policy; with the slot empty an
-///   entry parks the CPU and prints nothing, which is how a kernel fault
-///   used to disappear.
-///
-/// # Errors
-///
-/// [`BootError::ExceptionIsrInstall`] or [`BootError::PageFaultIsrInstall`]
-/// when the per-CPU bootstrap latch refuses an IDT write or the
-/// guarded-copy slot is already spoken for. The boot refuses rather than
-/// run with an exception that would park the CPU without a diagnosis.
-///
-/// # Safety
-///
-/// The BSP, after `percpu::init(0)`, with interrupts disabled for the
-/// whole call so an IDT write cannot race a delivery.
-unsafe fn install_fault_entries() -> Result<(), BootError> {
-    // SAFETY: the caller's contract — BSP, post-`percpu::init(0)`,
-    // interrupts disabled — is exactly what both installs require.
-    // `PAGE_FAULT_VECTOR` is neither `#NMI` (2) nor `#DF` (8), and
-    // `install_vector` derives each gate's IST from the shared mapping
-    // anyway, so neither disturbs an IST-routed gate.
-    unsafe {
-        tairix_arch_x86_64::exceptions::install_exception_vectors(0)
-            .map_err(|_| BootError::ExceptionIsrInstall)?;
-        percpu::install_vector(0, fault::PAGE_FAULT_VECTOR, fault::page_fault_isr_addr())
-            .map_err(|_| BootError::PageFaultIsrInstall)?;
-    }
+/// `percpu::init` already routed every exception to an entry that reports
+/// it and `#PF` to the resumable one. The fault-windowed user copy is armed
+/// beside that entry, because its kernel-fault window check is what redirects
+/// an in-window fault to the copy's fix-up. The fatal handler slot is filled
+/// last; it is set-once and never overrides an occupant, so a QEMU vertical
+/// that observes its own deliberate faults publishes ahead of `boot` and keeps
+/// it.
+fn install_fault_entries() {
     tairix_arch_x86_64::uaccess::install();
     let _ = crate::x86_64::panic_ctx::install_kernel_fault_handler();
-    Ok(())
 }
 
 fn try_boot(

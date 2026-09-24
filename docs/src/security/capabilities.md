@@ -199,7 +199,10 @@ administrative capabilities (`CAP_USER_ADMIN`, `CAP_FS_CHOWN` — the
 network-administration set `CAP_NET_ADMIN`, `CAP_NET_BIND_PRIVILEGED`, and
 `CAP_NET_RAW` — running a privileged network service, or reaching below the
 transport layer to run the diagnostic `ping`, is an administrative act, the
-Unix `CAP_NET_BIND_SERVICE`/`CAP_NET_RAW` model — and `CAP_PROC_CONTROL`,
+Unix `CAP_NET_BIND_SERVICE`/`CAP_NET_RAW` model — `CAP_NET_DISCOVER_ALL`,
+browsing any link-local service type and enumerating every type, where an
+application otherwise browses only the types its signed manifest declares
+(`docs/src/userland/discoveryd.md`), and `CAP_PROC_CONTROL`,
 which `signal` consults only once its own-child and own-uid checks have
 both come up empty: controlling a process that belongs to a *different*
 principal is an administrative act, while signalling one's own children

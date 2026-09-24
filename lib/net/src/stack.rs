@@ -123,6 +123,12 @@ const MULTICAST_DATA_HOP_LIMIT: u8 = 1;
 /// Default per-interface multicast-group membership bound.
 pub const MULTICAST_CAPACITY: usize = 32;
 
+/// Groups of one family a consumer may hold on an interface at the default
+/// bound: the table less the all-systems group every IPv4 engine joins for
+/// itself. One figure for both families, so a group set that fits one
+/// interface fits every interface.
+pub const MULTICAST_GROUPS_AVAILABLE: usize = MULTICAST_CAPACITY - 1;
+
 /// How a route entered the table (carried as route metadata).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum RouteKind {
@@ -1013,6 +1019,19 @@ impl Stack {
     pub fn set_mtu(&mut self, mtu: u16) {
         self.link_mtu = usize::from(mtu);
         self.mtu_v6 = usize::from(mtu);
+    }
+
+    /// Whether an IPv4 datagram has a source to leave this interface from.
+    #[must_use]
+    pub fn has_ipv4_source(&self) -> bool {
+        self.iface.ipv4().is_some()
+    }
+
+    /// Whether an IPv6 datagram has a source to leave this interface from: an
+    /// address past duplicate address detection.
+    #[must_use]
+    pub fn has_ipv6_source(&self) -> bool {
+        self.iface.has_usable_v6()
     }
 
     /// Whether IPv4 is administratively enabled (`net.ipv4.enabled`).

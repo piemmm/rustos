@@ -342,6 +342,15 @@ enum NetPeerMode {
     /// the peer's gate is not a completion gate: the guest's own applied
     /// instant is the property under test.
     V4DhcpNtpServer,
+    /// A **multicast DNS responder** peer (the `plans/ZEROCONF.md` Z4
+    /// vertical): same deterministic link-local addressing as
+    /// [`Self::V6LinkLocal`], but the peer runs no campaign. It publishes one
+    /// service instance through `lib/net`'s responder engine and answers the
+    /// guest's browse, resolve, and host-lookup queries; its verdict requires
+    /// the guest to have asked the wire for every record those need. The
+    /// guest exits of its own accord once it printed the peer's answers, so
+    /// there is no race for a gate to settle.
+    MdnsResponder,
 }
 
 /// Which filesystem volume (if any) the host harness plants on the
@@ -1501,6 +1510,36 @@ static TESTS: &[QemuTest] = &[
     QemuTest {
         package: "tairix-test-fatal-fault-qemu-x86_64",
         binary: "tairix-test-fatal-fault-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+        expect: Expect::Fatal(&[
+            tairix_arch_api::fatal::KERNEL_FAULT.message,
+            "cpu=0",
+            "syndrome=0x0000000e00000000",
+            "fault_addr=0x0000000100000000",
+            "boot_stack_guard=intact",
+        ]),
+    },
+    // D146 on x86_64, after `percpu::init`: the same read with the kernel's
+    // own per-CPU tables loaded, which route every exception as the boot
+    // tables do.
+    QemuTest {
+        package: "tairix-test-fatal-fault-percpu-qemu-x86_64",
+        binary: "tairix-test-fatal-fault-percpu-qemu-x86_64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -6784,6 +6823,75 @@ static TESTS: &[QemuTest] = &[
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             ("root@tairix ~% ", Duration::ZERO, PING_COMMAND_LINE),
             (PING_REPLY_MARKER, Duration::ZERO, "exit\n"),
+        ],
+        expect: Expect::Pass,
+    },
+    // `plans/ZEROCONF.md` Z4: the live link-local discovery vertical.
+    // `tairix-test-discovery-qemu-aarch64` boots the *production* aarch64
+    // pipeline against the shared net-tool disk — the standard signed store
+    // bundles, so the real `dns-sd` command and the `discoveryd` service PID 1
+    // starts at boot are present, plus the signed virtio-net driver — with the
+    // harness-side multicast DNS responder on its `dgram` netdev
+    // (`NetPeerMode::MdnsResponder`).
+    //
+    // It unlocks the root, authenticates `root`/`root`, and types three
+    // `dns-sd` lookups, each only once the one before printed the peer's
+    // answer: a browse of the peer's type, a resolve of the instance the browse
+    // found, and a lookup of the host the resolve named. Each answer crossed
+    // `lib/discovery`, the discovery channel, and the front from a sandboxed
+    // decoder that parsed the peer's datagram, and no typed line contains a
+    // later marker (the wire crate pins that), so the script can only finish if
+    // the whole path works.
+    //
+    // The guest audit sink counts the three `dns-sd` exits and reports PASS on
+    // the next audited exit — the shell's, typed only after the last marker.
+    // The harness also requires the peer's verdict that the guest asked the
+    // wire for the type's `PTR`, the instance's `SRV` and `TXT`, and the host's
+    // `AAAA`; whether the peer answers again depends on what the guest cached
+    // from its announcements. The budget is the telnet vertical's: the same
+    // boot, unlock, and two-process network bring-up on QEMU TCG.
+    QemuTest {
+        package: "tairix-test-discovery-qemu-aarch64",
+        binary: "tairix-test-discovery-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::MdnsResponder,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::NetToolRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            (
+                "root@tairix ~% ",
+                Duration::ZERO,
+                tairix_test_netstack_wire::MDNS_BROWSE_LINE,
+            ),
+            (
+                tairix_test_netstack_wire::MDNS_INSTANCE,
+                Duration::ZERO,
+                tairix_test_netstack_wire::MDNS_RESOLVE_LINE,
+            ),
+            (
+                tairix_test_netstack_wire::MDNS_RESOLVE_MARKER,
+                Duration::ZERO,
+                tairix_test_netstack_wire::MDNS_HOST_LINE,
+            ),
+            (
+                tairix_test_netstack_wire::MDNS_HOST_MARKER,
+                Duration::ZERO,
+                "exit\n",
+            ),
         ],
         expect: Expect::Pass,
     },
@@ -14599,6 +14707,7 @@ fn spawn_net_peer(
         NetPeerMode::V4DhcpNtpServer => {
             super::netpeer::NetPeer::spawn_dhcp_time(qemu_sock, peer_sock)
         }
+        NetPeerMode::MdnsResponder => super::netpeer::NetPeer::spawn_mdns(qemu_sock, peer_sock),
         // The bond peer needs two wires (two socket pairs), so it is attached
         // directly in `finish_run`, never through this single-wire spawner.
         NetPeerMode::Bond => {

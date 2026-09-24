@@ -256,6 +256,29 @@ pub const TIMED_MANIFEST: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `discoveryd` link-local discovery service's manifest
+/// (`plans/ZEROCONF.md` Z4): `CAP_NET` for the two multicast DNS datagram
+/// sockets — the one principal the stack lets bind the port or address the
+/// groups — `CAP_SANDBOX_SPAWN` because every datagram is decoded in a
+/// capability-empty worker rather than in the process holding the sockets,
+/// `CAP_IPC_BIND_PRIVILEGED` to claim the reserved discovery endpoint a
+/// squatter would otherwise answer every program's browse from,
+/// `CAP_FS_ACCESS` to read the grant store on the read-only `/System`, and
+/// `CAP_LOG_EMIT` for its audit records.
+///
+/// It stops there: no `CAP_NET_RAW` or `CAP_NET_ADMIN`, no general spawn, and
+/// not the `CAP_NET_DISCOVER_ALL` it enforces against its callers. The
+/// effective set is this request intersected with the account's
+/// `DISCOVERYD_CEILING`, which carries exactly the same five.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const DISCOVERYD_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::NET,
+    CapabilityId::SANDBOX_SPAWN,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `audiod` audio service's manifest: `CAP_AUDIO_DEVICE` (the whole
 /// authority it has over hardware, and the system's only holder — every
 /// audio driver's device-channel endpoint is bound restricted-sender on it,
@@ -753,6 +776,29 @@ mod tests {
                 !other.contains(&CapabilityId::TIME_SET),
                 "only `timed` may hold CAP_TIME_SET"
             );
+        }
+    }
+
+    #[test]
+    fn discoveryd_manifest_is_pinned() {
+        // The account exists only to run this service, so its ceiling and the
+        // bundle's request must coincide.
+        assert_eq!(
+            set(DISCOVERYD_MANIFEST),
+            set(tairix_users::DISCOVERYD_CEILING)
+        );
+        // It enforces the whole-segment grant against its callers; holding
+        // it, or any wider network authority, would let a compromise do what
+        // it refuses them.
+        for denied in [
+            CapabilityId::NET_DISCOVER_ALL,
+            CapabilityId::NET_RAW,
+            CapabilityId::NET_ADMIN,
+            CapabilityId::PROC_SPAWN,
+            CapabilityId::SPAWN_AS_USER,
+            CapabilityId::USERS_READ,
+        ] {
+            assert!(!DISCOVERYD_MANIFEST.contains(&denied), "{denied:?}");
         }
     }
 
@@ -1357,6 +1403,21 @@ mod tests {
         CapabilityId::NET,
     ];
 
+    // The `dns-sd` link-local discovery diagnostic (plans/ZEROCONF.md Z4):
+    // console write for its listing, filesystem access for its own Help/
+    // documents, CAP_NET — the authority every discovery session needs — and
+    // CAP_NET_DISCOVER_ALL, which is what lets it browse every type and
+    // enumerate the types themselves. The last is administrative, so only an
+    // administrator's intersection keeps it; everyone else's dns-sd is
+    // refused a browse with the reason stated. Not an embedded spawn-floor
+    // program, so the list lives only in this pin.
+    const DNS_SD_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::NET,
+        CapabilityId::NET_DISCOVER_ALL,
+    ];
+
     // The `telnet` NVT client (plans/TELNET.md): console write for the remote
     // host's output and its own diagnostics, console *read* for the raw-mode
     // keystrokes it relays (which also authorises its input-mode switch),
@@ -1466,14 +1527,6 @@ mod tests {
         CapabilityId::LOG_EMIT,
     ];
 
-    /// `discoveryd`'s request. Installed from its bundle and not enrolled
-    /// yet, so the list lives only in this pin.
-    const DISCOVERYD_REQUEST: &[CapabilityId] = &[
-        CapabilityId::NET,
-        CapabilityId::SANDBOX_SPAWN,
-        CapabilityId::LOG_EMIT,
-    ];
-
     /// Every program crate's on-disk `AppInfo.toml` manifest source
     /// requests exactly the capability set this registry embeds, and the
     /// two program inventories are identical (`plans/APPS.md` deliverable
@@ -1506,7 +1559,8 @@ mod tests {
             ("devmgr", ProgramKind::Service, DEVMGR_MANIFEST),
             ("df", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("dirname", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("discoveryd", ProgramKind::Service, DISCOVERYD_REQUEST),
+            ("discoveryd", ProgramKind::Service, DISCOVERYD_MANIFEST),
+            ("dns-sd", ProgramKind::Command, DNS_SD_TOOL_REQUEST),
             ("du", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("edit", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("elsh", ProgramKind::Command, SHELL_MANIFEST),

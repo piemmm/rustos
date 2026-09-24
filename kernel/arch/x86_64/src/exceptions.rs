@@ -294,47 +294,6 @@ const _: () = {
     }
 };
 
-/// Install every exception vector's dedicated stub in `cpu_index`'s
-/// per-CPU IDT, replacing the vector-agnostic default thunk
-/// `crate::percpu::init` left there.
-///
-/// Called on every CPU as it comes online, immediately after
-/// `percpu::init` and before anything can fault. Vector 14 is untouched
-/// — the boot path installs the resumable `#PF` entry over it — and the
-/// `#DF` / `#NMI` gates keep the IST routing `percpu::init` chose, because
-/// `install_vector` derives it from the same shared mapping.
-///
-/// # Errors
-///
-/// * [`crate::percpu::InitError::CpuIndexOutOfRange`] if `cpu_index` is
-///   outside the registered `PerCpuStorage`.
-/// * [`crate::percpu::InitError::NotInitialised`] if `crate::percpu::init`
-///   has not yet run for `cpu_index`.
-///
-/// An error leaves the vectors installed so far installed and the rest on
-/// the default thunk. That partial table never runs: the boot path refuses
-/// the boot on a refusal, and every slot in it is one of the two
-/// fail-closed entries either way — so the honest posture is "some
-/// vectors report, the rest park", not a corrupt table.
-///
-/// # Safety
-///
-/// * `cpu_index` must be the index passed to `crate::percpu::init` on
-///   *this* CPU.
-/// * Interrupts on the calling CPU must be disabled for the duration, so
-///   a delivery cannot race an IDT write.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub unsafe fn install_exception_vectors(cpu_index: usize) -> Result<(), crate::percpu::InitError> {
-    for &(vector, stub) in EXCEPTION_STUBS {
-        let handler = stub as *const () as usize as u64;
-        // SAFETY: the caller's contract gives us this CPU's own index with
-        // interrupts disabled, and `handler` is the address of a generated
-        // stub in this image.
-        unsafe { crate::percpu::install_vector(cpu_index, vector, handler)? };
-    }
-    Ok(())
-}
-
 /// Route every exception vector of a table not yet loaded — each generated
 /// stub, and the resumable `#PF` entry on vector 14 — through the fatal
 /// tail, each gate on the IST `ist_for` names.

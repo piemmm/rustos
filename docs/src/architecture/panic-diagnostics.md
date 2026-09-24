@@ -84,8 +84,11 @@ Every port arms its exception vectors in its boot entry, before
 `kernel_main` runs — aarch64's `VBAR_EL1`, riscv64's `stvec`, and on x86_64
 a set of boot descriptor tables that route every vector to the fatal tail
 and give `#DF` a stack of its own — so no binary can take an exception with
-nowhere to go. The kernel later arms each CPU for itself, and on x86_64
-replaces the boot tables with its per-CPU ones.
+nowhere to go. The x86_64 boot tables live in memory `linker.ld` reserves
+beside the boot stack, sized by the port's own type, which the trampoline
+hands to the entry. The kernel later arms each CPU for itself, and on x86_64
+replaces the boot tables with per-CPU ones built by the same routine, so a
+fault after `percpu::init` is reported exactly as one before it.
 
 A fatal exception with no handler installed — a minimal QEMU test kernel,
 or a fault before the production boot installs its own — gets the port's

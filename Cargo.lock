@@ -1500,12 +1500,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-discovery"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-rt",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-discoveryd"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-caps",
  "tairix-fuzzseed",
  "tairix-hash",
+ "tairix-inline",
  "tairix-log",
  "tairix-net",
  "tairix-rng",
@@ -1528,6 +1539,17 @@ dependencies = [
 [[package]]
 name = "tairix-dma-barrier"
 version = "0.0.0"
+
+[[package]]
+name = "tairix-dns-sd"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-discovery",
+ "tairix-help",
+ "tairix-net",
+ "tairix-rt",
+]
 
 [[package]]
 name = "tairix-drv-accelerator-virtio-crypto"
@@ -2381,6 +2403,7 @@ dependencies = [
  "tairix-abi",
  "tairix-crypto",
  "tairix-fdt",
+ "tairix-net",
  "tairix-qemu",
 ]
 
@@ -3050,10 +3073,12 @@ name = "tairix-resolver"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-discovery",
  "tairix-net",
  "tairix-procinfo",
  "tairix-rng",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3931,6 +3956,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-discovery-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-driver-register-program"
 version = "0.0.0"
 dependencies = [
@@ -4079,6 +4115,14 @@ dependencies = [
 
 [[package]]
 name = "tairix-test-fatal-double-fault-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+]
+
+[[package]]
+name = "tairix-test-fatal-fault-percpu-qemu-x86_64"
 version = "0.0.0"
 dependencies = [
  "tairix-arch-x86_64",
@@ -7028,6 +7072,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "tairix-abi",
+ "tairix-appload",
  "tairix-arch-api",
  "tairix-browse",
  "tairix-cc",

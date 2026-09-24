@@ -84,6 +84,14 @@ pub const AUDIOD_PATH: &[u8] = b"/System/Services/audiod.app/Run";
 /// identical on every target.
 pub const TIMED_PATH: &[u8] = b"/System/Services/timed.app/Run";
 
+/// Absolute path the link-local discovery service program is registered
+/// under (`plans/ZEROCONF.md`): the service store's `<name>.app` bundle. It
+/// must match exactly the `discoveryd` path PID 1 `init` hands to the `spawn`
+/// syscall at startup (`userland/system/init/src/startup.rs`), and the path
+/// its decoder is spawned from. One OS-wide path contract, identical on every
+/// target.
+pub const DISCOVERYD_PATH: &[u8] = b"/System/Services/discoveryd.app/Run";
+
 /// Absolute path the `ps` tool program is registered under: the system
 /// command store's command-named bundle, so the shell resolves the bare word `ps`
 /// to it (`plans/APPS.md` §8). One OS-wide path contract, identical on
@@ -154,9 +162,9 @@ pub const USERS_CLI_PATH: &[u8] = b"/System/Commands/users.app/Run";
 #[cfg(test)]
 mod tests {
     use super::{
-        AUDIOD_PATH, CAT_PATH, CLEAR_PATH, CONFD_PATH, DEVMGR_PATH, FONTD_PATH, LOGIN_PATH,
-        LS_PATH, MAN_PATH, NETSTACK_PATH, PS_PATH, RESET_PATH, SEATMGR_PATH, SHELL_PATH,
-        STRESS_PATH, SYSINFOD_PATH, SYSINFO_PATH, SYSMON_PATH, TIMED_PATH, TOP_PATH,
+        AUDIOD_PATH, CAT_PATH, CLEAR_PATH, CONFD_PATH, DEVMGR_PATH, DISCOVERYD_PATH, FONTD_PATH,
+        LOGIN_PATH, LS_PATH, MAN_PATH, NETSTACK_PATH, PS_PATH, RESET_PATH, SEATMGR_PATH,
+        SHELL_PATH, STRESS_PATH, SYSINFOD_PATH, SYSINFO_PATH, SYSMON_PATH, TIMED_PATH, TOP_PATH,
         USERS_CLI_PATH,
     };
     use tairix_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_COMMAND_STORE, SYSTEM_SERVICE_STORE};
@@ -179,6 +187,7 @@ mod tests {
             (CONFD_PATH, "confd"),
             (AUDIOD_PATH, "audiod"),
             (TIMED_PATH, "timed"),
+            (DISCOVERYD_PATH, "discoveryd"),
         ] {
             let expected = alloc::format!(
                 "{SYSTEM_SERVICE_STORE}/{service}{BUNDLE_SUFFIX}/{}",

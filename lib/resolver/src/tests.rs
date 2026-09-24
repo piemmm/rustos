@@ -24,7 +24,8 @@ use tairix_net::dns::{
 use tairix_abi::net_ipc::address_parts;
 
 use super::{
-    configured_servers, pointer_name, resolve_host, resolve_name, resolve_pointer, ResolveError,
+    configured_servers, pointer_name, resolve_host, resolve_name, resolve_pointer, route_address,
+    route_name, LinkLookup, ResolveError, Route,
 };
 
 // -- The System Information API fake -------------------------------------
@@ -257,8 +258,15 @@ fn resolves_a_record_via_the_configured_server() {
     let sysinfo = SysinfoFake::new(alloc::vec![v4_record(10, 0, 2, 3)]);
     let mut udp = DnsFake::new(|_server, q| alloc::vec![a_response(q, [93, 184, 216, 34])]);
     let mut rng = counter_rng();
-    let resolution = resolve_name("example.com", LookupType::A, &sysinfo, &mut udp, &mut rng)
-        .expect("no transport error");
+    let resolution = resolve_name(
+        "example.com",
+        LookupType::A,
+        &sysinfo,
+        &mut udp,
+        &mut NoLink,
+        &mut rng,
+    )
+    .expect("no transport error");
     assert_eq!(resolution.status, ResolveStatus::Success);
     assert_eq!(
         resolution.addresses().first().copied(),
@@ -276,7 +284,14 @@ fn no_configured_server_is_a_distinct_error_not_a_timeout() {
     let sysinfo = SysinfoFake::new(Vec::new());
     let mut udp = DnsFake::new(|_server, _q| Vec::new());
     let mut rng = counter_rng();
-    let result = resolve_name("example.com", LookupType::A, &sysinfo, &mut udp, &mut rng);
+    let result = resolve_name(
+        "example.com",
+        LookupType::A,
+        &sysinfo,
+        &mut udp,
+        &mut NoLink,
+        &mut rng,
+    );
     assert_eq!(result, Err(ResolveError::NoServers));
     // Nothing was ever sent — the engine was never driven.
     assert!(udp.sent_to.is_empty());
@@ -289,8 +304,15 @@ fn a_silent_server_resolves_to_a_timeout() {
     let sysinfo = SysinfoFake::new(alloc::vec![v4_record(10, 0, 2, 3)]);
     let mut udp = DnsFake::new(|_server, _q| Vec::new());
     let mut rng = counter_rng();
-    let resolution = resolve_name("example.com", LookupType::A, &sysinfo, &mut udp, &mut rng)
-        .expect("no transport error");
+    let resolution = resolve_name(
+        "example.com",
+        LookupType::A,
+        &sysinfo,
+        &mut udp,
+        &mut NoLink,
+        &mut rng,
+    )
+    .expect("no transport error");
     assert_eq!(resolution.status, ResolveStatus::Timeout);
     assert!(!udp.sent_to.is_empty(), "at least one query was attempted");
 }
@@ -302,7 +324,14 @@ fn an_invalid_name_is_rejected_before_any_query() {
     let mut rng = counter_rng();
     // A label longer than 63 octets is invalid.
     let long_label = "a".repeat(64);
-    let result = resolve_name(&long_label, LookupType::A, &sysinfo, &mut udp, &mut rng);
+    let result = resolve_name(
+        &long_label,
+        LookupType::A,
+        &sysinfo,
+        &mut udp,
+        &mut NoLink,
+        &mut rng,
+    );
     assert!(matches!(result, Err(ResolveError::InvalidName(_))));
     assert!(
         udp.sent_to.is_empty(),
@@ -316,7 +345,14 @@ fn a_transport_send_error_aborts_fail_closed() {
     let mut udp = DnsFake::new(|_server, _q| Vec::new());
     udp.send_err = Some(Errno::NetworkUnreachable);
     let mut rng = counter_rng();
-    let result = resolve_name("example.com", LookupType::A, &sysinfo, &mut udp, &mut rng);
+    let result = resolve_name(
+        "example.com",
+        LookupType::A,
+        &sysinfo,
+        &mut udp,
+        &mut NoLink,
+        &mut rng,
+    );
     assert_eq!(
         result,
         Err(ResolveError::Transport(Errno::NetworkUnreachable))
@@ -328,7 +364,14 @@ fn a_server_source_failure_is_reported() {
     let sysinfo = SysinfoFake::denying();
     let mut udp = DnsFake::new(|_server, _q| Vec::new());
     let mut rng = counter_rng();
-    let result = resolve_name("example.com", LookupType::A, &sysinfo, &mut udp, &mut rng);
+    let result = resolve_name(
+        "example.com",
+        LookupType::A,
+        &sysinfo,
+        &mut udp,
+        &mut NoLink,
+        &mut rng,
+    );
     assert_eq!(
         result,
         Err(ResolveError::ServerSource(Errno::PermissionDenied))
@@ -486,8 +529,8 @@ fn resolves_a_pointer_record_for_an_ipv4_address() {
     let mut udp = DnsFake::new(|_server, q| alloc::vec![ptr_response(q, "gateway.example")]);
     let mut rng = counter_rng();
     let address = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2));
-    let resolution =
-        resolve_pointer(address, &sysinfo, &mut udp, &mut rng).expect("no transport error");
+    let resolution = resolve_pointer(address, &sysinfo, &mut udp, &mut NoLink, &mut rng)
+        .expect("no transport error");
     assert_eq!(resolution.status, ResolveStatus::Success);
     assert_eq!(
         pointer_name(&resolution).as_deref(),
@@ -507,7 +550,8 @@ fn a_reverse_query_asks_the_in_addr_arpa_name() {
     });
     let mut rng = counter_rng();
     let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 133));
-    resolve_pointer(address, &sysinfo, &mut udp, &mut rng).expect("no transport error");
+    resolve_pointer(address, &sysinfo, &mut udp, &mut NoLink, &mut rng)
+        .expect("no transport error");
     let query = asked.borrow();
     let question = &query.first().expect("one query")[12..];
     let expected = Name::encode("133.2.0.192.in-addr.arpa").expect("valid");
@@ -524,8 +568,8 @@ fn a_reverse_lookup_with_no_record_yields_no_name() {
     let mut udp = DnsFake::new(|_server, _q| Vec::new());
     let mut rng = counter_rng();
     let address = IpAddr::V6(Ipv6Addr::from([0x20; 16]));
-    let resolution =
-        resolve_pointer(address, &sysinfo, &mut udp, &mut rng).expect("no transport error");
+    let resolution = resolve_pointer(address, &sysinfo, &mut udp, &mut NoLink, &mut rng)
+        .expect("no transport error");
     assert_eq!(resolution.status, ResolveStatus::Timeout);
     assert_eq!(pointer_name(&resolution), None);
 }
@@ -540,8 +584,109 @@ fn a_reverse_lookup_needs_a_configured_server() {
             IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2)),
             &sysinfo,
             &mut udp,
+            &mut NoLink,
             &mut rng
         ),
         Err(ResolveError::NoServers)
+    );
+}
+
+/// A link that must never be asked: every lookup in these tests is the
+/// servers'.
+struct NoLink;
+
+impl LinkLookup for NoLink {
+    fn host(&mut self, name: &Name, _record_type: LookupType) -> Result<Resolution, ResolveError> {
+        panic!("{name} was routed to the link");
+    }
+
+    fn pointer(&mut self, address: IpAddr) -> Result<Resolution, ResolveError> {
+        panic!("{address} was routed to the link");
+    }
+}
+
+/// A link that answers every host lookup with one address and every reverse
+/// lookup with one name, counting what it was asked.
+#[derive(Default)]
+struct Link {
+    asked: usize,
+}
+
+impl LinkLookup for Link {
+    fn host(&mut self, _name: &Name, _record_type: LookupType) -> Result<Resolution, ResolveError> {
+        self.asked += 1;
+        Ok(Resolution {
+            status: ResolveStatus::Success,
+            answer: Answer::Addresses(AddrList::from_addrs(&[IpAddr::V4(Ipv4Addr::new(
+                169, 254, 3, 4,
+            ))])),
+            ttl_secs: 0,
+        })
+    }
+
+    fn pointer(&mut self, _address: IpAddr) -> Result<Resolution, ResolveError> {
+        self.asked += 1;
+        Ok(Resolution {
+            status: ResolveStatus::Success,
+            answer: Answer::Pointer(Some(Name::encode("printer.local").unwrap())),
+            ttl_secs: 0,
+        })
+    }
+}
+
+#[test]
+fn a_local_name_is_answered_by_the_link_and_never_asked_of_a_server() {
+    let sysinfo = SysinfoFake::new(alloc::vec![v4_record(9, 9, 9, 9)]);
+    let mut udp = DnsFake::new(|server, _query| panic!("{server} was asked a link name"));
+    let mut rng = counter_rng();
+    let mut link = Link::default();
+    for (name, record) in [
+        ("printer.local", LookupType::A),
+        ("Printer.LOCAL.", LookupType::Aaaa),
+    ] {
+        let resolution =
+            resolve_name(name, record, &sysinfo, &mut udp, &mut link, &mut rng).expect("answered");
+        assert_eq!(resolution.status, ResolveStatus::Success);
+    }
+    // A pointer lookup of a link name is browsing, which is discovery's: it
+    // finds nothing and asks no one.
+    let browse = resolve_name(
+        "_ipp._tcp.local",
+        LookupType::Ptr,
+        &sysinfo,
+        &mut udp,
+        &mut link,
+        &mut rng,
+    )
+    .expect("answered");
+    assert_eq!(browse.status, ResolveStatus::NonExistent);
+    assert_eq!(link.asked, 2);
+}
+
+#[test]
+fn only_a_link_local_address_is_resolved_in_reverse_on_the_link() {
+    let sysinfo = SysinfoFake::new(alloc::vec![v4_record(9, 9, 9, 9)]);
+    let mut udp = DnsFake::new(|server, _query| panic!("{server} was asked a link address"));
+    let mut rng = counter_rng();
+    let mut link = Link::default();
+    for address in [
+        IpAddr::V4(Ipv4Addr::new(169, 254, 3, 4)),
+        IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+    ] {
+        let resolution =
+            resolve_pointer(address, &sysinfo, &mut udp, &mut link, &mut rng).expect("answered");
+        assert_eq!(
+            resolution.pointer().map(ToString::to_string).as_deref(),
+            Some("printer.local")
+        );
+    }
+    assert_eq!(link.asked, 2);
+    assert_eq!(
+        route_address(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+        Route::Servers
+    );
+    assert_eq!(
+        route_name(&Name::encode("example.com").unwrap()),
+        Route::Servers
     );
 }

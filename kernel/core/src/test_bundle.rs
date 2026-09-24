@@ -463,6 +463,7 @@ pub(crate) fn composed_bundle_published_by(
         kind: ProgramKind::Command,
         capabilities: caps,
         associations: Vec::new(),
+        browses: Vec::new(),
         library: None,
         library_icon: None,
         purpose: None,

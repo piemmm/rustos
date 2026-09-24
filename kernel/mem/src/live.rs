@@ -1760,31 +1760,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn alloc_dma_maps_a_zeroed_coherent_buffer_in_the_dma_window() {
-        let mut live = live_space!();
-        let mapping = live
-            .alloc_dma(2 * PAGE_SIZE, 0, custodian(custody!()))
-            .expect("a free block exists");
-        // The CPU VA lies inside the configured DMA window, past the leading
-        // guard page.
-        assert!(
-            mapping.cpu_va > DMA_WINDOW_BASE
-                && mapping.cpu_va < DMA_WINDOW_BASE + (DMA_WINDOW_PAGES as u64) * PAGE_SIZE as u64,
-            "DMA VA lies inside the configured window, past the leading guard"
-        );
-        // The backing block is physically contiguous RAM drawn from the
-        // allocator's window.
-        assert!(mapping.phys_base >= SIM_BASE, "phys base is real RAM");
-        // The buffer reads back as zero through the CPU mapping (no stale
-        // bytes are ever user-visible).
-        let sim = sim();
-        let mut buf = vec![0xAAu8; 2 * PAGE_SIZE];
-        copy_in(live.space(), &sim, VirtAddr::new(mapping.cpu_va), &mut buf)
-            .expect("readable user range");
-        assert!(buf.iter().all(|&b| b == 0), "DMA buffer is zeroed");
-    }
-
     /// The live space's DMA path must route the post-zero cache maintenance
     /// through *its own* `PhysMap` on both allocation and free: the carve is
     /// zeroed through the cacheable direct-map alias while the owning task
@@ -1947,13 +1922,56 @@ mod tests {
 
     /// Whether every byte of `block` reads zero through `simmap`.
     fn block_is_zero(simmap: &SimPhysMap, block: crate::dma::DmaBlock) -> bool {
+        phys_is_zero(simmap, block.frame.start(), block.len())
+    }
+
+    /// Whether the `len` simulated bytes at `phys` are all zero.
+    fn phys_is_zero(simmap: &SimPhysMap, phys: PhysAddr, len: usize) -> bool {
         let ptr = simmap
-            .translate(block.frame.start(), block.len())
-            .expect("block in the sim window");
-        // SAFETY: the sim map proved the pointer valid for the block; the
-        // block's owning space is gone, so nothing else references it.
-        let bytes = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), block.len()) };
+            .translate(phys, len)
+            .expect("range in the sim window");
+        // SAFETY: the sim map proved the pointer valid for `len` bytes, and no
+        // reference to them is live while the test reads.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), len) };
         bytes.iter().all(|&b| b == 0)
+    }
+
+    /// Set the `len` simulated bytes at `phys` to `byte`, as a device or a
+    /// previous owner would have left them.
+    fn fill_phys(simmap: &SimPhysMap, phys: PhysAddr, len: usize, byte: u8) {
+        let ptr = simmap
+            .translate(phys, len)
+            .expect("range in the sim window");
+        // SAFETY: the sim map proved the pointer valid for `len` bytes, and no
+        // reference to them is live while the test writes.
+        unsafe { core::ptr::write_bytes(ptr.as_ptr(), byte, len) };
+    }
+
+    #[test]
+    fn alloc_dma_maps_a_zeroed_coherent_buffer_in_the_dma_window() {
+        let (frames, simmap) = backing!();
+        // Whatever a carve is drawn from starts dirty, so only a scrub reads
+        // back as zero.
+        fill_phys(simmap, PhysAddr::new(SIM_BASE), SIM_BYTES, 0xAA);
+        let mut live = shared_live_space!(frames, simmap);
+        let mapping = live
+            .alloc_dma(2 * PAGE_SIZE, 0, custodian(custody!()))
+            .expect("a free block exists");
+        // The CPU VA lies inside the configured DMA window, past the leading
+        // guard page.
+        assert!(
+            mapping.cpu_va > DMA_WINDOW_BASE
+                && mapping.cpu_va < DMA_WINDOW_BASE + (DMA_WINDOW_PAGES as u64) * PAGE_SIZE as u64,
+            "DMA VA lies inside the configured window, past the leading guard"
+        );
+        // The backing block is physically contiguous RAM drawn from the
+        // allocator's window.
+        assert!(mapping.phys_base >= SIM_BASE, "phys base is real RAM");
+        // The frames the task and the device share hold no stale bytes.
+        assert!(
+            phys_is_zero(simmap, PhysAddr::new(mapping.phys_base), 2 * PAGE_SIZE),
+            "DMA buffer is zeroed"
+        );
     }
 
     #[test]
@@ -1973,13 +1991,7 @@ mod tests {
             second = live
                 .alloc_dma(PAGE_SIZE, 0, custodian(held))
                 .expect("a second block");
-            copy_out(
-                live.space(),
-                simmap,
-                VirtAddr::new(first.cpu_va),
-                &[0xC3u8; 64],
-            )
-            .expect("writable DMA buffer");
+            fill_phys(simmap, PhysAddr::new(first.phys_base), 64, 0xC3);
             held.with(|r| assert_eq!((r.bound, r.binds), (1, 1), "one binding per space"));
         }
         assert_eq!(

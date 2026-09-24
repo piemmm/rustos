@@ -21,6 +21,11 @@
 //!   `in-addr.arpa` / `ip6.arpa` name an address maps back to, over the same
 //!   servers and the same engine, with [`pointer_name`] rendering what a tool
 //!   prints.
+//! * [`route_name`] and [`route_address`] — the one decision of where a
+//!   lookup is answered: a name under `local` and the reverse name of a
+//!   link-local address are the link's, answered through link-local
+//!   discovery behind the injected [`LinkLookup`], and never sent to a
+//!   server, which would leak them off the link.
 //! * [`resolve_host`] — the pure *host-operand* policy every connecting tool
 //!   shares: an address literal resolves with no query at all, otherwise the
 //!   wanted record types are tried in family-preference order. One definition,
@@ -60,12 +65,63 @@ use tairix_abi::net_ipc::{ip_from_parts, NetAddrFamily, MAX_RESOLVER_SERVERS};
 use tairix_abi::Errno;
 use tairix_net::addr::IpAddr;
 use tairix_net::dns::{self, DnsError, DnsTransport, LookupType, Name, Resolution, ResolveStatus};
+use tairix_net::mdns::{is_link_local_address, is_link_local_name};
 use tairix_procinfo::{for_each_resolver_server, CallError, ListError, Transport, WalkStep};
 
 #[cfg(all(feature = "program", target_os = "none"))]
 mod rt;
 #[cfg(all(feature = "program", target_os = "none"))]
-pub use rt::{host_address, resolve, reverse_name, RtDnsTransport};
+pub use rt::{host_address, resolve, reverse_name, RtDnsTransport, RtLinkLookup};
+
+/// Where a lookup is answered.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Route {
+    /// The configured recursive servers.
+    Servers,
+    /// The link, through link-local discovery.
+    Link,
+}
+
+/// Where a lookup of `name` is answered: a name under `local` is the link's
+/// (RFC 6762 §3), every other name the servers'.
+#[must_use]
+pub fn route_name(name: &Name) -> Route {
+    if is_link_local_name(name) {
+        Route::Link
+    } else {
+        Route::Servers
+    }
+}
+
+/// Where a reverse lookup of `address` is answered: a link-local address is
+/// the link's (RFC 6762 §4), every other address the servers'.
+#[must_use]
+pub fn route_address(address: IpAddr) -> Route {
+    if is_link_local_address(address) {
+        Route::Link
+    } else {
+        Route::Servers
+    }
+}
+
+/// Lookups the link answers.
+pub trait LinkLookup {
+    /// The `record_type` answer for `name`, a name under `local`.
+    ///
+    /// # Errors
+    ///
+    /// A [`ResolveError`] when the lookup could not be made. A link with no
+    /// answer — or a machine with no link-local discovery at all — is a
+    /// [`ResolveStatus::NonExistent`] resolution, not an error.
+    fn host(&mut self, name: &Name, record_type: LookupType) -> Result<Resolution, ResolveError>;
+
+    /// The name link-local `address` has.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::host`].
+    fn pointer(&mut self, address: IpAddr) -> Result<Resolution, ResolveError>;
+}
 
 /// Why a name resolution did not produce an answer.
 ///
@@ -162,10 +218,17 @@ pub fn resolve_name(
     record_type: LookupType,
     sysinfo: &dyn Transport,
     udp: &mut dyn DnsTransport,
+    link: &mut dyn LinkLookup,
     rng: &mut dyn FnMut() -> u32,
 ) -> Result<Resolution, ResolveError> {
     let name = Name::encode(name).map_err(ResolveError::InvalidName)?;
-    query(&name, record_type, sysinfo, udp, rng)
+    match (route_name(&name), record_type) {
+        (Route::Link, LookupType::A | LookupType::Aaaa) => link.host(&name, record_type),
+        // Browsing a link name is discovery's, not a resolver's: it finds
+        // nothing here, and is never asked of a server.
+        (Route::Link, LookupType::Ptr) => Ok(nothing(record_type)),
+        (Route::Servers, _) => query(&name, record_type, sysinfo, udp, rng),
+    }
 }
 
 /// Resolve the domain name `address` maps back to: a `PTR` lookup of the
@@ -182,9 +245,23 @@ pub fn resolve_pointer(
     address: IpAddr,
     sysinfo: &dyn Transport,
     udp: &mut dyn DnsTransport,
+    link: &mut dyn LinkLookup,
     rng: &mut dyn FnMut() -> u32,
 ) -> Result<Resolution, ResolveError> {
-    query(&Name::reverse(address), LookupType::Ptr, sysinfo, udp, rng)
+    match route_address(address) {
+        Route::Link => link.pointer(address),
+        Route::Servers => query(&Name::reverse(address), LookupType::Ptr, sysinfo, udp, rng),
+    }
+}
+
+/// The resolution of a lookup nothing answered: no such name on the link.
+#[must_use]
+pub fn nothing(record_type: LookupType) -> Resolution {
+    Resolution {
+        status: ResolveStatus::NonExistent,
+        answer: dns::Answer::empty(record_type),
+        ttl_secs: 0,
+    }
 }
 
 /// The shared "fetch the servers, then drive the engine" step both the

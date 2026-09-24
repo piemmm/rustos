@@ -37,7 +37,8 @@ pub const ADMIN_REFUSED: EventId = EventId(16_004);
 /// A socket-service request was refused before dispatch: the frame failed
 /// to decode.
 pub const SOCKET_MALFORMED: EventId = EventId(16_005);
-/// A socket-service request was denied because the caller lacks `CAP_NET`.
+/// A socket-service request was denied for want of authority: `CAP_NET`, the
+/// privileged-port grant, or the multicast DNS reservation.
 ///
 /// A denial is a security-relevant decision recorded at `Warn`.
 pub const SOCKET_DENIED: EventId = EventId(16_006);

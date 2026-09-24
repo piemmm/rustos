@@ -1283,7 +1283,8 @@ impl HwResource {
     /// * [`Dma`](HwResourceKind::Dma) is an addressing *constraint* (an
     ///   exclusive address ceiling `base` and an extent `len`), not a mapped
     ///   window: the child may be no more permissive — no higher ceiling, no
-    ///   larger extent, and the same bus translation.
+    ///   larger extent. A translated window's child must also lie within its
+    ///   CPU side, `[base - len, base)`, with the identical CPU↔bus offset.
     /// * [`DmaController`](HwResourceKind::DmaController) and
     ///   [`DmaRequest`](HwResourceKind::DmaRequest) cover only themselves,
     ///   and a request line also covers an [`Endpoint`](HwResourceKind::Endpoint)
@@ -1301,6 +1302,18 @@ impl HwResource {
             return false;
         }
         match (parent_kind, child_kind) {
+            (HwResourceKind::Dma, HwResourceKind::Dma) if self.is_translated_dma_window() => {
+                // The CPU side is `[base - len, base)`: the child must sit inside
+                // it and keep its CPU↔bus offset, or it re-points the device.
+                let (Some(parent_start), Some(child_start)) = (
+                    self.base.checked_sub(self.len),
+                    child.base.checked_sub(child.len),
+                ) else {
+                    return false;
+                };
+                self.xlate.wrapping_sub(parent_start) == child.xlate.wrapping_sub(child_start)
+                    && interval_contains(parent_start, self.len, child_start, child.len)
+            }
             (HwResourceKind::Dma, HwResourceKind::Dma) => {
                 self.xlate == child.xlate && child.base <= self.base && child.len <= self.len
             }
@@ -3155,17 +3168,37 @@ mod tests {
 
     #[test]
     fn covers_treats_dma_as_a_no_wider_constraint() {
-        // A DMA grant covers a child with no higher ceiling, no larger
-        // extent, and the same translation; anything more permissive fails.
+        // A plain constraint covers a child with no higher ceiling and no
+        // larger extent.
+        let limit = HwResource::dma(0xC000_0000, 0x4000_0000);
+        assert!(limit.covers(&HwResource::dma(0xB000_0000, 0x1000_0000)));
+        assert!(!limit.covers(&HwResource::dma(0xC100_0000, 0x1000)));
+        assert!(!limit.covers(&HwResource::dma(0xC000_0000, 0x5000_0000)));
+    }
+
+    #[test]
+    fn a_translated_dma_window_covers_only_a_sub_window_with_its_own_offset() {
+        // CPU 0x8000_0000..0xC000_0000, reached at bus 0..0x4000_0000.
         let parent = HwResource::dma_translated(0xC000_0000, 0x4000_0000, 0x0);
-        assert!(parent.covers(&HwResource::dma_translated(0xC000_0000, 0x4000_0000, 0x0)));
-        assert!(parent.covers(&HwResource::dma_translated(0xB000_0000, 0x1000_0000, 0x0)));
-        // Higher ceiling -> rejected.
-        assert!(!parent.covers(&HwResource::dma_translated(0xC100_0000, 0x1000, 0x0)));
-        // Larger extent -> rejected.
+        assert!(parent.covers(&parent));
+        assert!(parent.covers(&HwResource::dma_translated(
+            0xB000_0000,
+            0x1000_0000,
+            0x2000_0000
+        )));
+        // The same bus base at a later CPU start re-points the device: its bus
+        // 0 is really CPU 0x8000_0000, not 0xA000_0000.
+        assert!(!parent.covers(&HwResource::dma_translated(0xB000_0000, 0x1000_0000, 0x0)));
+        assert!(!parent.covers(&HwResource::dma_translated(
+            0xC100_0000,
+            0x1000,
+            0x4100_0000
+        )));
         assert!(!parent.covers(&HwResource::dma_translated(0xC000_0000, 0x5000_0000, 0x0)));
-        // Different translation -> rejected.
         assert!(!parent.covers(&HwResource::dma_translated(0xC000_0000, 0x1000, 0x1_0000)));
+        // A window claiming more than lies below its ceiling covers nothing.
+        let malformed = HwResource::dma_translated(0x1000, 0x2000, 0x0);
+        assert!(!malformed.covers(&malformed));
     }
 
     #[test]

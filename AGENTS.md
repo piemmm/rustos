@@ -608,6 +608,7 @@ tairix/
 │   ├── devids/          # PCI/USB ID-database engine.
 │   ├── devmatch/        # Deterministic hardware-node <-> driver bind-table match.
 │   ├── disasm/          # Instruction decoders for the four Tier-1 ISAs.
+│   ├── discovery/       # Link-local service discovery client (discovery-v1).
 │   ├── display/         # Display-service protocol engine.
 │   ├── dma-barrier/     # DMA memory-ordering barriers for user-space drivers.
 │   ├── drvrt/           # User-space driver runtime host.

@@ -1,34 +1,103 @@
 # Link-local service discovery (`discoveryd`)
 
 `discoveryd` is the multicast DNS / DNS-SD service, installed at
-`/System/Services/discoveryd.app/Run`. The staged design is
-`plans/ZEROCONF.md`. The protocol engine it runs is `tairix_net::mdns`
-([`lib/net`](../lib/net.md)), and the containment it runs under is the
+`/System/Services/discoveryd.app/Run` and started by PID 1 at boot: a segment
+takes time to answer, so the service should already be listening when a program
+first asks. It requires `network-up`, so it starts once the network stack
+answers, and since its sockets live in the stack, a stack relaunch stops it and
+starts it again against the new one. The staged design is `plans/ZEROCONF.md`. Programs reach it through
+[`lib/discovery`](../lib/discovery.md); the protocol engine is
+`tairix_net::mdns` ([`lib/net`](../lib/net.md)); the containment is the
 supervised session of [`lib/sandbox`](../security/sandbox.md).
 
-Today it listens: it learns what its segments announce into one cache per
-interface. Nothing publishes or asks through it yet, so it sends nothing.
-PID 1 does not enrol it, so it is installed but not started until a client
-of it exists.
+It asks and answers questions for its clients. It publishes nothing of its own
+yet.
 
 ## The authority split
 
-A multicast DNS datagram is written by whoever shares the segment — a
-café's network, a compromised printer. The process that parses it therefore
-holds nothing worth taking.
+A multicast DNS datagram is written by whoever shares the segment — a café's
+network, a compromised printer. The process that parses it therefore holds
+nothing worth taking.
 
 | | Front | Decoder |
 |---|---|---|
 | Is | the service as started | the same binary, respawned in the kernel's sandbox spawn mode |
-| Holds | the two multicast DNS sockets, `CAP_NET`, `CAP_SANDBOX_SPAWN`, `CAP_LOG_EMIT` | two pipe ends; an empty capability record and the sandbox syscall allow-list |
-| Parses | nothing a peer sent; only a flag and an integer from its decoder, field by field | every datagram, through one engine per interface |
+| Holds | the two multicast DNS sockets, the discovery endpoint, `CAP_NET`, `CAP_SANDBOX_SPAWN`, `CAP_IPC_BIND_PRIVILEGED`, `CAP_FS_ACCESS` (the grant store, read once at start), `CAP_LOG_EMIT` | two pipe ends; an empty capability record and the sandbox syscall allow-list |
+| Parses | nothing a peer sent; only fixed fields from its decoder, each bounds-checked | every datagram, through one engine per interface |
 | Has a clock | yes | no: each frame that moves time carries the instant |
 | Has randomness | the kernel CSPRNG | none of its own: its cache key and CSPRNG key arrive in its first frame |
 
-A decoder's engines are keyed by what the front drew for that decoder, so a
-replacement never shares keys with the decoder it replaces. One engine per
-interface, created by that interface's first datagram, means a record learned
-on one link can never answer for another.
+The network stack reserves the multicast DNS port and groups to the service's
+account (`DISCOVERYD_UID`), so no other process can hear the segment's answers
+or send a query that draws unicast replies from every responder on it.
+
+## Clients
+
+A client opens a **session** on the reserved `DISCOVERY_ENDPOINT`, naming a
+private delivery port, and starts typed requests in it
+(`tairix_abi::discovery_ipc`): browse a service type, resolve an instance, look
+up a host's addresses, name a link-local address, or enumerate every type. Each
+request is answered continuously until it is stopped. Answers queue in the
+session and are taken with a call that never waits; the service rings the port
+once when answers are waiting and not again until the client has collected
+them all, so a slow reader costs one doorbell however many answers queue. A
+doorbell is believed only when its kernel-attested sender is the service's
+account.
+
+The service derives every name it asks the segment from the request's fields,
+so the type a browse is scoped to is a field it reads, never a name the caller
+spelled. Every answer names the interface it was learned on, and nothing merges
+two links.
+
+### Admission
+
+Decided from the caller's kernel-attested `Origin`, before any state is
+touched:
+
+| Request | Needs |
+|---|---|
+| any | `CAP_NET` |
+| host, reverse | nothing more |
+| browse, resolve | a grant for the type, or `CAP_NET_DISCOVER_ALL` |
+| enumerate types | `CAP_NET_DISCOVER_ALL` |
+
+Grants live in `/System/Security/Policy/Discovery`. The image builder writes
+them from each signed manifest's `browses` list, keyed on the bundle id and
+publisher the load gate attests, so a grant is never more than a verified
+manifest asked for. The service reads the store once at start and takes it
+whole or not at all: a store that does not parse grants nothing, and says why.
+A refusal names what the caller lacked and the type it asked for, never whether
+another principal holds that type.
+
+### Bounds
+
+Fixed containment bounds, since each is state the service holds for a client:
+
+| Bound | Value |
+|---|---|
+| Sessions per account | 8 |
+| Requests per session | 16 |
+| Queued answers per session | 64 KiB; past it the request is told `Lost` once, after everything queued before |
+| Sessions in all | 256 |
+
+A session ends when its owner exits: the service watches every principal it
+holds a session for through the kernel's peer-exit watch
+([`peer_watch`](../architecture/syscalls.md)), so a client that dies takes its
+questions with it.
+
+## Questions
+
+Each distinct question — a form and a name — is asked once, however many
+requests share it, on every interface whose link is up. A request that joins a
+question already asked is brought up to date by a replay from the decoder's
+cache rather than from a second copy in the front.
+
+The front keeps keyed fingerprints of what each question holds on each link,
+which is all it needs to hold the decoder to its word: an answer is added once,
+renewed or retired only while held, and never beyond the most records an honest
+engine can hold for one question on one link. An answer that crossed a stop, a
+flush, or a link edge in flight is stale and dropped; one no honest decoder
+sends condemns it.
 
 ## The channel
 
@@ -42,7 +111,20 @@ exactly its bytes.
 | front → decoder | `Configure` | the cache key and CSPRNG key; the first frame, sent once |
 | front → decoder | `Datagram` | the instant, the arrival interface, the sender's address and port, the payload unread |
 | front → decoder | `Tick` | the instant |
+| front → decoder | `Link` | the instant, an interface, and whether its link came up or went down |
+| front → decoder | `Ask` | the instant, a question id, its form, and the name |
+| front → decoder | `Stop` | a question id |
+| front → decoder | `Replay` | a question id and a token naming the requests owed it |
 | decoder → front | `Deadline` | the earliest instant any engine next needs time, or none |
+| decoder → front | `Answer` | one edge in one question's answers, already typed |
+| decoder → front | `Held` / `Replayed` | a replay's answers, then its end |
+| decoder → front | `Transmit` | a datagram an engine built, its interface, and its destination |
+| decoder → front | `Linked` | the acknowledgement of one link edge |
+
+The decoder acknowledges every link edge. The front believes an answer about a
+link, and sends a datagram built for it, only once every edge it told the
+decoder has been acknowledged, so nothing learned before a link's last edge
+reaches a client after it.
 
 A decoder that receives anything before its configuration, a second
 configuration, or a frame it cannot decode ends its session: the front never
@@ -54,42 +136,39 @@ sends one, so guessing would only hide a bug.
   whether its sender is on the arrival interface's link. The front drops
   anything else unread, because reflected mDNS is an amplifier.
 - **Relay admission is budgeted per sender, then shared.** A sender gets a
-  burst of 64 at 32 per second. All senders together get 2048 at 1024 per
-  second, across 32 tracked senders. A sender over its own budget is refused
-  before the shared one is charged, so one flooder cannot starve the rest,
-  and the shared budget bounds a sender rotating its address.
+  burst of 64 at 32 per second; all senders together get 2048 at 1024 per
+  second, across 32 tracked senders.
+- **What it sends is bounded too.** A datagram goes to the group, within the
+  interface's budget of a burst of 32 at 8 per second, or straight back to a
+  peer the front relayed from on that interface within the last second, once
+  per datagram relayed from it and at most four owed at once. It names its
+  egress interface, so a message built from one link's state never leaves by
+  another.
 - **Back-pressure costs nothing per datagram.** The decoder's queue holds
-  64 KiB. A datagram it has no room for is held, and the front stops
-  draining its delivery port until the queue drains. The stack's bounded
-  mailbox then fills and drops.
+  64 KiB. A datagram it has no room for is held, and the front stops draining
+  its delivery port until the queue drains.
 - **Time is paced by the front.** It ticks the decoder when the reported
-  instant comes, never before the decoder has reported since the last tick,
-  and never closer together than 10 ms. A tick the queue has no room for
-  waits on the queue draining. After every wake, the next wake the front
-  asks for is later than the instant it just acted on, so its loop parks and
-  never spins, whatever the decoder reports.
+  instant comes, never before the decoder has reported since the last tick, and
+  never closer together than 10 ms. After every wake, the next wake it asks for
+  is later than the instant it just acted on, so its loop parks and never
+  spins.
 - **Containment is total.** A decoder is reaped and logged, and everything
-  learned from it dropped, if it crashes, breaks the framing, ends its
-  stream, or sends a frame no decoder sends. A replacement starts after the
-  supervisor's paced delay (100 ms, doubling to 30 s), so a datagram crafted
-  to kill the decoder costs a spawn per backoff step, never one per datagram.
+  learned from it dropped — every client holding an answer is told the answers
+  are void — if it crashes, breaks the framing, ends its stream, or sends a
+  frame no decoder sends. A replacement starts after the supervisor's paced
+  delay (100 ms, doubling to 30 s), is keyed afresh, and is told the links and
+  asked the questions again.
 - **Without entropy, no decoder.** If the random source refuses the keys a
-  decoder needs, the service logs why and exits rather than run a decoder
-  under predictable keys.
+  decoder needs, the service logs why and exits.
 
 ## The reactor
 
-One wait-set holds three things:
-
-- the delivery port, registered only while the front will take datagrams,
-  and drained at most one mailbox's worth (64) per wake, so a segment that
-  refills it as fast as it drains cannot keep the loop from its decoder or
-  its timer;
-- the decoder's two pipe ends, registered exactly as its session wants
-  them, and moved to each generation's new pipes;
-- a timeout for the one instant the front must next act by.
-
-A dead wait-set ends the service rather than degrading into a poll.
+One wait-set holds the delivery port (registered only while the front takes
+datagrams, and drained at most one mailbox's worth per wake), the decoder's two
+pipe ends, the discovery endpoint, the thread's peer-exit feed, and room on any
+client port a doorbell is owed to, with a timeout for the one instant the front
+must next act by. A dead wait-set ends the service rather than degrading into a
+poll.
 
 ## Audit records
 
@@ -99,33 +178,31 @@ decoder launch is its `6001`.
 
 | Id | Name | Level | Meaning |
 |---|---|---|---|
-| `25_001` | `SERVICE_STARTED` | Info | The front holds its multicast DNS sockets; carries which address families joined their group. |
+| `25_001` | `SERVICE_STARTED` | Info | The front holds its multicast DNS sockets; carries each address family's outcome — joined, or the step the stack refused and why. |
 | `25_002` | `DECODER_STARTED` | Info | A decoder started and was keyed; carries its generation. |
-| `25_003` | `SERVICE_UNAVAILABLE` | Error | The service cannot serve and is exiting; carries the reason. |
+| `25_003` | `SERVICE_UNAVAILABLE` | Error | The service cannot serve and is exiting; carries the reason, and each family's outcome when no socket could be opened. |
+| `25_004` | `REQUEST_DENIED` | Warn | A client request was refused for want of authority; carries what was lacking, the caller's uid, and the type asked for. |
+| `25_005` | `GRANTS_REFUSED` | Warn | The grant store could not be opened or read, or was refused whole, so no application may browse; carries the reason. |
 
 ## Tests
 
-The front and the decoder are host-tested over in-process workers: a
-recording one, a doomed one, one that lies, and the real decoder end to end.
-The tests cover:
+The front, the decoder, the channel, the question table, the sessions, and the
+query planner are host-tested, the front over in-process workers — a recording
+one, a doomed one, one that lies, and the real decoder end to end. They cover
+relay admission, the held datagram, the tick floor, crash replacement under
+fresh keys, condemnation, admission and refusal, grants, replays to late
+joiners, link flaps in flight, bounded queues and the `Lost` notice, peer exit,
+and every transmit rule.
 
-- relay of on-link datagrams only;
-- per-sender budgets;
-- the held datagram and the stopped drain;
-- the tick floor, and a tick owed to a full queue;
-- crash replacement under fresh keys;
-- condemnation of an unbelievable frame;
-- refusal to start without entropy.
+`fuzz_discoveryd` is enrolled in `cargo xtask fuzz`: both codecs canonical under
+random frames and single-bit mutations, the decoder total over hostile and
+well-formed datagrams with time running backwards, and the front against a
+decoder saying anything at all while it holds its no-spin bound, configures each
+decoder first and once, spaces its ticks, contains the decoder, and relays to
+its replacement.
 
-`fuzz_discoveryd` is enrolled in `cargo xtask fuzz`. It runs every
-structural case on every iteration, with drawn content inside each:
-
-- both codecs canonical under random frames and single-bit mutations;
-- the decoder total over hostile and well-formed datagrams, with time
-  running backwards;
-- the front against a decoder saying anything at all. That covers
-  believable deadlines past and future, an unknown tag, an oversize frame,
-  framed and raw noise, and an ended stream, plus a queue filled to the
-  byte while a tick falls due. In every case the front must hold its no-spin
-  bound, configure each decoder first and once, space its ticks, contain the
-  decoder, and relay to its replacement.
+The live vertical `tairix-test-discovery-qemu-aarch64` boots the production
+aarch64 image with a host-side multicast DNS responder on the wire and runs
+`dns-sd` browse, resolve, and host lookups through the whole path; the peer
+requires that the guest asked the wire for every record they need, and the
+script that the guest printed each of the peer's answers.

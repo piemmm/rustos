@@ -87,7 +87,8 @@ for filesystems, the feature section below.
 | Networking | ◐ virtio | ◐ virtio + GENET | ◐ virtio | — |
 | DHCPv4 / DHCPv6 address configuration | ✓ | ✓ | ✓ | — |
 | DNS name resolution, forward and reverse (`A`/`AAAA`/`PTR`) | ✓ | ✓ | ✓ | — |
-| Link-local service discovery (mDNS / DNS-SD, `discoveryd`) | ◐ | ◐ | ◐ | — |
+| Link-local service browse, resolve, and `.local` lookup (mDNS / DNS-SD, `discoveryd`, `dns-sd`) | ✓ | ✓ | ✓ | — |
+| Link-local service publication (mDNS / DNS-SD) | ▢ | ▢ | ▢ | — |
 | Network clock synchronisation (`timed`, sandboxed NTP client) | ✓ | ✓ | ✓ | — |
 | Real-time clock (RTC) drivers | ✓ mc146818 | ✓ pl031 + ◐ rpi + ◐ i2c | ✓ goldfish | — |
 | Accelerator (offload-engine) drivers | ▢ | ✓ virtio-crypto | ▢ | — |

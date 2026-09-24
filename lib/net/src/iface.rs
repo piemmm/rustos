@@ -1069,6 +1069,15 @@ impl Iface {
             .collect()
     }
 
+    /// Whether an IPv6 address past duplicate address detection is held, so a
+    /// datagram has a source to leave from.
+    #[must_use]
+    pub fn has_usable_v6(&self) -> bool {
+        self.v6
+            .iter()
+            .any(|entry| !matches!(entry.state, AddrState::Tentative { .. }))
+    }
+
     /// A counter that changes whenever the set of IPv6 addresses this
     /// interface holds changes.
     ///

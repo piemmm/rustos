@@ -31,6 +31,7 @@ use tairix_net::internet_checksum;
 use tairix_net::rate::{RateCounters, RateMeter, RateSelector};
 use tairix_net::stack::{
     RxMeta, SendError, Stack, StackConfig, StackEvent, StackOutput, TxFrame, TxOffload,
+    MULTICAST_GROUPS_AVAILABLE,
 };
 use tairix_net::tcp::TcpSegmentMeta;
 
@@ -145,27 +146,57 @@ fn push_rx_filter<F: FrameService>(channel: &mut Interface, policy: &RxFilterPol
     }
 }
 
+/// Program `channel`'s device filter with the groups the `target` engine
+/// needs, returning the set's size when the device refused it.
+///
+/// The groups are the stack target's and the record of what the device was
+/// last sent is the channel's: a bond's members share one engine, and a
+/// record kept on the bond would let the first member pumped stand in for
+/// every other.
 fn push_multicast<F: FrameService>(
-    iface: &mut Interface,
+    interfaces: &mut [Interface],
+    target: usize,
+    channel: usize,
     fs: &mut F,
     scratch: &mut Vec<MacAddress>,
 ) -> Option<usize> {
-    if matches!(iface.facts.multicast_filter, McastFilter::Unfiltered) {
+    if matches!(
+        interfaces[channel].facts.multicast_filter,
+        McastFilter::Unfiltered
+    ) {
         return None;
     }
-    let revision = iface.stack.multicast_revision();
-    if iface.pushed_multicast == Some(revision) {
+    let revision = interfaces[target].stack.multicast_revision();
+    if interfaces[channel].pushed_multicast == Some(revision) {
         return None;
     }
-    iface.stack.multicast_macs(scratch);
+    interfaces[target].stack.multicast_macs(scratch);
     match fs.set_multicast_groups(scratch) {
         Ok(()) => {
-            iface.pushed_multicast = Some(revision);
+            interfaces[channel].pushed_multicast = Some(revision);
             None
         }
         Err(_) => Some(scratch.len()),
     }
 }
+
+/// One logical interface's link, for one address family, as
+/// [`Netstack::publish_links`] last saw it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PublishedLink {
+    /// The interface's alias.
+    pub name: [u8; IF_NAME_LEN],
+    /// The family.
+    pub family: NetAddrFamily,
+    /// Whether the family can speak on it: the link is up and the interface
+    /// holds a source address of the family.
+    pub up: bool,
+    /// The epoch of its last change.
+    pub epoch: u64,
+}
+
+/// The families every logical interface's link is published for.
+const FAMILIES: [NetAddrFamily; 2] = [NetAddrFamily::V4, NetAddrFamily::V6];
 
 /// What one [`Netstack::service_interface`] pump produced.
 ///
@@ -274,6 +305,29 @@ impl Interface {
     pub fn stack_mut(&mut self) -> &mut Stack {
         &mut self.stack
     }
+
+    /// Whether the link is up: a bond's when any member is eligible, a plain
+    /// interface's as its device reported it.
+    fn link_up(&self) -> bool {
+        match &self.role {
+            BondRole::Bond { engine, .. } => engine.is_up(),
+            _ => self.facts.link == LinkState::Up,
+        }
+    }
+
+    /// Whether a datagram of `family` has a source to leave from.
+    fn has_source(&self, family: NetAddrFamily) -> bool {
+        match family {
+            NetAddrFamily::V4 => self.stack.has_ipv4_source(),
+            NetAddrFamily::V6 => self.stack.has_ipv6_source(),
+        }
+    }
+
+    /// [`Self::link_up`] for a logical interface, or `None` for a bond member,
+    /// which carries no datagrams and no memberships of its own.
+    fn link_up_if_logical(&self) -> Option<bool> {
+        (!matches!(self.role, BondRole::Member { .. })).then(|| self.link_up())
+    }
 }
 
 /// A factory for per-interface RFC 8981 temporary-address randomness
@@ -337,6 +391,21 @@ pub struct Netstack {
     /// swapped.
     datagram_ports: Vec<u16>,
     datagram_ports_scratch: Vec<u16>,
+    /// Each logical interface's link as last published, in table order, and
+    /// the scratch the next candidate set is built into. Compared rather than
+    /// tracked, like [`Self::datagram_ports`], so no path that moves a link
+    /// has to remember to say so.
+    published_links: Vec<PublishedLink>,
+    links_scratch: Vec<PublishedLink>,
+    /// Advanced once for every link that moves, so each published link
+    /// carries the epoch of its last change and a reader holding an older one
+    /// knows it missed at least one edge, however many.
+    link_epoch: u64,
+    /// Every multicast group a socket holds, with how many socket
+    /// memberships hold it. The one count: every interface's engine holds
+    /// each listed group exactly once, whenever the interface arrived and
+    /// whatever bond role it has held since.
+    groups: Vec<(IpAddr, u32)>,
     /// The key every hash this service takes over input a remote peer chooses
     /// is drawn under: a bond's transmit flow hash, and each interface's
     /// neighbour-cache index. Injected like the randomness factories above,
@@ -367,6 +436,10 @@ impl Netstack {
             mcast_scratch: Vec::new(),
             datagram_ports: Vec::new(),
             datagram_ports_scratch: Vec::new(),
+            published_links: Vec::new(),
+            links_scratch: Vec::new(),
+            link_epoch: 0,
+            groups: Vec::new(),
             peer_hash_key,
         }
     }
@@ -425,9 +498,7 @@ impl Netstack {
         config.iface.privacy = self.settings.ipv6_privacy;
         let temp_source = (self.temp_factory)();
         let mut stack = Stack::new(&config, temp_source, now).map_err(|_| Errno::OutOfRange)?;
-        // A new interface joins with the set already published, so a socket
-        // bound before it appeared still receives broadcast on it.
-        stack.set_datagram_ports(self.published_datagram_ports());
+        self.adopt_published(&mut stack, now)?;
         self.interfaces.push(Interface {
             name,
             kind,
@@ -794,9 +865,10 @@ impl Netstack {
             .collect()
     }
 
-    /// Originate a UDP datagram from every interface that can carry it,
-    /// returning the frames each produced tagged by interface alias so the
-    /// caller can queue them onto that interface's TX ring.
+    /// Originate a UDP datagram from every interface that can carry it —
+    /// or from the one `egress` names — returning the frames each produced
+    /// tagged by interface alias so the caller can queue them onto that
+    /// interface's TX ring.
     ///
     /// Egress selection is deterministic and per-link: interfaces are
     /// tried in table order. A **unicast** destination is sent out the
@@ -807,8 +879,13 @@ impl Netstack {
     /// resolution frames now and the datagram once the neighbour answers —
     /// exactly the unicast echo behaviour.
     ///
+    /// A named `egress` is the whole of the choice: that logical interface
+    /// carries the datagram or it is refused, never another in its place.
+    ///
     /// # Errors
     ///
+    /// * [`Errno::NotFound`] — `egress` names no logical interface (a bond
+    ///   member carries no datagrams of its own).
     /// * [`Errno::MessageTooLarge`] — the datagram is too large to fit or
     ///   fragment onto the path (an oversize IPv6 datagram is
     ///   source-fragmented) or overflows the length field, on an interface
@@ -823,8 +900,17 @@ impl Netstack {
         source_port: u16,
         destination_port: u16,
         payload: &[u8],
+        egress: Option<[u8; IF_NAME_LEN]>,
         now: Duration64,
     ) -> Result<FrameBatch, Errno> {
+        if let Some(name) = egress {
+            let pinned = self
+                .find(name)
+                .filter(|&index| !matches!(self.interfaces[index].role, BondRole::Member { .. }));
+            if pinned.is_none() {
+                return Err(Errno::NotFound);
+            }
+        }
         let multicast = match dest {
             IpAddr::V4(v4) => v4.is_multicast(),
             IpAddr::V6(v6) => v6.is_multicast(),
@@ -840,7 +926,10 @@ impl Netstack {
             ..
         } = self;
         let peer_hash_key = *peer_hash_key;
-        for iface in interfaces.iter_mut() {
+        for iface in interfaces
+            .iter_mut()
+            .filter(|iface| egress.is_none_or(|name| iface.name == name))
+        {
             match iface
                 .stack
                 .send_datagram(dest, source_port, destination_port, payload, now, out)
@@ -1028,47 +1117,171 @@ impl Netstack {
         })
     }
 
-    /// Join multicast `group` on every managed interface (multicast
-    /// membership is a per-link property), returning the frames each
-    /// interface emitted (the IGMP/MLD report) tagged by alias.
+    /// Record one more socket membership of `group`, joining it on every
+    /// interface when it is the first, and return each logical interface's
+    /// membership report tagged by alias.
+    ///
+    /// A bond member's own engine takes the join too, without reporting it:
+    /// the member is silent on its link while enrolled, and if it is released
+    /// it resumes as a host that already holds every group.
     ///
     /// # Errors
     ///
     /// * [`Errno::OutOfRange`] — `group` is not a multicast group.
-    /// * [`Errno::LimitExceeded`] — an interface's bounded membership
-    ///   table is full (fail closed).
+    /// * [`Errno::LimitExceeded`] — the family already holds every group an
+    ///   engine can, or `group` is held as often as the count can say.
+    /// * [`Errno::OutOfMemory`] — the group table could not grow.
     pub fn join_multicast_all(
         &mut self,
         group: IpAddr,
         now: Duration64,
     ) -> Result<FrameBatch, Errno> {
+        if !group.is_multicast() {
+            return Err(Errno::OutOfRange);
+        }
+        if let Some((_, holders)) = self.groups.iter_mut().find(|(held, _)| *held == group) {
+            *holders = holders.checked_add(1).ok_or(Errno::LimitExceeded)?;
+            return Ok(FrameBatch::new());
+        }
+        let family = self
+            .groups
+            .iter()
+            .filter(|(held, _)| held.is_ipv4() == group.is_ipv4())
+            .count();
+        if family >= MULTICAST_GROUPS_AVAILABLE {
+            return Err(Errno::LimitExceeded);
+        }
+        self.groups.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        let refused = self
+            .interfaces
+            .iter_mut()
+            .position(|iface| iface.stack.join_multicast(group, now).is_err());
+        if let Some(refused) = refused {
+            for iface in &mut self.interfaces[..refused] {
+                iface.stack.leave_multicast(group, now);
+            }
+            return Err(Errno::LimitExceeded);
+        }
+        self.groups.push((group, 1));
+        Ok(self.report_memberships(now))
+    }
+
+    /// Record one fewer socket membership of `group`, leaving it on every
+    /// interface when that was the last, and return each logical interface's
+    /// leave report tagged by alias. A group no socket holds is ignored.
+    pub fn leave_multicast_all(&mut self, group: IpAddr, now: Duration64) -> FrameBatch {
+        let Some(position) = self.groups.iter().position(|(held, _)| *held == group) else {
+            return FrameBatch::new();
+        };
+        let holders = &mut self.groups[position].1;
+        *holders = holders.saturating_sub(1);
+        if *holders > 0 {
+            return FrameBatch::new();
+        }
+        self.groups.swap_remove(position);
+        for iface in &mut self.interfaces {
+            iface.stack.leave_multicast(group, now);
+        }
+        self.report_memberships(now)
+    }
+
+    /// Run every logical interface's engine once so a membership change
+    /// reaches its link now rather than at the next timer, returning the
+    /// frames tagged by alias. Members stay silent: their engines are not
+    /// driven while enrolled.
+    fn report_memberships(&mut self, now: Duration64) -> FrameBatch {
         let mut batches = FrameBatch::new();
         let Self {
             interfaces, out, ..
         } = self;
         for iface in interfaces.iter_mut() {
-            // A member owns no membership; the bond does. Skip members.
             if matches!(iface.role, BondRole::Member { .. }) {
                 continue;
             }
-            match iface.stack.join_multicast(group, now) {
-                // A fresh join emits a membership report to announce it.
-                Ok(true) => {
-                    iface.stack.advance(now, out);
-                    let frames = core::mem::take(&mut out.frames);
-                    if let Some(tag) = egress_tag(&iface.role, iface.name, 0) {
-                        batches.push((tag, frames));
-                    }
-                }
-                // Already a member (a prior reference): no new report.
-                Ok(false) => {}
-                Err(tairix_net::stack::McastError::NotMulticast) => return Err(Errno::OutOfRange),
-                Err(tairix_net::stack::McastError::CapacityExhausted) => {
-                    return Err(Errno::LimitExceeded)
-                }
+            iface.stack.advance(now, out);
+            let frames = core::mem::take(&mut out.frames);
+            if frames.is_empty() {
+                continue;
+            }
+            if let Some(tag) = egress_tag(&iface.role, iface.name, 0) {
+                batches.push((tag, frames));
             }
         }
-        Ok(batches)
+        batches
+    }
+
+    /// Publish every logical interface's link, stamping each that moved
+    /// with a fresh epoch: one bound up, gone down, or come back. One that
+    /// stopped being logical — renamed, or enrolled into a bond — leaves the
+    /// published set, which reads as down.
+    ///
+    /// An unchanged table costs one pass and no allocation. A publication
+    /// that cannot allocate leaves the last one standing, so the next call
+    /// makes it again and nothing a reader is owed is lost.
+    pub fn publish_links(&mut self) {
+        let Self {
+            interfaces,
+            published_links,
+            links_scratch,
+            link_epoch,
+            ..
+        } = self;
+        links_scratch.clear();
+        if links_scratch
+            .try_reserve(interfaces.len() * FAMILIES.len())
+            .is_err()
+        {
+            return;
+        }
+        let mut moved = false;
+        // Both lists are in table order, so the last publication is walked in
+        // step and searched only where the table changed shape.
+        let mut cursor = 0;
+        for iface in interfaces.iter() {
+            let Some(link_up) = iface.link_up_if_logical() else {
+                continue;
+            };
+            for family in FAMILIES {
+                let up = link_up && iface.has_source(family);
+                let same = |link: &&PublishedLink| link.name == iface.name && link.family == family;
+                let last = published_links
+                    .get(cursor)
+                    .filter(same)
+                    .or_else(|| published_links.iter().find(same));
+                cursor += 1;
+                let epoch = match last {
+                    Some(link) if link.up == up => link.epoch,
+                    _ => {
+                        moved = true;
+                        link_epoch.wrapping_add(1)
+                    }
+                };
+                links_scratch.push(PublishedLink {
+                    name: iface.name,
+                    family,
+                    up,
+                    epoch,
+                });
+            }
+        }
+        moved |= links_scratch.len() != published_links.len();
+        if moved {
+            *link_epoch = link_epoch.wrapping_add(1);
+            core::mem::swap(published_links, links_scratch);
+        }
+    }
+
+    /// The logical interfaces' links as last published.
+    #[must_use]
+    pub fn links(&self) -> &[PublishedLink] {
+        &self.published_links
+    }
+
+    /// The epoch of the last published change; it moves whenever
+    /// [`Self::links`] does.
+    #[must_use]
+    pub fn link_epoch(&self) -> u64 {
+        self.link_epoch
     }
 
     /// Publish the local datagram ports a broadcast datagram may be
@@ -1094,33 +1307,24 @@ impl Netstack {
         }
     }
 
-    /// The datagram ports last published, so a freshly added interface
-    /// starts from the same set as its siblings.
-    fn published_datagram_ports(&self) -> &[u16] {
-        &self.datagram_ports
-    }
-
-    /// Leave multicast `group` on every managed interface, returning the
-    /// frames each interface emitted (an IGMP Leave when the last
-    /// reference dropped) tagged by alias.
-    pub fn leave_multicast_all(&mut self, group: IpAddr, now: Duration64) -> FrameBatch {
-        let mut batches = FrameBatch::new();
-        let Self {
-            interfaces, out, ..
-        } = self;
-        for iface in interfaces.iter_mut() {
-            if matches!(iface.role, BondRole::Member { .. }) {
-                continue;
-            }
-            if iface.stack.leave_multicast(group, now) {
-                iface.stack.advance(now, out);
-                let frames = core::mem::take(&mut out.frames);
-                if let Some(tag) = egress_tag(&iface.role, iface.name, 0) {
-                    batches.push((tag, frames));
-                }
-            }
+    /// Bring an engine not yet in the table up to what every interface
+    /// carries — the broadcast ports sockets are bound to and the groups they
+    /// hold — so a socket that predates the interface is served on it too.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::LimitExceeded`] — the engine refused a group. The group set
+    ///   is bounded to what every engine holds, so this is an engine built
+    ///   with a smaller table; the interface is refused rather than added
+    ///   short of a membership.
+    fn adopt_published(&self, stack: &mut Stack, now: Duration64) -> Result<(), Errno> {
+        stack.set_datagram_ports(&self.datagram_ports);
+        for &(group, _) in &self.groups {
+            stack
+                .join_multicast(group, now)
+                .map_err(|_| Errno::LimitExceeded)?;
         }
-        batches
+        Ok(())
     }
 
     /// The whole table's static facts, one record per interface, from
@@ -1181,12 +1385,7 @@ impl Netstack {
                     };
                     count += 1;
                 }
-                // A bond's link is up when any member is eligible; a plain
-                // interface's link is its device's reported link.
-                let link_up = match &i.role {
-                    BondRole::Bond { engine, .. } => engine.is_up(),
-                    _ => i.facts.link == LinkState::Up,
-                };
+                let link_up = i.link_up();
                 NetInterfaceStateRecord {
                     name: i.name,
                     link_up,
@@ -1333,6 +1532,10 @@ impl Netstack {
             mcast_scratch,
             datagram_ports: _,
             datagram_ports_scratch: _,
+            published_links: _,
+            links_scratch: _,
+            link_epoch: _,
+            groups: _,
             peer_hash_key: _,
         } = self;
         let iface = &mut interfaces[index];
@@ -1346,12 +1549,12 @@ impl Netstack {
         // *before* the doorbell, so a group this advance joined (a fresh
         // address's solicited-node group, whose DAD probe the same advance
         // just queued) is admitted before any answer to it could arrive.
-        let multicast_refused = push_multicast(iface, fs, mcast_scratch);
+        let multicast_refused = push_multicast(interfaces, index, channel_index, fs, mcast_scratch);
         // Keep the device's receive pre-filter in step with the addresses
         // this advance may have assigned, before any answer to them could
         // arrive. The addresses are the stack target's; the device is this
         // channel's, and so is the record of what it was last sent.
-        let rx_policy = iface.stack.rx_filter_policy();
+        let rx_policy = interfaces[index].stack.rx_filter_policy();
         push_rx_filter(&mut interfaces[channel_index], &rx_policy, fs);
         let iface = &mut interfaces[index];
         // The device's cumulative pre-filter count: whatever the waking
@@ -1453,12 +1656,12 @@ impl Netstack {
     pub fn next_deadline(&self) -> Option<Duration64> {
         self.interfaces
             .iter()
-            .flat_map(|i| {
-                let bond = match &i.role {
-                    BondRole::Bond { engine, .. } => engine.next_deadline(),
-                    _ => None,
-                };
-                [i.stack.next_deadline(), bond]
+            .flat_map(|i| match &i.role {
+                // A member's own engine is not driven while it is enrolled, so
+                // a deadline it holds would read as due on every park.
+                BondRole::Member { .. } => [None, None],
+                BondRole::Bond { engine, .. } => [i.stack.next_deadline(), engine.next_deadline()],
+                BondRole::None => [i.stack.next_deadline(), None],
             })
             .flatten()
             .min_by_key(|d| (d.secs(), d.subsec_nanos()))
@@ -1600,6 +1803,7 @@ impl Netstack {
         config.iface.privacy = self.settings.ipv6_privacy;
         let temp_source = (self.temp_factory)();
         let mut stack = Stack::new(&config, temp_source, now).map_err(|_| Errno::OutOfRange)?;
+        self.adopt_published(&mut stack, now)?;
         // The bond has no admitted member yet, so its aggregate link is
         // down until the failover monitor admits one.
         stack.set_link(LinkState::Down);
@@ -1660,6 +1864,7 @@ impl Netstack {
                 }
                 if let Some(idx) = self.find(*member) {
                     self.interfaces[idx].role = BondRole::None;
+                    self.interfaces[idx].pushed_multicast = None;
                     self.reenable_member_stack(idx, now);
                 }
             }
@@ -1681,6 +1886,9 @@ impl Netstack {
                 };
                 self.disable_member_stack(idx, now);
                 self.interfaces[idx].role = BondRole::Member { bond: bond_alias };
+                // Its filter now mirrors another engine, whose revisions are
+                // not comparable with the one it was last programmed from.
+                self.interfaces[idx].pushed_multicast = None;
                 let link = self.interfaces[idx].facts.link;
                 if let BondRole::Bond { engine, .. } = &mut self.interfaces[bond_index].role {
                     if engine.add_member(member_id(*member)).is_ok() {

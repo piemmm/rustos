@@ -61,7 +61,11 @@ extern "C" {
 /// invariants in `boot.s` are upheld. Calling from anywhere else is a
 /// kernel bug.
 #[no_mangle]
-pub extern "C" fn tairix_arch_x86_64_main(magic: u64, boot_info: u64) -> ! {
+pub extern "C" fn tairix_arch_x86_64_main(
+    magic: u64,
+    boot_info: u64,
+    boot_tables: *mut crate::percpu::BootTables,
+) -> ! {
     // The magic arrives in `%rdi` zero-extended from the 32-bit value
     // the entry stub placed in `%edi`. Only the low 32 bits carry the
     // magic; the truncation is the documented 32-bit entry ABI of both
@@ -76,9 +80,13 @@ pub extern "C" fn tairix_arch_x86_64_main(magic: u64, boot_info: u64) -> ! {
         refuse("the boot protocol was recorded twice");
     }
     pic::remap_and_mask_all(&pio::x86_port_io8());
-    // SAFETY: the boot CPU with interrupts disabled — the contract
-    // `install_boot_tables` states, which `boot.s` guarantees here.
-    if unsafe { crate::percpu::install_boot_tables() }.is_err() {
+    if !boot_tables.is_aligned() {
+        refuse("the boot descriptor tables' reservation is misaligned");
+    }
+    // SAFETY: the boot CPU, once, with interrupts disabled, and
+    // `boot_tables` is the reservation `linker.ld` sizes for them, which
+    // `boot.s` hands over and nothing else uses.
+    if unsafe { crate::percpu::install_boot_tables(boot_tables) }.is_err() {
         refuse("the boot descriptor tables were refused");
     }
     // SAFETY: `kernel_main` is provided by the linked test binary and is

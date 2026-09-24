@@ -12,9 +12,10 @@ use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     i32_from_register, i32_register_is_canonical, i64_from_register, spec_for, AbiType,
     CallRecvFlags, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange,
-    MapFlags, OpenFlags, PortWidth, PowerAction, RandomFlags, RealpathMode, SchedPriority, Signal,
-    SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE,
-    FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
+    MapFlags, OpenFlags, PeerWatchOp, PortWidth, PowerAction, RandomFlags, RealpathMode,
+    SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags,
+    ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
+    SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId};
@@ -1312,6 +1313,21 @@ pub trait SyscallHandlers {
         _endpoint: u64,
         _ticket: u64,
         _resource: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Watch, stop watching, or take the exit of the process instance whose
+    /// 16-byte identity is at `proc_id`/`len` — read for a watch or unwatch,
+    /// written for a take. Acts only on the calling thread's own watches.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn peer_watch(
+        &self,
+        _caller: &CallerContext<'_>,
+        _op: PeerWatchOp,
+        _proc_id: u64,
+        _len: usize,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -3467,6 +3483,14 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .call_peer_holds(caller, args.0[0], args.0[1], args.0[2])
             }
+            SyscallNumber::PEER_WATCH => {
+                // args[0] is the `PeerWatchOp` discriminant, refused before
+                // dispatch when unknown; args[1] is the non-null identity
+                // `UserPtr` (dispatcher-checked) and args[2] its length.
+                let op = PeerWatchOp::from_u32(decode_u32(args.0[0]))?;
+                let len = decode_len(args.0[2])?;
+                self.handlers.peer_watch(caller, op, args.0[1], len)
+            }
             SyscallNumber::RESOURCE_GRANTS => {
                 // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
                 // is the buffer capacity.
@@ -4863,6 +4887,17 @@ mod tests {
             _resource: u64,
         ) -> SyscallResult {
             self.record("call_peer_holds");
+            Ok(0)
+        }
+
+        fn peer_watch(
+            &self,
+            _c: &CallerContext<'_>,
+            _op: PeerWatchOp,
+            _proc_id: u64,
+            _len: usize,
+        ) -> SyscallResult {
+            self.record("peer_watch");
             Ok(0)
         }
 

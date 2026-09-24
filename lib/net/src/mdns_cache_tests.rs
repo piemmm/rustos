@@ -46,7 +46,10 @@ fn held(cache: &RecordCache, dotted: &str, record_type: RecordType) -> Vec<Recor
 fn a_learned_record_is_found_by_name_and_type() {
     let mut cache = cache();
     let record = a_record("printer.local", 5, 120);
-    assert_eq!(cache.learn(at(0), &record, host(1)), Learned::Added);
+    assert_eq!(
+        cache.learn(at(0), &record, host(1), &mut |_, _| {}),
+        Learned::Added
+    );
     assert_eq!(
         held(&cache, "printer.local", RecordType::A),
         alloc::vec![record]
@@ -59,7 +62,12 @@ fn a_learned_record_is_found_by_name_and_type() {
 #[test]
 fn lookup_is_case_insensitive_because_dns_names_are() {
     let mut cache = cache();
-    cache.learn(at(0), &a_record("Printer.LOCAL", 5, 120), host(1));
+    cache.learn(
+        at(0),
+        &a_record("Printer.LOCAL", 5, 120),
+        host(1),
+        &mut |_, _| {},
+    );
     assert_eq!(held(&cache, "printer.local", RecordType::A).len(), 1);
 }
 
@@ -68,8 +76,8 @@ fn two_shared_records_at_one_name_both_live_there() {
     let mut cache = cache();
     let first = ptr_record("_ipp._tcp.local", "a._ipp._tcp.local", 4500);
     let second = ptr_record("_ipp._tcp.local", "b._ipp._tcp.local", 4500);
-    cache.learn(at(0), &first, host(1));
-    cache.learn(at(0), &second, host(2));
+    cache.learn(at(0), &first, host(1), &mut |_, _| {});
+    cache.learn(at(0), &second, host(2), &mut |_, _| {});
     assert_eq!(held(&cache, "_ipp._tcp.local", RecordType::Ptr).len(), 2);
 }
 
@@ -77,8 +85,11 @@ fn two_shared_records_at_one_name_both_live_there() {
 fn relearning_a_held_record_renews_it_rather_than_duplicating_it() {
     let mut cache = cache();
     let record = a_record("printer.local", 5, 120);
-    cache.learn(at(0), &record, host(1));
-    assert_eq!(cache.learn(at(30), &record, host(1)), Learned::Refreshed);
+    cache.learn(at(0), &record, host(1), &mut |_, _| {});
+    assert_eq!(
+        cache.learn(at(30), &record, host(1), &mut |_, _| {}),
+        Learned::Refreshed
+    );
     assert_eq!(cache.len(), 1);
     let entry = cache
         .lookup(&name("printer.local"), RecordType::A)
@@ -93,13 +104,16 @@ fn relearning_a_held_record_renews_it_rather_than_duplicating_it() {
 fn a_goodbye_retires_the_record_after_the_one_second_grace() {
     let mut cache = cache();
     let record = a_record("printer.local", 5, 120);
-    cache.learn(at(0), &record, host(1));
+    cache.learn(at(0), &record, host(1), &mut |_, _| {});
     let mut goodbye = record;
     goodbye.ttl = 0;
-    assert_eq!(cache.learn(at(10), &goodbye, host(1)), Learned::Retired);
+    assert_eq!(
+        cache.learn(at(10), &goodbye, host(1), &mut |_, _| {}),
+        Learned::Retired
+    );
     // Still held during the grace RFC 6762 §10.1 asks for.
     assert_eq!(cache.len(), 1);
-    cache.advance(at(11), &mut |_, _| {});
+    cache.advance(at(11), &mut |_, _| {}, &mut |_, _| {});
     assert_eq!(cache.len(), 0);
 }
 
@@ -107,11 +121,14 @@ fn a_goodbye_retires_the_record_after_the_one_second_grace() {
 fn a_goodbye_from_another_host_cannot_delete_a_neighbours_record() {
     let mut cache = cache();
     let record = a_record("printer.local", 5, 120);
-    cache.learn(at(0), &record, host(1));
+    cache.learn(at(0), &record, host(1), &mut |_, _| {});
     let mut goodbye = record;
     goodbye.ttl = 0;
-    assert_eq!(cache.learn(at(10), &goodbye, host(2)), Learned::Ignored);
-    cache.advance(at(20), &mut |_, _| {});
+    assert_eq!(
+        cache.learn(at(10), &goodbye, host(2), &mut |_, _| {}),
+        Learned::Ignored
+    );
+    cache.advance(at(20), &mut |_, _| {}, &mut |_, _| {});
     assert_eq!(cache.len(), 1);
 }
 
@@ -120,12 +137,12 @@ fn the_cache_flush_bit_retires_that_sources_other_records_only() {
     let mut cache = cache();
     let old = a_record("printer.local", 5, 120);
     let other_host = a_record("printer.local", 9, 120);
-    cache.learn(at(0), &old, host(1));
-    cache.learn(at(0), &other_host, host(2));
+    cache.learn(at(0), &old, host(1), &mut |_, _| {});
+    cache.learn(at(0), &other_host, host(2), &mut |_, _| {});
 
     let fresh = a_record("printer.local", 6, 120);
-    cache.learn(at(60), &fresh, host(1));
-    cache.advance(at(62), &mut |_, _| {});
+    cache.learn(at(60), &fresh, host(1), &mut |_, _| {});
+    cache.advance(at(62), &mut |_, _| {}, &mut |_, _| {});
 
     let live = held(&cache, "printer.local", RecordType::A);
     assert!(live.contains(&fresh), "the announcing record stays");
@@ -143,9 +160,9 @@ fn the_cache_flush_bit_spares_a_record_received_in_the_last_second() {
     let mut cache = cache();
     let first = a_record("printer.local", 5, 120);
     let second = a_record("printer.local", 6, 120);
-    cache.learn(at(0), &first, host(1));
-    cache.learn(at(0), &second, host(1));
-    cache.advance(at(2), &mut |_, _| {});
+    cache.learn(at(0), &first, host(1), &mut |_, _| {});
+    cache.learn(at(0), &second, host(1), &mut |_, _| {});
+    cache.advance(at(2), &mut |_, _| {}, &mut |_, _| {});
     assert_eq!(held(&cache, "printer.local", RecordType::A).len(), 2);
 }
 
@@ -154,17 +171,27 @@ fn the_cache_flush_bit_spares_a_record_received_in_the_last_second() {
 #[test]
 fn a_record_expires_at_its_ttl() {
     let mut cache = cache();
-    cache.learn(at(0), &a_record("printer.local", 5, 100), host(1));
-    cache.advance(at(99), &mut |_, _| {});
+    cache.learn(
+        at(0),
+        &a_record("printer.local", 5, 100),
+        host(1),
+        &mut |_, _| {},
+    );
+    cache.advance(at(99), &mut |_, _| {}, &mut |_, _| {});
     assert_eq!(cache.len(), 1);
-    cache.advance(at(100), &mut |_, _| {});
+    cache.advance(at(100), &mut |_, _| {}, &mut |_, _| {});
     assert_eq!(cache.len(), 0);
 }
 
 #[test]
 fn an_unwatched_record_arms_nothing_before_its_expiry() {
     let mut cache = cache();
-    cache.learn(at(0), &a_record("printer.local", 5, 100), host(1));
+    cache.learn(
+        at(0),
+        &a_record("printer.local", 5, 100),
+        host(1),
+        &mut |_, _| {},
+    );
     assert_eq!(cache.next_deadline(), Some(at(100)));
 }
 
@@ -172,16 +199,25 @@ fn an_unwatched_record_arms_nothing_before_its_expiry() {
 fn a_watched_record_is_refreshed_at_eighty_five_ninety_and_ninety_five_percent() {
     let mut cache = cache();
     cache.set_watched(&name("printer.local"), RecordType::A, true);
-    cache.learn(at(0), &a_record("printer.local", 5, 100), host(1));
+    cache.learn(
+        at(0),
+        &a_record("printer.local", 5, 100),
+        host(1),
+        &mut |_, _| {},
+    );
     assert_eq!(cache.next_deadline(), Some(at(80)));
 
     let mut points = Vec::new();
     for second in 0..=99 {
-        cache.advance(at(second), &mut |asked, record_type| {
-            assert_eq!(*asked, name("printer.local"));
-            assert_eq!(record_type, RecordType::A);
-            points.push(second);
-        });
+        cache.advance(
+            at(second),
+            &mut |asked, record_type| {
+                assert_eq!(*asked, name("printer.local"));
+                assert_eq!(record_type, RecordType::A);
+                points.push(second);
+            },
+            &mut |_, _| {},
+        );
     }
     assert_eq!(points, alloc::vec![80, 85, 90, 95]);
 }
@@ -190,12 +226,22 @@ fn a_watched_record_is_refreshed_at_eighty_five_ninety_and_ninety_five_percent()
 fn a_record_learned_while_a_question_is_live_inherits_the_schedule() {
     let mut cache = cache();
     cache.set_watched(&name("printer.local"), RecordType::A, true);
-    cache.learn(at(0), &a_record("printer.local", 5, 100), host(1));
+    cache.learn(
+        at(0),
+        &a_record("printer.local", 5, 100),
+        host(1),
+        &mut |_, _| {},
+    );
     // A second record at the same name and type joins the same watch.
-    cache.learn(at(0), &a_record("printer.local", 6, 100), host(1));
+    cache.learn(
+        at(0),
+        &a_record("printer.local", 6, 100),
+        host(1),
+        &mut |_, _| {},
+    );
     let mut refreshes = 0usize;
     for second in 0..=99 {
-        cache.advance(at(second), &mut |_, _| refreshes += 1);
+        cache.advance(at(second), &mut |_, _| refreshes += 1, &mut |_, _| {});
     }
     assert_eq!(refreshes, 8, "four points for each of two records");
 }
@@ -204,12 +250,17 @@ fn a_record_learned_while_a_question_is_live_inherits_the_schedule() {
 fn dropping_the_question_disarms_the_refresh() {
     let mut cache = cache();
     cache.set_watched(&name("printer.local"), RecordType::A, true);
-    cache.learn(at(0), &a_record("printer.local", 5, 100), host(1));
+    cache.learn(
+        at(0),
+        &a_record("printer.local", 5, 100),
+        host(1),
+        &mut |_, _| {},
+    );
     cache.set_watched(&name("printer.local"), RecordType::A, false);
     assert_eq!(cache.next_deadline(), Some(at(100)));
     let mut refreshed = false;
     for second in 0..=99 {
-        cache.advance(at(second), &mut |_, _| refreshed = true);
+        cache.advance(at(second), &mut |_, _| refreshed = true, &mut |_, _| {});
     }
     assert!(!refreshed);
 }
@@ -220,7 +271,7 @@ fn dropping_the_question_disarms_the_refresh() {
 fn holds_fresher_answers_the_known_answer_suppression_test() {
     let mut cache = cache();
     let record = a_record("printer.local", 5, 100);
-    cache.learn(at(0), &record, host(1));
+    cache.learn(at(0), &record, host(1), &mut |_, _| {});
     assert!(cache.holds_fresher(at(0), &record), "full lifetime left");
     assert!(
         !cache.holds_fresher(at(60), &record),
@@ -238,15 +289,20 @@ fn holds_fresher_answers_the_known_answer_suppression_test() {
 fn one_source_past_its_ceiling_evicts_its_own_oldest_record() {
     let mut cache = cache();
     let neighbour = a_record("neighbour.local", 1, 4500);
-    cache.learn(at(0), &neighbour, host(2));
+    cache.learn(at(0), &neighbour, host(2), &mut |_, _| {});
 
     for index in 0..MAX_RECORDS_PER_SOURCE {
         let owner = alloc::format!("flood{index}.local");
-        cache.learn(at(1), &a_record(&owner, 5, 4500), host(1));
+        cache.learn(at(1), &a_record(&owner, 5, 4500), host(1), &mut |_, _| {});
     }
     assert_eq!(cache.len_from(host(1)), MAX_RECORDS_PER_SOURCE);
 
-    cache.learn(at(2), &a_record("one-more.local", 5, 4500), host(1));
+    cache.learn(
+        at(2),
+        &a_record("one-more.local", 5, 4500),
+        host(1),
+        &mut |_, _| {},
+    );
     assert_eq!(
         cache.len_from(host(1)),
         MAX_RECORDS_PER_SOURCE,
@@ -281,13 +337,18 @@ fn a_full_cache_evicts_the_least_recently_used_record() {
                 0,
                 u16::try_from(source).expect("small"),
             ));
-            cache.learn(at(second), &a_record(&owner, 5, 4500), peer);
+            cache.learn(at(second), &a_record(&owner, 5, 4500), peer, &mut |_, _| {});
             second += 1;
         }
     }
     assert_eq!(cache.len(), MAX_RECORDS);
 
-    cache.learn(at(second), &a_record("newcomer.local", 5, 4500), host(9));
+    cache.learn(
+        at(second),
+        &a_record("newcomer.local", 5, 4500),
+        host(9),
+        &mut |_, _| {},
+    );
     assert_eq!(cache.len(), MAX_RECORDS, "the ceiling holds");
     assert_eq!(held(&cache, "newcomer.local", RecordType::A).len(), 1);
     assert!(
@@ -307,8 +368,13 @@ fn a_record_past_the_txt_bound_never_reaches_the_cache() {
 #[test]
 fn a_cleared_cache_holds_nothing_and_arms_nothing() {
     let mut cache = cache();
-    cache.learn(at(0), &a_record("printer.local", 5, 120), host(1));
-    cache.clear();
+    cache.learn(
+        at(0),
+        &a_record("printer.local", 5, 120),
+        host(1),
+        &mut |_, _| {},
+    );
+    cache.clear(&mut |_, _| {});
     assert!(cache.is_empty());
     assert_eq!(cache.next_deadline(), None);
     assert_eq!(cache.len_from(host(1)), 0);
@@ -317,10 +383,109 @@ fn a_cleared_cache_holds_nothing_and_arms_nothing() {
 #[test]
 fn a_freed_slot_is_reused_rather_than_growing_the_table() {
     let mut cache = cache();
-    cache.learn(at(0), &a_record("first.local", 1, 10), host(1));
-    cache.advance(at(10), &mut |_, _| {});
+    cache.learn(
+        at(0),
+        &a_record("first.local", 1, 10),
+        host(1),
+        &mut |_, _| {},
+    );
+    cache.advance(at(10), &mut |_, _| {}, &mut |_, _| {});
     assert!(cache.is_empty());
-    cache.learn(at(11), &a_record("second.local", 2, 10), host(1));
+    cache.learn(
+        at(11),
+        &a_record("second.local", 2, 10),
+        host(1),
+        &mut |_, _| {},
+    );
     assert_eq!(held(&cache, "second.local", RecordType::A).len(), 1);
     assert!(held(&cache, "first.local", RecordType::A).is_empty());
+}
+
+// -- telling a question its answers left ---------------------------------
+
+/// Every record `gone` was told of, with the key it was told with.
+fn gone_into(seen: &mut Vec<(u64, Record)>) -> impl FnMut(u64, &CachedRecord) + '_ {
+    move |key, gone| seen.push((key, gone.record))
+}
+
+#[test]
+fn a_watched_record_that_expires_is_reported_gone_with_its_index_key() {
+    let mut cache = cache();
+    let record = a_record("printer.local", 5, 100);
+    cache.set_watched(&record.name, RecordType::A, true);
+    cache.learn(at(0), &record, host(1), &mut |_, _| {});
+    let mut seen = Vec::new();
+    cache.advance(at(100), &mut |_, _| {}, &mut gone_into(&mut seen));
+    assert_eq!(
+        seen,
+        alloc::vec![(cache.key_of(&record.name, RecordType::A), record)]
+    );
+}
+
+#[test]
+fn a_record_no_question_watches_leaves_without_a_word() {
+    let mut cache = cache();
+    cache.learn(
+        at(0),
+        &a_record("printer.local", 5, 100),
+        host(1),
+        &mut |_, _| {},
+    );
+    let mut seen = Vec::new();
+    cache.advance(at(100), &mut |_, _| {}, &mut gone_into(&mut seen));
+    assert!(cache.is_empty());
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn a_watched_record_evicted_for_room_is_reported_gone() {
+    let mut cache = cache();
+    let first = a_record("q0.local", 5, 4500);
+    cache.set_watched(&first.name, RecordType::A, true);
+    let mut seen = Vec::new();
+    for index in 0..=MAX_RECORDS_PER_SOURCE {
+        let owner = alloc::format!("q{index}.local");
+        cache.learn(
+            at(i64::try_from(index).expect("small")),
+            &a_record(&owner, 5, 4500),
+            host(1),
+            &mut gone_into(&mut seen),
+        );
+    }
+    // The source's own oldest record made room for its newest.
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1, first);
+    assert!(held(&cache, "q0.local", RecordType::A).is_empty());
+}
+
+#[test]
+fn clearing_reports_every_watched_record_and_still_watches_afterwards() {
+    let mut cache = cache();
+    cache.set_watched(&name("printer.local"), RecordType::A, true);
+    cache.learn(
+        at(0),
+        &a_record("printer.local", 5, 100),
+        host(1),
+        &mut |_, _| {},
+    );
+    cache.learn(
+        at(0),
+        &a_record("other.local", 6, 100),
+        host(1),
+        &mut |_, _| {},
+    );
+    let mut seen = Vec::new();
+    cache.clear(&mut gone_into(&mut seen));
+    assert_eq!(seen.len(), 1, "only the watched record is reported");
+    assert!(cache.is_empty());
+
+    // The question outlives the link, so what is learned when it returns
+    // still arms the refresh schedule.
+    cache.learn(
+        at(200),
+        &a_record("printer.local", 5, 100),
+        host(1),
+        &mut |_, _| {},
+    );
+    assert_eq!(cache.next_deadline(), Some(at(280)));
 }

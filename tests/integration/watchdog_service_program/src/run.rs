@@ -14,9 +14,9 @@
 //! and only the supervised process can stop making one. So the fixture
 //! makes the absence deliberate and observable, in three steps:
 //!
-//! 1. **Attach.** Ask the manager what interval it holds this service to.
-//!    An unwatched run proves nothing, so it says so and parks rather than
-//!    passing quietly.
+//! 1. **Announce.** Announce readiness, as the stack it stands in for does,
+//!    and adopt the interval the manager answers with. An unwatched run
+//!    proves nothing, so it says so and exits rather than passing quietly.
 //! 2. **Renew.** Renew through the same `tairix_rt::servicenotice::Watchdog`
 //!    a real service uses — the code under test — recording each accepted
 //!    renewal. Three of them carry the service past one whole interval,
@@ -116,7 +116,7 @@ mod program {
     }
 
     fn main() -> i32 {
-        let mut watchdog = Watchdog::attach(now_ns());
+        let mut watchdog = Watchdog::announce_ready(now_ns());
         if !watchdog.is_watched() {
             // Fail loud: a run where the manager is not watching this
             // service can neither kill it nor restart it, so passing

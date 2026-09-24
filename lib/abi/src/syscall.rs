@@ -2572,6 +2572,22 @@ impl SyscallNumber {
     /// not audited — the decision it feeds is the server's to log.
     pub const CALL_PEER_HOLDS: Self = Self(129);
 
+    /// Watch, stop watching, or take the exit of a process *instance*
+    /// (`plans/ZEROCONF.md` Z4; [`crate::PeerWatchOp`]).
+    ///
+    /// Arguments: the op, then a pointer to and the length of one 16-byte
+    /// [`crate::ProcId`] — read for `Watch` and `Unwatch`, written for
+    /// `Take`. Returns `Ok(0)`, or `-errno`: [`Errno::NotFound`] for an
+    /// instance with no live process (or not watched),
+    /// [`Errno::WouldBlock`] for a `Take` with nothing waiting,
+    /// [`Errno::BufferTooSmall`] for a length short of an identity, and
+    /// [`Errno::OutOfMemory`] when the registry cannot grow.
+    ///
+    /// Ungated: an instance id is unforgeable and learnt only from an attested
+    /// `Origin`, and a watch reveals only when a process the caller already
+    /// knows has gone.
+    pub const PEER_WATCH: Self = Self(130);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

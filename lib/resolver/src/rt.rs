@@ -28,20 +28,88 @@
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::net::{SocketAddr, SocketDatagram, SocketId};
+use tairix_abi::discovery_ipc::Families;
+use tairix_abi::net::{SocketAddr, SocketDatagram, SocketDelivery, SocketId};
 use tairix_abi::net_ipc::NetAddrFamily;
 use tairix_abi::time::Duration64;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::Errno;
+use tairix_discovery::DiscoveryError;
 use tairix_net::addr::IpAddr;
-use tairix_net::dns::{DnsTransport, LookupType, Resolution, Wait, PORT};
+use tairix_net::dns::{
+    AddrList, Answer, DnsTransport, LookupType, Name, Resolution, ResolveStatus, Wait, PORT,
+};
 use tairix_procinfo::IpcTransport;
 use tairix_rng::{FastRng, RandU64};
 
-use crate::{pointer_name, resolve_name, resolve_pointer, ResolveError};
+use crate::{nothing, pointer_name, resolve_name, resolve_pointer, LinkLookup, ResolveError};
+
+/// How long a lookup the link answers waits for its first answer: the
+/// question's first transmission and the one a second later (RFC 6762 §5.2),
+/// with time for a responder's answer to each.
+const LINK_WINDOW_NS: u64 = 3 * ONE_SEC_NANOS;
+
+/// The lookups the link answers, through `discoveryd`.
+///
+/// A machine with no discovery service answers every one of them with
+/// nothing: a `.local` name is still never sent to a server.
+pub struct RtLinkLookup;
+
+impl LinkLookup for RtLinkLookup {
+    fn host(&mut self, name: &Name, record_type: LookupType) -> Result<Resolution, ResolveError> {
+        let families = match record_type {
+            LookupType::A => Families {
+                v4: true,
+                v6: false,
+            },
+            LookupType::Aaaa => Families {
+                v4: false,
+                v6: true,
+            },
+            LookupType::Ptr => return Ok(nothing(record_type)),
+        };
+        let until = tairix_rt::clock_get().saturating_add(LINK_WINDOW_NS);
+        match tairix_discovery::host_addresses(name.as_wire(), families, until) {
+            Ok(addresses) if !addresses.is_empty() => Ok(Resolution {
+                status: ResolveStatus::Success,
+                answer: Answer::Addresses(AddrList::from_addrs(&addresses)),
+                ttl_secs: 0,
+            }),
+            Ok(_) | Err(DiscoveryError::Unavailable) => Ok(nothing(record_type)),
+            Err(error) => Err(link_error(error)),
+        }
+    }
+
+    fn pointer(&mut self, address: IpAddr) -> Result<Resolution, ResolveError> {
+        let until = tairix_rt::clock_get().saturating_add(LINK_WINDOW_NS);
+        match tairix_discovery::reverse_name(address, until) {
+            Ok(Some(target)) => Ok(Name::from_wire(&target).map_or_else(
+                || nothing(LookupType::Ptr),
+                |name| Resolution {
+                    status: ResolveStatus::Success,
+                    answer: Answer::Pointer(Some(name)),
+                    ttl_secs: 0,
+                },
+            )),
+            Ok(None) | Err(DiscoveryError::Unavailable) => Ok(nothing(LookupType::Ptr)),
+            Err(error) => Err(link_error(error)),
+        }
+    }
+}
+
+/// A link lookup's failure, as the resolver reports one.
+fn link_error(error: DiscoveryError) -> ResolveError {
+    match error {
+        DiscoveryError::Refused(errno) | DiscoveryError::Transport(errno) => {
+            ResolveError::Transport(errno)
+        }
+        DiscoveryError::Unavailable | DiscoveryError::Malformed => {
+            ResolveError::Transport(Errno::BadMagic)
+        }
+    }
+}
 
 /// Delivery-port mailbox depth. A resolution has one query outstanding at a
 /// time, but retransmission and failover can leave a couple of late replies
@@ -119,7 +187,8 @@ impl RtDnsTransport {
                 set,
                 v4: None,
                 v6: None,
-                scratch: vec![0u8; SocketDatagram::MAX_WIRE_LEN],
+                scratch: tairix_util::fallible::filled(SocketDatagram::MAX_WIRE_LEN, 0u8)
+                    .ok_or(Errno::OutOfMemory)?,
             },
             rng,
         })
@@ -147,9 +216,14 @@ impl RtDnsTransport {
         record_type: LookupType,
     ) -> Result<Resolution, ResolveError> {
         let Self { sockets, rng } = self;
-        resolve_name(name, record_type, &IpcTransport, sockets, &mut || {
-            rng.next_u32()
-        })
+        resolve_name(
+            name,
+            record_type,
+            &IpcTransport,
+            sockets,
+            &mut RtLinkLookup,
+            &mut || rng.next_u32(),
+        )
     }
 
     /// Resolve the domain name `address` maps back to over this transport,
@@ -160,7 +234,13 @@ impl RtDnsTransport {
     /// As [`resolve`](Self::resolve).
     pub fn resolve_reverse(&mut self, address: IpAddr) -> Result<Resolution, ResolveError> {
         let Self { sockets, rng } = self;
-        resolve_pointer(address, &IpcTransport, sockets, &mut || rng.next_u32())
+        resolve_pointer(
+            address,
+            &IpcTransport,
+            sockets,
+            &mut RtLinkLookup,
+            &mut || rng.next_u32(),
+        )
     }
 
     /// The display name `address` maps back to, or [`None`] when it has no
@@ -238,7 +318,7 @@ impl DnsTransport for Sockets {
     fn send(&mut self, server: IpAddr, query: &[u8]) -> Result<(), Errno> {
         let dest = server_socket_addr(server);
         let socket = self.socket_for(dest.family)?;
-        tairix_rt::net::send(socket, Some(dest), query)
+        tairix_rt::net::send(socket, Some(dest), None, query)
     }
 
     fn wait(&mut self, deadline: Duration64, buf: &mut [u8]) -> Result<Wait, Errno> {
@@ -251,11 +331,14 @@ impl DnsTransport for Sockets {
             // Only the stack's own deliveries come back: the receive
             // discards a forged sender before the engine could see it.
             match tairix_rt::net::recv(self.deliver, &mut self.scratch) {
-                Ok(datagram) => {
+                Ok(SocketDelivery::Datagram(datagram)) => {
                     let len = datagram.payload.len().min(buf.len());
                     buf[..len].copy_from_slice(&datagram.payload[..len]);
                     return Ok(Wait::Datagram(len));
                 }
+                // A resolver's sockets join no group, so no link edge is
+                // ever delivered; one that were would answer nothing.
+                Ok(SocketDelivery::Link(_)) => {}
                 // The mailbox is momentarily empty: park until the stack posts
                 // a datagram or the remaining budget elapses, then re-check.
                 Err(Errno::WouldBlock) => self.park(deadline_ns - now),

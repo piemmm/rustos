@@ -1,20 +1,22 @@
 # Signed-AppInfo manifest source for `discoveryd`, the link-local service
 # discovery service (plans/ZEROCONF.md). Discovered by the build's app-bundle
-# composer and planted under /System/Services/; nothing enrols it yet, so it is
-# installed but never started until a client of it exists.
+# composer, planted under /System/Services/, and enrolled at boot.
 #
 # The capability list is the bundle's request and is deliberately minimal:
 # CAP_NET (the two multicast DNS datagram sockets and their group
 # memberships), CAP_SANDBOX_SPAWN (every datagram is parsed in a
-# capability-empty worker, never in the process holding the sockets), and
-# CAP_LOG_EMIT (its audit records).
+# capability-empty worker, never in the process holding the sockets),
+# CAP_IPC_BIND_PRIVILEGED (the reserved discovery endpoint, which a squatter
+# would otherwise answer), CAP_FS_ACCESS (the grant store on the read-only
+# /System volume), and CAP_LOG_EMIT (its audit records).
 #
-# It binds no endpoint, holds no filesystem authority, no general spawn, no
-# CAP_NET_RAW and no CAP_NET_ADMIN. Compromising it yields two ordinary
-# datagram sockets — and the parsing that could compromise it is not in it.
+# It holds no general spawn, no CAP_NET_RAW and no CAP_NET_ADMIN, and no
+# client of it holds its sockets: compromising it yields two ordinary datagram
+# sockets and a read of one policy file — and the parsing that could
+# compromise it is not in it.
 id = "os.tairix.discoveryd"
 name = "discoveryd"
 title = "Discovery"
 version = "0.1.0"
 kind = "service"
-capabilities = ["CAP_NET", "CAP_SANDBOX_SPAWN", "CAP_LOG_EMIT"]
+capabilities = ["CAP_NET", "CAP_SANDBOX_SPAWN", "CAP_IPC_BIND_PRIVILEGED", "CAP_FS_ACCESS", "CAP_LOG_EMIT"]

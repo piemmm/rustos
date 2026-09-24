@@ -113,7 +113,7 @@ pub fn ip_from_parts(family: NetAddrFamily, addr: [u8; 16]) -> core::net::IpAddr
 }
 
 /// An IP address family as carried on this protocol.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(u8)]
 pub enum NetAddrFamily {
     /// IPv4; the address field's first four bytes are significant.

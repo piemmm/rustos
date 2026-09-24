@@ -12,10 +12,11 @@
 //!
 //! # Receive plane
 //!
-//! Inbound datagrams are delivered by the stack as
-//! [`SocketDatagram`] frames sent to the
-//! async **port** the client bound and named in
-//! [`socket`]. The client parks on that port and drains it with [`recv`].
+//! Inbound datagrams — and, for a socket holding group memberships, each
+//! change in where they are live — are delivered by the stack as
+//! [`SocketDelivery`] frames sent to the async **port** the client bound and
+//! named in [`socket`]. The client parks on that port and drains it with
+//! [`recv`].
 //! A delivery port is an inbox any process may post to, so every receive
 //! here authenticates the sender as the stack by its kernel-attested
 //! service account ([`from_network_stack`]) and discards anything else
@@ -23,10 +24,10 @@
 
 use tairix_abi::net::{
     decode_bind_reply, decode_send_reply, decode_socket_reply, from_network_stack, ShutdownHow,
-    SocketAddr, SocketDatagram, SocketEcho, SocketId, SocketRequest, SocketStreamEvent, SocketType,
+    SocketAddr, SocketDelivery, SocketEcho, SocketId, SocketRequest, SocketStreamEvent, SocketType,
     NETSTACK_SOCKET_ENDPOINT, SOCKET_MAX_REPLY,
 };
-use tairix_abi::net_ipc::NetAddrFamily;
+use tairix_abi::net_ipc::{NetAddrFamily, IF_NAME_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::{Errno, Origin};
 
@@ -35,6 +36,8 @@ use crate::{ipc_call, ipc_recv};
 /// Largest fixed control-plane request header (no payload): comfortably
 /// covers every [`SocketRequest`] but `Send`, which sizes its own buffer.
 const REQUEST_HEADER_MAX: usize = 64;
+
+const _: () = assert!(SocketRequest::HEADER_LEN <= REQUEST_HEADER_MAX);
 
 /// Open a datagram socket of `family`, delivering inbound datagrams to the
 /// async port `deliver_port` (an endpoint the caller has already bound).
@@ -98,9 +101,10 @@ pub fn stream_send(socket: SocketId, payload: &[u8]) -> Result<u32, Errno> {
     let request = SocketRequest::Send {
         socket,
         dest: None,
+        interface: None,
         payload,
     };
-    let mut buf = alloc::vec![0u8; REQUEST_HEADER_MAX + payload.len()];
+    let mut buf = payload_buffer(payload)?;
     let mut reply = [0u8; SOCKET_MAX_REPLY];
     let len = call(&request, &mut buf, &mut reply)?;
     decode_send_reply(&reply[..len])
@@ -193,20 +197,29 @@ pub fn connect(socket: SocketId, peer: SocketAddr) -> Result<(), Errno> {
 }
 
 /// Send one datagram from `socket`. `dest` is [`None`] to use the
-/// connected peer (see [`connect`]).
+/// connected peer (see [`connect`]); `interface` pins the one logical
+/// interface it leaves by, or is [`None`] for the stack's own choice.
 ///
 /// # Errors
 ///
 /// The typed [`Errno`] the stack returned — [`Errno::NotConnected`] with
-/// no `dest` and no connected peer, [`Errno::NetworkUnreachable`],
-/// [`Errno::MessageTooLarge`], or a transport error.
-pub fn send(socket: SocketId, dest: Option<SocketAddr>, payload: &[u8]) -> Result<(), Errno> {
+/// no `dest` and no connected peer, [`Errno::NetworkUnreachable`] (on a
+/// named interface: that one cannot carry it), [`Errno::MessageTooLarge`],
+/// [`Errno::OutOfMemory`] when the request cannot be built, or a transport
+/// error.
+pub fn send(
+    socket: SocketId,
+    dest: Option<SocketAddr>,
+    interface: Option<[u8; IF_NAME_LEN]>,
+    payload: &[u8],
+) -> Result<(), Errno> {
     let request = SocketRequest::Send {
         socket,
         dest,
+        interface,
         payload,
     };
-    let mut buf = alloc::vec![0u8; REQUEST_HEADER_MAX + payload.len()];
+    let mut buf = payload_buffer(payload)?;
     let mut reply = [0u8; SOCKET_MAX_REPLY];
     let len = call(&request, &mut buf, &mut reply)?;
     decode_status_reply(&reply[..len])
@@ -285,7 +298,7 @@ pub fn send_echo(
         sequence,
         payload,
     };
-    let mut buf = alloc::vec![0u8; REQUEST_HEADER_MAX + payload.len()];
+    let mut buf = payload_buffer(payload)?;
     let mut reply = [0u8; SOCKET_MAX_REPLY];
     let len = call(&request, &mut buf, &mut reply)?;
     decode_status_reply(&reply[..len])
@@ -310,9 +323,9 @@ pub fn leave_multicast(socket: SocketId, group: SocketAddr) -> Result<(), Errno>
     status_call(&SocketRequest::LeaveMulticast { socket, group })
 }
 
-/// Receive the next inbound datagram the stack delivered to
-/// `deliver_port`, decoding it into `buf`. Anything another sender posted
-/// there is discarded unread.
+/// Receive the next delivery the stack made to `deliver_port` — a datagram,
+/// or a change in where the socket's memberships are live — decoding it into
+/// `buf`. Anything another sender posted there is discarded unread.
 ///
 /// # Errors
 ///
@@ -320,10 +333,10 @@ pub fn leave_multicast(socket: SocketId, group: SocketAddr) -> Result<(), Errno>
 ///   [`Errno::from_syscall`]) if the receive fails — [`Errno::WouldBlock`]
 ///   once nothing the stack sent is waiting.
 /// * [`Errno::BadMagic`] / [`Errno::LengthOutOfRange`] / … if the stack's
-///   message is not a well-formed [`SocketDatagram`].
-pub fn recv(deliver_port: u64, buf: &mut [u8]) -> Result<SocketDatagram<'_>, Errno> {
+///   message is not a well-formed [`SocketDelivery`].
+pub fn recv(deliver_port: u64, buf: &mut [u8]) -> Result<SocketDelivery<'_>, Errno> {
     let len = recv_from_stack(deliver_port, buf)?;
-    SocketDatagram::parse(&buf[..len])
+    SocketDelivery::parse(&buf[..len])
 }
 
 /// Receive the next inbound ICMP echo reply the stack delivered to
@@ -340,6 +353,12 @@ pub fn recv(deliver_port: u64, buf: &mut [u8]) -> Result<SocketDatagram<'_>, Err
 pub fn recv_echo(deliver_port: u64, buf: &mut [u8]) -> Result<SocketEcho<'_>, Errno> {
     let len = recv_from_stack(deliver_port, buf)?;
     SocketEcho::parse(&buf[..len])
+}
+
+/// A zeroed request buffer for a header and `payload`, refused as
+/// [`Errno::OutOfMemory`] rather than aborting when the heap cannot supply it.
+fn payload_buffer(payload: &[u8]) -> Result<alloc::vec::Vec<u8>, Errno> {
+    tairix_util::fallible::filled(REQUEST_HEADER_MAX + payload.len(), 0u8).ok_or(Errno::OutOfMemory)
 }
 
 /// Dequeue messages from `port` into `buf` until one the network stack

@@ -165,6 +165,12 @@ const PROGRAMS: &[Program] = &[
         prefix: "TIMED",
     },
     Program {
+        pkg: "tairix-discoveryd",
+        bin: "tairix-discoveryd-run",
+        fixture: "discoveryd_rxe.rs",
+        prefix: "DISCOVERYD",
+    },
+    Program {
         pkg: "tairix-ps",
         bin: "tairix-ps-run",
         fixture: "ps_rxe.rs",

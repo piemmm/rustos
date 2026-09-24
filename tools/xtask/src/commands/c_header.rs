@@ -57,29 +57,30 @@ use tairix_abi::{
     HwResource, HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput, LibraryCategory,
     LibraryScope, LimitKind, LinkFlags, LoadAverage, LoadHeader, ManifestHeader, MapFlags,
     MountAvailability, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary, NoticeTopic,
-    OpenFlags, PointerButtonCode, PointerInput, PortName, PowerAction, ProcessListRequest,
-    ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, RealpathMode, ResourceLimit,
-    ResourceLimitRecord, RxePermission, SchedPriority, Segment, SelfAccountRecord, Severity,
-    Signal, SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader,
-    SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord, UserDirectoryRequest,
-    WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES,
-    APPINFO_MAX_MIME, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX,
-    BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
-    COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
-    DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
-    DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
-    ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, HOSTNAME_MAX,
-    HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS,
-    HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED,
-    KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED,
-    KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC,
-    LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX, LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX,
-    LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
-    MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN,
-    MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
-    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, NOTICE_PAYLOAD_MAX,
-    PAGE_SIZE, PLAUSIBLE_FUTURE_SECS, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE,
-    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+    OpenFlags, PeerWatchOp, PointerButtonCode, PointerInput, PortName, PowerAction,
+    ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, RealpathMode,
+    ResourceLimit, ResourceLimitRecord, RxePermission, SchedPriority, Segment, SelfAccountRecord,
+    Severity, Signal, SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId,
+    SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord,
+    UserDirectoryRequest, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC,
+    APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN,
+    BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX,
+    BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS,
+    CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS,
+    DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK,
+    DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX,
+    FS_ATTR_VALUE_MAX, FS_MODE_MASK, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
+    HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT,
+    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
+    KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX,
+    LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
+    LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX,
+    LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
+    MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT,
+    MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
+    MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, NOTICE_PAYLOAD_MAX, PAGE_SIZE, PLAUSIBLE_FUTURE_SECS,
+    POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
+    PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
     PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
     RELEASE_EPOCH_SECS, RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC,
     SEG_FLAG_READ, SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT,
@@ -1168,6 +1169,15 @@ fn generate_appinfo() -> String {
     let _ = writeln!(out, "#define TAIRIX_MIME_TYPE_MAX {MIME_TYPE_MAX}u");
     out.push_str("/* Encoded length of one MIME-type body entry (length byte + buffer). */\n");
     let _ = writeln!(out, "#define TAIRIX_MIME_ENTRY_LEN {MIME_ENTRY_LEN}u");
+    out.push_str("/* Maximum number of service types a bundle may declare it browses for. */\n");
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_APPINFO_MAX_BROWSE {APPINFO_MAX_BROWSE}u"
+    );
+    out.push_str(
+        "/* Encoded length of one browsed service type (transport, length, name buffer). */\n",
+    );
+    let _ = writeln!(out, "#define TAIRIX_BROWSE_ENTRY_LEN {BROWSE_ENTRY_LEN}u");
     out.push_str("/* Maximum length, in bytes, of a bundle's library icon asset name. */\n");
     let _ = writeln!(out, "#define TAIRIX_LIBRARY_ICON_MAX {LIBRARY_ICON_MAX}u");
     out.push_str("/* Maximum length, in bytes, of a bundle's one-line purpose. */\n");
@@ -1250,6 +1260,8 @@ const APPINFO_HEADER_FIELDS: &[(&str, usize)] = &[
     ("uint32_t flags", 4),
     ("uint16_t capability_count", 2),
     ("uint16_t mime_count", 2),
+    ("uint16_t browse_count", 2),
+    ("uint16_t reserved", 2),
     ("uint8_t id_len", 1),
     ("uint8_t name_len", 1),
     ("uint8_t version_len", 1),
@@ -2724,6 +2736,22 @@ fn emit_signal_contract(out: &mut String) {
     out.push('\n');
 
     out.push_str(
+        "/* peer_watch() operations (the `op` argument, uint32_t). A watched process\n\
+         * instance's exit is waited on through a wait-set member of kind\n\
+         * TAIRIX_WAIT_SOURCE_PEER_EXIT (id 0) and taken, oldest first, with the take\n\
+         * operation. Watching an instance that has already exited is refused with\n\
+         * TAIRIX_E_NOT_FOUND, so no exit is ever missed. */\n",
+    );
+    for (name, op) in [
+        ("WATCH", PeerWatchOp::Watch),
+        ("UNWATCH", PeerWatchOp::Unwatch),
+        ("TAKE", PeerWatchOp::Take),
+    ] {
+        let _ = writeln!(out, "#define TAIRIX_PEER_WATCH_OP_{name} {}u", op.as_u32());
+    }
+    out.push('\n');
+
+    out.push_str(
         "/* sched_set_priority() service levels (the `priority` argument, uint32_t),\n\
          * also carried in tairix_process_record.priority. 0 is reserved and never\n\
          * valid; a value outside this set is rejected with TAIRIX_E_OUT_OF_RANGE.\n\
@@ -2833,6 +2861,7 @@ const fn wait_source_macro_suffix(kind: WaitSourceKind) -> &'static str {
         WaitSourceKind::SystemNotice => "SYSTEM_NOTICE",
         WaitSourceKind::PortRoom => "PORT_ROOM",
         WaitSourceKind::StreamRoom => "STREAM_ROOM",
+        WaitSourceKind::PeerExit => "PEER_EXIT",
     }
 }
 
@@ -4080,9 +4109,9 @@ mod tests {
     fn appinfo_header_pins_layout_constants_and_names() {
         use tairix_abi::{
             AppInfoHeader, BundleEntry, LibraryCategory, LibraryScope, APPINFO_MAGIC,
-            APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
-            BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
-            SYSTEM_LIBRARIES_DIR,
+            APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN,
+            BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX,
+            MIME_ENTRY_LEN, MIME_TYPE_MAX, SYSTEM_LIBRARIES_DIR,
         };
         let h = body("tairix_appinfo.h");
         assert!(h.contains("#ifndef TAIRIX_APPINFO_H"), "guard present");
@@ -4102,6 +4131,8 @@ mod tests {
             format!("#define TAIRIX_BUNDLE_VERSION_MAX {BUNDLE_VERSION_MAX}u"),
             format!("#define TAIRIX_MIME_TYPE_MAX {MIME_TYPE_MAX}u"),
             format!("#define TAIRIX_MIME_ENTRY_LEN {MIME_ENTRY_LEN}u"),
+            format!("#define TAIRIX_APPINFO_MAX_BROWSE {APPINFO_MAX_BROWSE}u"),
+            format!("#define TAIRIX_BROWSE_ENTRY_LEN {BROWSE_ENTRY_LEN}u"),
             format!("#define TAIRIX_LIBRARY_ICON_MAX {LIBRARY_ICON_MAX}u"),
             format!(
                 "#define TAIRIX_APPINFO_HEADER_WIRE_LEN {}u",
@@ -4801,7 +4832,7 @@ mod tests {
             ("tairix_ipc.h", "} tairix_ipc_message_header_t;", size_of::<IpcMessageHeader>(), 32, align_of::<IpcMessageHeader>(), 8),
             ("tairix_ipc.h", "} tairix_port_name_t;", size_of::<PortName>(), 32, align_of::<PortName>(), 1),
             ("tairix_manifest.h", "} tairix_manifest_header_t;", size_of::<ManifestHeader>(), 144, align_of::<ManifestHeader>(), 4),
-            ("tairix_appinfo.h", "} tairix_appinfo_header_t;", size_of::<AppInfoHeader>(), 728, align_of::<AppInfoHeader>(), 4),
+            ("tairix_appinfo.h", "} tairix_appinfo_header_t;", size_of::<AppInfoHeader>(), 732, align_of::<AppInfoHeader>(), 4),
             ("tairix_rxe.h", "} tairix_load_header_t;", size_of::<LoadHeader>(), 56, align_of::<LoadHeader>(), 8),
             ("tairix_process.h", "} tairix_process_start_header_t;", size_of::<ProcessStartHeader>(), 40, align_of::<ProcessStartHeader>(), 8),
             ("tairix_process.h", "} tairix_string_slot_t;", size_of::<StringSlot>(), 8, align_of::<StringSlot>(), 4),

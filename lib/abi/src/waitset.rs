@@ -263,6 +263,17 @@ pub enum WaitSourceKind {
     /// room is forbidden, so the room edge is a source like any other
     /// (`plans/SSH.md` §1.1 — the monitor↔worker flow control).
     StreamRoom = 11,
+    /// The caller's **own** peer-exit feed (its `id` is always `0`: a thread
+    /// has exactly one feed, and observes only its own). Ready when a
+    /// process the thread watches through
+    /// [`crate::SyscallNumber::PEER_WATCH`] has exited and the exit has not
+    /// yet been taken with [`crate::PeerWatchOp::Take`]. Readiness is a
+    /// non-consuming peek, so an untaken exit reports again on the next wait.
+    ///
+    /// It is how a service learns that a client it holds state for — a
+    /// socket, a session, a counted connection — has gone, without being its
+    /// parent and without polling for it: one member covers every watch.
+    PeerExit = 12,
 }
 
 impl WaitSourceKind {
@@ -292,6 +303,7 @@ impl WaitSourceKind {
             9 => Ok(Self::SystemNotice),
             10 => Ok(Self::PortRoom),
             11 => Ok(Self::StreamRoom),
+            12 => Ok(Self::PeerExit),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -325,10 +337,11 @@ mod tests {
             WaitSourceKind::SystemNotice,
             WaitSourceKind::PortRoom,
             WaitSourceKind::StreamRoom,
+            WaitSourceKind::PeerExit,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(12), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(13), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 

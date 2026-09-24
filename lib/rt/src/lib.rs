@@ -65,10 +65,10 @@ use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
     BootFacts, BootId, BootSession, CapabilityId, Errno, FileStat, HwNode, HwRemoveFlags,
     InputMode, LimitKind, LockConflict, LockFlags, LockMode, LockRange, MapFlags, OpenFlags,
-    Origin, PortWidth, PowerAction, ProcId, RandomFlags, ResourceLimit, SchedPriority, Signal,
-    SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus, WallClockReading,
-    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDIN,
-    TERMINAL_SIZE_WIRE_LEN,
+    Origin, PeerWatchOp, PortWidth, PowerAction, ProcId, RandomFlags, ResourceLimit, SchedPriority,
+    Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus,
+    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN,
+    SPAWN_UID_INHERIT, STDIN, TERMINAL_SIZE_WIRE_LEN,
 };
 use tairix_abi_trap::raw_syscall;
 use tairix_util::secret::Wiped;
@@ -189,6 +189,9 @@ const NUM_SHM_GRANT_PEER: u64 = SyscallNumber::SHM_GRANT_PEER.as_u16() as u64;
 
 /// `call_peer_holds` syscall number (as above).
 const NUM_CALL_PEER_HOLDS: u64 = SyscallNumber::CALL_PEER_HOLDS.as_u16() as u64;
+
+/// `peer_watch` syscall number (as above).
+const NUM_PEER_WATCH: u64 = SyscallNumber::PEER_WATCH.as_u16() as u64;
 
 /// `wait` syscall number (as above).
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
@@ -2196,6 +2199,72 @@ pub fn dma_free(handle: u64, cpu_va: u64) -> i64 {
     // `cpu_va` from the caller's own address space.
     let ret = unsafe { raw_syscall(NUM_DMA_FREE, [handle, cpu_va, 0, 0, 0, 0]) };
     ret as i64
+}
+
+/// Watch the exit of the process instance `peer` on the calling thread's
+/// behalf (`SyscallNumber::PEER_WATCH`). Idempotent.
+///
+/// The thread then parks on a wait-set member of kind
+/// [`tairix_abi::WaitSourceKind::PeerExit`] (id `0`) for every watch it holds
+/// and takes each exit with [`peer_exit_take`].
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] when no live process is that instance — the caller
+/// treats the peer as already gone — and [`Errno::OutOfMemory`] when the
+/// kernel cannot record the watch.
+pub fn peer_watch(peer: ProcId) -> Result<(), Errno> {
+    peer_watch_call(PeerWatchOp::Watch, &mut peer.to_le_bytes())
+}
+
+/// Stop watching `peer`.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] when it was not watched, including a watch that has
+/// already fired.
+pub fn peer_unwatch(peer: ProcId) -> Result<(), Errno> {
+    peer_watch_call(PeerWatchOp::Unwatch, &mut peer.to_le_bytes())
+}
+
+/// Take the oldest exit of a process the calling thread watched.
+///
+/// # Errors
+///
+/// [`Errno::WouldBlock`] when none is waiting.
+pub fn peer_exit_take() -> Result<ProcId, Errno> {
+    let mut instance = [0u8; tairix_abi::PROC_ID_LEN];
+    peer_watch_call(PeerWatchOp::Take, &mut instance)?;
+    Ok(ProcId::from_raw(instance))
+}
+
+fn peer_watch_call(
+    op: PeerWatchOp,
+    instance: &mut [u8; tairix_abi::PROC_ID_LEN],
+) -> Result<(), Errno> {
+    // SAFETY: `raw_syscall` is always safe to invoke. The one pointer is to
+    // the caller's `instance` array, live across the call, exactly the length
+    // passed, and mutable because a take writes into it; the kernel acts only
+    // on the calling thread's own watches.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the status encoding (0, else -errno).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_PEER_WATCH,
+            [
+                u64::from(op.as_u32()),
+                instance.as_mut_ptr() as u64,
+                instance.len() as u64,
+                0,
+                0,
+                0,
+            ],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
+    }
+    Ok(())
 }
 
 /// Declare the calling driver's device quiesced, releasing the DMA memory
@@ -6723,6 +6792,34 @@ mod tests {
         });
         assert_eq!(number, NUM_MEM_PIN);
         assert_eq!(&args, &[0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn peer_watch_marshals_the_op_and_the_instance_and_a_take_reads_it_back() {
+        let peer = ProcId::from_raw([0x3C; tairix_abi::PROC_ID_LEN]);
+        for (op, call) in [
+            (
+                PeerWatchOp::Watch,
+                peer_watch as fn(ProcId) -> Result<(), Errno>,
+            ),
+            (PeerWatchOp::Unwatch, peer_unwatch),
+        ] {
+            let (number, args) = capture(0, || {
+                assert_eq!(call(peer), Ok(()));
+            });
+            assert_eq!(number, NUM_PEER_WATCH);
+            assert_eq!(args[0], u64::from(op.as_u32()));
+            assert_eq!(args[2], tairix_abi::PROC_ID_LEN as u64);
+            assert_eq!(&args[3..], &[0, 0, 0]);
+        }
+        let (number, args) = capture(refusal(Errno::WouldBlock), || {
+            assert_eq!(peer_exit_take(), Err(Errno::WouldBlock));
+        });
+        assert_eq!(number, NUM_PEER_WATCH);
+        assert_eq!(args[0], u64::from(PeerWatchOp::Take.as_u32()));
+        let (_, _) = capture(refusal(Errno::NotFound), || {
+            assert_eq!(peer_watch(peer), Err(Errno::NotFound));
+        });
     }
 
     #[test]

@@ -53,12 +53,13 @@ pub const HEADER_LEN: usize = 12;
 
 /// The largest domain name, in its canonical wire encoding including the
 /// terminating zero-length root label (RFC 1035 §2.3.4). A fixed validation
-/// bound: no name a peer sends can grow past it.
-pub const MAX_NAME_LEN: usize = 255;
+/// bound: no name a peer sends can grow past it. The discovery channel
+/// carries names too, so it is defined there and taken here.
+pub const MAX_NAME_LEN: usize = tairix_abi::discovery_ipc::NAME_MAX;
 
 /// The largest single label (RFC 1035 §2.3.4): 63 octets, since the two
 /// high bits of a label length octet are reserved for compression pointers.
-pub const MAX_LABEL_LEN: usize = 63;
+pub const MAX_LABEL_LEN: usize = tairix_abi::discovery_ipc::LABEL_MAX;
 
 /// The largest number of resolved addresses surfaced from one response. A
 /// fixed validation bound: a response advertising more is truncated to this
@@ -312,6 +313,20 @@ fn write_decimal_label(out: &mut [u8], octet: u8) -> usize {
 /// syntactic characters are backslash-escaped. A `PTR` answer is
 /// attacker-controlled text that ends up on a terminal, so it never reaches
 /// one as raw control bytes.
+/// Octets a peer chose, rendered in RFC 1035 presentation form: printable
+/// ASCII as it stands, `.` and `\\` escaped, every other octet as `\\DDD` —
+/// the one spelling in which peer-authored text reaches a terminal.
+#[derive(Clone, Copy, Debug)]
+pub struct Presentation<'a>(pub &'a [u8]);
+
+impl fmt::Display for Presentation<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0
+            .iter()
+            .try_for_each(|&byte| write_presentation_byte(f, byte))
+    }
+}
+
 fn write_presentation_byte(f: &mut fmt::Formatter<'_>, byte: u8) -> fmt::Result {
     match byte {
         b'.' | b'\\' => {
@@ -540,6 +555,38 @@ impl Name {
         &self.wire[..self.len]
     }
 
+    /// The name `octets` spell in canonical wire form: uncompressed labels,
+    /// ending exactly at the root label. `None` for anything else — a
+    /// compression pointer, a reserved label type, a name past
+    /// [`MAX_NAME_LEN`], or bytes after the root — since a name outside a
+    /// message has nothing a pointer could refer to.
+    #[must_use]
+    pub fn from_wire(octets: &[u8]) -> Option<Self> {
+        if octets.len() > MAX_NAME_LEN {
+            return None;
+        }
+        let mut at = 0;
+        loop {
+            let len = usize::from(*octets.get(at)?);
+            if len == 0 {
+                break;
+            }
+            if len > MAX_LABEL_LEN {
+                return None;
+            }
+            at += 1 + len;
+        }
+        if at + 1 != octets.len() {
+            return None;
+        }
+        let mut wire = [0u8; MAX_NAME_LEN];
+        wire[..octets.len()].copy_from_slice(octets);
+        Some(Self {
+            wire,
+            len: octets.len(),
+        })
+    }
+
     /// Read a (possibly compressed) name from `msg` starting at `start`,
     /// expanding it into canonical form and returning it with the offset of
     /// the first octet *after* the name in the record stream (RFC 1035
@@ -632,9 +679,7 @@ impl fmt::Display for Name {
                 f.write_char('.')?;
             }
             first = false;
-            for &byte in label {
-                write_presentation_byte(f, byte)?;
-            }
+            write!(f, "{}", Presentation(label))?;
             pos += 1 + usize::from(label_len);
         }
         Ok(())

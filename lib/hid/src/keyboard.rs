@@ -193,6 +193,25 @@ impl<S: ReportSource> BootKeyboard<S> {
     pub fn source_mut(&mut self) -> &mut S {
         &mut self.source
     }
+
+    /// Release every key and modifier the device last reported held, as a
+    /// report with nothing pressed would, so a key held as the device went
+    /// away is not left down. Edges already latched come first; call until it
+    /// returns `0`.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::BufferTooSmall`] for an empty `events`.
+    pub fn release_all(&mut self, events: &mut [InputEvent]) -> Result<usize, DriverError> {
+        if events.is_empty() {
+            return Err(DriverError::BufferTooSmall);
+        }
+        if self.pending.is_empty() {
+            self.state
+                .decode(&[0; BOOT_KEYBOARD_REPORT_MIN], &mut self.pending)?;
+        }
+        Ok(self.pending.drain_into(events))
+    }
 }
 
 impl<S: ReportSource> Input for BootKeyboard<S> {

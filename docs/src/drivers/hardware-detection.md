@@ -161,8 +161,9 @@ minted grants (`HwResource::covers`): a bus driver can hand a child only
 authority it already holds, so the recursion can never escalate privilege
 (§4 — no ambient authority; §18.3). Coverage is decided per resource kind:
 an `Mmio`/`Port`/`Irq` window or line range must lie wholly inside a grant
-of the same kind; a `Dma` constraint may be no wider; a `BusWindow`
-sub-window must keep the parent's exact CPU↔bus translation. The one
+of the same kind; a `Dma` constraint may be no wider; a translated `Dma`
+window and a `BusWindow` sub-window must each lie inside the parent's CPU
+side and keep its exact CPU↔bus translation. The one
 cross-kind rule is the central PCI(e) case: a host bridge holds its
 outbound window as a `BusWindow` grant and authorises every CPU access
 within it, so it covers a child device's register **BAR** — an `Mmio`
@@ -268,8 +269,8 @@ controller's space, and a tree that names no parent at all maps nothing.
 The generic DMA binding is read for every FDT port. A node with
 `#dma-cells` is classed `Dma` and carries a `DmaController` duty naming its
 endpoint, with the channel mask the tree states, and one `Dma` window per
-entry of its parent bus's `dma-ranges`, translated to CPU addresses and
-carrying the bus address it starts at. A window is flagged
+window every bus between it and the root composes to through its
+`dma-ranges`, carrying the bus address it starts at. A window is flagged
 `HwResource::DMA_TRANSLATED`, because its bus address may be `0`: an
 unflagged `Dma` resource is a plain addressing limit, whose length is the
 largest buffer rather than a window's extent. Each entry of a consumer's `dmas`

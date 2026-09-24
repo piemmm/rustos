@@ -1574,13 +1574,17 @@ way to keep the user out of their own desktop; it is refused
 
 ## Idleness: the screensaver and the idle lock
 
-The session keeps one idle deadline (`idle::IdleClock`): the last seat input,
-a held key's repeat included, and the two waits the user's settings name —
-`screensaver.after_min` and `lock.after_min`. A deadline is folded into the
-serve loop's park only while its action is still pending, so a desktop whose
-screensaver is up and whose screen is locked arms no timer, and one whose
-policy names neither never wakes for idleness. A session that cannot verify a
-password never locks on its own.
+The session keeps one idle deadline (`idle::IdleClock`): the last seat input
+and the two waits the user's settings name — `screensaver.after_min` and
+`lock.after_min`. A repeat the session makes up for a held key is not input,
+so a stuck key cannot hold the lock off, and a deadline is acted on at
+whichever wake finds it passed, so a client keeping the loop busy cannot
+either. A lock that fails to engage is asked for again on a paced retry — a
+second, doubling to a minute, never abandoned — rather than left open until
+the user returns. A deadline is folded into the serve loop's park only while
+its action is still pending, so a desktop whose screensaver is up and whose
+screen is locked arms no timer, and one whose policy names neither never wakes
+for idleness. A session that cannot verify a password never locks on its own.
 
 The screensaver (`saver::Screensaver`) is one full-screen surface, raised over
 everything before each composite, with the lock kept directly beneath it; an

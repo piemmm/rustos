@@ -2892,3 +2892,22 @@ fn a_peer_is_on_link_when_link_local_or_reached_without_a_gateway() {
         0x2001, 0xdb8, 0, 2, 0, 0, 0, 0x99
     ))));
 }
+
+#[test]
+fn the_consumer_group_bound_fits_beside_the_engines_own_membership() {
+    let mut s = stack(MAC_A, IID_A);
+    s.set_ipv4_config(Ipv4Addr::new(10, 0, 2, 15), 24, None)
+        .expect("configure");
+    for n in 0..MULTICAST_GROUPS_AVAILABLE {
+        let low = u8::try_from(n).expect("fits");
+        let v4 = IpAddr::V4(Ipv4Addr::new(239, 9, 0, low));
+        let v6 = IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0x99, u16::from(low)));
+        assert_eq!(s.join_multicast(v4, t(1)), Ok(true));
+        assert_eq!(s.join_multicast(v6, t(1)), Ok(true));
+    }
+    // The all-systems group the engine joined takes the last IPv4 slot.
+    assert_eq!(
+        s.join_multicast(IpAddr::V4(Ipv4Addr::new(239, 9, 1, 0)), t(1)),
+        Err(McastError::CapacityExhausted)
+    );
+}

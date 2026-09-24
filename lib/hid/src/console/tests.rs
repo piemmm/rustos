@@ -346,3 +346,54 @@ fn a_modifier_edge_that_changes_nothing_observable_reports_nothing() {
         Some(AbiModifiers::default())
     );
 }
+
+#[test]
+fn a_keyboard_leaving_releases_every_key_it_last_reported_held() {
+    // 'a' and 'b' held under left shift, and the device goes away.
+    let mut report = kbd_report(&[0x04, 0x05]);
+    report[0] = 0x02;
+    let mut keyboard = BootKeyboard::new(MockReports {
+        queue: VecDeque::from([report]),
+    });
+    let mut console = KeyboardConsole::new();
+    let mut sink = Recorder {
+        records: Vec::new(),
+    };
+    while pump_once(&mut keyboard, &mut console, &mut sink).expect("pump") > 0 {}
+    let pressed = sink.records.len();
+
+    release_held(&mut keyboard, &mut console, &mut sink).expect("release");
+    let released = &sink.records[pressed..];
+    assert_eq!(released.len(), 3, "both keys and the shift: {released:?}");
+    assert!(released[..2]
+        .iter()
+        .all(|record| matches!(record, KeyInput::Released { .. })));
+    assert!(matches!(
+        released[2],
+        KeyInput::ModifiersChanged { modifiers } if modifiers == AbiModifiers::default()
+    ));
+
+    // Nothing is held any more, so a second release says nothing.
+    release_held(&mut keyboard, &mut console, &mut sink).expect("release");
+    assert_eq!(sink.records.len(), pressed + 3);
+}
+
+#[test]
+fn a_release_delivers_what_was_latched_before_it() {
+    // A report pressing two keys decodes to two edges; a one-slot poll
+    // delivers the first and latches the second.
+    let mut keyboard = BootKeyboard::new(MockReports {
+        queue: VecDeque::from([kbd_report(&[0x04, 0x05])]),
+    });
+    let mut events = [crate::EVENT_ZERO; 1];
+    assert_eq!(keyboard.poll(&mut events).expect("poll"), 1);
+    let mut edges = Vec::new();
+    loop {
+        let drained = keyboard.release_all(&mut events).expect("release");
+        if drained == 0 {
+            break;
+        }
+        edges.push((events[0].code, events[0].value));
+    }
+    assert_eq!(edges, [(0x05, 1), (0x04, 0), (0x05, 0)]);
+}

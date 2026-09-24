@@ -36,6 +36,10 @@
 #define TAIRIX_MIME_TYPE_MAX 64u
 /* Encoded length of one MIME-type body entry (length byte + buffer). */
 #define TAIRIX_MIME_ENTRY_LEN 65u
+/* Maximum number of service types a bundle may declare it browses for. */
+#define TAIRIX_APPINFO_MAX_BROWSE 16u
+/* Encoded length of one browsed service type (transport, length, name buffer). */
+#define TAIRIX_BROWSE_ENTRY_LEN 17u
 /* Maximum length, in bytes, of a bundle's library icon asset name. */
 #define TAIRIX_LIBRARY_ICON_MAX 64u
 /* Maximum length, in bytes, of a bundle's one-line purpose. */
@@ -43,7 +47,7 @@
 /* Maximum length, in bytes, of a bundle's author attribution. */
 #define TAIRIX_BUNDLE_AUTHOR_MAX 64u
 /* Packed little-endian wire size of an AppInfo header, in bytes. */
-#define TAIRIX_APPINFO_HEADER_WIRE_LEN 728u
+#define TAIRIX_APPINFO_HEADER_WIRE_LEN 732u
 
 /* Curated, OS-provided shared-library directory (AGENTS.md sec.16.4). */
 #define TAIRIX_SYSTEM_LIBRARIES_DIR "/System/Libraries"
@@ -82,6 +86,8 @@ typedef struct tairix_appinfo_header {
     uint32_t flags;
     uint16_t capability_count;
     uint16_t mime_count;
+    uint16_t browse_count;
+    uint16_t reserved;
     uint8_t id_len;
     uint8_t name_len;
     uint8_t version_len;

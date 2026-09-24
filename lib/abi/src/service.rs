@@ -229,7 +229,9 @@ impl ServiceState {
 ///
 /// Conditions decouple readiness from a specific service name: `netstack`
 /// *provides* [`NetworkUp`](Self::NetworkUp) when it reports ready, and any
-/// number of services may *require* it without naming `netstack`. A
+/// number of services may *require* it without naming `netstack`. A provided
+/// condition holds only while a provider is ready, so a service requiring it
+/// runs only while it holds and is started again once it next does. A
 /// condition no running configuration ever satisfies (for example
 /// [`DisplayPresent`](Self::DisplayPresent) on a headless boot) simply keeps
 /// its requiring services [`ServiceState::Inactive`] forever — the headless
@@ -237,8 +239,8 @@ impl ServiceState {
 #[repr(u16)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum ReadyCondition {
-    /// The network stack is up and can carry traffic (provided by
-    /// `netstack`).
+    /// The network stack is serving its endpoints, so a socket can be opened
+    /// (provided by `netstack`). Says nothing of any link being up.
     NetworkUp = 0,
     /// The system's filesystems are mounted and writable.
     FilesystemsMounted = 1,

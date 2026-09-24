@@ -34,7 +34,7 @@ documentation entry.
 
 ## `AppInfo` manifest
 
-`AppInfoHeader` is the fixed-size (`WIRE_LEN` = 728), signed prefix of the
+`AppInfoHeader` is the fixed-size (`WIRE_LEN` = 732), signed prefix of the
 manifest. It is `#[repr(C)]`, allocation-free, little-endian, with
 `to_le_bytes`/`from_bytes` and a fail-closed decoder. Its declaration order
 **is** its wire order, so the in-memory image and the wire image are the same
@@ -82,14 +82,16 @@ field. It carries:
     own scope by construction rather than by a check a caller might forget.
     `BundleId` is the validated inline form the kernel attests on an
     `Origin`.
-- `capability_count` and `mime_count` describing the body.
+- `capability_count`, `mime_count`, and `browse_count` describing the body,
+  then a reserved `u16` that must be zero — the explicit padding, so no byte
+  of the signed prefix is unnamed.
 - `syscall_table_hash` — the syscall interface the bundle was linked against
   (§9 / §19.2).
 - `content_hash` — the digest binding the signature to the bundle's contents
   (§16.5).
 - `signer_pubkey` and `signature` (Ed25519). The signature covers the whole
   manifest except the `signature` field itself: the `signed_range()` header
-  prefix concatenated with the capability/MIME body, so a tampered
+  prefix concatenated with the body, so a tampered
   capability request breaks the signature rather than hiding behind a
   header-only signature.
 - `publisher_pubkey` and `publisher_cert` — the developer identity, described
@@ -139,9 +141,15 @@ that pins it.
 
 The variable body that follows the header is the requested capability-id
 list (`capability_count` little-endian `u16`s, decoded by the shared
-`decode_capability_ids`) immediately followed by the MIME-type table
-(`mime_count` fixed-stride entries, read by `mime_type_at`). `body_len`
-gives the exact body size for a given count pair.
+`decode_capability_ids`), the MIME-type table (`mime_count` fixed-stride
+entries, read by `mime_type_at`), and the browse table (`browse_count`
+entries, at most `APPINFO_MAX_BROWSE`, each a transport byte, a length byte,
+and a service name padded to `SERVICE_NAME_MAX`, read by `browse_type_at`):
+the link-local service types the bundle asks to browse, from which the image
+builder writes its grants (`docs/src/userland/discoveryd.md`). The manifest key
+is `browses = ["_ipp._tcp", …]`, each type in its lowercase canonical spelling
+and none twice, so the signed table is the one form a grant can match. `body_len` gives
+the exact body size for given counts.
 
 ## Bundle content digest
 

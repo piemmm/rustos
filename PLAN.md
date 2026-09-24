@@ -6524,8 +6524,15 @@ remain. Link-local service discovery (multicast DNS / DNS-SD) is staged in
 the `lib/net::dnssd` vocabulary, and the `userland/net/discoveryd` split
 process — a capability-empty sandboxed decoder supervised through
 `lib/sandbox::supervise`, beneath a front that owns the sockets and every
-authority. Browse, publication behind the three authority gates, and posture
-follow there.
+authority — started by PID 1 at boot. Browsing, resolving, and `.local` lookup
+are done: the `discovery-v1` session ABI (`lib/abi::discovery_ipc`), the client
+crate `lib/discovery`, grant-scoped browsing (`/System/Security/Policy/Discovery`,
+written by the image builder from signed manifests) with
+`CAP_NET_DISCOVER_ALL` for the administrator, `lib/resolver` routing every
+`.local` name and link-local address to the link, the `dns-sd` command app, and
+the kernel's `peer_watch` exit feed both network services release a dead
+principal's state through. Publication behind the three authority gates, and
+posture, follow there.
 
 ---
 
@@ -9364,8 +9371,8 @@ with DMA4 arriving with SND19. No QEMU vertical is reachable, because QEMU's
   `DmaController` duty and `DmaRequest` resources, the reserved
   `DMA_CONTROLLER_ENDPOINTS` block and `dmaengine-v1` in
   `lib/abi/src/driver/dmaengine.rs` (fuzzed by `fuzz_dmaengine`); the shared
-  FDT walk reads `#dma-cells`, `dmas` and `dma-names`, per-entry `dma-ranges`
-  (`tairix_fdt::dma_ranges`, `translate_dma`) and each node's effective
+  FDT walk reads `#dma-cells`, `dmas` and `dma-names`, the windows every bus's
+  `dma-ranges` composes to (`tairix_fdt::dma_reach`) and each node's effective
   `interrupt-parent`; the aarch64 port converts the Broadcom channel mask; a
   node carries sixteen resources.
 - **SND5b — the kernel prerequisites, done.** `shm_create_dma` (no. 127)

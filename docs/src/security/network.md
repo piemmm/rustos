@@ -20,6 +20,8 @@ model, the defences, and the audit event-id registry for network events.
 | Forged caller identity | `netstack` derives every caller's identity from the kernel-attested `Origin` (`call_peer_origin`), never from a claimed field; the capability is checked before any state is touched, and the receiver does not re-check. |
 | Cross-principal socket / peer disclosure | The system-wide socket listing (`NET_SOCKETS`), the per-interface counter/rate queries, and the bond-topology listing (`NET_BOND_MEMBERS`) name other principals' sockets, peers, and the link-aggregation layout, so they require `CAP_SYSINFO_GLOBAL` and are audited; there is no `/proc/net` and no unprivileged path to another principal's sockets. |
 | Silent failure hiding an attack in progress | Every refusal is a typed error and an audited event (below); the socket listing fails loud rather than returning an empty table (§24), and the defence counters surface a DoS in progress. |
+| Reflected or eavesdropped multicast DNS (a host turned amplifier; a second listener hearing the segment's answers) | The multicast DNS port and groups are reserved to the discovery service's account; any other principal's bind, connect, or send claiming them is refused `SOCKET_DENIED`. The service relays only datagrams the stack found on-link, answers a peer directly only once per datagram relayed from it, and paces group traffic per interface (`docs/src/userland/discoveryd.md`). |
+| A principal's state outliving it (sockets and memberships held for a dead process) | `netstack` and `discoveryd` watch every principal they hold state for through the kernel's peer-exit watch, and release all of it when the principal exits. |
 | A bond member's link silently failing (path loss going unnoticed) | Bond failover is link-state-driven and audited (`BOND_FAILOVER`, and `BOND_DOWN` when the last member goes); a dead member becomes ineligible immediately, the transmit path re-targets a healthy member and re-announces the bond's presence (gratuitous ARP / unsolicited NA), and per-member health/eligibility is observable. Each transition is audited on the transition itself, never on whether an announcement went with it, so a bond with nothing announceable cannot lose a member silently. A member holds no addresses and refuses direct address assignment (the bond owns them). |
 
 ## Capabilities
@@ -36,6 +38,10 @@ The network capabilities are deliberately coarse and few (§5.2):
 - `CAP_SYSINFO_GLOBAL` — the system-wide, cross-principal introspection
   queries (`NET_SOCKETS`, per-interface counters and rates, and the bond
   member/health listing `NET_BOND_MEMBERS`), audited.
+- `CAP_NET_DISCOVER_ALL` — browse or resolve any link-local service type, and
+  enumerate every type, without a per-application grant. Held by the
+  administrator ceiling; an application otherwise browses only the types its
+  signed manifest declares.
 
 ## Audit event-id registry (§19.4)
 
@@ -51,7 +57,7 @@ one range test. The assigned identifiers:
 | `16_003` | `REQUEST_MALFORMED` | Warn | An admin/broker request frame failed to decode. |
 | `16_004` | `ADMIN_REFUSED` | Warn | An admin mutation named an unmanaged interface or the engine refused it. |
 | `16_005` | `SOCKET_MALFORMED` | Warn | A socket-service request frame failed to decode. |
-| `16_006` | `SOCKET_DENIED` | Warn | A socket request was denied (missing `CAP_NET` or privileged-port grant). |
+| `16_006` | `SOCKET_DENIED` | Warn | A socket request was denied: a missing `CAP_NET` or privileged-port grant, or a claim on the multicast DNS port or groups by anyone but the discovery service. |
 | `16_007` | `SOCKET_OPENED` | Info | A socket was opened for a principal. |
 | `16_008` | `SOCKET_REFUSED` | Warn | A socket operation was refused after the capability check (quota, address in use, no route). |
 | `16_009` | `DRIVER_BOUND` | Info | A NIC driver's device channel was bound to a managed interface. |
@@ -76,7 +82,13 @@ one range test. The assigned identifiers:
 | `16_028` | `SERVICE_UNAVAILABLE` | Error | The service cannot serve and is exiting, with its reason: an endpoint could not be bound or watched, or the kernel random source could not key the per-boot secrets sequence numbers, SYN cookies, ephemeral ports, and identifiers come from — which fails closed rather than serving predictable ones. |
 
 Link-local service discovery is its own service with its own range,
-`25_000` … `25_999` (`docs/src/userland/discoveryd.md`).
+`25_000` … `25_999` (`docs/src/userland/discoveryd.md`). Its security
+decisions:
+
+| Id | Name | Level | Meaning |
+|---|---|---|---|
+| `25_004` | `REQUEST_DENIED` | Warn | A discovery request was refused for want of `CAP_NET`, a grant for the type, or `CAP_NET_DISCOVER_ALL`; carries what was lacking, the caller's uid, and the type asked for — never whether another principal holds it. |
+| `25_005` | `GRANTS_REFUSED` | Warn | The browse grant store could not be opened or read, or was refused whole, so no application may browse; carries the reason. |
 
 The stack-wide `net.*` policy (`net.ipv4.enabled`, `net.ipv6.enabled`,
 `net.ipv6.privacy`, `net.tcp.syncookies`, `net.tcp.keepalive`,

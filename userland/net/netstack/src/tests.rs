@@ -1612,6 +1612,7 @@ fn unicast_send_originates_frames() {
     let request = encode_request(&SocketRequest::Send {
         socket: id,
         dest: Some(v4_addr(10, 0, 2, 2, 7)),
+        interface: None,
         payload: b"hello",
     });
     let out = svc
@@ -1657,6 +1658,7 @@ fn send_without_a_peer_or_dest_is_not_connected() {
     let request = encode_request(&SocketRequest::Send {
         socket: id,
         dest: None,
+        interface: None,
         payload: b"x",
     });
     assert_eq!(
@@ -2123,11 +2125,22 @@ fn open_socket(
     who: &Caller,
     sock_type: SocketType,
 ) -> Result<u32, Errno> {
+    open_in(svc, stack, who, NetAddrFamily::V4, sock_type)
+}
+
+/// Open a socket of `family`.
+fn open_in(
+    svc: &mut SocketService,
+    stack: &mut Netstack,
+    who: &Caller,
+    family: NetAddrFamily,
+    sock_type: SocketType,
+) -> Result<u32, Errno> {
     let sink = RecordingSink::new();
     let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = encode_request(&SocketRequest::Socket {
-        family: NetAddrFamily::V4,
+        family,
         sock_type,
         deliver_port: 0x5000,
     });
@@ -3236,6 +3249,7 @@ impl<'r> StreamFixture<'r> {
                 SocketRequest::Send {
                     socket,
                     dest: None,
+                    interface: None,
                     payload,
                 },
                 &mut response,
@@ -3270,6 +3284,7 @@ impl<'r> StreamFixture<'r> {
             SocketRequest::Send {
                 socket,
                 dest: None,
+                interface: None,
                 payload,
             },
             &mut response,
@@ -3487,6 +3502,7 @@ fn shutdown_write_half_closes_and_keeps_reading() {
             SocketRequest::Send {
                 socket: sid,
                 dest: None,
+                interface: None,
                 payload: b"request",
             },
             &mut response,
@@ -5518,4 +5534,858 @@ fn a_share_that_cannot_afford_a_listener_refuses_to_listen() {
         ),
         Err(Errno::LimitExceeded)
     );
+}
+
+// --- Z4: the pinned egress, the mDNS reservation, memberships, reclaim ---
+
+/// A `CAP_NET` principal running as `uid`, as instance `proc_byte`.
+fn net_caller_as(uid: u32, proc_byte: u8) -> Caller {
+    let mut summary = CapabilitySummary::EMPTY;
+    summary.insert(CapabilityId::NET);
+    Caller::new(Origin::new(
+        TrustDomain::User,
+        uid,
+        101,
+        u64::from(proc_byte),
+        ProcId::from_raw([proc_byte; 16]),
+        summary,
+        tairix_abi::ORIGIN_CONSOLE_NONE,
+    ))
+}
+
+fn mdns_group_v4() -> SocketAddr {
+    v4_addr(224, 0, 0, 251, 5353)
+}
+
+fn datagram_bound(svc: &mut SocketService, stack: &mut Netstack, who: &Caller, port: u16) -> u32 {
+    let id = open_socket(svc, stack, who, SocketType::Datagram).expect("open");
+    serve_req(
+        svc,
+        stack,
+        who,
+        &SocketRequest::Bind {
+            socket: id,
+            local: v4_addr(0, 0, 0, 0, port),
+        },
+    )
+    .expect("bind");
+    id
+}
+
+#[test]
+fn the_multicast_dns_port_and_groups_are_reserved_to_the_discovery_service() {
+    let mut svc = socket_service();
+    let mut stack = routed_stack();
+    let who = net_caller_as(1000, 1);
+    let id = open_socket(&mut svc, &mut stack, &who, SocketType::Datagram).expect("open");
+    let bind = |socket| SocketRequest::Bind {
+        socket,
+        local: v4_addr(0, 0, 0, 0, 5353),
+    };
+    assert_eq!(
+        serve_req(&mut svc, &mut stack, &who, &bind(id)),
+        Err(Errno::PermissionDenied)
+    );
+    let query = |socket, dest| SocketRequest::Send {
+        socket,
+        dest: Some(dest),
+        interface: None,
+        payload: b"q",
+    };
+    assert_eq!(
+        serve_req(&mut svc, &mut stack, &who, &query(id, mdns_group_v4())),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &SocketRequest::Connect {
+                socket: id,
+                peer: mdns_group_v4(),
+            }
+        ),
+        Err(Errno::PermissionDenied)
+    );
+    // One peer's port names a host, not the segment.
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &query(id, v4_addr(10, 0, 2, 2, 5353))
+        ),
+        Ok(())
+    );
+    // The port space is shared, so a stream cannot squat it either.
+    let stream = open_socket(&mut svc, &mut stack, &who, SocketType::Stream).expect("open");
+    assert_eq!(
+        serve_req(&mut svc, &mut stack, &who, &bind(stream)),
+        Err(Errno::PermissionDenied)
+    );
+
+    let discovery = net_caller_as(tairix_abi::discovery_ipc::DISCOVERYD_UID, 2);
+    let id = open_socket(&mut svc, &mut stack, &discovery, SocketType::Datagram).expect("open");
+    assert_eq!(
+        serve_req(&mut svc, &mut stack, &discovery, &bind(id)),
+        Ok(())
+    );
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &discovery,
+            &query(id, mdns_group_v4())
+        ),
+        Ok(())
+    );
+}
+
+/// `routed_stack` plus a second interface, `lan`, on another subnet.
+fn two_link_stack() -> Netstack {
+    let mut stack = routed_stack();
+    stack
+        .add_interface(
+            name("lan"),
+            NetIfKind::Ethernet,
+            facts(MAC_B),
+            IID_B,
+            9,
+            0,
+            t(0),
+        )
+        .expect("add interface");
+    stack
+        .addr_add(
+            name("lan"),
+            NetAddrFamily::V4,
+            24,
+            v4_bytes(Ipv4Addr::new(192, 168, 7, 1)),
+            t(1),
+        )
+        .expect("addr add");
+    stack
+}
+
+fn egress_of(tx: &[([u8; IF_NAME_LEN], Vec<TxFrame>)]) -> Vec<[u8; IF_NAME_LEN]> {
+    tx.iter().map(|(tag, _)| *tag).collect()
+}
+
+#[test]
+fn a_send_pinned_to_an_interface_leaves_by_that_one_alone() {
+    let mut svc = socket_service();
+    let mut stack = two_link_stack();
+    let sink = RecordingSink::new();
+    let who = net_caller_as(1000, 3);
+    let id = datagram_bound(&mut svc, &mut stack, &who, 7100);
+    let send = |interface| {
+        encode_request(&SocketRequest::Send {
+            socket: id,
+            dest: Some(v4_addr(239, 1, 2, 3, 7100)),
+            interface,
+            payload: b"m",
+        })
+    };
+    let mut ent = seeded_entropy();
+    let mut reply = [0u8; 64];
+    let everywhere = svc
+        .serve(
+            &mut stack,
+            &who,
+            &sink,
+            &mut ent,
+            &send(None),
+            &mut reply,
+            t(2),
+        )
+        .expect("send");
+    assert_eq!(egress_of(&everywhere.tx), [name("wan"), name("lan")]);
+    let pinned = svc
+        .serve(
+            &mut stack,
+            &who,
+            &sink,
+            &mut ent,
+            &send(Some(name("lan"))),
+            &mut reply,
+            t(2),
+        )
+        .expect("send");
+    assert_eq!(egress_of(&pinned.tx), [name("lan")]);
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &who,
+            &sink,
+            &mut ent,
+            &send(Some(name("nope"))),
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::NotFound)
+    );
+    // A stream is bound to its link for life.
+    let stream = open_socket(&mut svc, &mut stack, &who, SocketType::Stream).expect("open");
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &SocketRequest::Send {
+                socket: stream,
+                dest: None,
+                interface: Some(name("wan")),
+                payload: b"x",
+            }
+        ),
+        Err(Errno::OutOfRange)
+    );
+}
+
+fn holds_group_mac(stack: &Netstack, interface: &str, group: Ipv4Addr) -> bool {
+    let octets = group.octets();
+    let mac = MacAddress([0x01, 0x00, 0x5E, octets[1] & 0x7F, octets[2], octets[3]]);
+    let mut macs = Vec::new();
+    stack
+        .interface(name(interface))
+        .expect("the interface")
+        .stack()
+        .multicast_macs(&mut macs);
+    macs.contains(&mac)
+}
+
+/// Each link event that landed: the socket, the interface, and whether up.
+type Landed = Vec<(u32, [u8; IF_NAME_LEN], bool)>;
+
+/// Publish the links and tell every member socket through a port that
+/// takes `room` events, returning what landed, in order, and the ports left
+/// owing.
+fn tell(stack: &mut Netstack, svc: &mut SocketService, room: usize) -> (Landed, Vec<u64>) {
+    stack.publish_links();
+    let mut landed = Vec::new();
+    let blocked = svc.tell_links(stack.links(), stack.link_epoch(), &mut |_, frame| {
+        if landed.len() == room {
+            return Err(Errno::WouldBlock);
+        }
+        let event = tairix_abi::net::SocketLinkEvent::parse(frame).expect("a link event");
+        landed.push((event.socket, event.interface, event.up));
+        Ok(())
+    });
+    (landed, blocked)
+}
+
+#[test]
+fn a_membership_taken_before_an_interface_existed_reaches_it_and_its_socket_is_told() {
+    const GROUP: Ipv4Addr = Ipv4Addr::new(239, 4, 5, 6);
+    let mut svc = socket_service();
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
+    let who = net_caller_as(1000, 4);
+    let member = datagram_bound(&mut svc, &mut stack, &who, 7200);
+    let _bystander = datagram_bound(&mut svc, &mut stack, &who, 7201);
+    join_group(&mut svc, &mut stack, &who, member, GROUP);
+    assert_eq!(tell(&mut stack, &mut svc, usize::MAX), (vec![], vec![]));
+
+    stack
+        .add_interface(
+            name("wan"),
+            NetIfKind::Ethernet,
+            facts(MAC_A),
+            IID_A,
+            7,
+            0,
+            t(3),
+        )
+        .expect("add interface");
+    assert!(
+        holds_group_mac(&stack, "wan", GROUP),
+        "the new interface carries it"
+    );
+    stack
+        .addr_add(name("wan"), NetAddrFamily::V4, 24, v4_bytes(V4_A), t(3))
+        .expect("addr add");
+    let (landed, blocked) = tell(&mut stack, &mut svc, usize::MAX);
+    assert_eq!(
+        landed,
+        [(member, name("wan"), true)],
+        "the bystander holds no group"
+    );
+    assert!(blocked.is_empty());
+    assert_eq!(tell(&mut stack, &mut svc, usize::MAX).0, [], "told once");
+
+    stack.on_member_link_change(name("wan"), LinkState::Down, t(4));
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [(member, name("wan"), false)]
+    );
+}
+
+#[test]
+fn a_first_join_is_told_every_link_its_membership_already_rides() {
+    let mut svc = socket_service();
+    let mut stack = two_link_stack();
+    let who = net_caller_as(1000, 5);
+    let id = datagram_bound(&mut svc, &mut stack, &who, 7300);
+    assert_eq!(tell(&mut stack, &mut svc, usize::MAX).0, []);
+    join_group(&mut svc, &mut stack, &who, id, Ipv4Addr::new(239, 0, 0, 1));
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [(id, name("wan"), true), (id, name("lan"), true)]
+    );
+    join_group(&mut svc, &mut stack, &who, id, Ipv4Addr::new(239, 0, 0, 2));
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [],
+        "told its links once"
+    );
+}
+
+#[test]
+fn a_port_with_no_room_is_owed_the_rest_and_told_it_in_order() {
+    let mut svc = socket_service();
+    let mut stack = two_link_stack();
+    let who = net_caller_as(1000, 13);
+    let id = datagram_bound(&mut svc, &mut stack, &who, 7310);
+    join_group(&mut svc, &mut stack, &who, id, Ipv4Addr::new(239, 0, 0, 3));
+    let (landed, blocked) = tell(&mut stack, &mut svc, 1);
+    assert_eq!(landed, [(id, name("wan"), true)]);
+    assert_eq!(blocked, [0x5000], "the port is owed");
+    let (landed, blocked) = tell(&mut stack, &mut svc, usize::MAX);
+    assert_eq!(
+        landed,
+        [(id, name("lan"), true)],
+        "resumed where it stopped"
+    );
+    assert!(blocked.is_empty());
+}
+
+#[test]
+fn a_flap_while_the_port_was_full_is_told_as_down_then_up() {
+    let mut svc = socket_service();
+    let mut stack = routed_stack();
+    let who = net_caller_as(1000, 14);
+    let id = datagram_bound(&mut svc, &mut stack, &who, 7320);
+    join_group(&mut svc, &mut stack, &who, id, Ipv4Addr::new(239, 0, 0, 4));
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [(id, name("wan"), true)]
+    );
+    stack.on_member_link_change(name("wan"), LinkState::Down, t(3));
+    assert_eq!(tell(&mut stack, &mut svc, 0).0, []);
+    stack.on_member_link_change(name("wan"), LinkState::Up, t(4));
+    assert_eq!(tell(&mut stack, &mut svc, 0).0, []);
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [(id, name("wan"), false), (id, name("wan"), true)],
+        "what it learned before the flap is void"
+    );
+    // Down, up, and down again while full reads as the one change it is.
+    for (link, at) in [
+        (LinkState::Down, 5),
+        (LinkState::Up, 6),
+        (LinkState::Down, 7),
+    ] {
+        stack.on_member_link_change(name("wan"), link, t(at));
+        assert_eq!(tell(&mut stack, &mut svc, 0).0, []);
+    }
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [(id, name("wan"), false)]
+    );
+}
+
+#[test]
+fn a_principals_first_socket_asks_to_be_watched_and_its_later_ones_do_not() {
+    let mut svc = socket_service();
+    let mut stack = routed_stack();
+    let sink = RecordingSink::new();
+    let who = net_caller_as(1000, 6);
+    let open = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    let mut ent = seeded_entropy();
+    let mut reply = [0u8; 64];
+    let first = svc
+        .serve(&mut stack, &who, &sink, &mut ent, &open, &mut reply, t(2))
+        .expect("open");
+    assert_eq!(first.watch, Some(ProcId::from_raw([6; 16])));
+    let id = decode_socket_reply(&reply[..first.len]).expect("id");
+    let second = svc
+        .serve(&mut stack, &who, &sink, &mut ent, &open, &mut reply, t(2))
+        .expect("open");
+    assert_eq!(second.watch, None);
+    let other = decode_socket_reply(&reply[..second.len]).expect("id");
+    for socket in [id, other] {
+        serve_req(&mut svc, &mut stack, &who, &SocketRequest::Close { socket }).expect("close");
+    }
+    let again = svc
+        .serve(&mut stack, &who, &sink, &mut ent, &open, &mut reply, t(2))
+        .expect("open");
+    assert_eq!(
+        again.watch,
+        Some(ProcId::from_raw([6; 16])),
+        "watched afresh"
+    );
+}
+
+#[test]
+fn an_exited_principals_sockets_are_reclaimed_and_its_port_is_free_again() {
+    const GROUP: Ipv4Addr = Ipv4Addr::new(239, 7, 7, 7);
+    let mut svc = socket_service();
+    let mut stack = routed_stack();
+    let gone = net_caller_as(1000, 7);
+    let id = datagram_bound(&mut svc, &mut stack, &gone, 7400);
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &gone,
+        &SocketRequest::JoinMulticast {
+            socket: id,
+            group: local_group(GROUP),
+        },
+    )
+    .expect("join");
+    let listener = open_socket(&mut svc, &mut stack, &gone, SocketType::Stream).expect("open");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &gone,
+        &SocketRequest::Bind {
+            socket: listener,
+            local: v4_addr(0, 0, 0, 0, 7401),
+        },
+    )
+    .expect("bind");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &gone,
+        &SocketRequest::Listen { socket: listener },
+    )
+    .expect("listen");
+    let survivor = net_caller_as(1000, 8);
+    let kept = datagram_bound(&mut svc, &mut stack, &survivor, 7402);
+
+    let tx = svc.reclaim_owner(&mut stack, ProcId::from_raw([7; 16]), t(3));
+    assert!(!tx.is_empty(), "leaving the group is said on the wire");
+    assert!(!holds_group_mac(&stack, "wan", GROUP));
+    assert_eq!(svc.len(), 1, "only the other principal's socket stands");
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &survivor,
+            &SocketRequest::Close { socket: kept }
+        ),
+        Ok(())
+    );
+    // Its ports are free for whoever comes next.
+    let next = net_caller_as(1000, 9);
+    datagram_bound(&mut svc, &mut stack, &next, 7400);
+    // A principal holding nothing costs nothing and changes nothing.
+    assert!(svc
+        .reclaim_owner(&mut stack, ProcId::from_raw([7; 16]), t(4))
+        .is_empty());
+}
+
+fn plain_pair() -> Netstack {
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
+    for (alias, mac, iid) in [("eth0", MAC_A, IID_A), ("eth1", MAC_B, IID_B)] {
+        stack
+            .add_interface(
+                name(alias),
+                NetIfKind::Ethernet,
+                facts(mac),
+                iid,
+                7,
+                0,
+                t(0),
+            )
+            .expect("add interface");
+    }
+    stack
+}
+
+fn compose(stack: &mut Netstack, members: &[&str], now: Duration64) {
+    stack
+        .apply_bond_config(
+            &bond_cfg(members, NetBondMode::ActiveBackup, 1, Some(members[0])),
+            now,
+        )
+        .expect("compose bond");
+}
+
+fn join_group(
+    svc: &mut SocketService,
+    stack: &mut Netstack,
+    who: &Caller,
+    socket: u32,
+    group: Ipv4Addr,
+) {
+    serve_req(
+        svc,
+        stack,
+        who,
+        &SocketRequest::JoinMulticast {
+            socket,
+            group: local_group(group),
+        },
+    )
+    .expect("join");
+}
+
+#[test]
+fn a_bond_composed_after_a_socket_joined_carries_its_group_and_its_bound_port() {
+    const GROUP: Ipv4Addr = Ipv4Addr::new(239, 8, 8, 8);
+    let mut stack = plain_pair();
+    let mut svc = socket_service();
+    let who = net_caller_as(1000, 10);
+    let id = datagram_bound(&mut svc, &mut stack, &who, 7500);
+    join_group(&mut svc, &mut stack, &who, id, GROUP);
+    compose(&mut stack, &["eth0", "eth1"], t(2));
+    assert!(holds_group_mac(&stack, "bond0", GROUP));
+    let policy = stack
+        .interface(name("bond0"))
+        .expect("the bond")
+        .stack()
+        .rx_filter_policy();
+    assert!(policy.admits_broadcast_port(7500));
+}
+
+#[test]
+fn a_released_member_holds_exactly_the_groups_sockets_hold_when_it_leaves() {
+    const LEFT: Ipv4Addr = Ipv4Addr::new(239, 8, 1, 1);
+    const LATE: Ipv4Addr = Ipv4Addr::new(239, 8, 2, 2);
+    let mut stack = plain_pair();
+    stack
+        .add_interface(
+            name("eth2"),
+            NetIfKind::Ethernet,
+            facts(MAC_C),
+            IID_C,
+            7,
+            0,
+            t(0),
+        )
+        .expect("add interface");
+    let mut svc = socket_service();
+    let who = net_caller_as(1000, 11);
+    let id = datagram_bound(&mut svc, &mut stack, &who, 7501);
+    join_group(&mut svc, &mut stack, &who, id, LEFT);
+    compose(&mut stack, &["eth0", "eth1", "eth2"], t(1));
+    join_group(&mut svc, &mut stack, &who, id, LATE);
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::LeaveMulticast {
+            socket: id,
+            group: local_group(LEFT),
+        },
+    )
+    .expect("leave");
+    compose(&mut stack, &["eth0", "eth2"], t(2));
+    assert!(
+        holds_group_mac(&stack, "eth1", LATE),
+        "joined while it was enrolled"
+    );
+    assert!(
+        !holds_group_mac(&stack, "eth1", LEFT),
+        "left while it was enrolled"
+    );
+}
+
+fn nanos(at: Duration64) -> i128 {
+    i128::from(at.secs()) * 1_000_000_000 + i128::from(at.subsec_nanos())
+}
+
+#[test]
+fn an_enrolled_members_own_engine_never_holds_the_park_deadline() {
+    // Joined while plain, so each member's engine owes a repeat report when
+    // it is enrolled and then never driven again.
+    let mut stack = plain_pair();
+    let mut svc = socket_service();
+    let who = net_caller_as(1000, 12);
+    let id = datagram_bound(&mut svc, &mut stack, &who, 7502);
+    join_group(&mut svc, &mut stack, &who, id, Ipv4Addr::new(239, 8, 3, 3));
+    compose(&mut stack, &["eth0", "eth1"], t(2));
+    let (mut r0, mut r1) = (rings_region(), rings_region());
+    let mut fs0 = HarvestedService::new(QuietNet, region_of(&mut r0));
+    let mut fs1 = HarvestedService::new(QuietNet, region_of(&mut r1));
+    for _ in 0..16 {
+        let Some(due) = stack.next_deadline() else {
+            break;
+        };
+        // Everything the reactor does on a lapsed deadline.
+        for (member, fs) in [("eth0", &mut fs0), ("eth1", &mut fs1)] {
+            stack
+                .service_interface(name(member), fs, due, ServiceHint::default())
+                .expect("pump");
+        }
+        stack.advance_bonds(due);
+        let next = stack.next_deadline();
+        assert!(
+            next.is_none_or(|next| nanos(next) > nanos(due)),
+            "{next:?} is still due after the table was serviced at {due:?}"
+        );
+    }
+}
+
+#[test]
+fn every_member_of_a_bond_has_its_own_device_filter_programmed() {
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
+    for (alias, mac, iid) in [("eth0", MAC_A, IID_A), ("eth1", MAC_B, IID_B)] {
+        let mut filtering = facts(mac);
+        filtering.multicast_filter = McastFilter::Slots(15);
+        stack
+            .add_interface(name(alias), NetIfKind::Ethernet, filtering, iid, 7, 0, t(0))
+            .expect("add interface");
+    }
+    compose(&mut stack, &["eth0", "eth1"], t(0));
+    let programmed = [Rc::new(RefCell::new(None)), Rc::new(RefCell::new(None))];
+    let (mut r0, mut r1) = (rings_region(), rings_region());
+    for ((member, region), record) in [("eth0", &mut r0), ("eth1", &mut r1)]
+        .into_iter()
+        .zip(&programmed)
+    {
+        let mut fs = LocalFrameService::new(
+            FilteringNet {
+                slots: 15,
+                programmed: Rc::clone(record),
+            },
+            region,
+            GEOMETRY,
+            BufferClass::NonSensitive,
+        )
+        .expect("frame service");
+        stack
+            .service_interface(name(member), &mut fs, t(1), ServiceHint::default())
+            .expect("pump");
+    }
+    let first = programmed[0].borrow().clone().expect("eth0 programmed");
+    let second = programmed[1].borrow().clone().expect("eth1 programmed");
+    assert!(!first.is_empty());
+    assert_eq!(first, second, "both members admit the bond's groups");
+}
+
+#[test]
+fn a_link_that_stops_being_logical_is_told_as_down() {
+    let mut stack = plain_pair();
+    stack
+        .add_interface(
+            name("eth2"),
+            NetIfKind::Ethernet,
+            facts(MAC_C),
+            IID_C,
+            7,
+            0,
+            t(0),
+        )
+        .expect("add interface");
+    // An IPv4 socket is told only where IPv4 has a source to speak from.
+    for (alias, subnet) in [("eth0", 1), ("eth1", 2), ("eth2", 3)] {
+        stack
+            .addr_add(
+                name(alias),
+                NetAddrFamily::V4,
+                24,
+                v4_bytes(Ipv4Addr::new(10, subnet, 0, 1)),
+                t(0),
+            )
+            .expect("addr add");
+    }
+    let mut svc = socket_service();
+    let who = net_caller_as(1000, 15);
+    let id = datagram_bound(&mut svc, &mut stack, &who, 7330);
+    join_group(&mut svc, &mut stack, &who, id, Ipv4Addr::new(239, 0, 0, 5));
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [
+            (id, name("eth0"), true),
+            (id, name("eth1"), true),
+            (id, name("eth2"), true)
+        ]
+    );
+    compose(&mut stack, &["eth0", "eth1"], t(0));
+    stack
+        .addr_add(
+            name("bond0"),
+            NetAddrFamily::V4,
+            24,
+            v4_bytes(Ipv4Addr::new(10, 9, 0, 1)),
+            t(0),
+        )
+        .expect("addr add");
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [(id, name("eth0"), false), (id, name("eth1"), false)],
+        "enrolled, and the bond itself is down until a member is admitted"
+    );
+    stack.advance_bonds(t(2));
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [(id, name("bond0"), true)]
+    );
+    stack
+        .apply_interface_config(
+            &NetInterfaceConfigMsg {
+                alias: name("lan"),
+                match_mac: Some(*MAC_C.as_octets()),
+                match_node: None,
+                ipv4: NetIpv4Config::Static {
+                    addr: [10, 3, 0, 1],
+                    prefix: 24,
+                    gateway: None,
+                },
+                ipv6: NetIpv6Config::Disabled,
+                mtu: 0,
+                dns: NetDnsServers::EMPTY,
+            },
+            t(3),
+        )
+        .expect("rename");
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [(id, name("eth2"), false), (id, name("lan"), true)]
+    );
+    assert_eq!(tell(&mut stack, &mut svc, usize::MAX).0, []);
+}
+
+#[test]
+fn each_family_has_its_own_port_space() {
+    let mut svc = socket_service();
+    let mut stack = routed_stack();
+    let discovery = net_caller_as(tairix_abi::discovery_ipc::DISCOVERYD_UID, 3);
+    let bind = |socket, family| SocketRequest::Bind {
+        socket,
+        local: SocketAddr {
+            family,
+            addr: [0; 16],
+            port: 5353,
+        },
+    };
+    let mut open = |family| {
+        open_in(
+            &mut svc,
+            &mut stack,
+            &discovery,
+            family,
+            SocketType::Datagram,
+        )
+        .expect("open")
+    };
+    let (v4, v6, again) = (
+        open(NetAddrFamily::V4),
+        open(NetAddrFamily::V6),
+        open(NetAddrFamily::V6),
+    );
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &discovery,
+        &bind(v4, NetAddrFamily::V4),
+    )
+    .expect("v4");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &discovery,
+        &bind(v6, NetAddrFamily::V6),
+    )
+    .expect("the same port in the other family");
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &discovery,
+            &bind(again, NetAddrFamily::V6)
+        ),
+        Err(Errno::AddressInUse),
+        "within a family a port is held once"
+    );
+}
+
+#[test]
+fn a_member_is_listed_behind_once_however_many_edges_it_misses() {
+    let mut svc = socket_service();
+    let mut stack = routed_stack();
+    let who = net_caller_as(1000, 15);
+    for port in [7330, 7331] {
+        let id = datagram_bound(&mut svc, &mut stack, &who, port);
+        join_group(&mut svc, &mut stack, &who, id, Ipv4Addr::new(239, 0, 0, 5));
+    }
+    // Told the link is up, every later edge is owed to both.
+    assert_eq!(tell(&mut stack, &mut svc, usize::MAX).0.len(), 2);
+    assert_eq!(svc.behind_len(), 0);
+    for (link, at) in [
+        (LinkState::Down, 3),
+        (LinkState::Up, 4),
+        (LinkState::Down, 5),
+    ] {
+        stack.on_member_link_change(name("wan"), link, t(at));
+        assert_eq!(tell(&mut stack, &mut svc, 0).0, []);
+        assert_eq!(svc.behind_len(), 2);
+    }
+    let _ = tell(&mut stack, &mut svc, usize::MAX);
+    assert_eq!(svc.behind_len(), 0);
+}
+
+#[test]
+fn a_family_is_told_up_only_where_it_has_a_source_to_speak_from() {
+    let mut stack = plain_pair();
+    let mut svc = socket_service();
+    let who = net_caller_as(1000, 16);
+    let id = datagram_bound(&mut svc, &mut stack, &who, 7340);
+    join_group(&mut svc, &mut stack, &who, id, Ipv4Addr::new(239, 0, 0, 6));
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [],
+        "links up, but no IPv4 address to send from"
+    );
+    stack
+        .addr_add(
+            name("eth1"),
+            NetAddrFamily::V4,
+            24,
+            v4_bytes(Ipv4Addr::new(10, 4, 0, 1)),
+            t(1),
+        )
+        .expect("addr add");
+    assert_eq!(
+        tell(&mut stack, &mut svc, usize::MAX).0,
+        [(id, name("eth1"), true)]
+    );
+    // IPv6 coming up on the same link, once its link-local survives duplicate
+    // address detection, is no edge for an IPv4 socket.
+    let v6_up = |stack: &Netstack| {
+        stack
+            .links()
+            .iter()
+            .any(|link| link.family == NetAddrFamily::V6 && link.name == name("eth1") && link.up)
+    };
+    assert!(!v6_up(&stack));
+    for at in [2, 4] {
+        let mut out = StackOutput::default();
+        stack
+            .interface_mut(name("eth1"))
+            .expect("iface")
+            .stack_mut()
+            .advance(t(at), &mut out);
+    }
+    assert_eq!(tell(&mut stack, &mut svc, usize::MAX).0, []);
+    assert!(v6_up(&stack), "the link-local is past DAD");
 }

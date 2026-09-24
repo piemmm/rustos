@@ -1,0 +1,16 @@
+# Signed-AppInfo manifest source for `dns-sd`, the link-local discovery
+# diagnostic (plans/ZEROCONF.md Z4).
+#
+# CAP_NET_DISCOVER_ALL is what makes it the administrator's tool: every type
+# may be browsed and resolved, and the types themselves enumerated. The
+# discovery service admits it only where the running account's ceiling
+# carries it — an administrator's — and grants everyone else nothing past
+# CAP_NET. CAP_CONSOLE_WRITE writes the listing, CAP_FS_ACCESS reads the
+# bundle's own Help/ tree.
+id = "os.tairix.dns-sd"
+name = "dns-sd"
+title = "DNS-SD"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_NET", "CAP_NET_DISCOVER_ALL"]
+library-icon = "dns-sd.svg"

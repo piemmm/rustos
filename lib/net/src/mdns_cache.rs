@@ -100,6 +100,32 @@ struct Slot {
     recency_link: Link,
 }
 
+impl Slot {
+    fn cached(&self) -> CachedRecord {
+        CachedRecord {
+            record: self.record,
+            source: self.source,
+            received: crate::timeutil::from_nanos(self.received),
+            expires: crate::timeutil::from_nanos(self.expires),
+        }
+    }
+}
+
+/// One (name, type) a live question covers, with the keyed hash it is
+/// matched by, so a lookup compares one integer before any name.
+#[derive(Clone, Copy, Debug)]
+struct Watch {
+    key: u64,
+    name: Name,
+    record_type: RecordType,
+}
+
+impl Watch {
+    fn is(&self, key: u64, name: &Name, record_type: RecordType) -> bool {
+        self.key == key && self.record_type == record_type && self.name == *name
+    }
+}
+
 /// A view of the slot array through one of its three link fields.
 ///
 /// A [`Link`] carries the node's on-a-list state inside it, so a node can be
@@ -146,7 +172,7 @@ pub struct RecordCache {
     /// order is to ask first and learn second: a question raised before any
     /// answer arrives must still arm the refresh schedule of the answers
     /// when they do.
-    watched: ArrayVec<(Name, RecordType), MAX_QUESTIONS>,
+    watched: ArrayVec<Watch, MAX_QUESTIONS>,
     /// The earliest of every slot's expiry and armed refresh, or
     /// [`NEVER`].
     earliest: u128,
@@ -207,7 +233,17 @@ impl RecordCache {
     /// 6762 §10.2) retires every *other* record this source holds at the
     /// same name and type, which is how a unique record replaces rather than
     /// accumulates.
-    pub fn learn(&mut self, now: Duration64, record: &Record, source: IpAddr) -> Learned {
+    ///
+    /// `gone` is told of a watched record the bounds evicted to make room,
+    /// with its index key, so a question never goes on believing in a
+    /// record the cache no longer holds.
+    pub fn learn(
+        &mut self,
+        now: Duration64,
+        record: &Record,
+        source: IpAddr,
+        gone: &mut dyn FnMut(u64, &CachedRecord),
+    ) -> Learned {
         let now_ns = nanos(now);
         let key = self.key_of(&record.name, record.record_type());
 
@@ -227,11 +263,21 @@ impl RecordCache {
         if !self.reserve_chains(key, source) {
             return Learned::Ignored;
         }
-        let Some(index) = self.allocate(source) else {
+        let Some(index) = self.allocate(source, gone) else {
             return Learned::Ignored;
         };
         self.place(index, key, now_ns, record, source);
         Learned::Added
+    }
+
+    /// The keyed hash a record's (owner name, type) is chained under, which
+    /// a caller matching records against its own interests compares first.
+    #[must_use]
+    pub fn key_of(&self, name: &Name, record_type: RecordType) -> u64 {
+        let mut hasher = core::hash::BuildHasher::build_hasher(&self.index_hash);
+        name.hash(&mut hasher);
+        hasher.write_u16(record_type.value());
+        hasher.finish()
     }
 
     /// Every held record answering `name`/`record_type`, most recently
@@ -272,23 +318,27 @@ impl RecordCache {
     /// Only a watched record wakes the caller before it expires: a cache
     /// full of records nobody asked about costs no timers.
     pub fn set_watched(&mut self, name: &Name, record_type: RecordType, watched: bool) {
+        let key = self.key_of(name, record_type);
         let held = self
             .watched
             .iter()
-            .position(|(held, held_type)| held == name && *held_type == record_type);
+            .position(|watch| watch.is(key, name, record_type));
         match (watched, held) {
             (true, None) => {
                 // Past the bound the question simply refreshes nothing: it
                 // still asks on its own schedule, so the cost is a re-query
                 // rather than a wrong answer.
-                let _ = self.watched.try_push((*name, record_type));
+                let _ = self.watched.try_push(Watch {
+                    key,
+                    name: *name,
+                    record_type,
+                });
             }
             (false, Some(index)) => {
                 self.watched.remove(index);
             }
             _ => {}
         }
-        let key = self.key_of(name, record_type);
         let mut next = self.buckets.get(&key).and_then(IntrusiveList::front);
         while let Some(index) = next {
             let Some(Some(slot)) = self.slots.get_mut(index) else {
@@ -313,7 +363,14 @@ impl RecordCache {
     ///
     /// Expired records are dropped before the refresh points are collected,
     /// so a caller never re-asks about something it has just forgotten.
-    pub fn advance(&mut self, now: Duration64, due: &mut dyn FnMut(&Name, RecordType)) {
+    /// `gone` is told of each watched record that expired, with its index
+    /// key.
+    pub fn advance(
+        &mut self,
+        now: Duration64,
+        due: &mut dyn FnMut(&Name, RecordType),
+        gone: &mut dyn FnMut(u64, &CachedRecord),
+    ) {
         let now_ns = nanos(now);
         if now_ns < self.earliest {
             return;
@@ -325,7 +382,7 @@ impl RecordCache {
                 .and_then(Option::as_ref)
                 .is_some_and(|slot| slot.expires <= now_ns);
             if expired {
-                self.remove(index);
+                self.remove_reporting(index, gone);
             }
         }
         for index in 0..self.slots.len() {
@@ -344,23 +401,21 @@ impl RecordCache {
 
     /// Drop every held record — what an interface going down does, since a
     /// record learned on a link is meaningless once that link is gone.
-    pub fn clear(&mut self) {
+    ///
+    /// What is watched survives: that is the questions' interest, not the
+    /// link's, and a record learned once the link returns must still arm
+    /// its refresh. `gone` is told of each watched record dropped.
+    pub fn clear(&mut self, gone: &mut dyn FnMut(u64, &CachedRecord)) {
+        for slot in self.slots.iter().flatten().filter(|slot| slot.watched) {
+            gone(slot.key, &slot.cached());
+        }
         self.slots.clear();
-        self.watched.clear();
         self.free.clear();
         self.buckets.clear();
         self.sources.clear();
         self.recency = IntrusiveList::new();
         self.earliest = NEVER;
         self.live = 0;
-    }
-
-    /// The keyed hash a record's (owner name, type) is chained under.
-    fn key_of(&self, name: &Name, record_type: RecordType) -> u64 {
-        let mut hasher = core::hash::BuildHasher::build_hasher(&self.index_hash);
-        name.hash(&mut hasher);
-        hasher.write_u16(record_type.value());
-        hasher.finish()
     }
 
     /// The slot holding a record identical to `record`, or `None`.
@@ -436,7 +491,7 @@ impl RecordCache {
             return;
         };
         slot.received = now_ns;
-        slot.expires = now_ns.saturating_add(ttl_nanos(ttl));
+        slot.expires = expires_at(now_ns, ttl);
         slot.record.ttl = ttl;
         slot.refresh_stage = 0;
         slot.refresh_at = if slot.watched {
@@ -452,7 +507,11 @@ impl RecordCache {
 
     /// A slot for a record from `source`, evicting under the bounds if one
     /// is needed, or `None` when the cache refuses the record.
-    fn allocate(&mut self, source: IpAddr) -> Option<usize> {
+    fn allocate(
+        &mut self,
+        source: IpAddr,
+        gone: &mut dyn FnMut(u64, &CachedRecord),
+    ) -> Option<usize> {
         if self.len_from(source) >= MAX_RECORDS_PER_SOURCE {
             // The shouter pays: its own oldest record goes, never a
             // neighbour's.
@@ -460,10 +519,10 @@ impl RecordCache {
                 .sources
                 .get_mut(&source)
                 .and_then(|chain| chain.back())?;
-            self.remove(oldest);
+            self.remove_reporting(oldest, gone);
         } else if self.live >= MAX_RECORDS {
             let oldest = self.recency.back()?;
-            self.remove(oldest);
+            self.remove_reporting(oldest, gone);
         }
         if let Some(index) = self.free.pop() {
             return Some(index as usize);
@@ -478,8 +537,8 @@ impl RecordCache {
 
     /// Fill an allocated slot and index it.
     fn place(&mut self, index: usize, key: u64, now_ns: u128, record: &Record, source: IpAddr) {
-        let expires = now_ns.saturating_add(ttl_nanos(record.ttl));
-        let watched = self.is_watched(&record.name, record.record_type());
+        let expires = expires_at(now_ns, record.ttl);
+        let watched = self.is_watched(key, &record.name, record.record_type());
         let refresh_at = if watched {
             refresh_instant(now_ns, expires, 0)
         } else {
@@ -540,10 +599,21 @@ impl RecordCache {
 
     /// Whether a live question covers this name and type, so a newly placed
     /// record arms the refresh schedule at once.
-    fn is_watched(&self, name: &Name, record_type: RecordType) -> bool {
+    fn is_watched(&self, key: u64, name: &Name, record_type: RecordType) -> bool {
         self.watched
             .iter()
-            .any(|(held, held_type)| held == name && *held_type == record_type)
+            .any(|watch| watch.is(key, name, record_type))
+    }
+
+    /// [`Self::remove`], telling `gone` first when a question was watching
+    /// the record.
+    fn remove_reporting(&mut self, index: usize, gone: &mut dyn FnMut(u64, &CachedRecord)) {
+        if let Some(Some(slot)) = self.slots.get(index) {
+            if slot.watched {
+                gone(slot.key, &slot.cached());
+            }
+        }
+        self.remove(index);
     }
 
     /// Unlink and free the slot at `index`.
@@ -612,12 +682,7 @@ impl Iterator for Matches<'_> {
             if slot.record.name != self.name || slot.record.record_type() != self.record_type {
                 continue;
             }
-            return Some(CachedRecord {
-                record: slot.record,
-                source: slot.source,
-                received: crate::timeutil::from_nanos(slot.received),
-                expires: crate::timeutil::from_nanos(slot.expires),
-            });
+            return Some(slot.cached());
         }
         None
     }
@@ -625,9 +690,9 @@ impl Iterator for Matches<'_> {
 
 impl core::iter::FusedIterator for Matches<'_> {}
 
-/// A TTL in seconds as monotonic nanoseconds.
-fn ttl_nanos(ttl: u32) -> u128 {
-    u128::from(ttl) * u128::from(NANOS_PER_SEC)
+/// When a record received at `now_ns` with `ttl` seconds expires.
+pub(super) fn expires_at(now_ns: u128, ttl: u32) -> u128 {
+    now_ns.saturating_add(u128::from(ttl) * u128::from(NANOS_PER_SEC))
 }
 
 /// The instant a watched record's `stage`-th re-query is due, or [`NEVER`]

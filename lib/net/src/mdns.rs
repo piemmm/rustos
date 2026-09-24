@@ -42,7 +42,7 @@
 
 use tairix_inline::ArrayVec;
 
-use crate::addr::{Ipv4Addr, Ipv6Addr};
+use crate::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::dns::{DnsError, Name, RecordType, MAX_NAME_LEN};
 
 #[path = "mdns_codec.rs"]
@@ -57,8 +57,8 @@ mod engine;
 pub use cache::{CachedRecord, Learned, RecordCache};
 pub use codec::{Message, MessageWriter, Question, Section};
 pub use engine::{
-    Destination, Emit, MdnsEngine, MdnsEvent, PublishError, PublishId, QuestionId, Sender,
-    ServiceState,
+    Answer, AnswerChange, Destination, Emit, MdnsEngine, MdnsEvent, PublishError, PublishId,
+    QuestionId, Sender, ServiceState,
 };
 
 /// The UDP port every multicast DNS message is sent from and to (RFC 6762
@@ -74,14 +74,37 @@ pub const GROUP_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb);
 /// The parent domain every multicast name lives under (RFC 6762 §3).
 pub const LOCAL_LABEL: &[u8] = b"local";
 
+/// Whether `name` is multicast DNS's to answer rather than a server's: a
+/// name under [`LOCAL_LABEL`] with at least one label before it (RFC 6762
+/// §3). Sending one to a unicast server would leak it off the link.
+#[must_use]
+pub fn is_link_local_name(name: &Name) -> bool {
+    let (count, last) = name
+        .labels()
+        .fold((0usize, None), |(count, _), label| (count + 1, Some(label)));
+    count >= 2 && last.is_some_and(|label| label.eq_ignore_ascii_case(LOCAL_LABEL))
+}
+
+/// Whether `address` is resolved in reverse on the link: IPv4 `169.254/16`
+/// or IPv6 `fe80::/10` (RFC 6762 §4).
+#[must_use]
+pub fn is_link_local_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_unicast_link_local(),
+    }
+}
+
 /// The largest `TXT` record this engine will hold or emit, in rdata octets.
 ///
 /// A fixed validation bound, not a capacity: RFC 6763 §6.1 asks that a
 /// service's whole `TXT` stay under 400 octets so a response fits one
 /// classic 512-octet message, and this sits just above that. A larger record
 /// is refused rather than cached, because the cache's resident size must be
-/// a figure a small machine can afford whatever the segment sends.
-pub const MAX_TXT_LEN: usize = 512;
+/// a figure a small machine can afford whatever the segment sends. The
+/// discovery channel carries `TXT` rdata, so it is defined there and taken
+/// here.
+pub const MAX_TXT_LEN: usize = tairix_abi::discovery_ipc::TXT_MAX;
 
 /// The largest number of records one interface's cache holds.
 ///
@@ -98,8 +121,23 @@ pub const MAX_RECORDS_PER_SOURCE: usize = 32;
 /// The largest number of records one interface may publish.
 pub const MAX_PUBLISHED: usize = 64;
 
-/// The largest number of continuous questions one interface may ask.
-pub const MAX_QUESTIONS: usize = 16;
+/// The largest number of distinct continuous questions one interface may ask.
+///
+/// A fixed bound on what this host asks of a segment, not a capacity: every
+/// question is a query the whole link hears, re-asked on its backoff and on
+/// each refresh point. It is sized for a desktop's concurrent browses plus the
+/// short-lived resolves beneath them, a resolve being four questions (`SRV`,
+/// `TXT`, and the target's `A` and `AAAA`). An engine holds one question per
+/// name and type, so consumers wanting the same answer share it.
+pub const MAX_QUESTIONS: usize = 64;
+
+/// The largest message this host builds.
+///
+/// What every IPv6 link carries unfragmented — the 1280-octet minimum MTU
+/// less the IPv6 and UDP headers — so no query of ours depends on a
+/// fragmented multicast datagram arriving whole. A longer known-answer list
+/// is truncated and flagged (RFC 6762 §7.2), never fragmented.
+pub const MAX_MESSAGE_LEN: usize = 1232;
 
 /// The largest number of records one built message may carry in a section.
 pub const MAX_SECTION_RECORDS: usize = 64;

@@ -39,10 +39,10 @@ pub use channel::{FrameService, LocalFrameService, NetChannelClient, NetChannelT
 pub use cookie::CryptoCookieSecret;
 pub use iface::{
     queue_tx, BondChange, BondMemberHealth, DhcpRngFactory, FrameBatch, Interface, Netstack,
-    ServiceHint, ServiceOutcome, TempAddrFactory,
+    PublishedLink, ServiceHint, ServiceOutcome, TempAddrFactory,
 };
 pub use service::{serve, Caller};
-pub use socket::{Delivery, SocketReply, SocketService, StreamIo, MAX_GROUPS_PER_SOCKET};
+pub use socket::{Delivery, Post, SocketReply, SocketService, StreamIo, MAX_GROUPS_PER_SOCKET};
 
 #[cfg(test)]
 mod tests;

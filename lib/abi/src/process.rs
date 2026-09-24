@@ -1145,6 +1145,53 @@ impl SignalIntakeOp {
     }
 }
 
+/// An operation of the [`peer_watch`](crate::SyscallNumber::PEER_WATCH)
+/// syscall: watching the exit of a process *instance*, named by the attested
+/// [`crate::ProcId`] the caller read from its `Origin`.
+///
+/// A watch belongs to the thread that takes it — the thread that waits for
+/// its exits through a wait-set member of kind
+/// [`crate::WaitSourceKind::PeerExit`] — and is dropped as it fires. The
+/// discriminant is the `u32` carried in the syscall's `op` register; an
+/// unknown value fails closed.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum PeerWatchOp {
+    /// Watch the instance the argument names. Idempotent. Refused
+    /// [`Errno::NotFound`] for an instance with no live process — which the
+    /// caller treats as having already exited.
+    Watch = 0,
+    /// Stop watching it. Refused [`Errno::NotFound`] when not watched,
+    /// including a watch that has already fired.
+    Unwatch = 1,
+    /// Write the oldest untaken exit into the argument. Refused
+    /// [`Errno::WouldBlock`] when none is waiting.
+    Take = 2,
+}
+
+impl PeerWatchOp {
+    /// The discriminant carried on the wire.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Recover an operation from its wire discriminant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] for any value that is not a defined
+    /// operation.
+    pub const fn from_u32(value: u32) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::Watch),
+            1 => Ok(Self::Unwatch),
+            2 => Ok(Self::Take),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// The event a completed [`wait`](crate::SyscallNumber::WAIT) reports about
 /// a child, decoded from the [`WaitStatusRecord`] the kernel wrote.
 ///

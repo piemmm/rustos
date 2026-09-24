@@ -324,6 +324,7 @@ struct Subsystems {
     sched: &'static Scheduler<Aarch64BinArch>,
     arch: &'static Aarch64BinArch,
     caps: &'static RwLock<CapTable>,
+    peer_watch: &'static tairix_kernel_core::PeerWatch,
     ipc: &'static RwLock<PortRegistry>,
     aspaces: &'static RwLock<AddressSpaceRegistry>,
     rng: &'static RwLock<Box<dyn RandomReserve + Send + Sync>>,
@@ -365,6 +366,7 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
             counter_hz,
         )))),
         caps: Box::leak(Box::new(RwLock::new(CapTable::new()))),
+        peer_watch: Box::leak(Box::new(tairix_kernel_core::PeerWatch::new())),
         ipc: Box::leak(Box::new(RwLock::new(PortRegistry::new()))),
         aspaces: Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new()))),
         rng: Box::leak(Box::new(RwLock::new(
@@ -414,8 +416,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // — `call_create`, the ticketed `call_post`/`call_reap`/`call_cancel`
     // trio, `call_recv`/`call_reply`, the wait-set trio, `clock_get`, and
     // `exit` — runs the production caller-context resolution and handler path.
-    let hook: &'static KernelDispatchHook<'static, Aarch64BinArch> =
-        Box::leak(Box::new(KernelDispatchHook::new(
+    let hook: &'static KernelDispatchHook<'static, Aarch64BinArch> = Box::leak(Box::new(
+        KernelDispatchHook::new(
             sys.sched,
             sys.caps,
             sys.arch,
@@ -434,7 +436,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             live,
             &NULL_MMIO_MAP_FACILITY,
             &NULL_DMA_ALLOC_FACILITY,
-        )));
+        )
+        .with_peer_watch(sys.peer_watch),
+    ));
     if DISPATCH_SLOT.install_dispatcher(hook).is_err() {
         qemu_exit::exit_failure(FAIL_HOOK_INSTALL);
     }
@@ -451,6 +455,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         None,
         sys.aspaces,
         sys.caps,
+        sys.peer_watch,
         wait_producer,
         &AARCH64_PROCESS_SPAWN,
     );
@@ -460,6 +465,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         &SERIAL_SINK,
         sys.sched,
         sys.caps,
+        sys.peer_watch,
         sys.aspaces,
         sys.arch,
         wait_producer,

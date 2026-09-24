@@ -36,8 +36,9 @@ use crate::mdns::{TxtError, TxtRecord, TxtStrings, MAX_TXT_LEN};
 /// between the underscore and the transport.
 ///
 /// A fixed validation bound: the registry's own limit, so a name past it
-/// could never have been assigned.
-pub const MAX_SERVICE_NAME_LEN: usize = 15;
+/// could never have been assigned. The discovery channel carries service
+/// types, so it is defined there and taken here.
+pub const MAX_SERVICE_NAME_LEN: usize = tairix_abi::discovery_ipc::SERVICE_NAME_MAX;
 
 /// The longest one `TXT` string (RFC 1035 §3.3.14), whose length is carried
 /// in a single octet. [`crate::mdns::MAX_TXT_LEN`] bounds the whole record.
@@ -73,34 +74,9 @@ pub enum DnsSdError {
     Dns(DnsError),
 }
 
-/// The transport a service type runs over (RFC 6763 §4.1.2).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Transport {
-    /// TCP, spelled `_tcp`.
-    Tcp,
-    /// UDP, spelled `_udp`.
-    Udp,
-}
-
-impl Transport {
-    /// The wire label, underscore included.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Tcp => "_tcp",
-            Self::Udp => "_udp",
-        }
-    }
-
-    /// The transport `label` names, compared without ASCII case as every
-    /// DNS label is (RFC 4343).
-    #[must_use]
-    pub fn from_label(label: &[u8]) -> Option<Self> {
-        [Self::Tcp, Self::Udp]
-            .into_iter()
-            .find(|transport| label.eq_ignore_ascii_case(transport.label().as_bytes()))
-    }
-}
+/// The transport a service type runs over (RFC 6763 §4.1.2), defined once
+/// with the channel that carries it.
+pub use tairix_abi::discovery_ipc::Transport;
 
 /// Both transport labels are four octets, which sizes [`ASSEMBLY_LEN`].
 const TRANSPORT_LABEL_LEN: usize = Transport::Tcp.label().len();

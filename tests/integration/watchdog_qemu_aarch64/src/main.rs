@@ -106,8 +106,8 @@ mod kernel {
     /// whole interval — so the kill is the trivial one a never-renewing
     /// service earns, and renewal is not doing anything.
     const FAIL_KILLED_WHILE_HEALTHY: u16 = 12;
-    /// The manager gave up relaunching: the crash-loop budget was consumed
-    /// before the first relaunch was observed.
+    /// The manager gave up relaunching the double: its crash-loop budget was
+    /// consumed before the first relaunch was observed.
     const FAIL_NOT_RELAUNCHED: u16 = 13;
 
     /// Replays every event through [`SERIAL_SINK`] and decides the run.
@@ -140,7 +140,11 @@ mod kernel {
                 self.timed_out.store(true, Ordering::Relaxed);
                 return;
             }
-            if event.id == tairix_init::events::SERVICE_RESTART_EXHAUSTED {
+            // Only the double's budget bears on the run. Anything that needs a
+            // working stack fails on this disk, and giving up on it is the
+            // manager's bound working, not the watchdog failing.
+            if event.id == tairix_init::events::SERVICE_RESTART_EXHAUSTED && names_the_double(event)
+            {
                 fail(FAIL_NOT_RELAUNCHED);
             }
             // The relaunch. Only counted after the timeout, so the boot's

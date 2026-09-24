@@ -256,6 +256,7 @@ struct Subsystems {
     sched: &'static Scheduler<BinArch>,
     arch: &'static BinArch,
     caps: &'static RwLock<CapTable>,
+    peer_watch: &'static tairix_kernel_core::PeerWatch,
     ipc: &'static RwLock<PortRegistry>,
     aspaces: &'static RwLock<AddressSpaceRegistry>,
     rng: &'static RwLock<Box<dyn RandomReserve + Send + Sync>>,
@@ -318,6 +319,7 @@ fn leak_subsystems(board: &BspBringUp) -> Subsystems {
             board.irq_routing,
         ))),
         caps: Box::leak(Box::new(RwLock::new(CapTable::new()))),
+        peer_watch: Box::leak(Box::new(tairix_kernel_core::PeerWatch::new())),
         ipc: Box::leak(Box::new(RwLock::new(PortRegistry::new()))),
         aspaces: Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new()))),
         rng: Box::leak(Box::new(RwLock::new(
@@ -376,8 +378,8 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     // through — so every syscall the programs issue (`spawn`, `wait`,
     // `rlimit_set`, `exit`) and every user-fault resolution runs the
     // production caller-context resolution and handler path.
-    let hook: &'static KernelDispatchHook<'static, BinArch> =
-        Box::leak(Box::new(KernelDispatchHook::new(
+    let hook: &'static KernelDispatchHook<'static, BinArch> = Box::leak(Box::new(
+        KernelDispatchHook::new(
             sys.sched,
             sys.caps,
             sys.arch,
@@ -401,7 +403,9 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
             live,
             &NULL_MMIO_MAP_FACILITY,
             &NULL_DMA_ALLOC_FACILITY,
-        )));
+        )
+        .with_peer_watch(sys.peer_watch),
+    ));
     if DISPATCH_SLOT.install_dispatcher(hook).is_err() {
         fail("stack-grow test: dispatch hook install failed");
     }
@@ -421,6 +425,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
         None,
         sys.aspaces,
         sys.caps,
+        sys.peer_watch,
         wait_producer,
         &X86_64_PROCESS_SPAWN,
     );
@@ -430,6 +435,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
         &SERIAL_SINK,
         sys.sched,
         sys.caps,
+        sys.peer_watch,
         sys.aspaces,
         sys.arch,
         wait_producer,

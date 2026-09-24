@@ -392,6 +392,7 @@ Every page is checked, fail-closed, before a byte moves:
 | A page in range is not user-accessible (kernel-pointer confusion) | `NotUser` |
 | `copy_in` page lacks `READ` | `NotReadable` |
 | `copy_out` page lacks `WRITE` (read-only / executable — the §19.2 W^X guard) | `NotWritable` |
+| A page in range is mapped uncached, device, or write-combined: the copy's cacheable alias would lose coherence with the device | `NotCacheable` |
 | Backing frame outside the direct map | `PhysUnmapped` |
 | A hardware fault interrupted the byte move (window fix-up) | `Faulted` |
 

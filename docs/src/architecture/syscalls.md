@@ -173,6 +173,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 127 | `shm_create_dma` | `Handle` (`Dma` grant), `len`, `user_ptr` (id out), `user_ptr` (device address out) | `u64` (base VA) | `CAP_MEM_DMA` | yes |
 | 128 | `shm_grant_peer` | `Handle` (region), `IpcEndpoint`, `Handle` (ticket) | `u64` (handle) | `CAP_SHM`    | yes     |
 | 129 | `call_peer_holds` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (resource) | `errno` | —              | no      |
+| 130 | `peer_watch`   | `u32 op`, `user_ptr` (instance), `len`  | `errno`       | —                       | no      |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -1117,6 +1118,13 @@ at the opted-in task (only its own intake can concern it); only sets
 that contain a `Signal` member join the signal wake queue, so signal
 traffic never touches unrelated waiters.
 
+It accepts a `PeerExit` member: `id` is always `0`, the calling thread's own
+feed of exits of the process instances it watches through `peer_watch`, and
+it may be added before the first watch so a reactor arms it at start. It is
+ready while an exit waits untaken; readiness is a peek and the owner takes
+with `peer_watch(Take)`. The wake is targeted at the watching thread, and only
+sets holding a `PeerExit` member join its queue.
+
 It also accepts a `Stream` member (`plans/APPWIN.md` AW4): `id` names a
 descriptor of the **caller's own open table** holding a pipe end opened
 for reading (a write end, a path- or resource-backed descriptor, an
@@ -1450,6 +1458,32 @@ gate's one lock, concurrently with the victim's own entry into the kernel.
 Split across two locks, a kill arriving exactly as the victim enters could be
 recorded as a user-mode teardown against a thread that is by then inside a
 body, and the dispatch loop would free that body's stack at its next park.
+
+`peer_watch` (no. 130) is how a service learns that a process it holds state
+for has gone — a client's sockets, sessions, or counted connections, where the
+service is not the client's parent and nothing the client left behind rings.
+`op` is a closed `tairix_abi::PeerWatchOp` (`Watch` = 0, `Unwatch` = 1,
+`Take` = 2) and the argument one 16-byte process-instance id (`ProcId`), read
+for a watch or unwatch and written by a take. A watch says only that a process
+has gone and grants nothing, so it needs no capability, and every operation
+acts on the calling thread's own watches. An id is learnt from a
+kernel-attested `Origin`: its CSPRNG half makes it unguessable for any process
+admitted once the kernel's random reserve is seeded, while a bootstrap
+principal's (PID 1, the storage floor) carries only the counter, so anyone can
+watch those — whose exit the machine shows anyway.
+
+A watch is registered only on an instance whose capability record the kernel
+still holds, checked under the capability table's lock; the record's removal
+at teardown is the one path an instance ends by, and it fires every watch on
+it. So a watch either precedes the exit and fires, or finds the instance gone
+and is refused `NotFound`, which the caller treats as the exit — none is ever
+missed. Each watch reserves the slot its exit will occupy, so firing never
+allocates; a fired watch is dropped, and a thread's watches and untaken exits
+die with it. The registry is owned by the kernel state and reached by
+reference from the syscall handlers and every teardown path. The first-party
+wrappers are `tairix_rt::peer_watch`, `peer_unwatch`, and `peer_exit_take`;
+the C stub is `tairix_sys_peer_watch` with the `TAIRIX_PEER_WATCH_OP_*`
+constants.
 
 `signal_intake` (no. 94) operates on the calling process's own **signal
 intake** — the fail-closed signal-observation opt-in (`plans/STRESSTEST.md`

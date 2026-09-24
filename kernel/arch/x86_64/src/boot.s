@@ -305,7 +305,9 @@ higher_half_entry:
     // trampoline above pushes nothing and reaches this label by jump.
     movabsq $boot_stack_top_high, %rsp
     // rdi/rsi still hold the multiboot magic / info pointer (untouched by
-    // the absolute jump above or the stack rebase).
+    // the absolute jump above or the stack rebase); rdx hands the entry the
+    // descriptor tables' reservation, through the kernel window.
+    movabsq $boot_tables_high, %rdx
     call tairix_arch_x86_64_main
 
     // `tairix_arch_x86_64_main` is `-> !`; reaching here is a kernel bug.

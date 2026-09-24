@@ -51,7 +51,8 @@
 //!   readiness would hand the client an endpoint that does not exist yet.
 //!
 //! A `service`, `enrolled`, or `ondemand` directive may carry trailing
-//! `key=value` options after its account. Two are defined:
+//! `key=value` options after its account; a `session` carries none. Four are
+//! defined:
 //!
 //! * `watchdog=<n>s` — the liveness interval the manager holds the service
 //!   to, in whole seconds. A service that declares one must renew its
@@ -61,11 +62,20 @@
 //!   unit can never be misread.
 //! * `restart=never|on-failure|always` — what the manager does when the
 //!   service exits without being asked to.
+//! * `requires=<condition>[,<condition>…]` — the named readiness conditions
+//!   ([`ReadyCondition`]) the service runs only while: it starts once all
+//!   hold, and is stopped, to start again, when one is withdrawn.
+//! * `provides=<condition>[,<condition>…]` — the conditions the service
+//!   establishes. A provider is `notify`-ready: what it provides holds from
+//!   its readiness announcement until it stops being ready, never from a
+//!   spawn that has established nothing.
 //!
-//! Both default to off (no watchdog, `never`), and an unknown option or
-//! value refuses the whole config rather than being ignored: a
+//! Each defaults to off (no watchdog, `never`, no conditions). An unknown
+//! option or value, a repeated option or condition, or an option on a
+//! `session` refuses the whole config rather than being ignored: a
 //! misspelled liveness interval that silently meant "unwatched" would
-//! disable a defence without saying so.
+//! disable a defence without saying so, and a second `requires=` that
+//! silently replaced the first would drop a gate.
 //!
 //! This is the floor's own description, which is the one place a floor
 //! service's unit metadata has ever lived; a *discovered* bundle carries
@@ -83,8 +93,9 @@
 //! (`plans/USERS.md`).
 
 use core::fmt;
+use core::str::SplitWhitespace;
 
-use tairix_abi::{Duration64, RestartPolicy};
+use tairix_abi::{Duration64, ReadinessKind, ReadyCondition, RestartPolicy};
 use tairix_util::conf::strip_comment;
 
 /// Maximum length, in bytes, of a startup config text [`StartupConfig::parse`]
@@ -144,20 +155,18 @@ pub const REGISTERED_SERVICES: usize = MAX_SERVICES + MAX_ENROLLED_SERVICES + MA
 pub const DEFAULT_CONFIG: &str = "\
 # TAIRiX PID 1 startup configuration (plans/PI.md P6b / P11).
 # Open the system console, launch the System Information, network-stack,
-# device-manager, seat-manager, app-data, and time services, and start the
-# login service as the session — each under its own compiled-in service
-# account (plans/USERS.md). `sysinfod` starts first so the introspection
-# endpoint (`AGENTS.md` §16.6) is published before any client queries it;
-# `netstack` (plans/NETWORK.md) owns the network interfaces and is launched
-# before `devmgr` so it is ready to receive the NIC device channels `devmgr`
-# binds to it; it is the floor's one watchdog holder, because a stack whose
-# serve loop has stopped turning is still a live process — nothing else on
-# the machine notices, every socket simply stops being answered, and the
-# recovery (relaunch, sockets re-established) is one the system can make on
-# its own — which is why it is also the floor's one `on-failure` entry, since
-# detecting a wedge and then leaving the machine without a network stack
-# would be a worse outcome than the wedge. Thirty seconds is far longer than
-# any turn of its loop and far shorter than a user's patience; `seatmgr` (plans/DISPLAY.md D3) holds the seat-multiplexing
+# audio, device-manager, seat-manager, app-data, time, and discovery services,
+# register the font service, and start the login service as the session — each
+# under its own compiled-in service account (plans/USERS.md). `sysinfod`
+# starts first so the introspection endpoint is published before any client
+# queries it; `netstack` (plans/NETWORK.md) owns the network interfaces and is
+# launched before `devmgr` so it is ready to receive the NIC device channels
+# `devmgr` binds to it. It provides `network-up` once its endpoints answer. It
+# is the floor's one watchdog holder, because a wedged stack is still a live
+# process nothing else notices, and so its one `on-failure` entry: detecting a
+# wedge and then leaving the machine without a stack would be worse. Thirty
+# seconds is far longer than any turn of its loop and far shorter than a
+# user's patience. `seatmgr` (plans/DISPLAY.md D3) holds the seat-multiplexing
 # authority; `confd` (plans/APPDATA.md) owns every application's settings
 # store and is a boot-floor service because a headless machine needs it as
 # much as a desktop does — it binds its endpoint straight away and answers a
@@ -173,19 +182,25 @@ pub const DEFAULT_CONFIG: &str = "\
 # administrator's `disable` survives a reboot. It starts after `netstack` so
 # the interfaces exist by the time its first query is due, and needs no
 # readiness gate of its own — a query it cannot send simply fails and its
-# bounded backoff paces the retry. `fontd` (plans/FONT-SERVICE.md) is the one
+# bounded backoff paces the retry. `discoveryd` (plans/ZEROCONF.md) is enrolled
+# for the same reason, and starts at boot because what a segment volunteers
+# arrives over time. Its sockets live in the stack, so it requires
+# `network-up`: a stack relaunch takes it down and brings it back against the
+# new stack. It restarts on failure, since a machine left without it loses
+# every `.local` name without a word. `fontd` (plans/FONT-SERVICE.md) is the one
 # `ondemand` entry: nothing but a graphical consumer ever wants glyphs, so it
 # is registered here and started only when one asks the manager to connect to
 # it — which is what keeps it off a headless machine entirely, and what parks
 # that consumer until the endpoint is answerable instead of racing the bind.
 console
 service /System/Services/sysinfod.app/Run sysinfod
-service /System/Services/netstack.app/Run netstack watchdog=30s restart=on-failure
+service /System/Services/netstack.app/Run netstack watchdog=30s restart=on-failure provides=network-up
 service /System/Services/audiod.app/Run audiod
 service /System/Services/devmgr.app/Run devmgr
 service /System/Services/seatmgr.app/Run seatmgr
 service /System/Services/confd.app/Run confd
 enrolled /System/Services/timed.app/Run timed
+enrolled /System/Services/discoveryd.app/Run discoveryd restart=on-failure requires=network-up
 ondemand /System/Services/fontd.app/Run fontd
 session /System/Services/login.app/Run login
 ";
@@ -308,9 +323,12 @@ pub enum ConfigError {
     /// `watchdog=<n>s` with a non-zero whole-second count.
     MalformedWatchdog,
     /// A directive carried a trailing token that is not a `key=value`
-    /// option, names an option the parser does not define, or gives one an
-    /// unknown value.
+    /// option, names an option the parser does not define for it, or gives
+    /// one an unknown value.
     UnknownOption,
+    /// A directive named the same option, or the same condition within one
+    /// option, twice.
+    RepeatedOption,
 }
 
 impl fmt::Display for ConfigError {
@@ -329,13 +347,14 @@ impl fmt::Display for ConfigError {
             Self::TooManyServices => "startup config declares too many `service` directives",
             Self::MalformedWatchdog => "a startup directive's watchdog option is malformed",
             Self::UnknownOption => "a startup directive names an unknown option",
+            Self::RepeatedOption => "a startup directive repeats an option",
         };
         f.write_str(message)
     }
 }
 
 /// One validated launch entry: the program path, the uid of the
-/// compiled-in system account it runs as, and its liveness interval — all
+/// compiled-in system account it runs as, and its unit metadata — all
 /// resolved at parse time.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Launch<'a> {
@@ -352,6 +371,80 @@ pub struct Launch<'a> {
     /// to. Defaults to [`RestartPolicy::Never`]: a service comes back only
     /// when its own description asks for it.
     pub restart: RestartPolicy,
+    /// The conditions the service runs only while.
+    pub requires: Conditions,
+    /// The conditions the service establishes by announcing readiness.
+    pub provides: Conditions,
+}
+
+impl<'a> Launch<'a> {
+    /// The entry a directive declaring no option parses to.
+    #[must_use]
+    pub const fn plain(path: &'a str, uid: u32) -> Self {
+        Self {
+            path,
+            uid,
+            watchdog: Duration64::ZERO,
+            restart: RestartPolicy::Never,
+            requires: Conditions::NONE,
+            provides: Conditions::NONE,
+        }
+    }
+
+    /// How the service reaches readiness: a provider announces it, since
+    /// what it provides cannot hold before it says so.
+    #[must_use]
+    pub fn readiness(&self) -> ReadinessKind {
+        if self.provides.is_empty() {
+            ReadinessKind::Immediate
+        } else {
+            ReadinessKind::Notify
+        }
+    }
+}
+
+/// A set of named readiness conditions, as a `requires=` or `provides=`
+/// option spells it.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Conditions(u32);
+
+const _: () = assert!(ReadyCondition::ALL.len() <= u32::BITS as usize);
+
+impl Conditions {
+    /// No condition.
+    pub const NONE: Self = Self(0);
+
+    /// Parse a comma-separated list of canonical condition names, refusing
+    /// an unknown or empty name and a repeated one.
+    fn parse(list: &str) -> Result<Self, ConfigError> {
+        let mut set = Self::NONE;
+        for name in list.split(',') {
+            let condition = ReadyCondition::from_name(name).ok_or(ConfigError::UnknownOption)?;
+            let bit = Self::bit(condition);
+            if set.0 & bit != 0 {
+                return Err(ConfigError::RepeatedOption);
+            }
+            set.0 |= bit;
+        }
+        Ok(set)
+    }
+
+    const fn bit(condition: ReadyCondition) -> u32 {
+        1 << condition.as_u16()
+    }
+
+    /// Whether the set names no condition.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The conditions in the set, in wire-discriminant order.
+    pub fn iter(self) -> impl Iterator<Item = ReadyCondition> {
+        ReadyCondition::ALL
+            .into_iter()
+            .filter(move |&condition| self.0 & Self::bit(condition) != 0)
+    }
 }
 
 /// A parsed, validated startup configuration borrowing from its source text.
@@ -395,12 +488,7 @@ impl<'a> StartupConfig<'a> {
     /// whose identities it cannot fully resolve — yields no
     /// [`StartupConfig`].
     pub fn parse(text: &'a str) -> Result<Self, ConfigError> {
-        const EMPTY: Launch<'_> = Launch {
-            path: "",
-            uid: 0,
-            watchdog: Duration64::ZERO,
-            restart: RestartPolicy::Never,
-        };
+        const EMPTY: Launch<'_> = Launch::plain("", 0);
         if text.len() > MAX_CONFIG_LEN {
             return Err(ConfigError::TooLong);
         }
@@ -435,7 +523,7 @@ impl<'a> StartupConfig<'a> {
                     console = true;
                 }
                 "session" => {
-                    let launch = parse_launch(argument.ok_or(ConfigError::MissingArgument)?)?;
+                    let launch = parse_session(argument.ok_or(ConfigError::MissingArgument)?)?;
                     if session.is_some() {
                         return Err(ConfigError::DuplicateDirective);
                     }
@@ -545,36 +633,61 @@ pub fn service_name(path: &str) -> &str {
     path
 }
 
-/// Parse one `session`/`service` argument — `<path> <account>
-/// [watchdog=<n>s]` — into a validated [`Launch`]: the path must be
-/// absolute, the account name must resolve against the compiled-in system
-/// identity, and the only thing that may follow the account is the
-/// watchdog option.
-fn parse_launch(argument: &str) -> Result<Launch<'_>, ConfigError> {
-    let mut fields = argument.split_whitespace();
+/// Parse the `<path> <account>` a launch argument opens with: the path must
+/// be absolute and the account must resolve against the compiled-in system
+/// identity. What follows the account is left in `fields`.
+fn parse_target<'a>(fields: &mut SplitWhitespace<'a>) -> Result<(&'a str, u32), ConfigError> {
     let path = fields.next().ok_or(ConfigError::MissingArgument)?;
     let account = fields.next().ok_or(ConfigError::MissingAccount)?;
-    let mut watchdog = Duration64::ZERO;
-    let mut restart = RestartPolicy::Never;
-    for option in fields {
-        let (key, value) = option.split_once('=').ok_or(ConfigError::UnknownOption)?;
-        match key {
-            "watchdog" => watchdog = parse_watchdog(value)?,
-            "restart" => {
-                restart = RestartPolicy::from_name(value).ok_or(ConfigError::UnknownOption)?;
-            }
-            _ => return Err(ConfigError::UnknownOption),
-        }
-    }
     if !path.starts_with('/') {
         return Err(ConfigError::NotAbsolutePath);
     }
     let uid = tairix_users::system_account_uid(account).ok_or(ConfigError::UnknownAccount)?;
+    Ok((path, uid.0))
+}
+
+/// Parse a `session` argument, which is only its target: the session
+/// supervisor honours none of the unit options.
+fn parse_session(argument: &str) -> Result<Launch<'_>, ConfigError> {
+    let mut fields = argument.split_whitespace();
+    let (path, uid) = parse_target(&mut fields)?;
+    if fields.next().is_some() {
+        return Err(ConfigError::UnknownOption);
+    }
+    Ok(Launch::plain(path, uid))
+}
+
+/// Parse a service argument — `<path> <account> [<key>=<value>…]` — into a
+/// validated [`Launch`], each option at most once.
+fn parse_launch(argument: &str) -> Result<Launch<'_>, ConfigError> {
+    let mut fields = argument.split_whitespace();
+    let (path, uid) = parse_target(&mut fields)?;
+    let mut watchdog = None;
+    let mut restart = None;
+    let mut requires = None;
+    let mut provides = None;
+    for option in fields {
+        let (key, value) = option.split_once('=').ok_or(ConfigError::UnknownOption)?;
+        let repeated = match key {
+            "watchdog" => watchdog.replace(parse_watchdog(value)?).is_some(),
+            "restart" => restart
+                .replace(RestartPolicy::from_name(value).ok_or(ConfigError::UnknownOption)?)
+                .is_some(),
+            "requires" => requires.replace(Conditions::parse(value)?).is_some(),
+            "provides" => provides.replace(Conditions::parse(value)?).is_some(),
+            _ => return Err(ConfigError::UnknownOption),
+        };
+        if repeated {
+            return Err(ConfigError::RepeatedOption);
+        }
+    }
+    let plain = Launch::plain(path, uid);
     Ok(Launch {
-        path,
-        uid: uid.0,
-        watchdog,
-        restart,
+        watchdog: watchdog.unwrap_or(plain.watchdog),
+        restart: restart.unwrap_or(plain.restart),
+        requires: requires.unwrap_or(plain.requires),
+        provides: provides.unwrap_or(plain.provides),
+        ..plain
     })
 }
 
@@ -676,24 +789,20 @@ const fn is_ascii_whitespace(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        service_name, ConfigError, Duration64, Launch, RestartPolicy, StartupConfig,
-        DEFAULT_CONFIG, MAX_CONFIG_LEN, MAX_ENROLLED_SERVICES, MAX_ONDEMAND_SERVICES, MAX_SERVICES,
-        REGISTERED_SERVICES,
+        service_name, Conditions, ConfigError, Duration64, Launch, ReadinessKind, ReadyCondition,
+        RestartPolicy, StartupConfig, DEFAULT_CONFIG, MAX_CONFIG_LEN, MAX_ENROLLED_SERVICES,
+        MAX_ONDEMAND_SERVICES, MAX_SERVICES, REGISTERED_SERVICES,
     };
 
     extern crate alloc;
     use alloc::format;
     use alloc::string::String;
+    use alloc::vec::Vec;
     use core::fmt::Write as _;
 
-    /// The entry a directive with no trailing options parses to.
-    fn plain(path: &'static str, uid: u32) -> Launch<'static> {
-        Launch {
-            path,
-            uid,
-            watchdog: Duration64::ZERO,
-            restart: RestartPolicy::Never,
-        }
+    /// The `requires=`/`provides=` set naming `network-up` alone.
+    fn network_up() -> Conditions {
+        Conditions::parse("network-up").expect("a canonical name")
     }
 
     #[test]
@@ -705,7 +814,7 @@ mod tests {
         // service uid it runs as (`plans/USERS.md`).
         assert_eq!(
             config.session(),
-            plain("/System/Services/login.app/Run", tairix_users::LOGIN_UID.0)
+            Launch::plain("/System/Services/login.app/Run", tairix_users::LOGIN_UID.0)
         );
         // `sysinfod` is launched before `netstack`/`devmgr` so the
         // introspection endpoint is published before any client queries it;
@@ -719,48 +828,59 @@ mod tests {
         assert_eq!(
             config.services(),
             &[
-                plain(
+                Launch::plain(
                     "/System/Services/sysinfod.app/Run",
                     tairix_users::SYSINFOD_UID.0
                 ),
                 // The floor's one watchdog holder, so its options are part
                 // of what the default config is asserted to mean.
                 Launch {
-                    path: "/System/Services/netstack.app/Run",
-                    uid: tairix_users::NETSTACK_UID.0,
                     watchdog: Duration64::from_secs(30),
                     restart: RestartPolicy::OnFailure,
+                    provides: network_up(),
+                    ..Launch::plain(
+                        "/System/Services/netstack.app/Run",
+                        tairix_users::NETSTACK_UID.0,
+                    )
                 },
-                plain(
+                Launch::plain(
                     "/System/Services/audiod.app/Run",
                     tairix_users::AUDIOD_UID.0
                 ),
-                plain(
+                Launch::plain(
                     "/System/Services/devmgr.app/Run",
                     tairix_users::DEVMGR_UID.0
                 ),
-                plain(
+                Launch::plain(
                     "/System/Services/seatmgr.app/Run",
                     tairix_users::SEATMGR_UID.0
                 ),
-                plain("/System/Services/confd.app/Run", tairix_users::CONFD_UID.0),
+                Launch::plain("/System/Services/confd.app/Run", tairix_users::CONFD_UID.0),
             ],
         );
-        // The enrolment-governed tier: `timed` alone, so a user who turns
-        // automatic time-setting off keeps it off across a reboot.
+        // The enrolment-governed tier, so a user who turns automatic
+        // time-setting or link-local discovery off keeps it off across a
+        // reboot.
         assert_eq!(
             config.enrolled(),
-            &[plain(
-                "/System/Services/timed.app/Run",
-                tairix_users::TIMED_UID.0
-            )],
+            &[
+                Launch::plain("/System/Services/timed.app/Run", tairix_users::TIMED_UID.0),
+                Launch {
+                    restart: RestartPolicy::OnFailure,
+                    requires: network_up(),
+                    ..Launch::plain(
+                        "/System/Services/discoveryd.app/Run",
+                        tairix_users::DISCOVERYD_UID.0,
+                    )
+                },
+            ],
         );
         // The on-demand tier: `fontd` alone. It is on neither list above,
         // which is the whole point — nothing starts it at boot, so a
         // headless machine never runs it at all.
         assert_eq!(
             config.ondemand(),
-            &[plain(
+            &[Launch::plain(
                 "/System/Services/fontd.app/Run",
                 tairix_users::FONTD_UID.0
             )],
@@ -811,11 +931,11 @@ mod tests {
         assert_eq!(
             config.services(),
             &[
-                plain(
+                Launch::plain(
                     "/System/Services/devmgr.app/Run",
                     tairix_users::DEVMGR_UID.0
                 ),
-                plain("/System/Services/netd", tairix_users::SYSINFOD_UID.0),
+                Launch::plain("/System/Services/netd", tairix_users::SYSINFOD_UID.0),
             ],
         );
     }
@@ -888,10 +1008,9 @@ mod tests {
         assert_eq!(
             config.services(),
             &[Launch {
-                path: "/a.app/Run",
-                uid: tairix_users::NETSTACK_UID.0,
                 watchdog: Duration64::from_secs(30),
                 restart: RestartPolicy::OnFailure,
+                ..Launch::plain("/a.app/Run", tairix_users::NETSTACK_UID.0)
             }],
         );
 
@@ -932,6 +1051,64 @@ mod tests {
     }
 
     #[test]
+    fn condition_options_parse_into_sets_and_make_a_provider_notify_ready() {
+        let text = "console\n\
+                    service /a.app/Run netstack provides=network-up\n\
+                    service /b.app/Run discoveryd requires=seat-available,network-up\n\
+                    service /c.app/Run sysinfod\n\
+                    session /x login\n";
+        let config = StartupConfig::parse(text).expect("condition options parse");
+        let [provider, requirer, plain] = config.services() else {
+            panic!("three services");
+        };
+        assert_eq!(provider.provides, network_up());
+        assert!(provider.requires.is_empty());
+        assert_eq!(provider.readiness(), ReadinessKind::Notify);
+        assert_eq!(
+            requirer.requires.iter().collect::<Vec<_>>(),
+            [ReadyCondition::NetworkUp, ReadyCondition::SeatAvailable],
+        );
+        assert_eq!(requirer.readiness(), ReadinessKind::Immediate);
+        assert_eq!(plain.readiness(), ReadinessKind::Immediate);
+    }
+
+    #[test]
+    fn a_malformed_or_repeated_option_refuses_the_whole_config() {
+        for (option, refusal) in [
+            ("requires=network_up", ConfigError::UnknownOption),
+            ("requires=", ConfigError::UnknownOption),
+            ("requires=network-up,", ConfigError::UnknownOption),
+            ("provides=,network-up", ConfigError::UnknownOption),
+            (
+                "requires=network-up,network-up",
+                ConfigError::RepeatedOption,
+            ),
+            (
+                "requires=network-up requires=seat-available",
+                ConfigError::RepeatedOption,
+            ),
+            ("restart=never restart=always", ConfigError::RepeatedOption),
+            ("watchdog=1s watchdog=1s", ConfigError::RepeatedOption),
+        ] {
+            let text =
+                alloc::format!("console\nservice /a.app/Run netstack {option}\nsession /x login\n");
+            assert_eq!(StartupConfig::parse(&text), Err(refusal), "{option}");
+        }
+    }
+
+    #[test]
+    fn a_session_carries_no_unit_option() {
+        for option in ["restart=never", "watchdog=5s", "requires=network-up"] {
+            let text = alloc::format!("console\nsession /x login {option}\n");
+            assert_eq!(
+                StartupConfig::parse(&text),
+                Err(ConfigError::UnknownOption),
+                "{option}"
+            );
+        }
+    }
+
+    #[test]
     fn max_services_is_the_boot_floor_service_count() {
         // The bound is derived from the floor itself, so the compiled-in
         // floor exactly fills it: the `const` tokeniser and the real parser
@@ -943,9 +1120,10 @@ mod tests {
         // confd; this pins the derived value so a change to the floor is a
         // conscious one.
         assert_eq!(MAX_SERVICES, 6);
-        // The same derivation over the `enrolled` keyword: `timed` alone.
+        // The same derivation over the `enrolled` keyword: `timed` and
+        // `discoveryd`.
         assert_eq!(floor.enrolled().len(), MAX_ENROLLED_SERVICES);
-        assert_eq!(MAX_ENROLLED_SERVICES, 1);
+        assert_eq!(MAX_ENROLLED_SERVICES, 2);
         // And over `ondemand`: `fontd` alone.
         assert_eq!(floor.ondemand().len(), MAX_ONDEMAND_SERVICES);
         assert_eq!(MAX_ONDEMAND_SERVICES, 1);
@@ -967,7 +1145,7 @@ mod tests {
         .expect("an on-demand directive parses");
         assert_eq!(
             config.ondemand(),
-            &[plain(
+            &[Launch::plain(
                 "/System/Services/fontd.app/Run",
                 tairix_users::FONTD_UID.0
             )],

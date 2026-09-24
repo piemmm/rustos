@@ -1,0 +1,30 @@
+[package]
+name = "tairix-discovery"
+description = "TAIRiX link-local service discovery client: sessions, typed requests and incremental answers over the `discovery-v1` channel to `discoveryd` (`plans/ZEROCONF.md` Z4)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The production transport and the doorbell park are an optional build
+# feature that pulls the freestanding userland runtime; the pure session
+# client and its host tests never do. Mirrors `lib/resolver`.
+[features]
+program = ["dep:tairix-rt"]
+
+[dependencies]
+# The one wire definition of the channel: requests, replies, entries, the
+# doorbell, and the service account a doorbell is authenticated by.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# Fallible allocation for the session's buffers.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+# For the `program` feature only: the IPC call, the private delivery port and
+# wait-set the doorbell parks on, and the clock.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }

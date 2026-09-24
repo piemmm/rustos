@@ -218,6 +218,7 @@ struct Subsystems {
     sched: &'static Scheduler<Aarch64BinArch>,
     arch: &'static Aarch64BinArch,
     caps: &'static RwLock<CapTable>,
+    peer_watch: &'static tairix_kernel_core::PeerWatch,
     aspaces: &'static RwLock<AddressSpaceRegistry>,
     irq_table: &'static IrqTable,
 }
@@ -257,6 +258,7 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
             counter_hz,
         )))),
         caps: Box::leak(Box::new(RwLock::new(CapTable::new()))),
+        peer_watch: Box::leak(Box::new(tairix_kernel_core::PeerWatch::new())),
         aspaces: Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new()))),
         irq_table: Box::leak(Box::new(IrqTable::new(0))),
     }
@@ -383,6 +385,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         None,
         sys.aspaces,
         sys.caps,
+        sys.peer_watch,
         &NULL_PROCESS_WAIT,
         &AARCH64_PROCESS_SPAWN,
     );
@@ -391,6 +394,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         &SERIAL_SINK,
         sys.sched,
         sys.caps,
+        sys.peer_watch,
         sys.aspaces,
         sys.arch,
         &NULL_PROCESS_WAIT,

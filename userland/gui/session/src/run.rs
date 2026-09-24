@@ -2476,8 +2476,11 @@ mod program {
                 && keyboard.repeat_due(tairix_rt::clock_get());
             if repeat_due {
                 token = SEAT_TOKEN;
-            } else if waited != 0 {
-                if Errno::from_syscall(waited) != Errno::TimedOut {
+            } else if waited != 0 || idle.is_due(tairix_rt::clock_get()) {
+                // An idle deadline is served on whatever wake finds it passed,
+                // so a client that keeps the loop busy cannot hold the lock
+                // off; the member that woke re-reports on the next wait.
+                if waited != 0 && Errno::from_syscall(waited) != Errno::TimedOut {
                     // A dead wait-set would degrade the loop into a busy poll;
                     // exit fail-loud instead and let the supervisor decide.
                     return fail(EXIT_WAIT_FAILED, "seat wait failed");
@@ -2502,13 +2505,18 @@ mod program {
                 // Idleness produces no event, so this is where it is acted on.
                 while let Some(action) = idle.due(now_ns) {
                     match action {
-                        IdleAction::Lock => lock_screen(
-                            &mut lock,
-                            (&mut confirm, &mut elevate),
-                            (account, shown_name),
-                            &mut shell,
-                            &mut compositor,
-                        ),
+                        IdleAction::Lock => {
+                            lock_screen(
+                                &mut lock,
+                                (&mut confirm, &mut elevate),
+                                (account, shown_name),
+                                &mut shell,
+                                &mut compositor,
+                            );
+                            if !lock.is_locked() {
+                                idle.lock_refused(now_ns);
+                            }
+                        }
                         IdleAction::StartScreensaver => {
                             let screen = compositor.screen_rect();
                             let settings = desktop.settings();
@@ -2527,6 +2535,8 @@ mod program {
                         }
                     }
                 }
+                saver.keep_topmost(&mut compositor);
+                lock.keep_topmost(&mut compositor, saver.window());
                 if let Some(source) =
                     saver
                         .due_slide(now_ns, wallpaper_catalog.len())
@@ -2587,9 +2597,9 @@ mod program {
             // the seat member ready for as long as it moved and every
             // application blocked in a window call would hang until it
             // stopped.
-            // Seat input, a held key's repeat included, is what idleness is
-            // counted from.
-            if token == SEAT_TOKEN {
+            // Idleness is counted from real seat input: a repeat the session
+            // makes up for a held key would let a stuck key hold the lock off.
+            if token == SEAT_TOKEN && !repeat_due {
                 idle.input(tairix_rt::clock_get());
             }
             if token == WINDOW_TOKEN {

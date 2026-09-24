@@ -103,6 +103,12 @@ SECTIONS
         boot_stack_bottom = .;
         . += BOOT_STACK_BYTES;
         boot_stack_top = .;
+        /* The boot CPU's descriptor tables, which `boot.s` hands to the
+         * entry: sized by the `boot_tables_bytes` symbol the port defines
+         * from the type itself. */
+        . = ALIGN(16);
+        boot_tables = .;
+        . += boot_tables_bytes;
     }
 
     . = ALIGN(4K);
@@ -119,6 +125,7 @@ SECTIONS
      * path reads it long after the trampoline has left the identity map
      * behind. */
     boot_stack_guard_bottom_high = boot_stack_guard_bottom + KERNEL_VMA_BASE;
+    boot_tables_high = boot_tables + KERNEL_VMA_BASE;
 
     /* Switch the location counter (VMA) into the higher half. Each section
      * below maps its LMA back to the contiguous low physical image with an

@@ -56,6 +56,7 @@ use crate::appspawn::AppStore;
 use crate::aspace::AddressSpaceRegistry;
 use crate::bootinfo::KernelArch;
 use crate::fs::FilesystemService;
+use crate::peerwatch::PeerWatch;
 use crate::procwait::ProcessWait;
 use crate::spawn::ArchImageBuilder;
 
@@ -152,6 +153,7 @@ pub struct SpawnServices {
     app_store: Option<&'static AppStore>,
     aspaces: &'static RwLock<AddressSpaceRegistry>,
     caps: &'static RwLock<CapTable>,
+    peer_watch: &'static PeerWatch,
     process_wait: &'static (dyn ProcessWait + 'static),
     image_builder: &'static (dyn ArchImageBuilder + 'static),
     runtime: &'static (dyn SpawnRuntime + 'static),
@@ -178,6 +180,8 @@ impl SpawnServices {
     /// * `caps` — the capability table the child's loading record lives in
     ///   and whose empty set the body replaces with the derived effective
     ///   set before the child enters user mode.
+    /// * `peer_watch` — the peer-exit watches a child that fails to load
+    ///   fires as its record leaves the table.
     /// * `process_wait` — the parent/child wait producer.
     /// * `image_builder` — the architecture image builder that produces the
     ///   child's isolated address space from the verified `rxe`.
@@ -195,6 +199,7 @@ impl SpawnServices {
         app_store: Option<&'static AppStore>,
         aspaces: &'static RwLock<AddressSpaceRegistry>,
         caps: &'static RwLock<CapTable>,
+        peer_watch: &'static PeerWatch,
         process_wait: &'static (dyn ProcessWait + 'static),
         image_builder: &'static (dyn ArchImageBuilder + 'static),
         runtime: &'static (dyn SpawnRuntime + 'static),
@@ -207,6 +212,7 @@ impl SpawnServices {
             app_store,
             aspaces,
             caps,
+            peer_watch,
             process_wait,
             image_builder,
             runtime,
@@ -255,6 +261,12 @@ impl SpawnServices {
     #[must_use]
     pub fn caps(&self) -> &'static RwLock<CapTable> {
         self.caps
+    }
+
+    /// The peer-exit watches the child's record fires as it leaves.
+    #[must_use]
+    pub fn peer_watch(&self) -> &'static PeerWatch {
+        self.peer_watch
     }
 
     /// The parent/child wait producer.
@@ -346,6 +358,7 @@ pub fn install_over<A: KernelArch + 'static>(
     app_store: Option<&'static AppStore>,
     aspaces: &'static RwLock<AddressSpaceRegistry>,
     caps: &'static RwLock<CapTable>,
+    peer_watch: &'static PeerWatch,
     process_wait: &'static (dyn ProcessWait + 'static),
     image_builder: &'static (dyn ArchImageBuilder + 'static),
 ) -> &'static SpawnServices {
@@ -360,6 +373,7 @@ pub fn install_over<A: KernelArch + 'static>(
             app_store,
             aspaces,
             caps,
+            peer_watch,
             process_wait,
             image_builder,
             runtime,
@@ -449,6 +463,7 @@ mod tests {
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
             Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let peers: &'static PeerWatch = Box::leak(Box::new(PeerWatch::new()));
         let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
         Box::leak(Box::new(SpawnServices::new(
             frames,
@@ -458,6 +473,7 @@ mod tests {
             None,
             aspaces,
             caps,
+            peers,
             &NULL_PROCESS_WAIT,
             builder,
             runtime,

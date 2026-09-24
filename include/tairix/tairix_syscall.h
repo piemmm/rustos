@@ -153,6 +153,7 @@ extern "C" {
 #define TAIRIX_SYS_SHM_CREATE_DMA 127u
 #define TAIRIX_SYS_SHM_GRANT_PEER 128u
 #define TAIRIX_SYS_CALL_PEER_HOLDS 129u
+#define TAIRIX_SYS_PEER_WATCH 130u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -319,6 +320,15 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_SIGNAL_INTAKE_OP_DISABLE 1u
 #define TAIRIX_SIGNAL_INTAKE_OP_TAKE 2u
 
+/* peer_watch() operations (the `op` argument, uint32_t). A watched process
+* instance's exit is waited on through a wait-set member of kind
+* TAIRIX_WAIT_SOURCE_PEER_EXIT (id 0) and taken, oldest first, with the take
+* operation. Watching an instance that has already exited is refused with
+* TAIRIX_E_NOT_FOUND, so no exit is ever missed. */
+#define TAIRIX_PEER_WATCH_OP_WATCH 0u
+#define TAIRIX_PEER_WATCH_OP_UNWATCH 1u
+#define TAIRIX_PEER_WATCH_OP_TAKE 2u
+
 /* sched_set_priority() service levels (the `priority` argument, uint32_t),
 * also carried in tairix_process_record.priority. 0 is reserved and never
 * valid; a value outside this set is rejected with TAIRIX_E_OUT_OF_RANGE.
@@ -356,6 +366,7 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_WAIT_SOURCE_SYSTEM_NOTICE 9u
 #define TAIRIX_WAIT_SOURCE_PORT_ROOM 10u
 #define TAIRIX_WAIT_SOURCE_STREAM_ROOM 11u
+#define TAIRIX_WAIT_SOURCE_PEER_EXIT 12u
 
 /* System notice topics (the `topic` argument of notice_read() and
 * notice_publish(), uint32_t) and each topic's exact payload length. A topic
@@ -536,6 +547,7 @@ uint64_t tairix_sys_dma_quiesced(void);
 uint64_t tairix_sys_shm_create_dma(uint64_t a0, uintptr_t a1, void * a2, void * a3);
 uint64_t tairix_sys_shm_grant_peer(uint64_t a0, uint64_t a1, uint64_t a2);
 int32_t tairix_sys_call_peer_holds(uint64_t a0, uint64_t a1, void * a2);
+int32_t tairix_sys_peer_watch(uint32_t a0, void * a1, uintptr_t a2);
 
 #ifdef __cplusplus
 } /* extern "C" */

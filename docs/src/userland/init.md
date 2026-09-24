@@ -105,9 +105,22 @@ and releases a dependent only once every dependency it names is
   providing service becomes ready or when the manager/kernel signals it
   through `Init::satisfy_condition`. Conditions decouple readiness from a
   service name — a client requires `network-up` without naming `netstack`.
+  A provided condition holds only while a provider is ready, so a service
+  requiring it runs only while it holds: when the last ready provider stops
+  being ready — it exits, is killed as wedged, or is stopped — the condition
+  is withdrawn (`CONDITION_WITHDRAWN`), and every live service requiring it,
+  with what names it as a dependency, is stopped and **held**: its exit
+  returns it to `inactive`, and it is admitted again once the condition next
+  holds. A hold spends no restart budget. A condition asserted through
+  `satisfy_condition` is never withdrawn. A stop or a shutdown is final: it
+  cancels a pending restart, admission, or hold, so a stopped service comes
+  back only when started by name.
   A condition is only ever satisfied by a principal that genuinely knows it:
-  `display-present` has no truthful producer today (`seatmgr` and `devmgr`
-  both reach ready on a headless machine), so nothing declares it. The
+  `netstack` provides `network-up` by announcing readiness once its endpoints
+  are bound, which is what `discoveryd` requires, since its sockets live in
+  the stack and a stack relaunch takes them with it. `display-present` has no
+  truthful producer today (`seatmgr` and `devmgr` both reach ready on a
+  headless machine), so nothing declares it. The
   headless guarantee for a GUI-only service does not rest on a condition
   anyway — it is `on-demand`, so a machine where nothing graphical runs never
   activates it (`AGENTS.md` §17.3).
@@ -434,8 +447,10 @@ The floor's one holder is `netstack` (`watchdog=30s restart=on-failure`). A
 stack whose serve loop has stopped turning is still a live process, so
 nothing else on the machine notices: every socket simply stops being
 answered. Detecting that and then leaving the machine with no network stack
-would be the worse outcome, which is why it is also the floor's one
-`on-failure` entry.
+would be the worse outcome, which is why it is also an `on-failure` entry.
+It learns its interval from the reply to its readiness announcement, and its
+relaunch withdraws `network-up`, so what requires it is brought back against
+the new stack.
 
 The live path is proven end to end by the aarch64 liveness-watchdog QEMU
 vertical, which boots the production pipeline against a disk whose
@@ -492,6 +507,7 @@ plumbing and exhaustively testable.
 | 9009 | `CONDITION_SATISFIED`  | Info  | a named readiness condition became satisfied  |
 | 9010 | `NOTIFY_REJECTED`      | Warn  | a readiness notice matched no starting service, or named a non-starting one |
 | 9011 | `SERVICE_NOT_ENROLLED` | Info  | a discovered bundle was skipped because it is not enrolled |
+| 9029 | `CONDITION_WITHDRAWN`  | Info  | the last ready provider of a condition stopped being ready, so what requires it is held |
 
 (On-demand-activation and stop/linger events `9012`–`9017`, the restart and
 scope events `9018`–`9020`, the control-surface events `9021`
@@ -572,13 +588,20 @@ account its program runs as, resolved to a uid at parse time:
   and idle-stops it afterwards. Optional and repeatable. Such a service is
   necessarily `notify`-ready (see *On-demand activation* above).
 
+A `service`, `enrolled`, or `ondemand` directive may follow its account with
+`key=value` options, the floor's unit metadata: `watchdog=<n>s`,
+`restart=never|on-failure|always`, `requires=<condition>[,…]`, and
+`provides=<condition>[,…]`. A provider is `notify`-ready, since what it
+provides cannot hold before it announces it. A `session` takes none.
+
 Because the config is the first thing a freshly spawned program reads, the
 parser treats it as untrusted input (`AGENTS.md` §19.5): it is
 allocation-free, borrows from its source text, and **fails closed** with a
 `ConfigError` — refusing an unknown or duplicated directive, a directive
-given the wrong argument, a non-absolute `session` path, an over-long
-config, or an omitted required directive — rather than guess at a
-malformed intent (`AGENTS.md` §2.9, §5.4.5).
+given the wrong argument, a non-absolute `session` path, an unknown,
+malformed, or repeated option, an over-long config, or an omitted required
+directive — rather than guess at a malformed intent (`AGENTS.md` §2.9,
+§5.4.5).
 
 ### Boot-floor services and session supervision (`plans/PI.md` P6e-3b-ii, `plans/NEW-SERVICEMANAGER.md` SVC-A)
 
@@ -591,7 +614,8 @@ First it registers each `service` directive with the engine — named by its
 `.app` bundle stem, run as the account the directive resolved — and calls
 `start_all`, which brings them up in dependency order through the
 readiness-gated admission engine above (the floor declares no dependencies,
-so all start immediately). PID 1 names only each service's binary and its
+so all start at once but `discoveryd`, which waits for `netstack` to
+announce `network-up`). PID 1 names only each service's binary and its
 account; the kernel — the single capability authority — verifies the signed
 bundle and grants `manifest ∩ ceiling` at load time. A service the kernel
 refuses to launch is reported on `stderr` and skipped, and the boot

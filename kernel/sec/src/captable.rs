@@ -1111,6 +1111,13 @@ pub struct CapTable {
     /// machine, which is what a system under load would actually pay. The two
     /// indices are only ever updated together, by the four mutators below.
     members: BTreeMap<ProcessId, BTreeSet<TaskId>>,
+    /// Each live process instance, by the [`ProcId`] its record carries.
+    ///
+    /// The one authority for whether an instance still exists, because it
+    /// changes under the same lock as the record: a caller that finds an
+    /// instance here while holding the table has found one whose teardown has
+    /// not yet removed it.
+    instances: BTreeMap<ProcId, ProcessId>,
 }
 
 /// Why registering a thread against a process was refused.
@@ -1138,6 +1145,7 @@ impl CapTable {
             entries: BTreeMap::new(),
             threads: BTreeMap::new(),
             members: BTreeMap::new(),
+            instances: BTreeMap::new(),
         }
     }
 
@@ -1162,10 +1170,14 @@ impl CapTable {
         let process = caps.process();
         if let Some(previous) = self.entries.get(&process) {
             caps.adopt_io_counters(previous);
+            self.instances.remove(&previous.proc_id());
         }
         let leader = process.leader_task();
         self.threads.insert(leader, process);
         self.members.entry(process).or_default().insert(leader);
+        if !caps.proc_id().is_kernel() {
+            self.instances.insert(caps.proc_id(), process);
+        }
         self.entries.insert(process, caps)
     }
 
@@ -1341,20 +1353,13 @@ impl CapTable {
     /// "no distinct process instance" and every kernel thread shares it, so it
     /// names no one process (fail closed).
     ///
-    /// Linear over the live records, and deliberately not indexed: the one
-    /// caller is `fd_grant`, which mints once per picker choice or blob open
-    /// and is audited, so a second map keyed the other way would be a copy of
-    /// a fact this table already holds. A caller that needs this per
-    /// dispatch has the wrong shape, not a missing index.
+    /// Indexed, because a watch on a peer's exit asks it once per client a
+    /// service holds state for, and the answer has to be taken under the
+    /// same lock that removes a record, or an exit could slip between a
+    /// watch's check and its registration.
     #[must_use]
     pub fn process_of_instance(&self, instance: ProcId) -> Option<ProcessId> {
-        if instance.is_kernel() {
-            return None;
-        }
-        self.entries
-            .values()
-            .find(|record| record.proc_id() == instance)
-            .map(TaskCapabilities::process)
+        self.instances.get(&instance).copied()
     }
 
     /// Detach one exiting `thread` from its process, returning the process it
@@ -1398,7 +1403,9 @@ impl CapTable {
                 self.threads.remove(&thread);
             }
         }
-        self.entries.remove(&process)
+        let removed = self.entries.remove(&process)?;
+        self.instances.remove(&removed.proc_id());
+        Some(removed)
     }
 
     /// Iterate every registered **process's** attested capability record, in
@@ -1690,6 +1697,42 @@ mod tests {
         // The identity is attribution, never authority: attaching it grants
         // nothing.
         assert_eq!(admitted.effective(), base.effective());
+    }
+
+    /// The instance index follows the record exactly: found while the record
+    /// stands, re-pointed when a replacement carries another instance, gone
+    /// with the record — and the kernel sentinel is never an instance.
+    #[test]
+    fn a_live_instance_is_found_by_its_proc_id_until_its_record_goes() {
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let record = |process: u64, id: u8| {
+            TaskCapabilities::derive(ProcessId(process), UserId(1000), grant, grant, &sink)
+                .with_proc_id(ProcId::from_raw([id; 16]))
+        };
+        let mut table = CapTable::new();
+        table.insert(record(60, 1));
+        assert_eq!(
+            table.process_of_instance(ProcId::from_raw([1; 16])),
+            Some(ProcessId(60))
+        );
+
+        // A placeholder replaced by a record carrying a fresh instance.
+        table.insert(record(60, 2));
+        assert_eq!(table.process_of_instance(ProcId::from_raw([1; 16])), None);
+        assert_eq!(
+            table.process_of_instance(ProcId::from_raw([2; 16])),
+            Some(ProcessId(60))
+        );
+
+        table.remove(ProcessId(60));
+        assert_eq!(table.process_of_instance(ProcId::from_raw([2; 16])), None);
+
+        table.insert(
+            TaskCapabilities::derive(ProcessId(61), UserId(0), grant, grant, &sink)
+                .with_proc_id(ProcId::KERNEL),
+        );
+        assert_eq!(table.process_of_instance(ProcId::KERNEL), None);
     }
 
     /// A sandbox child is stripped of every capability, and an audit consumer

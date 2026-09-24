@@ -89,10 +89,17 @@ mod program {
     /// Wait-set member token of the socket (data-plane control) endpoint.
     const SOCKET_TOKEN: u64 = 2;
 
+    /// Wait-set member token of the exits of the principals holding sockets.
+    const PEER_EXIT_TOKEN: u64 = 3;
+
+    /// Wait-set member token of room in every delivery port still owed a
+    /// link event it had no room for.
+    const PORT_ROOM_TOKEN: u64 = 4;
+
     /// First wait-set token of a bound NIC channel's notify port. Channel
     /// slot `i` (`0..MAX_CHANNELS`) owns `CHANNEL_TOKEN_BASE + i`, so a
     /// wake's token names its slot directly.
-    const CHANNEL_TOKEN_BASE: u64 = 3;
+    const CHANNEL_TOKEN_BASE: u64 = 5;
 
     /// Most NIC device channels the stack serves at once — the reserved
     /// device-channel endpoint block's width (a fixed shared-resource bound,
@@ -260,6 +267,18 @@ mod program {
         {
             return Err("the socket endpoint could not be watched");
         }
+        // A principal that exits holding sockets never closes them, so its
+        // exit is what frees their ports, groups, and buffers.
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::PeerExit,
+            0,
+            PEER_EXIT_TOKEN,
+        ) != 0
+        {
+            return Err("the exits of socket holders could not be watched");
+        }
         Ok(set)
     }
 
@@ -312,14 +331,15 @@ mod program {
         let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
         let mut reply = [0u8; NETSTACK_MAX_REPLY];
         let mut socket_reply = [0u8; SOCKET_MAX_REPLY];
-        // Ask the manager whether this stack is under a liveness watchdog
-        // and, if so, at what interval. `attach` rather than an announcement
-        // because the floor starts this service `immediate`-ready: the
-        // manager already considers it running, so it has no readiness edge
-        // left to announce. A stack the manager is not watching arms
-        // nothing and never calls again.
-        let mut watchdog = Watchdog::attach(span_nanos(now()));
+        // Every endpoint is bound, so announce readiness: it establishes
+        // `network-up` for the services that run only while the stack does,
+        // and the reply carries the liveness interval this stack is held to.
+        let mut watchdog = Watchdog::announce_ready(span_nanos(now()));
+        let mut rooms: Vec<u64> = Vec::new();
         loop {
+            // Whatever the last event was, a link it moved is told to the
+            // sockets whose memberships ride it before anything else is.
+            publish_links(&mut stack, &mut sockets, set, &mut rooms);
             // Renew before computing the park, so a deadline that has just
             // lapsed is renewed now rather than yielding a zero timeout the
             // loop would spin on.
@@ -372,6 +392,9 @@ mod program {
                     &mut origin_buf,
                     &mut socket_reply,
                 ),
+                PEER_EXIT_TOKEN => reclaim_exited(&mut stack, &mut sockets, &mut channels, &secret),
+                // The owed link events go out at the top of the loop.
+                PORT_ROOM_TOKEN => {}
                 other => serve_notify(&mut stack, &mut sockets, &mut channels, &secret, other),
             }
         }
@@ -744,6 +767,17 @@ mod program {
             now(),
         ) {
             Ok(out) => {
+                // A socket is only handed to a principal whose exit will be
+                // heard: one that is already gone, or cannot be watched, has
+                // what it was just given taken back.
+                if let Some(owner) = out.watch {
+                    if let Err(err) = tairix_rt::peer_watch(owner) {
+                        let tx = sockets.reclaim_owner(stack, owner, now());
+                        transmit_batch(stack, sockets, channels, secret, &tx);
+                        reply_error(NETSTACK_SOCKET_ENDPOINT, ticket, err);
+                        return;
+                    }
+                }
                 let _ = tairix_rt::call_reply(NETSTACK_SOCKET_ENDPOINT, ticket, &reply[..out.len]);
                 // An `Accept` hands back the bytes the connection already
                 // buffered (its one-shot Connected and any early data); send
@@ -757,6 +791,66 @@ mod program {
                 transmit_batch(stack, sockets, channels, secret, &out.tx);
             }
             Err(err) => reply_error(NETSTACK_SOCKET_ENDPOINT, ticket, err),
+        }
+    }
+
+    /// Free what every principal that has exited still held: each watched
+    /// holder's sockets, ports, group memberships, and connections.
+    fn reclaim_exited(
+        stack: &mut Netstack,
+        sockets: &mut SocketService,
+        channels: &mut [Option<Channel>],
+        secret: &CryptoCookieSecret,
+    ) {
+        while let Ok(owner) = tairix_rt::peer_exit_take() {
+            let tx = sockets.reclaim_owner(stack, owner, now());
+            transmit_batch(stack, sockets, channels, secret, &tx);
+        }
+    }
+
+    /// Publish the links, tell each socket whose memberships ride one what
+    /// moved, and park on room in exactly the delivery ports that could not
+    /// take it all, so a link event is late but never lost.
+    fn publish_links(
+        stack: &mut Netstack,
+        sockets: &mut SocketService,
+        set: u64,
+        rooms: &mut Vec<u64>,
+    ) {
+        stack.publish_links();
+        let blocked = sockets.tell_links(stack.links(), stack.link_epoch(), &mut |port, frame| {
+            match tairix_rt::ipc_send(port, frame) {
+                0 => Ok(()),
+                ret => Err(Errno::from_syscall(ret)),
+            }
+        });
+        rooms.retain(|port| {
+            let owed = blocked.contains(port);
+            if !owed {
+                let _ = tairix_rt::waitset_ctl(
+                    set,
+                    WaitSetOp::Del,
+                    WaitSourceKind::PortRoom,
+                    *port,
+                    PORT_ROOM_TOKEN,
+                );
+            }
+            owed
+        });
+        for port in blocked {
+            if rooms.contains(&port) || rooms.try_reserve(1).is_err() {
+                continue;
+            }
+            let armed = tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::PortRoom,
+                port,
+                PORT_ROOM_TOKEN,
+            ) == 0;
+            if armed {
+                rooms.push(port);
+            }
         }
     }
 

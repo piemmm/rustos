@@ -39,6 +39,9 @@ tairix-qemu = { path = "../../../tools/qemu", version = "=0.0.0" }
 # store-side verifier go through the same wrapped primitives. `lib/crypto` is
 # the one crate in the workspace that names a cryptographic dependency.
 tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0", optional = true }
+# The RFC 6335 service-type grammar a manifest's `browses` entries are held
+# to, from the one crate that defines it.
+tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
 
 [dev-dependencies]
 # Build a real flattened device tree (the same fixture the `lib/fdt` unit

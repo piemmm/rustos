@@ -101,16 +101,7 @@ impl ProcId {
     /// not allocate). The returned `&str` borrows `out`.
     #[must_use]
     pub fn write_hex(self, out: &mut [u8; PROC_ID_HEX_LEN]) -> &str {
-        const DIGITS: &[u8; 16] = b"0123456789abcdef";
-        let mut i = 0;
-        while i < PROC_ID_LEN {
-            out[i * 2] = DIGITS[(self.0[i] >> 4) as usize];
-            out[i * 2 + 1] = DIGITS[(self.0[i] & 0x0f) as usize];
-            i += 1;
-        }
-        // SAFETY: every byte written above is an ASCII hex digit, so `out`
-        // is valid UTF-8.
-        core::str::from_utf8(out).unwrap_or("")
+        crate::hex::encode(&self.0, out)
     }
 }
 

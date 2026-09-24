@@ -93,8 +93,8 @@ mod program {
     use tairix_caps::CapabilitySet;
     use tairix_init::{
         enrol, ActivateError, ActivationOutcome, AuthorityScope, ClientId, ControlError, Enrolment,
-        EnrolmentOverride, Init, InitConfig, LoopReaper, NotifyError, ParkOutcome, Pid,
-        ReapedChild, ServiceSender, ServiceSpec, Spawner, Stopper,
+        EnrolmentOverride, FailedService, Init, InitConfig, LoopReaper, NotifyError, ParkOutcome,
+        Pid, ReapedChild, ServiceSender, ServiceSpec, Spawner, Stopper,
     };
     use tairix_rt::io::{Stderr, Stdout, Write};
     use tairix_rt::LogSink;
@@ -216,14 +216,31 @@ mod program {
     /// The manager's spec for one floor-description entry.
     ///
     /// The directive is the floor's unit metadata, so everything it
-    /// declares — the account, the liveness interval, the restart policy —
-    /// is applied here rather than special-cased per service. A discovered
-    /// bundle takes the same fields from its own signed manifest through
-    /// `ServiceSpec::from_manifest`, so the two paths agree by shape.
+    /// declares — the account, the liveness interval, the restart policy,
+    /// the conditions — is applied here rather than special-cased per
+    /// service. A discovered bundle takes the same fields from its own
+    /// signed manifest through `ServiceSpec::from_manifest`, so the two paths
+    /// agree by shape.
     fn floor_spec(entry: &FloorEntry<'_>) -> ServiceSpec {
         ServiceSpec::new(service_name(entry.path), entry.path, entry.uid, Vec::new())
             .with_watchdog(entry.watchdog)
             .with_restart(entry.restart)
+            .with_readiness(entry.readiness())
+            .requiring(entry.requires.iter().collect::<Vec<_>>())
+            .providing(entry.provides.iter().collect::<Vec<_>>())
+    }
+
+    /// State on the diagnostic stream each service an admission pass could
+    /// not bring up, and carry on: one refused service (a stale or mis-signed
+    /// bundle) must not take the rest of the system down with it. The audit
+    /// log already carries each refusal; this makes it visible at the console.
+    fn state_refused(failed: &[FailedService], what: &str) {
+        for service in failed {
+            let _ = Stderr.write_fmt(format_args!(
+                "init: service {} not {what} ({:?}); continuing without it\n",
+                service.name, service.failure
+            ));
+        }
     }
 
     /// How long an idle on-demand service is kept alive after its last
@@ -414,12 +431,10 @@ mod program {
                 pid: Pid::new(pid),
                 exit_code,
             });
-            // The monotonic clock feeds the engine's restart-backoff
-            // deadlines. The floor services restart `Never`, so `now` is
-            // inert for them today; it is correct as soon as a restarting
-            // service is registered.
+            // The monotonic clock feeds the engine's restart-backoff and
+            // grace deadlines.
             let now = Duration64::from_nanos(tairix_rt::clock_get());
-            self.engine.reap(now);
+            state_refused(&self.engine.reap(now).failed, "started");
             // An exit resolves every park on the service that died — as an
             // abandonment, or as a connection if a restart carried it back
             // to ready.
@@ -599,16 +614,7 @@ mod program {
         fn expire_deadlines(&mut self) {
             let now = Duration64::from_nanos(tairix_rt::clock_get());
             self.try_adopt_overrides(now);
-            let report = self.engine.expire_due(now);
-            for failed in &report.failed {
-                // Fail loud, degrade gracefully: a relaunch the kernel
-                // refused is stated on the diagnostic stream, exactly as at
-                // boot, and the rest of the system stays up.
-                let _ = Stderr.write_fmt(format_args!(
-                    "init: service {} not restarted ({:?}); continuing without it\n",
-                    failed.name, failed.failure
-                ));
-            }
+            state_refused(&self.engine.expire_due(now).failed, "restarted");
             // A lapsed deadline can restart a service into readiness, which
             // releases whoever was parked waiting for it.
             self.release_parked_clients();
@@ -700,15 +706,7 @@ mod program {
                 .engine
                 .notify_sender(sender, signal)
                 .map_err(notify_errno)?;
-            for failed in &report.started.failed {
-                // Fail loud, degrade gracefully: a dependent the notice
-                // could not release is stated on the diagnostic stream, and
-                // the rest of the system stays up.
-                let _ = Stderr.write_fmt(format_args!(
-                    "init: service {} not started ({:?}); continuing without it\n",
-                    failed.name, failed.failure
-                ));
-            }
+            state_refused(&report.started.failed, "started");
             // The announcement is also what establishes the service's
             // renewal cadence, so it is answered with the same pair a
             // renewal is: one reply shape for the endpoint, and a
@@ -1222,17 +1220,7 @@ mod program {
                 return EXIT_CONFIG_INVALID;
             }
         };
-        // Fail loud, degrade gracefully: state each service the kernel refused
-        // to start (a stale or mis-signed bundle) and boot on with the rest —
-        // one dead service must not take down the device manager, the other
-        // services, or the login sessions. The kernel's audit log already
-        // carries the refusal; this makes it visible at the console too.
-        for failed in &report.failed {
-            let _ = Stderr.write_fmt(format_args!(
-                "init: service {} not started ({:?}); continuing without it\n",
-                failed.name, failed.failure
-            ));
-        }
+        state_refused(&report.failed, "started");
 
         // Supervise one login session per console and route every other
         // reaped child — a service the engine started, or an inherited
@@ -1353,16 +1341,21 @@ impl supervisor::Services for StubServices {
 fn main() {
     if let Ok(config) = startup::StartupConfig::parse(startup::DEFAULT_CONFIG) {
         let mut banner_buf = [0u8; startup::BANNER_MAX];
-        // Touch the `service_name` derivation every startup entry now flows
-        // through — the floor and the enrolment-governed tier alike — so a
-        // regression in it is caught by an ordinary host build.
+        // Touch the derivations every startup entry flows through — the
+        // floor and the enrolment-governed tier alike — so a regression in
+        // them is caught by an ordinary host build.
         for entry in config
             .services()
             .iter()
             .chain(config.enrolled())
             .chain(config.ondemand())
         {
-            let _ = startup::service_name(entry.path);
+            let _ = (
+                startup::service_name(entry.path),
+                entry.readiness(),
+                entry.requires.iter().count(),
+                entry.provides.is_empty(),
+            );
         }
         let _ = (
             config.session(),

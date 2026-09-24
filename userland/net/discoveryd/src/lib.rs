@@ -28,4 +28,8 @@ extern crate alloc;
 pub mod decoder;
 pub mod events;
 pub mod front;
+pub mod grants;
+pub mod query;
+pub mod questions;
+pub mod sessions;
 pub mod wire;

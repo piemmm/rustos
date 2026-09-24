@@ -187,6 +187,14 @@ bitflags_like! {
     }
 }
 
+impl MapFlags {
+    /// Every attribute that maps a page as something other than ordinary
+    /// write-back RAM.
+    pub const NOT_CACHEABLE: Self = Self::NO_CACHE
+        .union(Self::DMA_COHERENT)
+        .union(Self::WRITE_COMBINE);
+}
+
 /// Errors a page-table operation may report.
 ///
 /// These are *distinct* from [`AllocError`] because the caller wants to

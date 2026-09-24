@@ -211,6 +211,42 @@ over an ordinary `CAP_NET` UDP socket (with CSPRNG source-port
 randomisation and a random query id). There is no `/etc/resolv.conf` and no
 local host file.
 
+A name under `local` or a link-local address is the link's rather than a
+server's: `host printer.local` is answered by link-local discovery, never sent
+to a unicast server, and a build without discovery answers it with nothing.
+
+## `dns-sd` — link-local service discovery
+
+`dns-sd` browses for, resolves, and looks up services on the local link through
+the discovery service ([`discoveryd`](./discoveryd.md)), in the shape the
+`dns-sd` tool established:
+
+```
+$ dns-sd -t 5 -B _ipp._tcp
+Browsing for _ipp._tcp
+A/R    Interface        Domain  Service Type          Instance Name
+Add    eth0             local.  _ipp._tcp.            Hall\032Printer
+$ dns-sd -t 5 -L 'Hall Printer' _ipp._tcp
+Lookup Hall\032Printer._ipp._tcp.local
+Add Hall\032Printer._ipp._tcp.local. can be reached at hall.local.:631 (interface eth0, priority 0, weight 0)
+Add   TXT txtvers=1 (interface eth0)
+$ dns-sd -t 5 -G v4v6 hall.local
+```
+
+`-B` browses a type, or with no type every type the link offers; `-L`
+resolves an instance to its target, port, and attributes; `-G` looks up a
+host's `v4`, `v6`, or `v4v6` addresses. Each runs until interrupted, or with
+`-t` for a bounded number of seconds, and prints every answer as it moves:
+`Add` and `Rmv`, or a `Flush` when a link went down and everything learned on
+it is void. Every answer names its interface. Every name printed was written by
+an unauthenticated peer, so it is shown in DNS presentation form, escaped.
+`dns-sd` exits `0` when it ran its course and `1` when the service refused or is
+not running, saying why on standard error.
+
+Browsing a type needs a grant for it in the bundle's signed manifest or
+`CAP_NET_DISCOVER_ALL`, which the administrator ceiling holds; host lookups
+need only `CAP_NET`.
+
 ## `ping` — reachability and round-trip time
 
 `ping` sends ICMP/`ICMPv6` echo requests through the capability-gated echo

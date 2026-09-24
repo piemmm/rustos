@@ -26,7 +26,9 @@
 //! subset, parsed fail-closed: `#` comments; the required keys `id`,
 //! `name`, `version`, `kind`, and `capabilities` (a single-line array of
 //! canonical `CAP_*` names); and the optional keys `associations` (the
-//! declared file-type hints), `library` (the program-library folder a
+//! declared file-type hints), `browses` (the service types link-local
+//! discovery may grant the bundle, spelled `_ipp._tcp`), `library` (the
+//! program-library folder a
 //! graphical application lists itself under — absence means the library
 //! never shows the bundle), `library-icon` (an icon asset inside the
 //! bundle's `Resources/`), `title` (the human-readable name every surface
@@ -41,15 +43,18 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use tairix_abi::discovery_ipc::ServiceTypeField;
 use tairix_abi::{
-    digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId, LibraryCategory,
-    ProgramKind, ABI_VERSION_CURRENT, APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR,
-    APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX,
-    BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX,
-    LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+    browse_entry, digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId,
+    LibraryCategory, ProgramKind, ABI_VERSION_CURRENT, APPINFO_FLAG_MULTI_INSTANCE,
+    APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES,
+    APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+    BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX,
+    MIME_ENTRY_LEN, MIME_TYPE_MAX,
 };
 use tairix_crypto::sha256;
 use tairix_crypto::Ed25519SecretKey;
+use tairix_net::dnssd::{ServiceType, Transport};
 
 /// File name of a program crate's manifest source, beside its `Cargo.toml`.
 pub const APP_MANIFEST_SOURCE: &str = "AppInfo.toml";
@@ -101,6 +106,10 @@ pub struct AppManifestSource {
     /// gate still verifies and capability-checks whichever bundle is
     /// launched (`plans/NEW-FILEMANAGER.md` `FM6b`).
     pub associations: Vec<String>,
+    /// The service types the bundle may browse the link for, in manifest
+    /// order: the most link-local discovery will ever grant it. Empty when it
+    /// declares none — the key is optional — and then it browses nothing.
+    pub browses: Vec<ServiceType>,
     /// The program-library folder the bundle lists itself under, or `None`
     /// for a bundle the desktop's Program Library never shows. Listing is
     /// an explicit opt-in — exactly as a desktop entry is elsewhere — so a
@@ -142,9 +151,11 @@ impl AppManifestSource {
     /// duplicate key, a missing key, a malformed string or array value, an
     /// over-long or empty identity field, a name that is not a plain
     /// command word, an unknown `kind`, an unknown or duplicate `CAP_*`
-    /// name, a capability list exceeding the manifest bound, an unknown
-    /// library folder, an over-long `library-icon`, `title`, `purpose`, or
-    /// `author`,
+    /// name, a capability list exceeding the manifest bound, a `browses`
+    /// entry that is not a lowercase `_name._tcp`/`_name._udp` of RFC 6335
+    /// grammar or that repeats, more browsed types than the manifest bound,
+    /// an unknown library folder, an over-long `library-icon`, `title`,
+    /// `purpose`, or `author`,
     /// an `icon-bar` that is not a bare `true`/`false`, an `instances` that is
     /// neither `"single"` nor `"multiple"`, or a `library` on a `service`.
     pub fn parse(text: &str) -> Result<Self, AppImageError> {
@@ -156,6 +167,7 @@ impl AppManifestSource {
         let mut kind = None;
         let mut capabilities = None;
         let mut associations = None;
+        let mut browses = None;
         let mut library = None;
         let mut library_icon = None;
         let mut purpose = None;
@@ -184,6 +196,7 @@ impl AppManifestSource {
                 "associations" => {
                     set(&at, key, &mut associations, parse_associations(&at, value)?)?;
                 }
+                "browses" => set(&at, key, &mut browses, parse_browses(&at, value)?)?,
                 "library" => set(&at, key, &mut library, parse_library(&at, value)?)?,
                 "library-icon" => {
                     set(&at, key, &mut library_icon, parse_string(&at, value)?)?;
@@ -210,6 +223,7 @@ impl AppManifestSource {
             // `library-icon`, whose absence means the bundle is drawn with
             // its class artwork instead of one of its own.
             associations: associations.unwrap_or_default(),
+            browses: browses.unwrap_or_default(),
             library,
             library_icon,
             purpose,
@@ -270,6 +284,9 @@ impl AppManifestSource {
         }
         for mime in &self.associations {
             check_len(ctx, "association", mime, MIME_TYPE_MAX)?;
+        }
+        if self.browses.len() > usize::from(APPINFO_MAX_BROWSE) {
+            return Err(AppImageError::new(ctx, "too many browsed service types"));
         }
         if let Some(icon) = &self.library_icon {
             check_len(ctx, "library-icon", icon, LIBRARY_ICON_MAX)?;
@@ -431,6 +448,49 @@ fn parse_associations(at: &str, value: &str) -> Result<Vec<String>, AppImageErro
         mimes.push(mime);
     }
     Ok(mimes)
+}
+
+/// Parse a single-line array of double-quoted service types — the types the
+/// bundle may browse for — each spelled `_<name>._tcp` or `_<name>._udp` in
+/// the lowercase a grant store records. Duplicates are refused.
+fn parse_browses(at: &str, value: &str) -> Result<Vec<ServiceType>, AppImageError> {
+    let inner = value
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .ok_or_else(|| AppImageError::new(at, "expected a single-line `[...]` array"))?
+        .trim();
+    let mut types = Vec::new();
+    if inner.is_empty() {
+        return Ok(types);
+    }
+    for item in inner.split(',') {
+        let spelled = parse_string(at, item.trim())?;
+        let service = spelled
+            .strip_prefix('_')
+            .and_then(|rest| rest.rsplit_once('.'))
+            .and_then(|(name, transport)| {
+                let transport = Transport::from_label(transport.as_bytes())?;
+                ServiceType::new(name.as_bytes(), transport).ok()
+            })
+            .filter(|service| {
+                !spelled.bytes().any(|byte| byte.is_ascii_uppercase())
+                    && service.to_string() == spelled
+            })
+            .ok_or_else(|| {
+                AppImageError::new(
+                    at,
+                    format!("`{spelled}` is not a lowercase `_name._tcp` or `_name._udp`"),
+                )
+            })?;
+        if types.contains(&service) {
+            return Err(AppImageError::new(
+                at,
+                format!("duplicate browsed type `{spelled}`"),
+            ));
+        }
+        types.push(service);
+    }
+    Ok(types)
 }
 
 /// One program crate the discovery walk found: its cargo package name (the
@@ -666,12 +726,16 @@ pub fn compose_signed_appinfo(
         .map_err(|_| AppImageError::new(ctx, "too many capabilities"))?;
     let mime_count = u16::try_from(manifest.associations.len())
         .map_err(|_| AppImageError::new(ctx, "too many associations"))?;
+    let browse_count = u16::try_from(manifest.browses.len())
+        .map_err(|_| AppImageError::new(ctx, "too many browsed service types"))?;
     let header = AppInfoHeader {
         magic: APPINFO_MAGIC,
         abi_version: ABI_VERSION_CURRENT,
         flags: header_flags(manifest),
         capability_count,
         mime_count,
+        browse_count,
+        reserved: 0,
         id_len: inline_len(ctx, "id", &manifest.id, BUNDLE_ID_MAX)?,
         name_len: inline_len(ctx, "name", &manifest.name, BUNDLE_NAME_MAX)?,
         version_len: inline_len(ctx, "version", &manifest.version, BUNDLE_VERSION_MAX)?,
@@ -723,25 +787,13 @@ pub fn compose_signed_appinfo(
     let mut bytes = Vec::with_capacity(
         AppInfoHeader::WIRE_LEN
             + manifest.capabilities.len() * 2
-            + manifest.associations.len() * MIME_ENTRY_LEN,
+            + manifest.associations.len() * MIME_ENTRY_LEN
+            + manifest.browses.len() * BROWSE_ENTRY_LEN,
     );
     bytes.extend_from_slice(&header.to_le_bytes());
-    for cap in &manifest.capabilities {
-        bytes.extend_from_slice(&cap.as_u16().to_le_bytes());
-    }
-    // The MIME table follows the capability-id list (the body layout
-    // `mime_type_at` reads): one fixed-length entry per association, a
-    // length byte then the bytes in a `MIME_TYPE_MAX` buffer. The whole
-    // body — capabilities then MIME table — is covered by the signature
-    // below, so a tampered association breaks the bundle.
-    for mime in &manifest.associations {
-        let len = u8::try_from(mime.len())
-            .map_err(|_| AppImageError::new(ctx, "association too long"))?;
-        let mut entry = [0u8; MIME_ENTRY_LEN];
-        entry[0] = len;
-        entry[1..=mime.len()].copy_from_slice(mime.as_bytes());
-        bytes.extend_from_slice(&entry);
-    }
+    // The whole body is covered by the signature below, so a tampered entry
+    // breaks the bundle.
+    append_body(ctx, manifest, &mut bytes)?;
 
     let mut signed = Vec::with_capacity(bytes.len() - 64);
     signed.extend_from_slice(&bytes[AppInfoHeader::signed_range()]);
@@ -754,6 +806,37 @@ pub fn compose_signed_appinfo(
         signer_pubkey,
         publisher_pubkey,
     })
+}
+
+/// Append the body the header counts: the capability ids, then the MIME
+/// table `mime_type_at` reads (a length byte and the type in a
+/// `MIME_TYPE_MAX` buffer per association), then the browse table
+/// `browse_type_at` reads.
+fn append_body(
+    ctx: &str,
+    manifest: &AppManifestSource,
+    bytes: &mut Vec<u8>,
+) -> Result<(), AppImageError> {
+    for cap in &manifest.capabilities {
+        bytes.extend_from_slice(&cap.as_u16().to_le_bytes());
+    }
+    for mime in &manifest.associations {
+        let len = u8::try_from(mime.len())
+            .map_err(|_| AppImageError::new(ctx, "association too long"))?;
+        let mut entry = [0u8; MIME_ENTRY_LEN];
+        entry[0] = len;
+        entry[1..=mime.len()].copy_from_slice(mime.as_bytes());
+        bytes.extend_from_slice(&entry);
+    }
+    for service in &manifest.browses {
+        let entry = browse_entry(&ServiceTypeField {
+            name: service.name(),
+            transport: service.transport(),
+        })
+        .map_err(|e| AppImageError::new(ctx, format!("browsed type: {e:?}")))?;
+        bytes.extend_from_slice(&entry);
+    }
+    Ok(())
 }
 
 /// The validated inline-field length byte.
@@ -1087,6 +1170,7 @@ mod tests {
                 "df",
                 "dirname",
                 "discoveryd",
+                "dns-sd",
                 "du",
                 "edit",
                 "elsh",
@@ -1389,6 +1473,66 @@ mod tests {
 
         let dup = format!("{GOOD}associations = [\"text/plain\", \"text/plain\"]\n");
         assert!(AppManifestSource::parse(&dup).is_err());
+    }
+
+    #[test]
+    fn browses_are_optional_canonical_and_unique() {
+        let manifest = AppManifestSource::parse(GOOD).expect("valid");
+        assert!(manifest.browses.is_empty());
+        let text = format!("{GOOD}browses = [\"_ipp._tcp\", \"_sleep-proxy._udp\"]\n");
+        let manifest = AppManifestSource::parse(&text).expect("valid");
+        let spelled: Vec<String> = manifest.browses.iter().map(ToString::to_string).collect();
+        assert_eq!(spelled, ["_ipp._tcp", "_sleep-proxy._udp"]);
+        for refused in [
+            "[\"_ipp._tcp\", \"_ipp._tcp\"]",
+            "[\"_IPP._tcp\"]",
+            "[\"_ipp._sctp\"]",
+            "[\"ipp._tcp\"]",
+            "[\"_-ipp._tcp\"]",
+            "[\"_sixteen-octets-x._tcp\"]",
+            "[\"_ipp._tcp.local\"]",
+        ] {
+            let text = format!("{GOOD}browses = {refused}\n");
+            assert!(AppManifestSource::parse(&text).is_err(), "{refused}");
+        }
+        let many: Vec<String> = (0..=APPINFO_MAX_BROWSE)
+            .map(|n| format!("\"_s{n}._tcp\""))
+            .collect();
+        let text = format!("{GOOD}browses = [{}]\n", many.join(", "));
+        assert!(AppManifestSource::parse(&text).is_err(), "past the bound");
+    }
+
+    #[test]
+    fn composed_appinfo_carries_the_signed_browse_table_after_the_mime_table() {
+        let text = format!(
+            "{GOOD}associations = [\"text/plain\"]\nbrowses = [\"_ipp._tcp\", \"_http._tcp\"]\n"
+        );
+        let manifest = AppManifestSource::parse(&text).expect("valid");
+        let composed = compose_signed_appinfo(
+            &[9u8; 32],
+            PublisherSource::SelfPublished,
+            &manifest,
+            [0x11; 32],
+            &[BundleFileDigest {
+                path: "Run",
+                bytes: b"program",
+            }],
+        )
+        .expect("composes");
+        let header = AppInfoHeader::from_bytes(&composed.bytes).expect("decodes");
+        assert_eq!(header.browse_count, 2);
+        let body = &composed.bytes[AppInfoHeader::WIRE_LEN..];
+        assert_eq!(body.len(), header.body_len().expect("fits"));
+        let (caps, mimes) = (
+            usize::from(header.capability_count),
+            usize::from(header.mime_count),
+        );
+        let read = |index| {
+            tairix_abi::browse_type_at(body, caps, mimes, index)
+                .map(|service| (service.name.to_vec(), service.transport))
+        };
+        assert_eq!(read(0), Ok((b"ipp".to_vec(), Transport::Tcp)));
+        assert_eq!(read(1), Ok((b"http".to_vec(), Transport::Tcp)));
     }
 
     #[test]

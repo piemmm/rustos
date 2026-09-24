@@ -566,6 +566,8 @@ mod grid {
             flags: 0,
             capability_count: 0,
             mime_count: 0,
+            browse_count: 0,
+            reserved: 0,
             id_len,
             name_len,
             version_len,

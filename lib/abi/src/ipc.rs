@@ -83,6 +83,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::pinboard_ipc::PINBOARD_ENDPOINT
         || id == crate::net_ipc::NETSTACK_ENDPOINT
         || id == crate::net::NETSTACK_SOCKET_ENDPOINT
+        || id == crate::discovery_ipc::DISCOVERY_ENDPOINT
         || id == crate::font_ipc::FONT_ENDPOINT
         || id == crate::service_control::SERVICE_CONTROL_ENDPOINT
         || id == crate::service_control::SERVICE_ENROL_ENDPOINT

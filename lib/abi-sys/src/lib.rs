@@ -79,6 +79,8 @@ const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 const NUM_MEM_PIN: u64 = SyscallNumber::MEM_PIN.as_u16() as u64;
 const NUM_MEM_UNPIN: u64 = SyscallNumber::MEM_UNPIN.as_u16() as u64;
 const NUM_SIGNAL_INTAKE: u64 = SyscallNumber::SIGNAL_INTAKE.as_u16() as u64;
+/// `peer_watch` syscall number (as above).
+const NUM_PEER_WATCH: u64 = SyscallNumber::PEER_WATCH.as_u16() as u64;
 const NUM_SCHED_SET_REALTIME: u64 = SyscallNumber::SCHED_SET_REALTIME.as_u16() as u64;
 const NUM_SCHED_SET_PRIORITY: u64 = SyscallNumber::SCHED_SET_PRIORITY.as_u16() as u64;
 const NUM_SYSTEM_POWER: u64 = SyscallNumber::SYSTEM_POWER.as_u16() as u64;
@@ -1296,6 +1298,28 @@ pub extern "C" fn sys_signal_intake(op: u32) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel validates the op and acts only on the caller's own intake.
     unsafe { raw_syscall(NUM_SIGNAL_INTAKE, [u64::from(op), 0, 0, 0, 0, 0]) }
+}
+
+/// `peer_watch`: watch, stop watching, or take the exit of a process instance
+/// (`SyscallNumber::PEER_WATCH`). `op` is a `TAIRIX_PEER_WATCH_OP_*`
+/// discriminant — watch (0), unwatch (1), take (2) — and `proc_id`/`len` name
+/// one 16-byte instance, read for a watch or unwatch and written for a take.
+/// Returns `0`, or a `TAIRIX_E_*` code reinterpreted into the result:
+/// `TAIRIX_E_NOT_FOUND` for an instance with no live process (or not
+/// watched), `TAIRIX_E_WOULD_BLOCK` for a take with nothing waiting.
+///
+/// The kernel validates the op and `(proc_id, len)` against the caller's
+/// address space before reading or writing it.
+#[must_use]
+#[export_name = "tairix_sys_peer_watch"]
+pub extern "C" fn sys_peer_watch(op: u32, proc_id: *mut c_void, len: usize) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(proc_id, len)`.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_PEER_WATCH,
+            [u64::from(op), ptr_arg(proc_id), len as u64, 0, 0, 0],
+        ))
+    }
 }
 
 /// `latency_watch`: declare the calling thread's interactive frame budget in
@@ -3436,6 +3460,7 @@ mod tests {
         (NUM_MEM_PIN, "mem_pin", 0),
         (NUM_MEM_UNPIN, "mem_unpin", 0),
         (NUM_SIGNAL_INTAKE, "signal_intake", 1),
+        (NUM_PEER_WATCH, "peer_watch", 3),
         (NUM_SCHED_SET_REALTIME, "sched_set_realtime", 1),
         (NUM_SCHED_SET_PRIORITY, "sched_set_priority", 2),
         (NUM_SYSTEM_POWER, "system_power", 1),
@@ -4087,6 +4112,20 @@ mod tests {
         assert_eq!(args[1], 1);
         assert_eq!(args[2], 0x10_0000);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn peer_watch_marshals_the_op_and_the_instance_buffer() {
+        let mut instance = [0u8; tairix_abi::PROC_ID_LEN];
+        let buf = instance.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_peer_watch(2, buf, tairix_abi::PROC_ID_LEN), 0);
+        });
+        assert_eq!(number, NUM_PEER_WATCH);
+        assert_eq!(
+            args,
+            [2, ptr_arg(buf), tairix_abi::PROC_ID_LEN as u64, 0, 0, 0]
+        );
     }
 
     #[test]

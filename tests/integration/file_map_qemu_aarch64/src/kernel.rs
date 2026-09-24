@@ -587,6 +587,7 @@ struct Subsystems {
     sched: &'static Scheduler<Aarch64BinArch>,
     arch: &'static Aarch64BinArch,
     caps: &'static RwLock<CapTable>,
+    peer_watch: &'static tairix_kernel_core::PeerWatch,
     ipc: &'static RwLock<PortRegistry>,
     aspaces: &'static RwLock<AddressSpaceRegistry>,
     rng: &'static RwLock<Box<dyn RandomReserve + Send + Sync>>,
@@ -628,6 +629,7 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
             counter_hz,
         )))),
         caps: Box::leak(Box::new(RwLock::new(CapTable::new()))),
+        peer_watch: Box::leak(Box::new(tairix_kernel_core::PeerWatch::new())),
         ipc: Box::leak(Box::new(RwLock::new(PortRegistry::new()))),
         aspaces: Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new()))),
         rng: Box::leak(Box::new(RwLock::new(
@@ -700,6 +702,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             &NULL_MMIO_MAP_FACILITY,
             &NULL_DMA_ALLOC_FACILITY,
         )
+        .with_peer_watch(sys.peer_watch)
         .with_file_map(live)
         .with_filesystem(&FIXTURE_FS),
     ));
@@ -722,6 +725,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         None,
         sys.aspaces,
         sys.caps,
+        sys.peer_watch,
         wait_producer,
         &AARCH64_PROCESS_SPAWN,
     );
@@ -731,6 +735,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         &SERIAL_SINK,
         sys.sched,
         sys.caps,
+        sys.peer_watch,
         sys.aspaces,
         sys.arch,
         wait_producer,

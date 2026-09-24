@@ -33,12 +33,18 @@ use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr, Ipv6Addr, ALL_NODES};
 use tairix_net::checksum::Pseudo;
 use tairix_net::dhcp::{self, MessageType};
 use tairix_net::dhcpv6::{self, Duid, MessageType as Dhcp6MessageType};
+use tairix_net::dns::{Name, RecordType};
 use tairix_net::eth::{
     self, ipv6_multicast_mac, BROADCAST, ETHERNET_HEADER_LEN, ETHERTYPE_IPV4, ETHERTYPE_IPV6,
 };
 use tairix_net::iface::{eui64_interface_id, TempAddrSource};
 use tairix_net::ipv4::{Ipv4Header, IPV4_HEADER_LEN};
 use tairix_net::ipv6::{Ipv6Header, IPV6_HEADER_LEN, NEXT_HEADER_ICMPV6};
+use tairix_net::mdns::{
+    is_link_local_address, Destination, MdnsEngine, Message, NameKind, RData, Sender, Service,
+    TxtRecord, GROUP_V6 as MDNS_GROUP_V6, MAX_MESSAGE_LEN as MDNS_MAX_MESSAGE_LEN,
+    PORT as MDNS_PORT,
+};
 use tairix_net::nd::{ND_HOP_LIMIT, TYPE_ROUTER_ADVERTISEMENT};
 use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput, TxFrame};
 use tairix_net::tcp::conn::{Tcb, TcpConfig};
@@ -244,6 +250,20 @@ impl NetPeer {
     /// passes alone.
     pub fn spawn_ntp(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
         Self::spawn_with(qemu_sock, peer_sock, run_ntp_peer)
+    }
+
+    /// Bind `peer_sock` and start the **multicast DNS responder** peer thread
+    /// (the `plans/ZEROCONF.md` Z4 vertical): through `lib/net`'s own
+    /// responder engine the peer publishes [`wire::MDNS_HOST`] at its
+    /// link-local address, one [`wire::MDNS_INSTANCE`] of
+    /// [`wire::MDNS_SERVICE`] reached there, and the type's pointer to it, and
+    /// answers the segment's queries as any responder would. Its verdict
+    /// ([`Self::stop_and_join`]) is `Ok` once the guest has asked for every
+    /// record a browse, a resolve, and a host lookup need and the peer has sent
+    /// each of them since, so the answers the guest prints can only have come
+    /// from the wire.
+    pub fn spawn_mdns(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
+        Self::spawn_with(qemu_sock, peer_sock, run_mdns_peer)
     }
 
     /// Bind `peer_sock` and start the **DHCP-server-plus-NTP-server** peer
@@ -2180,30 +2200,21 @@ const NTP_TRANSMIT_TS_AT: usize = 40;
 /// The UDP port NTP is served on (RFC 5905 §7.2).
 const NTP_PORT: u16 = 123;
 
-/// The parts of a client request the fixture server acts on.
-struct NtpRequest {
-    /// The client's CSPRNG nonce, carried in its transmit timestamp — the
-    /// value a genuine reply must echo as its origin timestamp.
-    nonce: u64,
-    /// The client's source address; the reply's destination.
-    client_addr: IpAddr,
-    /// The address the request was *addressed to* — the reply's source. Taken
-    /// from the wire rather than from a scenario constant, so the same
-    /// responder serves the IPv6 static-addressing vertical and the IPv4
-    /// DHCP-learned one without knowing which it is in.
-    server_addr: IpAddr,
-    /// The client's source port; the reply's destination port.
-    client_port: u16,
-    /// The client's source MAC — the reply frame's link-layer destination.
-    client_mac: MacAddress,
+/// One UDP datagram an Ethernet frame carried, over either address family.
+struct UdpFrame<'a> {
+    source: IpAddr,
+    destination: IpAddr,
+    source_port: u16,
+    destination_port: u16,
+    source_mac: MacAddress,
+    payload: &'a [u8],
 }
 
-/// Decode the NTP client request an Ethernet frame carries, or `None` if the
-/// frame is not one (fail closed). Every layer is parsed with the production
-/// `lib/net` decoders, so the server accepts exactly the frames a real client
-/// emits — over either address family, since a guest addressed by DHCP asks
-/// over IPv4 and a statically addressed one over IPv6.
-fn parse_ntp_frame(frame: &[u8]) -> Option<NtpRequest> {
+/// Decode the UDP datagram an Ethernet frame carries, or `None` if it carries
+/// none (fail closed). Every layer is parsed with the production `lib/net`
+/// decoders, so a fixture server accepts exactly the frames a real client
+/// emits.
+fn parse_udp_frame(frame: &[u8]) -> Option<UdpFrame<'_>> {
     let eth_frame = eth::EthernetFrame::parse(frame)?;
     let (source, destination, payload) = match eth_frame.ethertype {
         ETHERTYPE_IPV6 => {
@@ -2223,6 +2234,95 @@ fn parse_ntp_frame(frame: &[u8]) -> Option<NtpRequest> {
         _ => return None,
     };
     let datagram = udp::UdpDatagram::parse(udp_pseudo(source, destination), payload)?;
+    Some(UdpFrame {
+        source,
+        destination,
+        source_port: datagram.source_port,
+        destination_port: datagram.destination_port,
+        source_mac: eth_frame.source,
+        payload: datagram.payload,
+    })
+}
+
+/// Frame `payload` as UDP from `source_port` to `destination_port`, over IP
+/// from `source` to `destination`, in an Ethernet frame from the peer to
+/// `destination_mac`, with the production `lib/net` writers. An IPv6 packet
+/// carries the link-scoped hop limit both fixture protocols require.
+fn udp_frame(
+    source: IpAddr,
+    destination: IpAddr,
+    destination_mac: MacAddress,
+    ports: (u16, u16),
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut datagram = vec![0u8; udp::UDP_HEADER_LEN + payload.len()];
+    udp::write(
+        udp_pseudo(source, destination),
+        ports.0,
+        ports.1,
+        payload,
+        &mut datagram,
+    )
+    .expect("the UDP buffer is sized for the payload");
+
+    let (packet, ethertype) = match (source, destination) {
+        (IpAddr::V6(source), IpAddr::V6(destination)) => {
+            let mut header = Ipv6Header::new(source, destination, PROTOCOL_UDP);
+            header.hop_limit = ND_HOP_LIMIT;
+            let mut packet = vec![0u8; IPV6_HEADER_LEN + datagram.len()];
+            header
+                .write(&mut packet, datagram.len())
+                .expect("the IPv6 header fits the sized packet");
+            packet[IPV6_HEADER_LEN..].copy_from_slice(&datagram);
+            (packet, ETHERTYPE_IPV6)
+        }
+        (IpAddr::V4(source), IpAddr::V4(destination)) => {
+            let header = Ipv4Header::new(source, destination, PROTOCOL_UDP);
+            let mut packet = vec![0u8; IPV4_HEADER_LEN + datagram.len()];
+            header
+                .write(&mut packet, datagram.len())
+                .expect("the IPv4 header fits the sized packet");
+            packet[IPV4_HEADER_LEN..].copy_from_slice(&datagram);
+            (packet, ETHERTYPE_IPV4)
+        }
+        _ => unreachable!("an IP packet's addresses are of one family"),
+    };
+
+    let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+    eth::write_header(
+        &mut frame,
+        destination_mac,
+        MacAddress(wire::PEER_MAC),
+        ethertype,
+    )
+    .expect("the Ethernet header fits the sized frame");
+    frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+    frame
+}
+
+/// The parts of a client request the fixture server acts on.
+struct NtpRequest {
+    /// The client's CSPRNG nonce, carried in its transmit timestamp — the
+    /// value a genuine reply must echo as its origin timestamp.
+    nonce: u64,
+    /// The client's source address; the reply's destination.
+    client_addr: IpAddr,
+    /// The address the request was *addressed to* — the reply's source. Taken
+    /// from the wire rather than from a scenario constant, so the same
+    /// responder serves the IPv6 static-addressing vertical and the IPv4
+    /// DHCP-learned one without knowing which it is in.
+    server_addr: IpAddr,
+    /// The client's source port; the reply's destination port.
+    client_port: u16,
+    /// The client's source MAC — the reply frame's link-layer destination.
+    client_mac: MacAddress,
+}
+
+/// Decode the NTP client request an Ethernet frame carries, or `None` if the
+/// frame is not one (fail closed) — over either address family, since a guest
+/// addressed by DHCP asks over IPv4 and a statically addressed one over IPv6.
+fn parse_ntp_frame(frame: &[u8]) -> Option<NtpRequest> {
+    let datagram = parse_udp_frame(frame)?;
     if datagram.destination_port != NTP_PORT {
         return None;
     }
@@ -2235,10 +2335,10 @@ fn parse_ntp_frame(frame: &[u8]) -> Option<NtpRequest> {
     nonce.copy_from_slice(&header[NTP_TRANSMIT_TS_AT..NTP_TRANSMIT_TS_AT + 8]);
     Some(NtpRequest {
         nonce: u64::from_be_bytes(nonce),
-        client_addr: source,
-        server_addr: destination,
+        client_addr: datagram.source,
+        server_addr: datagram.destination,
         client_port: datagram.source_port,
-        client_mac: eth_frame.source,
+        client_mac: datagram.source_mac,
     })
 }
 
@@ -2271,9 +2371,7 @@ fn ntp_timestamp(unix_secs: i64) -> u64 {
 ///
 /// `origin` is the origin timestamp the reply claims (the request's nonce for
 /// the truthful reply, a different value for the spoof) and `unix_secs` the
-/// instant it reports. Framed as UDP(123→client)/IPv6(peer→client)/Ethernet
-/// with the production `lib/net` writers, so the guest decodes it exactly as
-/// it would a real server's.
+/// instant it reports.
 fn build_ntp_reply(request: &NtpRequest, origin: u64, unix_secs: i64) -> Vec<u8> {
     let mut message = [0u8; NTP_PACKET_LEN];
     // Leap 0 (no warning), version 4, mode 4 (server), stratum 2.
@@ -2288,51 +2386,13 @@ fn build_ntp_reply(request: &NtpRequest, origin: u64, unix_secs: i64) -> Vec<u8>
     message[NTP_RECEIVE_TS_AT..NTP_RECEIVE_TS_AT + 8].copy_from_slice(&stamp.to_be_bytes());
     message[NTP_TRANSMIT_TS_AT..NTP_TRANSMIT_TS_AT + 8].copy_from_slice(&stamp.to_be_bytes());
 
-    let source = request.server_addr;
-    let destination = request.client_addr;
-    let mut datagram = vec![0u8; udp::UDP_HEADER_LEN + message.len()];
-    udp::write(
-        udp_pseudo(source, destination),
-        NTP_PORT,
-        request.client_port,
-        &message,
-        &mut datagram,
-    )
-    .expect("the UDP buffer is sized for the NTP header");
-
-    let (packet, ethertype) = match (source, destination) {
-        (IpAddr::V6(source), IpAddr::V6(destination)) => {
-            let mut header = Ipv6Header::new(source, destination, PROTOCOL_UDP);
-            header.hop_limit = ND_HOP_LIMIT;
-            let mut packet = vec![0u8; IPV6_HEADER_LEN + datagram.len()];
-            header
-                .write(&mut packet, datagram.len())
-                .expect("the IPv6 header fits the sized packet");
-            packet[IPV6_HEADER_LEN..].copy_from_slice(&datagram);
-            (packet, ETHERTYPE_IPV6)
-        }
-        (IpAddr::V4(source), IpAddr::V4(destination)) => {
-            let header = Ipv4Header::new(source, destination, PROTOCOL_UDP);
-            let mut packet = vec![0u8; IPV4_HEADER_LEN + datagram.len()];
-            header
-                .write(&mut packet, datagram.len())
-                .expect("the IPv4 header fits the sized packet");
-            packet[IPV4_HEADER_LEN..].copy_from_slice(&datagram);
-            (packet, ETHERTYPE_IPV4)
-        }
-        _ => unreachable!("an IP packet's addresses are of one family"),
-    };
-
-    let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
-    eth::write_header(
-        &mut frame,
+    udp_frame(
+        request.server_addr,
+        request.client_addr,
         request.client_mac,
-        MacAddress(wire::PEER_MAC),
-        ethertype,
+        (NTP_PORT, request.client_port),
+        &message,
     )
-    .expect("the Ethernet header fits the sized frame");
-    frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
-    frame
 }
 
 /// Answer one NTP client request the way every time vertical's peer does:
@@ -2410,6 +2470,332 @@ fn run_ntp_peer(
         Ok(())
     } else {
         Err("netstack peer: the guest sent no NTP request".to_string())
+    }
+}
+
+// --- Multicast DNS responder (plans/ZEROCONF.md Z4) --------------------
+
+/// One record the discovery verdict needs, and whether the guest asked the
+/// wire for it.
+struct Needed {
+    name: Name,
+    record_type: RecordType,
+    asked: bool,
+}
+
+/// What the guest's browse, resolve, and host lookup must have asked the wire
+/// for: the type's `PTR`, the instance's `SRV` and `TXT`, and the host's
+/// `AAAA`.
+///
+/// Only the asking is the guest's to prove. Whether the peer answers a
+/// question depends on what the guest already caches from the peer's own
+/// announcements, which known-answer suppression rightly withholds; that the
+/// answers reached the guest is the serial script's to see.
+struct MdnsWitness {
+    needed: [Needed; 4],
+}
+
+impl MdnsWitness {
+    fn new(service_type: &Name, instance: &Name, host: &Name) -> Self {
+        let needed = |name: &Name, record_type| Needed {
+            name: *name,
+            record_type,
+            asked: false,
+        };
+        Self {
+            needed: [
+                needed(service_type, RecordType::Ptr),
+                needed(instance, RecordType::Srv),
+                needed(instance, RecordType::Txt),
+                needed(host, RecordType::Aaaa),
+            ],
+        }
+    }
+
+    /// Note every needed record a query from the guest asks for.
+    fn on_query(&mut self, message: &Message<'_>) {
+        for question in message.questions() {
+            for needed in &mut self.needed {
+                if question.name == needed.name && question.qtype.matches(needed.record_type) {
+                    needed.asked = true;
+                }
+            }
+        }
+    }
+
+    fn verdict(&self) -> Result<(), String> {
+        match self.needed.iter().find(|needed| !needed.asked) {
+            Some(needed) => Err(format!(
+                "netstack peer: the guest never asked for {:?} {}",
+                needed.record_type, needed.name
+            )),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A fixed-seed xorshift draw for the responder's jitter: the vertical needs
+/// no unpredictability, and a fixed seed keeps runs replayable.
+fn fixture_draws() -> impl FnMut() -> u32 {
+    let mut state: u32 = 0x5EED_2004;
+    move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state
+    }
+}
+
+/// Send one datagram the responder engine built, from the peer's link-local
+/// multicast DNS port: to the group's MAC and address, or straight back to the
+/// guest, the only other host on the wire. The peer speaks IPv6 only, so an
+/// IPv4 destination is not sent.
+fn send_mdns(socket: &UnixDatagram, qemu_sock: &PathBuf, to: Destination, payload: &[u8]) {
+    let source = IpAddr::V6(wire::link_local(wire::PEER_IID));
+    let (destination, mac, port) = match to {
+        Destination::Group => (
+            IpAddr::V6(MDNS_GROUP_V6),
+            ipv6_multicast_mac(&MDNS_GROUP_V6),
+            MDNS_PORT,
+        ),
+        Destination::Peer {
+            addr: IpAddr::V6(addr),
+            port,
+        } => (IpAddr::V6(addr), MacAddress(wire::GUEST_MAC), port),
+        Destination::Peer { .. } => return,
+    };
+    let frame = udp_frame(source, destination, mac, (MDNS_PORT, port), payload);
+    let _ = socket.send_to(&frame, qemu_sock);
+}
+
+/// Publish the fixture: the host at the peer's link-local address, the
+/// instance's `SRV` and `TXT`, and the type's pointer to it — returning the
+/// witness of the records the guest must ask for.
+fn publish_fixture(
+    engine: &mut MdnsEngine,
+    now: Duration64,
+    draws: &mut dyn FnMut() -> u32,
+) -> Result<MdnsWitness, String> {
+    let name = |dotted: &str| {
+        Name::encode(dotted).map_err(|e| format!("netstack peer: name {dotted}: {e:?}"))
+    };
+    let host = name(wire::MDNS_HOST)?;
+    let service_type = name(&format!("{}.local", wire::MDNS_SERVICE))?;
+    let instance = name(&format!(
+        "{}.{}.local",
+        wire::MDNS_INSTANCE,
+        wire::MDNS_SERVICE
+    ))?;
+    let mut txt = vec![u8::try_from(wire::MDNS_TXT.len()).expect("a short TXT string")];
+    txt.extend_from_slice(wire::MDNS_TXT.as_bytes());
+    let txt = TxtRecord::new(&txt).map_err(|e| format!("netstack peer: TXT: {e:?}"))?;
+    let published = [
+        (
+            host,
+            NameKind::Host,
+            true,
+            RData::Aaaa(wire::link_local(wire::PEER_IID)),
+        ),
+        (
+            instance,
+            NameKind::Instance,
+            true,
+            RData::Srv(Service {
+                priority: 0,
+                weight: 0,
+                port: wire::MDNS_SERVICE_PORT,
+                target: host,
+            }),
+        ),
+        (instance, NameKind::Instance, true, RData::Txt(txt)),
+        (
+            service_type,
+            NameKind::Instance,
+            false,
+            RData::Ptr(instance),
+        ),
+    ];
+    for (owner, kind, unique, data) in published {
+        engine
+            .publish(now, owner, kind, unique, &[data], draws)
+            .map_err(|e| format!("netstack peer: publish {owner}: {e:?}"))?;
+    }
+    Ok(MdnsWitness::new(&service_type, &instance, &host))
+}
+
+/// The multicast DNS responder loop: publish the fixture service and answer
+/// the segment through `lib/net`'s responder engine.
+///
+/// A multicast DNS datagram goes to the responder and never to the peer's
+/// stack, which binds no port 5353 and would answer the group with a
+/// port-unreachable; every other frame goes to the stack, which runs the
+/// peer's own duplicate address detection and answers the guest's neighbour
+/// discovery.
+fn run_mdns_peer(
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    stop: &AtomicBool,
+    succeeded: &ObserverGate,
+) -> Result<(), String> {
+    let start = Instant::now();
+    let now = |t0: Instant| {
+        Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    };
+    let (mut stack, _guest_ll) = peer_stack(start)?;
+    let mut engine = MdnsEngine::new(STACK_HASH_KEY);
+    let mut draws = fixture_draws();
+    let mut witness = publish_fixture(&mut engine, now(start), &mut draws)?;
+    let mut message = vec![0u8; MDNS_MAX_MESSAGE_LEN];
+    let mut buf = [0u8; MAX_FRAME];
+    while !stop.load(Ordering::Acquire) {
+        flush_engine(&mut stack, socket, qemu_sock, now(start));
+        while let Some(emit) = engine.poll(now(start), &mut draws, &mut message, &mut |_| {}) {
+            send_mdns(socket, qemu_sock, emit.to, &message[..emit.len]);
+        }
+
+        match socket.recv(&mut buf) {
+            Ok(len) => match parse_udp_frame(&buf[..len]) {
+                Some(datagram) if datagram.destination_port == MDNS_PORT => {
+                    if let Some(query) = Message::parse(datagram.payload) {
+                        if !query.response {
+                            witness.on_query(&query);
+                        }
+                    }
+                    let sender = Sender {
+                        addr: datagram.source,
+                        port: datagram.source_port,
+                        on_link: is_link_local_address(datagram.source),
+                    };
+                    if let Some(emit) = engine.on_message(
+                        now(start),
+                        datagram.payload,
+                        sender,
+                        &mut draws,
+                        &mut message,
+                        &mut |_| {},
+                    ) {
+                        send_mdns(socket, qemu_sock, emit.to, &message[..emit.len]);
+                    }
+                }
+                _ => {
+                    let mut out = StackOutput::default();
+                    stack.on_frame(&buf[..len], now(start), &mut out);
+                    send_frames(socket, qemu_sock, &out.frames);
+                }
+            },
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
+        }
+        if witness.verdict().is_ok() {
+            succeeded.confirm();
+        }
+    }
+    witness.verdict()
+}
+
+#[cfg(test)]
+mod mdns_tests {
+    use super::{
+        eui64_interface_id, fixture_draws, publish_fixture, Duration64, IpAddr, MdnsEngine,
+        Message, Name, RecordType, Sender, MDNS_MAX_MESSAGE_LEN, MDNS_PORT, STACK_HASH_KEY,
+    };
+    use tairix_net::mdns::Section;
+    use tairix_test_netstack_wire as wire;
+
+    fn at(millis: u64) -> Duration64 {
+        Duration64::from_nanos(millis * 1_000_000)
+    }
+
+    fn from(iid: [u8; 8]) -> Sender {
+        Sender {
+            addr: IpAddr::V6(wire::link_local(iid)),
+            port: MDNS_PORT,
+            on_link: true,
+        }
+    }
+
+    fn name(dotted: &str) -> Name {
+        Name::encode(dotted).expect("a fixture name")
+    }
+
+    /// The failure the witness once had: a guest that cached the peer's
+    /// announcements lists them as known answers, so the peer rightly sends
+    /// nothing again, and only the guest's asking can be required of it.
+    #[test]
+    fn a_guest_answered_from_the_peers_announcements_still_passes() {
+        let mut draws = fixture_draws();
+        let mut buf = vec![0u8; MDNS_MAX_MESSAGE_LEN];
+        let mut peer = MdnsEngine::new(STACK_HASH_KEY);
+        let mut witness = publish_fixture(&mut peer, at(0), &mut draws).expect("publishes");
+        let mut guest = MdnsEngine::new(STACK_HASH_KEY);
+        for step in 0..40 {
+            while let Some(emit) = peer.poll(at(step * 250), &mut draws, &mut buf, &mut |_| {}) {
+                let sent = buf[..emit.len].to_vec();
+                let _ = guest.on_message(
+                    at(step * 250),
+                    &sent,
+                    from(wire::PEER_IID),
+                    &mut draws,
+                    &mut buf,
+                    &mut |_| {},
+                );
+            }
+        }
+
+        let instance = name(&format!(
+            "{}.{}.local",
+            wire::MDNS_INSTANCE,
+            wire::MDNS_SERVICE
+        ));
+        for (owner, record_type) in [
+            (
+                name(&format!("{}.local", wire::MDNS_SERVICE)),
+                RecordType::Ptr,
+            ),
+            (instance, RecordType::Srv),
+            (instance, RecordType::Txt),
+            (name(wire::MDNS_HOST), RecordType::Aaaa),
+        ] {
+            guest
+                .ask(at(10_000), owner, record_type, &mut draws, &mut |_| {})
+                .expect("asks");
+        }
+        let mut answered_again = false;
+        while let Some(emit) = guest.poll(at(10_500), &mut draws, &mut buf, &mut |_| {}) {
+            let query = buf[..emit.len].to_vec();
+            let parsed = Message::parse(&query).expect("the guest's query parses");
+            assert!(!parsed.response);
+            assert!(
+                parsed
+                    .records()
+                    .any(|(section, _)| section == Section::Answer),
+                "the query lists known answers"
+            );
+            witness.on_query(&parsed);
+            answered_again |= peer
+                .on_message(
+                    at(10_500),
+                    &query,
+                    from(eui64_interface_id(wire::GUEST_MAC)),
+                    &mut draws,
+                    &mut buf,
+                    &mut |_| {},
+                )
+                .is_some();
+        }
+        assert!(!answered_again, "every record was a known answer");
+        assert_eq!(witness.verdict(), Ok(()));
+    }
+
+    #[test]
+    fn a_record_the_guest_never_asked_for_fails_the_verdict() {
+        let mut draws = fixture_draws();
+        let mut peer = MdnsEngine::new(STACK_HASH_KEY);
+        let witness = publish_fixture(&mut peer, at(0), &mut draws).expect("publishes");
+        let verdict = witness.verdict().expect_err("nothing was asked");
+        assert!(verdict.contains("never asked for Ptr"), "{verdict}");
     }
 }
 

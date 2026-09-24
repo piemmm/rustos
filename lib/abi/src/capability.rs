@@ -757,6 +757,23 @@ impl CapabilityId {
     /// indicator the recording application cannot suppress.
     pub const AUDIO_CAPTURE: Self = Self(49);
 
+    /// Browse and resolve every link-local service type, and enumerate the
+    /// types a segment offers (`plans/ZEROCONF.md` §5).
+    ///
+    /// A browse is otherwise scoped to the service types the caller's bundle
+    /// declares and is granted, because enumerating a whole segment is
+    /// reconnaissance — the printers, file servers, and login hosts on it —
+    /// and on other systems it is free to any process. This lifts that scope
+    /// for the one class of principal that legitimately surveys a network: an
+    /// administrator's diagnostic tool. The discovery service checks it at
+    /// request admission against the kernel-attested caller.
+    ///
+    /// Not covered by an existing capability: `CAP_NET_ADMIN` reconfigures
+    /// interfaces, which a network survey must not need, and a program that
+    /// surveys must not thereby be able to reconfigure — the need to grant one
+    /// without the other is what splits it off.
+    pub const NET_DISCOVER_ALL: Self = Self(50);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -816,6 +833,7 @@ impl CapabilityId {
         (Self::DESKTOP_LAYER, "CAP_DESKTOP_LAYER"),
         (Self::AUDIO_DEVICE, "CAP_AUDIO_DEVICE"),
         (Self::AUDIO_CAPTURE, "CAP_AUDIO_CAPTURE"),
+        (Self::NET_DISCOVER_ALL, "CAP_NET_DISCOVER_ALL"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -959,6 +977,7 @@ mod tests {
         assert_eq!(CapabilityId::DESKTOP_LAYER.as_u16(), 47);
         assert_eq!(CapabilityId::AUDIO_DEVICE.as_u16(), 48);
         assert_eq!(CapabilityId::AUDIO_CAPTURE.as_u16(), 49);
+        assert_eq!(CapabilityId::NET_DISCOVER_ALL.as_u16(), 50);
     }
 
     #[test]
@@ -1002,6 +1021,10 @@ mod tests {
             CapabilityId::AUDIO_CAPTURE.name(),
             Some("CAP_AUDIO_CAPTURE")
         );
+        assert_eq!(
+            CapabilityId::NET_DISCOVER_ALL.name(),
+            Some("CAP_NET_DISCOVER_ALL")
+        );
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -1012,15 +1035,15 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=49 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=50 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=49 {
+        for raw in 1..=50 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }
         // …and the assigned range stops there: the next id is free, so a new
         // capability cannot silently reuse one.
-        assert_eq!(CapabilityId::from_raw(50).expect("in range").name(), None);
+        assert_eq!(CapabilityId::from_raw(51).expect("in range").name(), None);
     }
 
     #[test]

@@ -68,6 +68,7 @@
   - [`tairix-curses`](./lib/curses.md)
   - [`tairix-devmatch`](./lib/devmatch.md)
   - [`tairix-disasm`](./lib/disasm.md)
+  - [`tairix-discovery`](./lib/discovery.md)
   - [`tairix-dma-barrier`](./lib/dma_barrier.md)
   - [`tairix-drvrt`](./lib/drvrt.md)
   - [`tairix-fbcon`](./lib/fbcon.md)

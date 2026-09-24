@@ -24,11 +24,12 @@
 //! and the exit / driver-unload reclaim paths reach it from different call
 //! sites and neither owns the other. Every operation fails closed.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 
 use tairix_abi::Errno;
+use tairix_collections::HashMap;
+use tairix_hash::BuildFastHash;
 use tairix_kernel_mem::{DmaCustodian, SharedMemory, PAGE_SIZE};
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
@@ -78,20 +79,49 @@ struct DmaRegion {
 
 /// The registry state: the next id to mint, the live regions, and each
 /// task's live `(base_va, region_id)` mappings.
+///
+/// Both maps are keyed on values the kernel assigns, never on caller input,
+/// so the unkeyed hash is sound; and both grow fallibly, so a full kernel heap
+/// refuses a syscall rather than aborting it.
 struct State {
     next_id: u64,
-    regions: BTreeMap<u64, Region>,
-    mappings: BTreeMap<u64, Vec<(u64, u64)>>,
+    regions: HashMap<u64, Region, BuildFastHash>,
+    mappings: HashMap<u64, Vec<(u64, u64)>, BuildFastHash>,
 }
 
 impl State {
     const fn new() -> Self {
         Self {
             next_id: 1,
-            regions: BTreeMap::new(),
-            mappings: BTreeMap::new(),
+            regions: HashMap::with_hasher(BuildFastHash::new()),
+            mappings: HashMap::with_hasher(BuildFastHash::new()),
         }
     }
+
+    /// Note that `process` maps region `id` at `base_va`.
+    fn add_mapping(&mut self, process: u64, base_va: u64, id: u64) -> Result<(), Errno> {
+        if let Some(list) = self.mappings.get_mut(&process) {
+            list.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+            list.push((base_va, id));
+            return Ok(());
+        }
+        let mut list = Vec::new();
+        list.try_reserve_exact(1).map_err(|_| Errno::OutOfMemory)?;
+        list.push((base_va, id));
+        self.mappings
+            .try_insert(process, list)
+            .map_err(|_| Errno::OutOfMemory)?;
+        Ok(())
+    }
+}
+
+/// A copy of `chunks`, refused rather than aborting when the heap is full.
+fn copy_chunks(chunks: &[SharedChunk]) -> Result<Vec<SharedChunk>, Errno> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(chunks.len())
+        .map_err(|_| Errno::OutOfMemory)?;
+    copy.extend_from_slice(chunks);
+    Ok(copy)
 }
 
 /// The global shared-region registry. Pure data behind a [`SpinLock`]; the
@@ -130,7 +160,14 @@ pub fn create(
             return Err(err);
         }
     };
-    Ok((base_va, record(owner, base_va, chunks, pages, None)))
+    match record(owner, base_va, chunks, pages, None) {
+        Ok(id) => Ok((base_va, id)),
+        Err(chunks) => {
+            let _ = facility.unmap_region(base_va, region_len_bytes(pages));
+            facility.free_region(&chunks, SharedMemory::Cacheable);
+            Err(Errno::OutOfMemory)
+        }
+    }
 }
 
 /// A DMA region [`create_dma`] carved and mapped.
@@ -176,12 +213,21 @@ pub fn create_dma(
     let chunk = facility
         .alloc_dma_region(pages, addr_limit)
         .inspect_err(|_| unbind())?;
-    let chunks = alloc::vec![chunk];
+    let abandon = |chunks: &[SharedChunk]| {
+        facility.free_region(chunks, SharedMemory::DmaCoherent);
+        unbind();
+    };
+    let chunks = match copy_chunks(&[chunk]) {
+        Ok(chunks) => chunks,
+        Err(err) => {
+            abandon(&[chunk]);
+            return Err(err);
+        }
+    };
     let base_va = match facility.map_region(&chunks, SharedMemory::DmaCoherent) {
         Ok(va) => va,
         Err(err) => {
-            facility.free_region(&chunks, SharedMemory::DmaCoherent);
-            unbind();
+            abandon(&chunks);
             return Err(err);
         }
     };
@@ -190,7 +236,14 @@ pub fn create_dma(
         creator: owner,
         orphaned: false,
     };
-    let id = record(owner, base_va, chunks, chunk.pages, Some(dma));
+    let id = match record(owner, base_va, chunks, chunk.pages, Some(dma)) {
+        Ok(id) => id,
+        Err(chunks) => {
+            let _ = facility.unmap_region(base_va, region_len_bytes(chunk.pages));
+            abandon(&chunks);
+            return Err(Errno::OutOfMemory);
+        }
+    };
     Ok(DmaRegionCreated {
         base_va,
         id,
@@ -199,32 +252,39 @@ pub fn create_dma(
     })
 }
 
-/// Record a freshly mapped region owned by `owner`, returning its new id.
+/// Record a freshly mapped region owned by `owner`, returning its new id, or
+/// handing `chunks` back untouched for the caller to free when the registry
+/// cannot grow.
 fn record(
     owner: ProcessId,
     base_va: u64,
     chunks: Vec<SharedChunk>,
     pages: u64,
     dma: Option<DmaRegion>,
-) -> u64 {
+) -> Result<u64, Vec<SharedChunk>> {
     let mut state = REGIONS.lock();
     let id = state.next_id;
+    // The entry goes in holding no chunks, so a refused insert drops nothing
+    // the caller must still free.
+    let entry = Region {
+        chunks: Vec::new(),
+        pages,
+        refs: 1,
+        dma,
+    };
+    if state.regions.try_insert(id, entry).is_err() {
+        return Err(chunks);
+    }
+    if state.add_mapping(owner.0, base_va, id).is_err() {
+        state.regions.remove(&id);
+        return Err(chunks);
+    }
+    let Some(region) = state.regions.get_mut(&id) else {
+        return Err(chunks);
+    };
+    region.chunks = chunks;
     state.next_id = state.next_id.wrapping_add(1);
-    state.regions.insert(
-        id,
-        Region {
-            chunks,
-            pages,
-            refs: 1,
-            dma,
-        },
-    );
-    state
-        .mappings
-        .entry(owner.0)
-        .or_default()
-        .push((base_va, id));
-    id
+    Ok(id)
 }
 
 /// Map an existing region `id` into `process`'s own live address space,
@@ -240,51 +300,83 @@ pub fn map(
     process: ProcessId,
     id: u64,
 ) -> Result<(u64, usize), Errno> {
-    // Snapshot the backing under the lock; map outside it.
+    // The mapping's reference is taken before its entries exist, so a
+    // concurrent last unmap cannot free the frames under it.
     let (chunks, pages, memory) = {
-        let state = REGIONS.lock();
-        let region = state.regions.get(&id).ok_or(Errno::NotFound)?;
-        (region.chunks.clone(), region.pages, region.memory())
+        let mut state = REGIONS.lock();
+        let region = state.regions.get_mut(&id).ok_or(Errno::NotFound)?;
+        let chunks = copy_chunks(&region.chunks)?;
+        region.refs += 1;
+        (chunks, region.pages, region.memory())
     };
-    let base_va = facility.map_region(&chunks, memory)?;
-    let mut state = REGIONS.lock();
-    // The region could have been torn down between the two locks only if its
-    // last reference dropped; but `process` holds the grant and no mapping was
-    // dropped here, so re-checking keeps the accounting honest fail-closed.
-    let Some(region) = state.regions.get_mut(&id) else {
-        drop(state);
-        let _ = facility.unmap_region(base_va, region_len_bytes(pages));
-        return Err(Errno::NotFound);
+    let len = region_len_bytes(pages);
+    let base_va = match facility.map_region(&chunks, memory) {
+        Ok(va) => va,
+        Err(err) => {
+            release_ref(facility, id);
+            return Err(err);
+        }
     };
-    region.refs += 1;
-    state
-        .mappings
-        .entry(process.0)
-        .or_default()
-        .push((base_va, id));
-    Ok((base_va, region_len_bytes(pages)))
+    let recorded = REGIONS.lock().add_mapping(process.0, base_va, id);
+    if let Err(err) = recorded {
+        let _ = facility.unmap_region(base_va, len);
+        release_ref(facility, id);
+        return Err(err);
+    }
+    Ok((base_va, len))
+}
+
+/// A shared mapping whose page-table entries are gone but whose reference is
+/// still held, so the region's frames outlive every view the caller has yet
+/// to withdraw them from. Dropping it releases the reference, freeing the
+/// frames if it was the last.
+#[must_use = "the reference is released when this is dropped"]
+pub struct Unmapped<'f> {
+    facility: &'f dyn SharedMemFacility,
+    id: u64,
+    len: usize,
+}
+
+impl Unmapped<'_> {
+    /// The byte length released — the registry's own record of the region.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// `true` if the region is zero-length (never the case for a live
+    /// region — creation requires at least one page).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Drop for Unmapped<'_> {
+    fn drop(&mut self) {
+        release_ref(self.facility, self.id);
+    }
 }
 
 /// Release `process`'s shared mapping based at `base`, tearing down its
-/// page-table entries and dropping its reference to the region; the region's
-/// frames are zeroed and freed when its last reference is released.
+/// page-table entries; the reference goes when the returned [`Unmapped`] is
+/// dropped, and the region's frames are zeroed and freed at the last one.
 ///
-/// Reports the byte length released — the registry's own record of the
-/// region, which the teardown already reads — so the caller can drop exactly
-/// those pages from the process's address-space snapshot.
+/// The caller drops the region's pages from the process's address-space
+/// snapshot first, so no copy can reach frames a release has freed.
 ///
 /// # Errors
 ///
 /// [`Errno::NotFound`] if `base` does not name a live shared mapping of
-/// `process`.
+/// `process`, or the facility's unmap error (the reference is released
+/// either way).
 pub fn unmap(
     facility: &dyn SharedMemFacility,
     process: ProcessId,
     base: u64,
-) -> Result<usize, Errno> {
+) -> Result<Unmapped<'_>, Errno> {
     // Find and remove the mapping record and recover its region's length
-    // under the lock; the reference itself is dropped through the shared
-    // release step below, outside it.
+    // under the lock; the reference is held by the returned guard.
     let (id, len) = {
         let mut state = REGIONS.lock();
         let list = state.mappings.get_mut(&process.0).ok_or(Errno::NotFound)?;
@@ -299,18 +391,15 @@ pub fn unmap(
         let region = state.regions.get(&id).ok_or(Errno::NotFound)?;
         (id, region_len_bytes(region.pages))
     };
-    // Tear down the caller's page-table entries (outside the registry
-    // lock), then drop the mapping's reference — freeing the frames if it
-    // was the last one.
-    let unmap = facility.unmap_region(base, len);
-    release_ref(facility, id);
-    unmap.map(|()| len)
+    let unmapped = Unmapped { facility, id, len };
+    facility.unmap_region(base, len)?;
+    Ok(unmapped)
 }
 
 /// Drop one reference to region `id`, releasing its frames if this was the
 /// last one: to the allocator, or to its node's quarantine for a DMA region
 /// whose creator ended still mapping it. The shared release step behind
-/// [`unmap`], [`reclaim_process`], and a [`KernelHold`] drop.
+/// [`Unmapped`], [`reclaim_process`], and a [`KernelHold`] drop.
 fn release_ref(facility: &dyn SharedMemFacility, id: u64) {
     let released = {
         let mut state = REGIONS.lock();
@@ -429,8 +518,9 @@ pub fn kernel_hold(facility: &'static dyn SharedMemFacility, id: u64) -> Result<
         if region.dma.is_some() {
             return Err(Errno::NotImplemented);
         }
+        let chunks = copy_chunks(&region.chunks)?;
         region.refs += 1;
-        (region.chunks.clone(), region.pages)
+        (chunks, region.pages)
     };
     let len = region_len_bytes(pages);
     // A multi-chunk region is not physically contiguous, so the facility
@@ -624,7 +714,7 @@ mod tests {
         assert_eq!(fac.maps.lock().unwrap()[0].1, 2, "two pages mapped");
         assert_eq!(va, FakeFacility::va_for(fac.maps.lock().unwrap()[0].0));
         // Cleanup: the owner releases its only reference, freeing the region.
-        unmap(&fac, owner, va).expect("unmap");
+        drop(unmap(&fac, owner, va).expect("unmap"));
         assert_eq!(fac.frees.lock().unwrap().len(), 1, "freed at last ref");
         // The id is unforgeable to a later map once the region is gone.
         assert_eq!(map(&fac, owner, id), Err(Errno::NotFound));
@@ -644,20 +734,83 @@ mod tests {
 
         // The owner releases first: ref drops to 1, the frames are NOT freed
         // while the grantee still maps them (no use-after-free).
-        unmap(&fac, owner, owner_va).expect("owner unmap");
+        drop(unmap(&fac, owner, owner_va).expect("owner unmap"));
         assert!(
             fac.frees.lock().unwrap().is_empty(),
             "not freed while a grantee still maps the region"
         );
         // The grantee releases last: now the region's frames are scrubbed and
         // freed exactly once.
-        unmap(&fac, grantee, grantee_va).expect("grantee unmap");
+        drop(unmap(&fac, grantee, grantee_va).expect("grantee unmap"));
         assert_eq!(fac.frees.lock().unwrap().len(), 1, "freed at last ref");
         assert_eq!(
             fac.unmaps.lock().unwrap().len(),
             2,
             "both mappings torn down"
         );
+    }
+
+    /// A facility on which the owner's last unmap lands while a grantee's map
+    /// is installing its entries: the interleaving two CPUs can produce.
+    struct UnmapDuringMap {
+        inner: FakeFacility,
+        owner: ProcessId,
+        owner_va: AtomicU64,
+    }
+
+    impl SharedMemFacility for UnmapDuringMap {
+        fn alloc_region(&self, pages: u64) -> Result<Vec<SharedChunk>, Errno> {
+            self.inner.alloc_region(pages)
+        }
+        fn map_region(&self, chunks: &[SharedChunk], memory: SharedMemory) -> Result<u64, Errno> {
+            let owner_va = self.owner_va.swap(0, Ordering::Relaxed);
+            if owner_va != 0 {
+                drop(unmap(self, self.owner, owner_va).expect("the owner's last unmap"));
+            }
+            self.inner.map_region(chunks, memory)
+        }
+        fn unmap_region(&self, base: u64, len: usize) -> Result<(), Errno> {
+            self.inner.unmap_region(base, len)
+        }
+        fn free_region(&self, chunks: &[SharedChunk], memory: SharedMemory) {
+            self.inner.free_region(chunks, memory);
+        }
+    }
+
+    #[test]
+    fn a_last_unmap_racing_a_map_cannot_free_the_frames_under_it() {
+        let fac = UnmapDuringMap {
+            inner: FakeFacility::new(),
+            owner: ProcessId(0x5_0010),
+            owner_va: AtomicU64::new(0),
+        };
+        let grantee = ProcessId(0x5_0011);
+        let (owner_va, id) = create(&fac, fac.owner, 1).expect("create");
+        fac.owner_va.store(owner_va, Ordering::Relaxed);
+
+        let (grantee_va, _) = map(&fac, grantee, id).expect("the grantee maps");
+        assert!(
+            fac.inner.frees.lock().unwrap().is_empty(),
+            "freed while the grantee's entries were being installed"
+        );
+        drop(unmap(&fac, grantee, grantee_va).expect("grantee unmap"));
+        assert_eq!(fac.inner.frees.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_unmapped_region_is_freed_only_when_its_reference_goes() {
+        let fac = FakeFacility::new();
+        let owner = ProcessId(0x5_0012);
+        let (va, _) = create(&fac, owner, 1).expect("create");
+        let unmapped = unmap(&fac, owner, va).expect("unmap");
+        assert_eq!(unmapped.len(), PAGE_SIZE);
+        assert_eq!(fac.unmaps.lock().unwrap().len(), 1, "entries torn down");
+        assert!(
+            fac.frees.lock().unwrap().is_empty(),
+            "freed before the caller withdrew its view"
+        );
+        drop(unmapped);
+        assert_eq!(fac.frees.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -768,7 +921,7 @@ mod tests {
         assert_eq!(kernel_hold(fac, id).err(), Some(Errno::NotImplemented));
         // The failed hold released its extra reference: the owner's unmap
         // still frees the region exactly once (both chunks).
-        unmap(fac, owner, va).expect("unmap");
+        drop(unmap(fac, owner, va).expect("unmap"));
         assert_eq!(
             fac.inner.frees.lock().unwrap().len(),
             2,
@@ -785,7 +938,7 @@ mod tests {
         assert_eq!(kernel_hold(fac, id).err(), Some(Errno::NotImplemented));
         // The failed hold released its reference: the owner's unmap still
         // frees exactly once.
-        unmap(fac, owner, va).expect("unmap");
+        drop(unmap(fac, owner, va).expect("unmap"));
         assert_eq!(fac.frees.lock().unwrap().len(), 1);
     }
 
@@ -851,9 +1004,9 @@ mod tests {
 
         // The creator releases its own mapping while alive — its claim that
         // the device is stopped — so the last release frees normally.
-        unmap(&fac, creator, made.base_va).expect("creator unmaps");
+        drop(unmap(&fac, creator, made.base_va).expect("creator unmaps"));
         assert!(fac.frees.lock().unwrap().is_empty());
-        unmap(&fac, consumer, consumer_va).expect("consumer unmaps");
+        drop(unmap(&fac, consumer, consumer_va).expect("consumer unmaps"));
         assert_eq!(*fac.frees.lock().unwrap(), [(made.phys_base, 2, 4)]);
         assert_eq!(
             *fac.free_memory.lock().unwrap(),
@@ -880,7 +1033,7 @@ mod tests {
 
         // The consumer's release is the last: the block goes to the node's
         // quarantine under the dead driver's generation, never the allocator.
-        unmap(&fac, consumer, consumer_va).expect("consumer unmaps");
+        drop(unmap(&fac, consumer, consumer_va).expect("consumer unmaps"));
         assert!(fac.frees.lock().unwrap().is_empty());
         assert_eq!(*custody.held.lock().unwrap(), [(7, 3, made.phys_base)]);
         assert_eq!(*custody.unbinds.lock().unwrap(), [7]);
@@ -909,7 +1062,7 @@ mod tests {
         let made = create_dma(fac, creator, custodian(leaked_custody()), 1, 0).expect("carves");
         assert_eq!(kernel_hold(fac, made.id).err(), Some(Errno::NotImplemented));
         // The refusal took no reference: the creator's unmap is the last.
-        unmap(fac, creator, made.base_va).expect("creator unmaps");
+        drop(unmap(fac, creator, made.base_va).expect("creator unmaps"));
         assert_eq!(fac.inner.frees.lock().unwrap().len(), 1);
     }
 
@@ -922,7 +1075,7 @@ mod tests {
         let made = create_dma(&fac, creator, custodian(custody), 1, 0).expect("carves");
         map(&fac, consumer, made.id).expect("consumer maps");
         assert_eq!(reclaim_process(&fac, consumer), 0);
-        unmap(&fac, creator, made.base_va).expect("creator unmaps");
+        drop(unmap(&fac, creator, made.base_va).expect("creator unmaps"));
         assert_eq!(fac.frees.lock().unwrap().len(), 1);
         assert!(custody.held.lock().unwrap().is_empty());
     }
@@ -981,7 +1134,7 @@ mod tests {
         // A region id that was never created.
         assert_eq!(map(&fac, process, 0xDEAD_BEEF), Err(Errno::NotFound));
         // A base VA the process never mapped.
-        assert_eq!(unmap(&fac, process, 0x1234), Err(Errno::NotFound));
+        assert_eq!(unmap(&fac, process, 0x1234).err(), Some(Errno::NotFound));
         // Neither touched the facility's free path.
         assert!(fac.frees.lock().unwrap().is_empty());
     }

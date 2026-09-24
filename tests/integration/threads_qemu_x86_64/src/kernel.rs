@@ -320,6 +320,7 @@ struct Subsystems {
     sched: &'static Scheduler<BinArch>,
     arch: &'static BinArch,
     caps: &'static RwLock<CapTable>,
+    peer_watch: &'static tairix_kernel_core::PeerWatch,
     ipc: &'static RwLock<PortRegistry>,
     aspaces: &'static RwLock<AddressSpaceRegistry>,
     rng: &'static RwLock<Box<dyn RandomReserve + Send + Sync>>,
@@ -382,6 +383,7 @@ fn leak_subsystems(board: &BspBringUp) -> Subsystems {
             board.irq_routing,
         ))),
         caps: Box::leak(Box::new(RwLock::new(CapTable::new()))),
+        peer_watch: Box::leak(Box::new(tairix_kernel_core::PeerWatch::new())),
         ipc: Box::leak(Box::new(RwLock::new(PortRegistry::new()))),
         aspaces: Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new()))),
         rng: Box::leak(Box::new(RwLock::new(
@@ -482,6 +484,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
             &NULL_MMIO_MAP_FACILITY,
             &NULL_DMA_ALLOC_FACILITY,
         )
+        .with_peer_watch(sys.peer_watch)
         .with_process_signal(signal_producer),
     ));
     if DISPATCH_SLOT.install_dispatcher(hook).is_err() {
@@ -516,6 +519,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
         None,
         sys.aspaces,
         sys.caps,
+        sys.peer_watch,
         wait_producer,
         &X86_64_PROCESS_SPAWN,
     );
@@ -525,6 +529,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
         &SERIAL_SINK,
         sys.sched,
         sys.caps,
+        sys.peer_watch,
         sys.aspaces,
         sys.arch,
         wait_producer,

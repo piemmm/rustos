@@ -307,6 +307,10 @@ struct Service {
     /// clean stop, regardless of the exit code the killed process reports.
     /// Cleared once that exit is reaped or the service is next started.
     killed_by_watchdog: bool,
+    /// Set when the service is stopped because a condition it requires was
+    /// withdrawn, so [`reap`](Init::reap) returns it to admission rather than
+    /// to rest: it runs again once the condition holds again.
+    held: bool,
 }
 
 impl Service {
@@ -380,6 +384,12 @@ pub struct EnrolReport {
 /// readiness through [`notify`](Self::notify), so a dependent that needs the
 /// service *functional* is never released against one that is merely
 /// spawned.
+///
+/// A condition a service provides holds only while that service is ready, so
+/// a service requiring it runs only while it holds: when the last ready
+/// provider stops being ready the condition is withdrawn, and whatever
+/// requires it is stopped and returned to admission, to start again against
+/// the provider's next instance.
 pub struct Init<'a> {
     cfg: InitConfig<'a>,
     services: Vec<Service>,
@@ -390,6 +400,10 @@ pub struct Init<'a> {
     /// Which named readiness conditions are currently satisfied, indexed by
     /// [`ReadyCondition::as_u16`].
     satisfied: [bool; CONDITION_COUNT],
+    /// Which of them were asserted through
+    /// [`satisfy_condition`](Self::satisfy_condition) rather than by a
+    /// provider, and so outlive every provider.
+    asserted: [bool; CONDITION_COUNT],
     /// Parked clients that became connected because their service reached
     /// readiness, awaiting the caller's
     /// [`take_released_clients`](Self::take_released_clients) drain. The
@@ -420,6 +434,7 @@ impl<'a> Init<'a> {
             services: Vec::new(),
             order: Vec::new(),
             satisfied: [false; CONDITION_COUNT],
+            asserted: [false; CONDITION_COUNT],
             released_clients: Vec::new(),
             vendor: Enrolment::empty(),
             overrides: EnrolmentOverride::empty(),
@@ -513,6 +528,7 @@ impl<'a> Init<'a> {
             restart_pacer: restart_pacer(),
             watchdog_deadline: None,
             killed_by_watchdog: false,
+            held: false,
         });
         Ok(())
     }
@@ -607,9 +623,11 @@ impl<'a> Init<'a> {
     /// Idempotent: satisfying an already-satisfied condition changes
     /// nothing and audits nothing. This is the seam for a condition a
     /// providing service does not itself announce — for example the kernel
-    /// signalling [`ReadyCondition::FilesystemsMounted`]. The returned
-    /// [`StartReport`] lists the services this newly admitted.
+    /// signalling [`ReadyCondition::FilesystemsMounted`] — so a condition
+    /// asserted here is never withdrawn by a provider leaving readiness. The
+    /// returned [`StartReport`] lists the services this newly admitted.
     pub fn satisfy_condition(&mut self, condition: ReadyCondition) -> StartReport {
+        self.asserted[condition.as_u16() as usize] = true;
         self.satisfy_condition_inner(condition);
         self.pump()
     }
@@ -1467,8 +1485,10 @@ impl<'a> Init<'a> {
     /// [`ServiceState::Stopping`], and arm the grace deadline after which it
     /// is force-terminated. Clears any pending idle-linger and cancels any
     /// pending restart (a stop the manager asked for is never fought with a
-    /// relaunch).
+    /// relaunch). A service that was ready stops being so here, so what it
+    /// alone provided is withdrawn.
     fn begin_stop(&mut self, idx: usize, now: Duration64, reason: &str) {
+        let was_ready = self.services[idx].state.is_ready();
         self.services[idx].linger_deadline = None;
         self.services[idx].restart_deadline = None;
         // A stop the manager asked for must never be second-guessed by the
@@ -1486,6 +1506,66 @@ impl<'a> Init<'a> {
         self.services[idx].grace_deadline = Some(add_duration(now, grace));
         let name = self.services[idx].spec.name().to_string();
         self.audit(events::SERVICE_STOPPING, Level::Info, &name, reason);
+        if was_ready {
+            self.withdraw_provided(idx, now);
+        }
+    }
+
+    /// Stop service `idx` until it is next started by name: cancel a pending
+    /// restart, a pending admission, and any hold, and ask a live process to
+    /// exit.
+    fn stop_for_good(&mut self, idx: usize, now: Duration64, reason: &str) {
+        let service = &mut self.services[idx];
+        service.restart_deadline = None;
+        service.held = false;
+        if service.state == ServiceState::Inactive && !service.spec.activation().is_on_demand() {
+            service.state = ServiceState::Stopped;
+        }
+        if self.is_alive(idx) {
+            self.begin_stop(idx, now, reason);
+        }
+    }
+
+    /// Service `idx` has stopped being ready: withdraw each condition no
+    /// other ready service provides and nothing asserted, and stop what
+    /// requires one — with what depends on it — holding each for admission
+    /// once the condition holds again.
+    ///
+    /// Terminates: a service is stopped at most once, since a stopping one
+    /// is no longer alive.
+    fn withdraw_provided(&mut self, idx: usize, now: Duration64) {
+        for position in 0..self.services[idx].spec.provides().len() {
+            let condition = self.services[idx].spec.provides()[position];
+            let slot = condition.as_u16() as usize;
+            let still_held = self.asserted[slot]
+                || self.services.iter().any(|service| {
+                    service.state.is_ready() && service.spec.provides().contains(&condition)
+                });
+            if !self.satisfied[slot] || still_held {
+                continue;
+            }
+            self.satisfied[slot] = false;
+            self.audit_condition_withdrawn(condition);
+            for requirer in 0..self.services.len() {
+                if self.is_alive(requirer)
+                    && self.services[requirer].spec.requires().contains(&condition)
+                {
+                    self.hold_closure(requirer, now);
+                }
+            }
+        }
+    }
+
+    /// Stop `target` and every live service that names it, dependents first,
+    /// each held for admission once what it was admitted on holds again.
+    fn hold_closure(&mut self, target: usize, now: Duration64) {
+        let closure = self.dependent_closure(target);
+        for idx in self.reverse_stop_order() {
+            if closure[idx] && self.is_alive(idx) {
+                self.services[idx].held = true;
+                self.begin_stop(idx, now, "required condition withdrawn");
+            }
+        }
     }
 
     /// Whether service `idx` has a live-or-starting process the manager
@@ -1521,10 +1601,11 @@ impl<'a> Init<'a> {
     /// manager tears the closure down dependents-first so nothing is left
     /// running against a stopped prerequisite. Each stop is graceful — the
     /// service is asked to exit and force-terminated only if it overruns its
-    /// grace period ([`expire_grace`](Self::expire_grace)) — and any pending
-    /// restart in the closure is cancelled (a stop is honoured, never fought
-    /// with a relaunch). Services in the closure that are already down are
-    /// skipped.
+    /// grace period ([`expire_grace`](Self::expire_grace)) — and the stop is
+    /// final: a pending restart or admission in the closure is cancelled, and
+    /// nothing in it comes back until it is started by name. A service
+    /// requiring a condition the stop withdraws is held instead, and returns
+    /// once the condition holds again.
     ///
     /// This is the engine mechanism; the capability-checked control surface
     /// that gates *who* may stop a service is layered above it. `now` is the
@@ -1546,14 +1627,8 @@ impl<'a> Init<'a> {
         };
         let closure = self.dependent_closure(target);
         for idx in self.reverse_stop_order() {
-            if !closure[idx] {
-                continue;
-            }
-            // Cancel a pending restart even for a service that is already
-            // down: a deliberate stop supersedes a queued relaunch.
-            self.services[idx].restart_deadline = None;
-            if self.is_alive(idx) {
-                self.begin_stop(idx, now, "stop");
+            if closure[idx] {
+                self.stop_for_good(idx, now, "stop");
             }
         }
         Ok(())
@@ -1565,8 +1640,9 @@ impl<'a> Init<'a> {
     /// Tears the whole registered set down dependents-first (the reverse of
     /// the boot start order) so no service is stopped while another still
     /// depends on it. Every stop is graceful with its own grace deadline,
-    /// and every pending restart is cancelled first so a service the manager
-    /// is shutting down is never relaunched underneath it. `now` is the
+    /// and final: no pending restart, admission, or hold survives it, so a
+    /// service the manager is shutting down is never relaunched underneath
+    /// it. `now` is the
     /// current monotonic instant, from which the grace deadlines are
     /// computed.
     ///
@@ -1577,10 +1653,7 @@ impl<'a> Init<'a> {
     /// ([`expire_grace`](Self::expire_grace)).
     pub fn shutdown(&mut self, now: Duration64) {
         for idx in self.reverse_stop_order() {
-            self.services[idx].restart_deadline = None;
-            if self.is_alive(idx) {
-                self.begin_stop(idx, now, "shutdown");
-            }
+            self.stop_for_good(idx, now, "shutdown");
         }
     }
 
@@ -1945,16 +2018,20 @@ impl<'a> Init<'a> {
         in_set
     }
 
-    /// Reap every child that has exited, returning the number reaped.
+    /// Reap every child that has exited, returning what re-admitting the held
+    /// services among them started.
     ///
     /// A reaped process that matches a started service is logged as a
     /// service exit and its lifecycle moved to a terminal state. A service
     /// the manager had asked to stop ([`ServiceState::Stopping`]) reaches
     /// [`ServiceState::Stopped`] whatever its exit code — it was told to go,
-    /// so a non-zero code is not a failure. Otherwise a clean exit is
-    /// [`ServiceState::Stopped`] and a non-zero exit
-    /// [`ServiceState::Failed`]. Any other reaped process is an inherited
-    /// orphan and is logged as such (PID 1 reaps the whole system's zombies).
+    /// so a non-zero code is not a failure — unless it was stopped for a
+    /// withdrawn condition, when it returns to [`ServiceState::Inactive`] and
+    /// is admitted again at once if the condition already holds once more.
+    /// Otherwise a clean exit is [`ServiceState::Stopped`] and a non-zero exit
+    /// [`ServiceState::Failed`], and a service that was ready withdraws what
+    /// it alone provided. Any other reaped process is an inherited orphan and
+    /// is logged as such (PID 1 reaps the whole system's zombies).
     ///
     /// A service whose [`RestartPolicy`](tairix_abi::RestartPolicy) asks to
     /// come back — and whose exit the manager did **not** itself initiate
@@ -1974,24 +2051,27 @@ impl<'a> Init<'a> {
     /// linger or grace deadline is disarmed. Clients whose connections died
     /// with the process are the transport layer's to notice; the manager
     /// holds no stale references.
-    pub fn reap(&mut self, now: Duration64) -> usize {
-        let mut reaped = 0;
+    pub fn reap(&mut self, now: Duration64) -> StartReport {
+        let mut readmit = false;
         while let Some(child) = self.cfg.reaper.collect() {
-            reaped += 1;
             if let Some(pos) = self.services.iter().position(|s| s.pid == Some(child.pid)) {
                 let name = self.services[pos].spec.name().to_string();
                 let was_stopping = self.services[pos].state == ServiceState::Stopping;
+                let was_ready = self.services[pos].state.is_ready();
                 let watchdog_kill = self.services[pos].killed_by_watchdog;
+                let held = core::mem::take(&mut self.services[pos].held);
                 self.services[pos].pid = None;
                 // A watchdog kill is an unexpected *failure*, never a clean
                 // stop: the process was wedged, so it fails regardless of the
                 // exit code the forced termination happens to report.
-                self.services[pos].state =
-                    if !watchdog_kill && (was_stopping || child.exit_code == 0) {
-                        ServiceState::Stopped
-                    } else {
-                        ServiceState::Failed
-                    };
+                self.services[pos].state = if was_stopping && held {
+                    readmit = true;
+                    ServiceState::Inactive
+                } else if !watchdog_kill && (was_stopping || child.exit_code == 0) {
+                    ServiceState::Stopped
+                } else {
+                    ServiceState::Failed
+                };
                 self.services[pos].sink.clear();
                 self.abandon_waiters(pos);
                 self.services[pos].linger_deadline = None;
@@ -2000,6 +2080,9 @@ impl<'a> Init<'a> {
                 self.services[pos].watchdog_deadline = None;
                 self.services[pos].killed_by_watchdog = false;
                 self.audit_exit(&name, child);
+                if was_ready {
+                    self.withdraw_provided(pos, now);
+                }
                 // A manager-initiated stop is final: the manager asked it to
                 // go, so it is never fought with a restart. Only an
                 // *unexpected* exit of a still-wanted service is a restart
@@ -2019,7 +2102,11 @@ impl<'a> Init<'a> {
                 self.audit_orphan(child);
             }
         }
-        reaped
+        if readmit {
+            self.pump()
+        } else {
+            StartReport::default()
+        }
     }
 
     /// Consider a just-exited service for a policy-driven restart, arming a
@@ -2347,6 +2434,17 @@ impl<'a> Init<'a> {
         );
     }
 
+    fn audit_condition_withdrawn(&self, condition: ReadyCondition) {
+        self.emit(
+            Level::Info,
+            events::CONDITION_WITHDRAWN,
+            &[Field {
+                key: "condition",
+                value: tairix_log::FieldValue::Str(condition.as_str()),
+            }],
+        );
+    }
+
     fn audit_started(&self, name: &str, pid: Pid) {
         let mut pid_buf = DecBuf::new();
         self.emit(
@@ -2462,6 +2560,7 @@ fn event_message(id: EventId) -> &'static str {
         events::SERVICE_ENROLMENT_CHANGED => "service enrolment changed",
         events::SERVICE_ENROLMENT_DENIED => "service enrolment request denied",
         events::SERVICE_ENROLMENT_REVOKED => "service stopped: disabled by the administrator",
+        events::CONDITION_WITHDRAWN => "readiness condition withdrawn",
         _ => "init event",
     }
 }
@@ -3034,8 +3133,8 @@ mod tests {
         init.start_all().unwrap();
         assert_eq!(init.running_pid("svc"), Some(Pid::new(100)));
 
-        let reaped_count = init.reap(Duration64::ZERO);
-        assert_eq!(reaped_count, 2);
+        // Nothing was held, so the reap admits nothing.
+        assert_eq!(init.reap(Duration64::ZERO), super::StartReport::default());
         assert_eq!(init.running_count(), 0);
         assert_eq!(init.running_pid("svc"), None);
         assert_eq!(sink.count(events::SERVICE_EXITED), 1);
@@ -3155,6 +3254,280 @@ mod tests {
         assert_eq!(started_names(&report), ["client"]);
         assert!(init.condition_satisfied(ReadyCondition::NetworkUp));
         assert_eq!(init.state_of("client"), Some(ServiceState::Running));
+    }
+
+    /// A `notify` stack that provides `network-up` and comes back when it
+    /// fails, and a client that runs only while the condition holds.
+    fn register_stack_and_client(init: &mut Init<'_>) {
+        init.register(
+            notify_spec("netstack", &[])
+                .providing([ReadyCondition::NetworkUp])
+                .with_restart(RestartPolicy::OnFailure),
+        )
+        .unwrap();
+        init.register(spec("client", &[]).requiring([ReadyCondition::NetworkUp]))
+            .unwrap();
+        init.start_all().unwrap();
+        init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        assert_eq!(init.state_of("client"), Some(ServiceState::Running));
+    }
+
+    #[test]
+    fn a_provider_that_fails_withdraws_its_condition_and_holds_what_requires_it() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let stopper = RecordingStopper::new();
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        register_stack_and_client(&mut init);
+        let stack = init.running_pid("netstack").unwrap();
+        let client = init.running_pid("client").unwrap();
+
+        reaper.push(ReapedChild {
+            pid: stack,
+            exit_code: 1,
+        });
+        assert!(init.reap(Duration64::from_secs(10)).started.is_empty());
+        assert!(!init.condition_satisfied(ReadyCondition::NetworkUp));
+        assert_eq!(sink.count(events::CONDITION_WITHDRAWN), 1);
+        assert_eq!(init.state_of("client"), Some(ServiceState::Stopping));
+        assert_eq!(stopper.requested.borrow().as_slice(), &[client]);
+
+        // Its exit returns it to admission, where it waits for the condition
+        // without spending its own restart budget.
+        reaper.push(ReapedChild {
+            pid: client,
+            exit_code: 0,
+        });
+        assert!(init.reap(Duration64::from_secs(10)).started.is_empty());
+        assert_eq!(init.state_of("client"), Some(ServiceState::Inactive));
+        assert_eq!(init.restart_deadline("client"), None);
+
+        let deadline = init
+            .restart_deadline("netstack")
+            .expect("the stack relaunches");
+        assert!(init
+            .expire_restart_backoff("netstack", deadline)
+            .started
+            .iter()
+            .all(|started| started.name != "client"));
+        let report = init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        assert_eq!(started_names(&report), ["client"]);
+        assert_ne!(init.running_pid("client"), Some(client));
+        assert_eq!(sink.count(events::CONDITION_SATISFIED), 2);
+    }
+
+    #[test]
+    fn a_held_service_is_admitted_as_it_exits_when_its_condition_is_already_back() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        register_stack_and_client(&mut init);
+        let client = init.running_pid("client").unwrap();
+        reaper.push(ReapedChild {
+            pid: init.running_pid("netstack").unwrap(),
+            exit_code: 1,
+        });
+        init.reap(Duration64::from_secs(10));
+
+        // The stack is back before the client has finished going.
+        let deadline = init.restart_deadline("netstack").unwrap();
+        init.expire_restart_backoff("netstack", deadline);
+        let report = init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        assert!(report.started.is_empty());
+        assert_eq!(init.state_of("client"), Some(ServiceState::Stopping));
+
+        reaper.push(ReapedChild {
+            pid: client,
+            exit_code: 0,
+        });
+        let report = init.reap(Duration64::from_secs(11));
+        assert_eq!(started_names(&report), ["client"]);
+        assert_eq!(init.state_of("client"), Some(ServiceState::Running));
+    }
+
+    #[test]
+    fn a_condition_is_withdrawn_only_with_its_last_ready_provider() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        for name in ["a", "b"] {
+            init.register(notify_spec(name, &[]).providing([ReadyCondition::NetworkUp]))
+                .unwrap();
+        }
+        init.register(spec("client", &[]).requiring([ReadyCondition::NetworkUp]))
+            .unwrap();
+        init.start_all().unwrap();
+        init.notify("a", LifecycleSignal::Ready).unwrap();
+        init.notify("b", LifecycleSignal::Ready).unwrap();
+
+        reaper.push(ReapedChild {
+            pid: init.running_pid("a").unwrap(),
+            exit_code: 1,
+        });
+        init.reap(Duration64::from_secs(1));
+        assert!(init.condition_satisfied(ReadyCondition::NetworkUp));
+        assert_eq!(init.state_of("client"), Some(ServiceState::Running));
+
+        init.stop("b", Duration64::from_secs(2)).unwrap();
+        assert!(!init.condition_satisfied(ReadyCondition::NetworkUp));
+        assert_eq!(init.state_of("client"), Some(ServiceState::Stopping));
+    }
+
+    #[test]
+    fn an_asserted_condition_outlives_every_provider() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        register_stack_and_client(&mut init);
+        init.satisfy_condition(ReadyCondition::NetworkUp);
+
+        reaper.push(ReapedChild {
+            pid: init.running_pid("netstack").unwrap(),
+            exit_code: 1,
+        });
+        init.reap(Duration64::from_secs(1));
+        assert!(init.condition_satisfied(ReadyCondition::NetworkUp));
+        assert_eq!(init.state_of("client"), Some(ServiceState::Running));
+        assert_eq!(sink.count(events::CONDITION_WITHDRAWN), 0);
+    }
+
+    #[test]
+    fn stopping_a_provider_holds_what_requires_it_until_it_is_started_again() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        register_stack_and_client(&mut init);
+        let stack = init.running_pid("netstack").unwrap();
+        let client = init.running_pid("client").unwrap();
+
+        init.stop("netstack", Duration64::from_secs(1)).unwrap();
+        assert_eq!(init.state_of("client"), Some(ServiceState::Stopping));
+        for pid in [stack, client] {
+            reaper.push(ReapedChild { pid, exit_code: 0 });
+        }
+        init.reap(Duration64::from_secs(2));
+        assert_eq!(init.state_of("netstack"), Some(ServiceState::Stopped));
+        assert_eq!(init.state_of("client"), Some(ServiceState::Inactive));
+
+        init.start_service("netstack").unwrap();
+        let report = init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        assert_eq!(started_names(&report), ["client"]);
+    }
+
+    #[test]
+    fn a_stop_is_final_for_a_service_held_on_a_condition() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        register_stack_and_client(&mut init);
+        let client = init.running_pid("client").unwrap();
+        reaper.push(ReapedChild {
+            pid: init.running_pid("netstack").unwrap(),
+            exit_code: 1,
+        });
+        reaper.push(ReapedChild {
+            pid: client,
+            exit_code: 0,
+        });
+        init.reap(Duration64::from_secs(1));
+        assert_eq!(init.state_of("client"), Some(ServiceState::Inactive));
+
+        init.stop("client", Duration64::from_secs(2)).unwrap();
+        assert_eq!(init.state_of("client"), Some(ServiceState::Stopped));
+        let deadline = init.restart_deadline("netstack").unwrap();
+        init.expire_restart_backoff("netstack", deadline);
+        let report = init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        assert!(report.started.is_empty());
+        assert_eq!(init.state_of("client"), Some(ServiceState::Stopped));
+    }
+
+    #[test]
+    fn stopping_a_service_still_waiting_for_its_condition_cancels_its_admission() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("client", &[]).requiring([ReadyCondition::NetworkUp]))
+            .unwrap();
+        init.start_all().unwrap();
+        assert_eq!(init.state_of("client"), Some(ServiceState::Inactive));
+
+        init.stop("client", Duration64::from_secs(1)).unwrap();
+        assert!(init
+            .satisfy_condition(ReadyCondition::NetworkUp)
+            .started
+            .is_empty());
+        assert_eq!(init.state_of("client"), Some(ServiceState::Stopped));
+    }
+
+    #[test]
+    fn a_withdrawal_takes_down_what_depends_on_a_requirer_and_what_it_provided() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(notify_spec("netstack", &[]).providing([ReadyCondition::NetworkUp]))
+            .unwrap();
+        init.register(
+            notify_spec("seat", &[])
+                .requiring([ReadyCondition::NetworkUp])
+                .providing([ReadyCondition::SeatAvailable]),
+        )
+        .unwrap();
+        init.register(spec("helper", &["seat"])).unwrap();
+        init.register(spec("gui", &[]).requiring([ReadyCondition::SeatAvailable]))
+            .unwrap();
+        init.start_all().unwrap();
+        init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        init.notify("seat", LifecycleSignal::Ready).unwrap();
+        for name in ["seat", "helper", "gui"] {
+            assert_eq!(init.state_of(name), Some(ServiceState::Running), "{name}");
+        }
+
+        reaper.push(ReapedChild {
+            pid: init.running_pid("netstack").unwrap(),
+            exit_code: 1,
+        });
+        init.reap(Duration64::from_secs(1));
+        for name in ["seat", "helper", "gui"] {
+            assert_eq!(init.state_of(name), Some(ServiceState::Stopping), "{name}");
+        }
+        assert!(!init.condition_satisfied(ReadyCondition::SeatAvailable));
+        assert_eq!(sink.count(events::CONDITION_WITHDRAWN), 2);
+    }
+
+    #[test]
+    fn shutdown_holds_nothing_back_for_readmission() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        // Registered before its provider, so the provider is stopped first
+        // and its withdrawal reaches the client before the shutdown does.
+        init.register(spec("client", &[]).requiring([ReadyCondition::NetworkUp]))
+            .unwrap();
+        init.register(notify_spec("netstack", &[]).providing([ReadyCondition::NetworkUp]))
+            .unwrap();
+        init.start_all().unwrap();
+        init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        let pids = [
+            init.running_pid("client").unwrap(),
+            init.running_pid("netstack").unwrap(),
+        ];
+
+        init.shutdown(Duration64::from_secs(1));
+        for pid in pids {
+            reaper.push(ReapedChild { pid, exit_code: 0 });
+        }
+        assert!(init.reap(Duration64::from_secs(2)).started.is_empty());
+        assert_eq!(init.state_of("client"), Some(ServiceState::Stopped));
+        assert_eq!(init.state_of("netstack"), Some(ServiceState::Stopped));
     }
 
     #[test]
@@ -3544,7 +3917,9 @@ mod tests {
             pid,
             exit_code: 137,
         });
-        assert_eq!(init.reap(Duration64::from_secs(135)), 1);
+        let exits = sink.count(events::SERVICE_EXITED);
+        init.reap(Duration64::from_secs(135));
+        assert_eq!(sink.count(events::SERVICE_EXITED), exits + 1);
         assert_eq!(init.state_of("fontd"), Some(ServiceState::Stopped));
         assert_eq!(init.running_pid("fontd"), None);
         // A manager-initiated stop is never fought with a restart, even
@@ -4546,6 +4921,31 @@ mod tests {
         assert_eq!(init.state_of("timed"), Some(ServiceState::Stopping));
         assert_eq!(init.state_of("netstack"), Some(ServiceState::Running));
         assert_eq!(sink.count(events::SERVICE_ENROLMENT_REVOKED), 1);
+    }
+
+    #[test]
+    fn an_override_disabling_a_service_still_waiting_for_its_condition_keeps_it_down() {
+        use crate::registry::{Enrolment, EnrolmentOverride};
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register_enrolled(
+            [spec("discoveryd", &[]).requiring([ReadyCondition::NetworkUp])].into(),
+            Enrolment::parse("discoveryd\n").expect("vendor layer parses"),
+            EnrolmentOverride::empty(),
+        )
+        .unwrap();
+        init.start_all().unwrap();
+        assert_eq!(init.state_of("discoveryd"), Some(ServiceState::Inactive));
+
+        let overrides = EnrolmentOverride::parse("discoveryd disabled\n").expect("parses");
+        init.adopt_overrides(overrides, Duration64::from_secs(30));
+        assert!(init
+            .satisfy_condition(ReadyCondition::NetworkUp)
+            .started
+            .is_empty());
+        assert_eq!(init.state_of("discoveryd"), Some(ServiceState::Stopped));
     }
 
     #[test]

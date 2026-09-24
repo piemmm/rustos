@@ -21,7 +21,8 @@
 //!   audit output. Its ceiling is empty — powers come from capabilities,
 //!   and the boot floor holds none.
 //! * One account per system service (`devmgr`, `sysinfod`, `seatmgr`, `login`,
-//!   `netstack`, `fontd`, `greeter`, `confd`, `timed`, `audiod`), each with its own uid in the
+//!   `netstack`, `fontd`, `greeter`, `confd`, `timed`, `audiod`, `discoveryd`),
+//!   each with its own uid in the
 //!   system range and primary group [`SERVICES_GROUP`] — never a shared service
 //!   user, so per-service log partitioning, IPC peer attestation, and
 //!   blast-radius containment all key off a real per-service principal. Each
@@ -45,8 +46,9 @@ use tairix_abi::CapabilityId;
 use tairix_caps::CapabilitySet;
 
 use crate::grants::{
-    capability_set, AUDIOD_CEILING, CONFD_CEILING, DEVMGR_CEILING, FONTD_CEILING, GREETER_CEILING,
-    LOGIN_CEILING, NETSTACK_CEILING, SEATMGR_CEILING, SYSINFOD_CEILING, TIMED_CEILING,
+    capability_set, AUDIOD_CEILING, CONFD_CEILING, DEVMGR_CEILING, DISCOVERYD_CEILING,
+    FONTD_CEILING, GREETER_CEILING, LOGIN_CEILING, NETSTACK_CEILING, SEATMGR_CEILING,
+    SYSINFOD_CEILING, TIMED_CEILING,
 };
 use crate::groups::GroupRecord;
 use crate::password::StoredPassword;
@@ -139,6 +141,14 @@ pub const AUDIOD_USERNAME: &str = "audiod";
 /// The [`Uid`] of [`AUDIOD_USERNAME`].
 pub const AUDIOD_UID: Uid = Uid(19);
 
+/// Name of the link-local discovery service account — the one principal the
+/// network stack lets speak multicast DNS.
+pub const DISCOVERYD_USERNAME: &str = "discoveryd";
+
+/// The [`Uid`] of [`DISCOVERYD_USERNAME`], which the stack and every client
+/// authenticate the service by.
+pub const DISCOVERYD_UID: Uid = Uid(tairix_abi::discovery_ipc::DISCOVERYD_UID);
+
 /// One compiled-in account's specification: the single row both
 /// [`system_accounts`] and [`system_account_uid`] read, so the record
 /// set and the name→uid lookup can never diverge.
@@ -229,6 +239,13 @@ const SYSTEM_ACCOUNTS: &[SystemAccountSpec] = &[
         primary_gid: SERVICES_GID,
         display_name: "Audio Service",
         ceiling: AUDIOD_CEILING,
+    },
+    SystemAccountSpec {
+        username: DISCOVERYD_USERNAME,
+        uid: DISCOVERYD_UID,
+        primary_gid: SERVICES_GID,
+        display_name: "Discovery Service",
+        ceiling: DISCOVERYD_CEILING,
     },
 ];
 
@@ -376,6 +393,7 @@ mod tests {
                 ("confd", 17, 101),
                 ("timed", 18, 101),
                 ("audiod", 19, 101),
+                ("discoveryd", 20, 101),
             ]
         );
         for record in &records {
@@ -433,6 +451,10 @@ mod tests {
         assert_eq!(
             by_name("audiod").capabilities(),
             capability_set(AUDIOD_CEILING)
+        );
+        assert_eq!(
+            by_name("discoveryd").capabilities(),
+            capability_set(DISCOVERYD_CEILING)
         );
     }
 

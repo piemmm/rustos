@@ -30,7 +30,10 @@ capability, `ipc_call` fails and the tool reports why.
 administrator's ceiling carries it and an ordinary session's does not.
 Stopping the device manager, the network stack, or the clock affects every
 principal on the machine, which is why it is administrative rather than
-baseline.
+baseline. Stopping a service that provides a readiness condition also stops
+what requires it, which returns once the provider is started again; stopping a
+service itself is final until it is started by name, even one still waiting to
+be admitted.
 
 A reachable request can still be refused, and the reply says which:
 

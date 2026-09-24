@@ -96,11 +96,11 @@ use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, CapabilityQuery,
     DescriptorTable, DirEntry, Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain,
     IrqHandle, LimitKind, LockConflict, LockFlags, LockMode, LockRange, MapFlags, OpenFlags,
-    PortName, PortWidth, PowerAction, ProcId, ProcessStart, RandomFlags, ResourceLimit,
-    SchedPriority, Signal, SignalIntakeOp, SpawnAttach, StreamMode, SyscallNumber, TerminalSize,
-    Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
-    BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX,
-    FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN,
+    PeerWatchOp, PortName, PortWidth, PowerAction, ProcId, ProcessStart, RandomFlags,
+    ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, StreamMode, SyscallNumber,
+    TerminalSize, Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading,
+    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX,
+    FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN,
     PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
     RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
     WAITSET_CHILD_ANY, WAIT_PID_ANY,
@@ -156,6 +156,7 @@ use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::introspect::{IntrospectSource, NULL_INTROSPECT};
 use crate::kthread::{reschedule_current, spawn_kthread_with_stack_parked, Yielder};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
+use crate::peerwatch::PeerWatch;
 use crate::procsignal::{ProcessSignal, NULL_PROCESS_SIGNAL};
 use crate::procwait::{ChildPeek, ProcessWait, NULL_PROCESS_WAIT};
 use crate::random::{reserve_errno, RandomReserve};
@@ -391,6 +392,11 @@ where
     /// Held as a `'static` borrow because the registry lives for the
     /// lifetime of the running kernel, exactly like the console device.
     seat_registry: &'static SeatRegistry,
+    /// The peer-exit watches `peer_watch` records and the process teardown
+    /// fires. [`None`] until the boot path installs the kernel's through
+    /// [`Self::with_peer_watch`]: `peer_watch` then fails closed with
+    /// `NotImplemented`, so no watch exists for a teardown to miss.
+    peer_watch: Option<&'a PeerWatch>,
     /// The kernel-held crash-record store the user-fault kill path records
     /// into and the `sysinfo_introspect` `Crashes` domain serves
     /// (`plans/FIX-WILD.md` Stage 2). Defaults to the shared empty
@@ -877,6 +883,7 @@ where
             // closed (`NotImplemented` / not the seat owner) through the
             // shared `NULL_SEAT_REGISTRY`.
             seat_registry: &NULL_SEAT_REGISTRY,
+            peer_watch: None,
             // Crash-record store unwired until the boot path installs the
             // real one (`plans/FIX-WILD.md` Stage 2): a user-fault kill
             // records into the shared inert `NULL_CRASH_STORE` and the
@@ -1128,6 +1135,15 @@ where
     #[must_use]
     pub const fn with_seat_registry(mut self, seat_registry: &'static SeatRegistry) -> Self {
         self.seat_registry = seat_registry;
+        self
+    }
+
+    /// Install the kernel's peer-exit watch registry, consuming and returning
+    /// `self`. The same one the spawn and teardown contexts hold, so an exit
+    /// fires every watch taken through any of them.
+    #[must_use]
+    pub const fn with_peer_watch(mut self, peer_watch: &'a PeerWatch) -> Self {
+        self.peer_watch = Some(peer_watch);
         self
     }
 
@@ -2191,8 +2207,8 @@ where
     /// A mapping that could not be found is already gone, so nothing is
     /// published: there are no pages to drop.
     fn release_shared_mapping(&self, process: ProcessId, base: u64) {
-        if let Ok(len) = crate::sharedreg::unmap(self.shared_mem_facility, process, base) {
-            self.publish_region_teardown(process, base, pages_spanning(len as u64));
+        if let Ok(unmapped) = crate::sharedreg::unmap(self.shared_mem_facility, process, base) {
+            self.publish_region_teardown(process, base, pages_spanning(unmapped.len() as u64));
         }
     }
 
@@ -2646,7 +2662,7 @@ where
         // process would leave its accounting for whoever draws its id next.
         #[cfg(feature = "watchdog-diagnostics")]
         crate::latency::forget(SchedulerArch::current_cpu(self.arch), thread.0);
-        if crate::threads::retire(self.caps, self.aspaces, thread) != 0 {
+        if crate::threads::retire(self.caps, self.aspaces, self.peer_watch, thread) != 0 {
             return false;
         }
         if let Some(status) = status {
@@ -3204,7 +3220,13 @@ where
         // loading-child teardown also drives, so a fully-admitted task and
         // a child that failed to load release the same bookkeeping through
         // one definition.
-        reclaim_process_bookkeeping(self.caps, self.aspaces, self.process_wait, process);
+        reclaim_process_bookkeeping(
+            self.caps,
+            self.aspaces,
+            self.process_wait,
+            self.peer_watch,
+            process,
+        );
     }
 
     /// Whether one wait-set member is ready, as a **non-consuming peek**
@@ -3286,6 +3308,11 @@ where
             // `signal_intake(Take)`, so a still-pending intake re-reports
             // on the next wait.
             WaitSourceKind::Signal => m.id == 0 && crate::procsignal::intake_ready(sched_task),
+            // An exit of a process this thread watches, not yet taken — a
+            // peek; the owner takes it with `peer_watch(Take)`.
+            WaitSourceKind::PeerExit => {
+                m.id == 0 && self.peer_watch.is_some_and(|peers| peers.ready(sched_task))
+            }
             // The node the descriptor named at add time has changed since
             // this member last observed it — an edge peek against the
             // per-`FileId` change generation. The generation is keyed on the
@@ -7458,6 +7485,39 @@ where
         }
     }
 
+    fn peer_watch(
+        &self,
+        caller: &CallerContext<'_>,
+        op: PeerWatchOp,
+        proc_id: u64,
+        len: usize,
+    ) -> SyscallResult {
+        // Ungated: every operation acts only on the calling thread's own
+        // watches (`caller.task_id` is kernel-trusted), and naming an instance
+        // needs its unforgeable id, which only an attested origin hands out.
+        let peers = self.peer_watch.ok_or(Errno::NotImplemented)?;
+        if len < PROC_ID_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let watcher = caller.task_id.0;
+        if op == PeerWatchOp::Take {
+            // Delivered before it is consumed, so a faulting buffer loses no
+            // exit.
+            let exited = peers.oldest(watcher)?;
+            self.copy_out_user(caller, proc_id, exited.as_bytes())?;
+            peers.consume(watcher, exited);
+            return Ok(0);
+        }
+        let mut bytes = [0u8; PROC_ID_LEN];
+        self.copy_in_user(caller, proc_id, &mut bytes)?;
+        let peer = ProcId::from_raw(bytes);
+        match op {
+            PeerWatchOp::Watch => peers.watch(self.caps, watcher, peer),
+            PeerWatchOp::Unwatch | PeerWatchOp::Take => peers.unwatch(watcher, peer),
+        }
+        .map(|()| 0)
+    }
+
     fn sched_set_realtime(&self, caller: &CallerContext<'_>, realtime: bool) -> SyscallResult {
         // The dispatcher already checked `CAP_SCHED_REALTIME` and audited the
         // call. Act only on the caller's own task, keyed by the kernel-trusted
@@ -9645,10 +9705,15 @@ where
         // entries, and drop the caller's reference; the region's frames are
         // zeroed and freed at its last reference. A `base` that does not name
         // a live shared mapping of the caller fails closed `NotFound`.
-        let len = crate::sharedreg::unmap(self.shared_mem_facility, caller.process(), base)?;
-        // The unmap shrank the caller's live space; drop the region's own
-        // pages from its snapshot.
-        self.publish_region_teardown(caller.process(), base, pages_spanning(len as u64));
+        let unmapped = crate::sharedreg::unmap(self.shared_mem_facility, caller.process(), base)?;
+        // The pages leave the snapshot the copy path walks before the
+        // reference that keeps their frames allocated is released.
+        self.publish_region_teardown(
+            caller.process(),
+            base,
+            pages_spanning(unmapped.len() as u64),
+        );
+        drop(unmapped);
         Ok(0)
     }
 
@@ -9829,6 +9894,14 @@ where
                                 .stream_write_member(caller.process(), fd)
                         });
                         if !owned {
+                            return Err(Errno::NotFound);
+                        }
+                    }
+                    WaitSourceKind::PeerExit => {
+                        // A thread observes only its own peer-exit feed, whose
+                        // id is always 0. It may be added before the first
+                        // watch, so a reactor can arm it at start.
+                        if id != 0 {
                             return Err(Errno::NotFound);
                         }
                     }
@@ -10034,6 +10107,10 @@ where
         // actually holds a `Signal` member, and its wake is targeted at the
         // opted-in task, so signal traffic never disturbs another waiter.
         let observes_signal = members.iter().any(|m| m.kind == WaitSourceKind::Signal);
+        // The peer-exit queue the same way, woken only for the watching thread.
+        let peer_watch = self
+            .peer_watch
+            .filter(|_| members.iter().any(|m| m.kind == WaitSourceKind::PeerExit));
         // `CALL_WAITQ` is joined only by a set holding a `CallReply` member: a
         // reply completing (`call_reply` → `call_wake`) wakes the parked
         // reaper. A CallReply member also carries a *time* edge — its
@@ -10067,6 +10144,9 @@ where
         }
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        }
+        if let Some(peers) = peer_watch {
+            peers.join(sched_task);
         }
         if observes_notice {
             crate::waitq::NOTICE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
@@ -10214,6 +10294,9 @@ where
         }
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.deregister(sched_task);
+        }
+        if let Some(peers) = peer_watch {
+            peers.leave(sched_task);
         }
         if observes_notice {
             crate::waitq::NOTICE_WAITQ.deregister(sched_task);
@@ -11373,6 +11456,7 @@ fn reclaim_process_bookkeeping(
     caps: &RwLock<CapTable>,
     aspaces: &RwLock<AddressSpaceRegistry>,
     process_wait: &(dyn ProcessWait + 'static),
+    peer_watch: Option<&PeerWatch>,
     process: ProcessId,
 ) {
     // Drop the signal-intake state of every thread of the process (its opt-in
@@ -11387,6 +11471,9 @@ fn reclaim_process_bookkeeping(
     };
     for thread in threads {
         crate::procsignal::clear_intake(thread);
+        if let Some(peers) = peer_watch {
+            peers.forget_watcher(thread);
+        }
         // Drop the kill-gate state for the same reason — and so a thread
         // that exits on its own while a termination was deferred against it
         // (both raced) leaves no pending kill behind. That includes a
@@ -11405,7 +11492,7 @@ fn reclaim_process_bookkeeping(
     // dead parent can never reap, so a row it never collected — a running
     // orphan's link or an unreaped zombie — would be stranded forever.
     process_wait.parent_exited(process);
-    let _ = caps.write().remove(process);
+    let _ = crate::peerwatch::remove_record(peer_watch, caps, process);
     // Withdraw the address-space registry entry last: streams, open files
     // (pipe ends wake their parked peers as they drop), limits, grants, cwd,
     // and any frozen space snapshot all go together, so no stale entry
@@ -12244,6 +12331,7 @@ fn retire_loading_child(
         services.caps(),
         services.aspaces(),
         services.process_wait(),
+        Some(services.peer_watch()),
         sec_id,
     );
 }
@@ -12791,6 +12879,13 @@ where
     #[must_use]
     pub fn with_file_map(mut self, file_map: &'static (dyn FileMap + 'static)) -> Self {
         self.handlers = self.handlers.with_file_map(file_map);
+        self
+    }
+
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_peer_watch`].
+    #[must_use]
+    pub fn with_peer_watch(mut self, peer_watch: &'a PeerWatch) -> Self {
+        self.handlers = self.handlers.with_peer_watch(peer_watch);
         self
     }
 
@@ -17473,6 +17568,7 @@ mod tests {
         image_builder: &'static (dyn ArchImageBuilder + 'static),
     ) -> &'static SpawnServices {
         let runtime: &'static TestSpawnRuntime = Box::leak(Box::new(TestSpawnRuntime));
+        let peers: &'static PeerWatch = Box::leak(Box::new(PeerWatch::new()));
         Box::leak(Box::new(SpawnServices::new(
             frames,
             Some(frames),
@@ -17481,6 +17577,7 @@ mod tests {
             app_store,
             aspaces,
             caps,
+            peers,
             &crate::procwait::NULL_PROCESS_WAIT,
             image_builder,
             runtime,
@@ -19426,6 +19523,7 @@ mod tests {
         let builder2: &'static RecordingImageBuilder =
             Box::leak(Box::new(RecordingImageBuilder::new()));
         let runtime2: &'static TestSpawnRuntime = Box::leak(Box::new(TestSpawnRuntime));
+        let peers2: &'static PeerWatch = Box::leak(Box::new(PeerWatch::new()));
         let services2: &'static SpawnServices = Box::leak(Box::new(SpawnServices::new(
             frames,
             None,
@@ -19434,6 +19532,7 @@ mod tests {
             None,
             aspaces2,
             caps2,
+            peers2,
             &crate::procwait::NULL_PROCESS_WAIT,
             builder2,
             runtime2,
@@ -34663,6 +34762,116 @@ mod tests {
         caps
     }
 
+    /// `peer_watch` reads the instance it watches from the caller's memory,
+    /// fires through the real process-reclaim path, and writes the exit back
+    /// only once the caller takes it — one per watch, and never to a thread
+    /// that did not watch.
+    #[test]
+    fn peer_watch_reports_a_watched_peer_reclaimed_by_the_kernel() {
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let peer = ProcId::from_raw([0xE7; PROC_ID_LEN]);
+        let mut page = alloc::vec![0u8; 0x40];
+        page[..PROC_ID_LEN].copy_from_slice(peer.as_bytes());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &page);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let watcher = crate::test_boot::claim_task();
+        aspaces
+            .write()
+            .register(ProcessId(watcher), space, physmap)
+            .expect("registration succeeds");
+        let peer_process = crate::test_boot::claim_peer_task();
+        table
+            .write()
+            .insert(make_caps_record(peer_process, &[], sink).with_proc_id(peer));
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(watcher, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(watcher),
+            caps: &caps,
+        };
+        let unwired = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            unwired.peer_watch(&ctx, PeerWatchOp::Watch, 0x1000, PROC_ID_LEN),
+            Err(Errno::NotImplemented),
+            "no registry, no watch a teardown could miss"
+        );
+        let peers = PeerWatch::new();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_peer_watch(&peers);
+
+        assert_eq!(
+            h.peer_watch(&ctx, PeerWatchOp::Watch, 0x1000, PROC_ID_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            h.peer_watch(&ctx, PeerWatchOp::Watch, 0x1000, PROC_ID_LEN),
+            Ok(0)
+        );
+        assert_eq!(
+            h.peer_watch(&ctx, PeerWatchOp::Take, 0x1020, PROC_ID_LEN),
+            Err(Errno::WouldBlock),
+            "nothing has exited"
+        );
+
+        // One feed per thread: its member names id 0 and nothing else.
+        let set = h.waitset_create(&ctx).expect("create");
+        let peer_kind = WaitSourceKind::PeerExit.as_u32();
+        let add = WaitSetOp::Add.as_u32();
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, add, peer_kind, 1, 7),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(h.waitset_ctl(&ctx, set, add, peer_kind, 0, 7), Ok(0));
+        let member = crate::waitset::Member {
+            kind: WaitSourceKind::PeerExit,
+            id: 0,
+            token: 7,
+            file: FileId::NONE,
+            observed: 0,
+        };
+        assert!(!h.waitset_member_ready(&ctx, &member, 0));
+
+        h.reclaim_process_resources(ProcessId(peer_process));
+        assert!(peers.ready(watcher));
+        assert!(
+            h.waitset_member_ready(&ctx, &member, 0),
+            "the exit wakes the feed"
+        );
+        assert_eq!(
+            h.peer_watch(&ctx, PeerWatchOp::Take, 0x1020, PROC_ID_LEN),
+            Ok(0)
+        );
+        let mut told = [0u8; PROC_ID_LEN];
+        h.copy_in_user(&ctx, 0x1020, &mut told).expect("readable");
+        assert_eq!(ProcId::from_raw(told), peer);
+        assert_eq!(
+            h.peer_watch(&ctx, PeerWatchOp::Take, 0x1020, PROC_ID_LEN),
+            Err(Errno::WouldBlock),
+            "one exit per watch"
+        );
+        assert!(
+            !h.waitset_member_ready(&ctx, &member, 0),
+            "taken, the feed is quiet"
+        );
+        // A peer already gone cannot be watched: the watcher learns it is
+        // dead rather than waiting on an exit that happened.
+        assert_eq!(
+            h.peer_watch(&ctx, PeerWatchOp::Watch, 0x1000, PROC_ID_LEN),
+            Err(Errno::NotFound)
+        );
+    }
+
     /// `fd_grant` delegates only a descriptor the caller itself holds, only
     /// a plain non-directory filesystem backing, only to a recipient named
     /// by an attested live instance, and only with an extent ceiling that
@@ -36332,10 +36541,11 @@ mod tests {
             h.waitset_ctl(&ctx, set, 7, WS_KIND_IRQ, line, 0),
             Err(Errno::OutOfRange)
         );
-        // Kind 12 is past the last defined `WaitSourceKind`
-        // (`StreamRoom` = 11).
+        let unknown = (0..=u32::MAX)
+            .find(|&kind| WaitSourceKind::from_u32(kind).is_err())
+            .expect("some wire value names no kind");
         assert_eq!(
-            h.waitset_ctl(&ctx, set, WS_OP_ADD, 12, line, 0),
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, unknown, line, 0),
             Err(Errno::OutOfRange)
         );
 

@@ -9,13 +9,22 @@
 //! 2. A caller without `CAP_NET` is always refused `PermissionDenied`
 //!    before any state is created — no socket is ever opened for it.
 //! 3. The socket table never exceeds its global bound.
+//! 4. Whatever the links do and however full each socket's port is, a member
+//!    socket is told each link's edges alternately, starting with the link
+//!    coming up, holds exactly the published links once its port drains, and
+//!    nothing a principal held survives its reclaim.
 //!
 //! Runs a fixed smoke sweep under plain `cargo test`; keeps drawing from
 //! the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
 //! `cargo xtask fuzz`.
 
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, NetOffloads};
+use tairix_abi::net::{
+    decode_socket_reply, SocketAddr, SocketLinkEvent, SocketRequest, SocketType,
+};
 use tairix_abi::net_ipc::{NetAddrFamily, NetIfKind, IF_NAME_LEN};
+use tairix_abi::reply::decode_status_reply;
+use tairix_abi::Errno;
 use tairix_abi::{
     CapabilityId, CapabilitySummary, Duration64, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE,
 };
@@ -160,6 +169,156 @@ fn serve_never_panics_and_gates_on_cap_net() {
                 "committed {} against a budget of {}",
                 svc.committed_bytes(),
                 stack.settings().socket_budget_bytes
+            );
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}
+
+/// Serve one encoded request, returning its reply frame.
+fn serve(
+    svc: &mut SocketService,
+    stack: &mut Netstack,
+    who: &Caller,
+    request: &SocketRequest<'_>,
+) -> Vec<u8> {
+    let mut bytes = [0u8; 256];
+    let Ok(len) = request.encode(&mut bytes) else {
+        return Vec::new();
+    };
+    let mut reply = [0u8; 64];
+    let mut entropy = || 7u32;
+    let served = svc.serve(
+        stack,
+        who,
+        &NullSink,
+        &mut entropy,
+        &bytes[..len],
+        &mut reply,
+        Duration64::from_secs(2),
+    );
+    served.map_or_else(|_| Vec::new(), |out| reply[..out.len].to_vec())
+}
+
+/// What each member socket was last told about each link.
+type Beliefs = Vec<((u32, [u8; IF_NAME_LEN]), bool)>;
+
+/// Set the link, publish it, and tell the members with room for `room`
+/// events, checking every event against what its socket last heard.
+fn flip(
+    stack: &mut Netstack,
+    svc: &mut SocketService,
+    believed: &mut Beliefs,
+    link: LinkState,
+    room: usize,
+    now: Duration64,
+) {
+    stack.on_member_link_change(if_name(), link, now);
+    stack.publish_links();
+    let links = stack.links().to_vec();
+    let mut landed = 0;
+    svc.tell_links(&links, stack.link_epoch(), &mut |_, frame| {
+        if landed >= room {
+            return Err(Errno::WouldBlock);
+        }
+        landed += 1;
+        let event = SocketLinkEvent::parse(frame).expect("a link event");
+        let key = (event.socket, event.interface);
+        if let Some((_, up)) = believed.iter_mut().find(|(held, _)| *held == key) {
+            assert_ne!(*up, event.up, "a link's edges alternate");
+            *up = event.up;
+        } else {
+            assert!(event.up, "a socket first hears a link come up");
+            believed.push((key, true));
+        }
+        Ok(())
+    });
+}
+
+#[test]
+fn link_events_and_reclaims_never_lose_or_leak_state() {
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "link_events_and_reclaims_never_lose_or_leak_state",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..SMOKE_ITERATIONS / 200 {
+            let mut svc = SocketService::new(tairix_hash::HashSeed::from_words(1, 2));
+            let mut stack = routed_stack();
+            let mut believed = Beliefs::new();
+            let mut members = 0;
+            let owners: Vec<u8> = (1..=4).collect();
+            for &owner in &owners {
+                let who = caller(true, owner);
+                let Ok(socket) = decode_socket_reply(&serve(
+                    &mut svc,
+                    &mut stack,
+                    &who,
+                    &SocketRequest::Socket {
+                        family: NetAddrFamily::V4,
+                        sock_type: SocketType::Datagram,
+                        deliver_port: u64::from(owner),
+                    },
+                )) else {
+                    continue;
+                };
+                let mut group = [0u8; 16];
+                group[..4].copy_from_slice(&[239, 1, 1, rng.next_u8()]);
+                let joined = decode_status_reply(&serve(
+                    &mut svc,
+                    &mut stack,
+                    &who,
+                    &SocketRequest::JoinMulticast {
+                        socket,
+                        group: SocketAddr {
+                            family: NetAddrFamily::V4,
+                            addr: group,
+                            port: 0,
+                        },
+                    },
+                ));
+                members += usize::from(joined.is_ok());
+            }
+            for step in 0..32 {
+                let link = if rng.below(2) == 0 {
+                    LinkState::Up
+                } else {
+                    LinkState::Down
+                };
+                let now = Duration64::from_secs(3 + step);
+                flip(&mut stack, &mut svc, &mut believed, link, rng.below(3), now);
+            }
+            for (link, up) in [(LinkState::Up, true), (LinkState::Down, false)] {
+                let now = Duration64::from_secs(36);
+                flip(&mut stack, &mut svc, &mut believed, link, usize::MAX, now);
+                assert_eq!(believed.len(), members, "every member heard its link");
+                assert!(
+                    believed.iter().all(|(_, held)| *held == up),
+                    "a drained member holds the published link"
+                );
+            }
+            for &owner in &owners {
+                let _ = svc.reclaim_owner(
+                    &mut stack,
+                    ProcId::from_raw([owner; 16]),
+                    Duration64::from_secs(40),
+                );
+            }
+            assert_eq!(svc.len(), 0, "nothing survives its owner's reclaim");
+            let mut macs = Vec::new();
+            stack
+                .interface(if_name())
+                .expect("the interface")
+                .stack()
+                .multicast_macs(&mut macs);
+            assert!(
+                macs.iter()
+                    .all(|mac| mac.as_octets()[..3] != [0x01, 0x00, 0x5E]
+                        || mac.as_octets() == &[0x01, 0x00, 0x5E, 0, 0, 1]),
+                "no group a reclaimed socket held is still joined: {macs:?}"
             );
         }
         if !tairix_fuzzseed::within_budget(deadline) {

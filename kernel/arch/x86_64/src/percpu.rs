@@ -327,9 +327,9 @@ fn reset_per_cpu_storage_for_tests() {
 ///
 /// * the per-CPU GDT for `cpu_index` is `lgdt`-installed (kernel CS /
 ///   DS reloaded, `ltr` issued),
-/// * the per-CPU IDT is `lidt`-installed; every vector points at the
-///   fail-closed default thunk from
-///   `crate::interrupts::Idt::with_default_handler`,
+/// * the per-CPU IDT is `lidt`-installed: every exception vector routes to
+///   an entry that reports it (`#PF` to the resumable one), every other
+///   vector to the fail-closed default thunk,
 /// * `#DF` (vector 8) is routed through IST 1 backed by `df_stack`,
 /// * `#NMI` (vector 2) is routed through IST 2 backed by `nmi_stack`.
 ///
@@ -383,16 +383,24 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
         (IST_INDEX_DF, slot.df_stack_top()),
         (IST_INDEX_NMI, slot.nmi_stack_top()),
     ];
-    let selector = PerCpuGdt::selectors().kernel_cs;
-    slot.idt = Idt::with_default_handler(
-        crate::interrupts_default_isr_addr(),
-        selector,
-        ist_for_vector,
-    );
+    slot.idt = fatal_table(ist_for_vector);
     let PerCpu { gdt, idt, .. } = slot;
     // SAFETY: the slot is this CPU's alone for the whole call and lives for
     // `'static`, and the caller's contract keeps interrupts disabled.
     unsafe { load(gdt, idt, &ists) }
+}
+
+/// The table every CPU loads, the boot CPU's first one included: each
+/// exception routed to an entry that reports it (`#PF` to the resumable one),
+/// every other vector to the fail-closed default thunk, each gate on the IST
+/// `ist_for` names.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn fatal_table(ist_for: fn(u8) -> u8) -> Idt {
+    let selector = PerCpuGdt::selectors().kernel_cs;
+    let mut idt =
+        Idt::with_default_handler(crate::interrupts_default_isr_addr(), selector, ist_for);
+    crate::exceptions::route_exceptions(&mut idt, selector, ist_for);
+    idt
 }
 
 /// Wire `ists` into `gdt`'s TSS, finalise it, and load it and `idt` on the
@@ -422,7 +430,8 @@ unsafe fn load(
 }
 
 /// The boot CPU's descriptor tables, from the trampoline until the kernel
-/// installs its per-CPU ones through [`init`].
+/// installs its per-CPU ones through [`init`]. They live in memory the image
+/// reserves beside the boot stack, which the trampoline hands to the entry.
 ///
 /// Only `#DF` gets a stack of its own: a double fault is what an exception
 /// raised on an unusable stack becomes, and nothing at boot can take an
@@ -430,34 +439,20 @@ unsafe fn load(
 /// struct's own alignment is the stack top's.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[repr(C, align(16))]
-struct BootTables {
+pub(crate) struct BootTables {
     df_stack: [u8; IST_STACK_BYTES],
     gdt: PerCpuGdt,
     idt: Idt,
 }
 
-/// The boot tables and their one-shot latch.
+// The linker sizes the trampoline's reservation from this symbol, so the one
+// definition of the tables' size is the type's own.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-struct BootCell {
-    tables: UnsafeCell<BootTables>,
-    installed: AtomicBool,
-}
-
-// SAFETY: the tables are written once, by `install_boot_tables` on the boot
-// CPU behind the latch, before any other CPU runs; afterwards only that
-// CPU's own descriptor registers read them.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-unsafe impl Sync for BootCell {}
-
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-static BOOT_TABLES: BootCell = BootCell {
-    tables: UnsafeCell::new(BootTables {
-        df_stack: [0; IST_STACK_BYTES],
-        gdt: PerCpuGdt::new(),
-        idt: Idt::empty(),
-    }),
-    installed: AtomicBool::new(false),
-};
+core::arch::global_asm!(
+    ".globl boot_tables_bytes",
+    ".set boot_tables_bytes, {bytes}",
+    bytes = const core::mem::size_of::<BootTables>(),
+);
 
 /// The IST index each vector's gate takes in the boot tables.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
@@ -469,8 +464,8 @@ const fn boot_ist_for_vector(vector: u8) -> u8 {
     }
 }
 
-/// Install the boot CPU's descriptor tables: every exception routed to the
-/// fatal path, `#DF` on a stack of its own.
+/// Install the boot CPU's descriptor tables in `tables`: every exception
+/// routed to the fatal path, `#DF` on a stack of its own.
 ///
 /// The boot entry calls this before `kernel_main`, so no binary takes an
 /// exception through the invalid IDTR `boot.s` leaves — a triple fault that
@@ -478,29 +473,25 @@ const fn boot_ist_for_vector(vector: u8) -> u8 {
 ///
 /// # Errors
 ///
-/// [`InitError::AlreadyInitialised`] on a second call, and
 /// [`InitError::Ist`] if the `#DF` stack top were rejected.
 ///
 /// # Safety
 ///
-/// On the boot CPU, before interrupts are enabled.
+/// Once, on the boot CPU, before interrupts are enabled. `tables` is the
+/// trampoline's reservation: aligned for a [`BootTables`], that size, and
+/// used by nothing else for the rest of the boot.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub(crate) unsafe fn install_boot_tables() -> Result<(), InitError> {
-    if BOOT_TABLES.installed.swap(true, Ordering::AcqRel) {
-        return Err(InitError::AlreadyInitialised);
-    }
-    // SAFETY: the latch makes this the one access, and nothing reads the
-    // tables until they are loaded below.
-    let tables: &'static mut BootTables = unsafe { &mut *BOOT_TABLES.tables.get() };
+pub(crate) unsafe fn install_boot_tables(tables: *mut BootTables) -> Result<(), InitError> {
+    // SAFETY: the caller hands over the reservation alone, for the life of
+    // the boot; each descriptor table is written whole before any reference
+    // to the tables is formed, and the stack's bytes are valid as they lie.
+    let tables: &'static mut BootTables = unsafe {
+        core::ptr::addr_of_mut!((*tables).gdt).write(PerCpuGdt::new());
+        core::ptr::addr_of_mut!((*tables).idt).write(fatal_table(boot_ist_for_vector));
+        &mut *tables
+    };
     let BootTables { df_stack, gdt, idt } = tables;
     let df_top = df_stack.as_ptr_range().end as u64;
-    let selector = PerCpuGdt::selectors().kernel_cs;
-    *idt = Idt::with_default_handler(
-        crate::interrupts_default_isr_addr(),
-        selector,
-        boot_ist_for_vector,
-    );
-    crate::exceptions::route_exceptions(idt, selector, boot_ist_for_vector);
     // SAFETY: the boot CPU's own `'static` tables, with interrupts disabled
     // per the caller's contract.
     unsafe { load(gdt, idt, &[(IST_INDEX_DF, df_top)]) }

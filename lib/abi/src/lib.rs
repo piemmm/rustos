@@ -27,6 +27,8 @@ pub mod capability;
 pub mod cpufeatures;
 pub mod cpufreq;
 pub mod desktop;
+pub mod discovery_ipc;
+pub mod discovery_policy;
 pub mod display_ipc;
 pub mod driver;
 pub mod driver_store;
@@ -36,6 +38,7 @@ pub mod field;
 pub mod filelock;
 pub mod font_ipc;
 pub mod fs;
+pub(crate) mod hex;
 pub mod hwtree;
 pub mod i2c_ipc;
 pub mod input;
@@ -83,13 +86,14 @@ pub mod window_ipc;
 #[cfg(feature = "test-util")]
 pub use appinfo::manifest_header;
 pub use appinfo::{
-    body_len as appinfo_body_len, digest_bundle_contents, mime_type_at, resolve_library,
-    validate_bundle_id, validate_bundle_layout, AppInfoHeader, BundleEntry, BundleFileDigest,
-    BundleId, BundleLayoutError, LibraryCategory, LibraryError, LibraryScope, ProgramKind,
-    PublisherBinding, PublisherId, APPINFO_FLAG_MASK, APPINFO_FLAG_MULTI_INSTANCE,
-    APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
-    APPINFO_WIRE_MAX, BUNDLE_AUTHOR_MAX, BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX,
-    BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX,
+    body_len as appinfo_body_len, browse_entry, browse_type_at, digest_bundle_contents,
+    mime_type_at, resolve_library, validate_bundle_id, validate_bundle_layout, AppInfoHeader,
+    BundleEntry, BundleFileDigest, BundleId, BundleLayoutError, LibraryCategory, LibraryError,
+    LibraryScope, ProgramKind, PublisherBinding, PublisherId, APPINFO_FLAG_MASK,
+    APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_BROWSE,
+    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, APPINFO_WIRE_MAX, BROWSE_ENTRY_LEN,
+    BUNDLE_AUTHOR_MAX, BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+    BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX,
     HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, INSTALLED_APP_STORE, LIBRARY_ICON_MAX,
     MIME_ENTRY_LEN, MIME_TYPE_MAX, PUBLISHER_CERT_CONTEXT, PUBLISHER_CERT_MESSAGE_LEN,
     PUBLISHER_ID_CONTEXT, PUBLISHER_ID_LEN, PUBLISHER_ID_PREIMAGE_LEN, SYSTEM_APPLICATION_STORE,
@@ -174,7 +178,7 @@ pub use origin::{
 pub use power::PowerAction;
 pub use process::{
     encoded_len as process_start_encoded_len, load_failure_reason, load_failure_status,
-    write_into as process_start_write_into, DescriptorTable, FdWire, ProcessStart,
+    write_into as process_start_write_into, DescriptorTable, FdWire, PeerWatchOp, ProcessStart,
     ProcessStartHeader, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, StreamMode, StringSlot,
     WaitStatus, WaitStatusRecord, CONSOLE_INDEX_MAX, CONSOLE_INHERIT, DOCUMENT_ROLE_ARG,
     ENV_SHOWN_NAME, FD_WIRE_KIND_CLOSED, FD_WIRE_KIND_HANDLE, FD_WIRE_KIND_INHERIT,

@@ -31,8 +31,9 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+use tairix_abi::discovery_policy::{Grant, DISCOVERY_POLICY_PATH};
 use tairix_abi::driver_store::SystemConfigFile;
-use tairix_abi::{AppInfoHeader, BundleEntry, BundleFileDigest, APPINFO_MAGIC};
+use tairix_abi::{browse_type_at, AppInfoHeader, BundleEntry, BundleFileDigest, APPINFO_MAGIC};
 use tairix_fontface::FAMILY_MANIFEST;
 use tairix_image::{DecodeLimits, ImageFormat};
 use tairix_itest_harness::app_image::{
@@ -163,7 +164,9 @@ pub fn app_store_files(
         [const { OnceLock::new() }; MEMO_SLOTS];
     FILES[memo_slot(arch, profile)]
         .get_or_init(|| {
-            let mut files = build_app_bundles(ctx, arch, profile).map(|b| store_files(&b))?;
+            let bundles = build_app_bundles(ctx, arch, profile)?;
+            let mut files = store_files(&bundles);
+            files.push(discovery_grant_store(&bundles)?);
             // The `/System/Fonts` family store the `fontd` service discovers
             // ships on every image alongside the bundles.
             files.extend(system_font_files(ctx)?);
@@ -172,6 +175,62 @@ pub fn app_store_files(
         .as_ref()
         .map(Vec::as_slice)
         .map_err(Clone::clone)
+}
+
+/// The link-local discovery grant store the image plants
+/// (`plans/ZEROCONF.md` Z4): for every bundle whose composed manifest declares
+/// `browses`, exactly those types, recorded for the identity the load gate
+/// attests the bundle under. The image builder is the store's only writer —
+/// the trusted channel through which the OS vouches for its own bundles — so a
+/// grant is never more than the signed manifest asked for.
+///
+/// # Errors
+///
+/// A string naming a composed manifest that does not decode or a grant the
+/// store's codec refuses; the build fails closed rather than planting a store
+/// that grants something unverified.
+fn discovery_grant_store(bundles: &[BuiltAppBundle]) -> Result<AppStoreFile, String> {
+    let mut text = String::from("# Link-local discovery grants, written by the image builder.\n");
+    for bundle in bundles {
+        let header = AppInfoHeader::from_bytes(&bundle.appinfo).map_err(|e| {
+            format!(
+                "image: {} AppInfo does not decode: {e:?}",
+                bundle.bundle_dir
+            )
+        })?;
+        let body = &bundle.appinfo[AppInfoHeader::WIRE_LEN..];
+        let publisher = tairix_appload::publisher_id_of(&header);
+        for index in 0..usize::from(header.browse_count) {
+            let service = browse_type_at(
+                body,
+                usize::from(header.capability_count),
+                usize::from(header.mime_count),
+                index,
+            )
+            .map_err(|e| format!("image: {} browsed type {index}: {e:?}", bundle.bundle_dir))?;
+            let mut line = [0u8; 256];
+            let len = Grant {
+                bundle_id: header.bundle_id(),
+                publisher,
+                service,
+            }
+            .write_line(&mut line)
+            .map_err(|e| format!("image: {} grant: {e:?}", bundle.bundle_dir))?;
+            text.push_str(
+                std::str::from_utf8(&line[..len]).map_err(|_| "image: a grant is not text")?,
+            );
+        }
+    }
+    let path = DISCOVERY_POLICY_PATH
+        .strip_prefix("/System/")
+        .ok_or("image: the grant store is not on the /System volume")?;
+    Ok(AppStoreFile {
+        components: path
+            .split('/')
+            .map(|part| part.as_bytes().to_vec())
+            .collect(),
+        bytes: text.into_bytes(),
+    })
 }
 
 /// The `/System/Fonts` store the image plants: every family directory under

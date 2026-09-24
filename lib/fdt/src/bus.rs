@@ -85,29 +85,14 @@ fn cells_property(node: &Node<'_>, name: &str) -> Option<u32> {
 /// directly under the root need no translation.
 #[must_use]
 pub fn translate(levels: &[BusLevel<'_>], depth: usize, addr: u64) -> Option<u64> {
-    translate_through(levels, depth, addr, |level| level.ranges)
+    translate_through(levels, depth, addr)
 }
 
-/// [`translate`] for a DMA address: `addr` is a bus address in the space of
-/// the node at `depth`, carried towards memory by each ancestor bus's
-/// `dma-ranges` rather than its `ranges`. A bus with no `dma-ranges` has no
-/// mapping for its children (Devicetree Spec v0.4 §2.3.9), so the address is
-/// refused.
-#[must_use]
-pub fn translate_dma(levels: &[BusLevel<'_>], depth: usize, addr: u64) -> Option<u64> {
-    translate_through(levels, depth, addr, |level| level.dma_ranges)
-}
-
-fn translate_through<'a>(
-    levels: &[BusLevel<'a>],
-    depth: usize,
-    addr: u64,
-    ranges_of: impl Fn(&BusLevel<'a>) -> Option<&'a [u8]>,
-) -> Option<u64> {
+fn translate_through(levels: &[BusLevel<'_>], depth: usize, addr: u64) -> Option<u64> {
     let mut translated = addr;
     for bus in (1..depth).rev() {
         let level = levels.get(bus)?;
-        let ranges = ranges_of(level)?;
+        let ranges = level.ranges?;
         if ranges.is_empty() {
             continue;
         }
@@ -270,6 +255,162 @@ pub fn dma_ranges(
         return None;
     }
     Some(ranges)
+}
+
+/// The most windows [`dma_reach`] composes. A bound on untrusted input, since
+/// each bus's entries multiply the windows of the buses below it.
+pub const MAX_DMA_WINDOWS: usize = 16;
+
+/// One window a device reaches memory through: `size` bytes from bus address
+/// `bus` on the device's own bus, landing at CPU-physical address `cpu`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DmaWindow {
+    /// Where the window starts on the device's own bus.
+    pub bus: u64,
+    /// Where it lands in CPU-physical memory.
+    pub cpu: u64,
+    /// Its length in bytes.
+    pub size: u64,
+}
+
+/// At most [`MAX_DMA_WINDOWS`] composed windows.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct DmaWindows {
+    windows: [DmaWindow; MAX_DMA_WINDOWS],
+    len: usize,
+}
+
+impl DmaWindows {
+    const EMPTY: Self = Self {
+        windows: [DmaWindow {
+            bus: 0,
+            cpu: 0,
+            size: 0,
+        }; MAX_DMA_WINDOWS],
+        len: 0,
+    };
+
+    fn as_slice(&self) -> &[DmaWindow] {
+        &self.windows[..self.len]
+    }
+
+    /// Keep `window`, reporting whether there was room for it.
+    fn push(&mut self, window: DmaWindow) -> bool {
+        let Some(slot) = self.windows.get_mut(self.len) else {
+            return false;
+        };
+        *slot = window;
+        self.len += 1;
+        true
+    }
+
+    /// The first bus's entries, each a window of its own.
+    fn of(entries: DmaRanges<'_>) -> Self {
+        let mut out = Self::EMPTY;
+        for entry in entries.filter(|entry| entry.size != 0) {
+            let window = DmaWindow {
+                bus: entry.child,
+                cpu: entry.parent,
+                size: entry.size,
+            };
+            if !out.push(window) {
+                break;
+            }
+        }
+        out
+    }
+
+    /// These windows carried through one more bus: each clipped to that bus's
+    /// entries, split where an entry boundary changes the offset, and rebased
+    /// into its parent's space. A part no entry covers is dropped.
+    fn through(&self, entries: &DmaRanges<'_>) -> Self {
+        let mut out = Self::EMPTY;
+        for window in self.as_slice() {
+            let (start, end) = span(window.cpu, window.size);
+            for entry in entries.clone() {
+                let (entry_start, entry_end) = span(entry.child, entry.size);
+                let (lo, hi) = (start.max(entry_start), end.min(entry_end));
+                if lo >= hi {
+                    continue;
+                }
+                let into_window = lo - start;
+                let into_entry = lo - entry_start;
+                let (Ok(into_window), Ok(into_entry), Ok(size)) = (
+                    u64::try_from(into_window),
+                    u64::try_from(into_entry),
+                    u64::try_from(hi - lo),
+                ) else {
+                    continue;
+                };
+                let (Some(bus), Some(cpu)) = (
+                    window.bus.checked_add(into_window),
+                    entry.parent.checked_add(into_entry),
+                ) else {
+                    continue;
+                };
+                if !out.push(DmaWindow { bus, cpu, size }) {
+                    return out;
+                }
+            }
+        }
+        out
+    }
+}
+
+/// `[start, start + size)` in a width that cannot overflow.
+fn span(start: u64, size: u64) -> (u128, u128) {
+    (u128::from(start), u128::from(start) + u128::from(size))
+}
+
+/// Where a device on a bus reaches memory by DMA; built by [`dma_reach`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DmaReach {
+    windows: DmaWindows,
+    translated: bool,
+}
+
+impl DmaReach {
+    const IDENTITY: Self = Self {
+        windows: DmaWindows::EMPTY,
+        translated: false,
+    };
+
+    /// The windows the device reaches memory through, in the order the buses
+    /// list them, or `None` when no bus between it and the root translates or
+    /// bounds an address.
+    #[must_use]
+    pub fn windows(&self) -> Option<&[DmaWindow]> {
+        self.translated.then(|| self.windows.as_slice())
+    }
+}
+
+/// Compose the `dma-ranges` of every bus between the node at `depth` and the
+/// root into the windows it reaches memory through (Devicetree Spec v0.4
+/// §2.3.9). An empty property is the identity at its bus and the buses above
+/// it still apply; an absent or malformed one anywhere on the way maps
+/// nothing, so `None`.
+#[must_use]
+pub fn dma_reach(levels: &[BusLevel<'_>], depth: usize) -> Option<DmaReach> {
+    let mut reach = DmaReach::IDENTITY;
+    for bus in (1..depth).rev() {
+        let level = levels.get(bus)?;
+        let value = level.dma_ranges?;
+        if value.is_empty() {
+            continue;
+        }
+        let parent = levels.get(bus - 1)?;
+        let entries = dma_ranges(value, level.addr_cells, parent.addr_cells, level.size_cells)?;
+        let windows = if reach.translated {
+            reach.windows.through(&entries)
+        } else {
+            DmaWindows::of(entries)
+        };
+        reach = DmaReach {
+            windows,
+            translated: true,
+        };
+    }
+    Some(reach)
 }
 
 /// Decode a PCI host bridge's `dma-ranges` into the inbound DMA aperture
@@ -506,7 +647,7 @@ pub fn scan_translated<'a, T>(
 #[cfg(test)]
 mod tests {
     use super::{dma_ranges, dma_ranges_aperture, dma_ranges_aperture_of, outbound_mmio_window};
-    use super::{DmaRange, Fdt};
+    use super::{dma_reach, BusLevel, DmaRange, DmaReach, DmaWindow, Fdt, MAX_DMA_WINDOWS};
     use crate::fixture::DtbBuilder;
     use alloc::vec::Vec;
 
@@ -552,14 +693,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_dma_address_is_carried_through_every_bus_or_refused() {
-        use super::{translate_dma, BusLevel};
-        let soc = soc_dma_ranges(&[(0xc000_0000, 0x0, 0x4000_0000)]);
-        let sub: Vec<u8> = [0u32, 0xc000_0000, 0x1000_0000]
+    /// A one-cell child, one-cell parent, one-cell size `dma-ranges`: a
+    /// sub-bus inside the soc.
+    fn sub_dma_ranges(entries: &[(u32, u32, u32)]) -> Vec<u8> {
+        entries
             .iter()
-            .flat_map(|cell| cell.to_be_bytes())
-            .collect();
+            .flat_map(|&(child, parent, size)| [child, parent, size])
+            .flat_map(u32::to_be_bytes)
+            .collect()
+    }
+
+    /// Root, a Pi-style soc bus, and a sub-bus carrying `sub`, so a device on
+    /// the sub-bus sits at depth 3.
+    fn pi_levels<'a>(soc: &'a [u8], sub: Option<&'a [u8]>) -> [BusLevel<'a>; 3] {
         let level = |dma_ranges| BusLevel {
             addr_cells: 1,
             size_cells: 1,
@@ -570,15 +716,108 @@ mod tests {
             addr_cells: 2,
             ..BusLevel::DEFAULT
         };
-        let levels = [root, level(Some(&soc)), level(Some(&sub))];
-        assert_eq!(translate_dma(&levels, 3, 0x1000), Some(0x1000));
-        // Outside the inner bus's only window.
-        assert_eq!(translate_dma(&levels, 3, 0x2000_0000), None);
-        // An empty property is the identity; an absent one maps nothing.
-        let identity = [root, level(Some(&soc)), level(Some(&[]))];
-        assert_eq!(translate_dma(&identity, 3, 0xc000_1000), Some(0x1000));
-        let unmapped = [root, level(Some(&soc)), level(None)];
-        assert_eq!(translate_dma(&unmapped, 3, 0x1000), None);
+        [root, level(Some(soc)), level(sub)]
+    }
+
+    fn windows(levels: &[BusLevel<'_>], depth: usize) -> Vec<DmaWindow> {
+        dma_reach(levels, depth)
+            .as_ref()
+            .and_then(DmaReach::windows)
+            .map(<[DmaWindow]>::to_vec)
+            .expect("translated windows")
+    }
+
+    #[test]
+    fn an_identity_bus_keeps_the_translation_of_the_buses_above_it() {
+        let soc = soc_dma_ranges(&[(0xc000_0000, 0x0, 0x4000_0000)]);
+        assert_eq!(
+            windows(&pi_levels(&soc, Some(&[])), 3),
+            [DmaWindow {
+                bus: 0xc000_0000,
+                cpu: 0x0,
+                size: 0x4000_0000,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_inner_window_is_clipped_to_the_outer_one_and_rebased_through_it() {
+        let soc = soc_dma_ranges(&[(0xc000_0000, 0x0, 0x4000_0000)]);
+        // The inner bus reaches 0x3000_0000..0x5000_0000 on the soc; only the
+        // lower half lies in the soc's window to memory.
+        let sub = sub_dma_ranges(&[(0x0, 0xf000_0000, 0x2000_0000)]);
+        assert_eq!(
+            windows(&pi_levels(&soc, Some(&sub)), 3),
+            [DmaWindow {
+                bus: 0x0,
+                cpu: 0x3000_0000,
+                size: 0x1000_0000,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_window_spanning_two_outer_entries_is_split_where_the_offset_changes() {
+        let soc = soc_dma_ranges(&[
+            (0xc000_0000, 0x0, 0x1000_0000),
+            (0xd000_0000, 0x8000_0000, 0x1000_0000),
+        ]);
+        let sub = sub_dma_ranges(&[(0x0, 0xc800_0000, 0x1000_0000)]);
+        assert_eq!(
+            windows(&pi_levels(&soc, Some(&sub)), 3),
+            [
+                DmaWindow {
+                    bus: 0x0,
+                    cpu: 0x0800_0000,
+                    size: 0x0800_0000,
+                },
+                DmaWindow {
+                    bus: 0x0800_0000,
+                    cpu: 0x8000_0000,
+                    size: 0x0800_0000,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bus_that_maps_nothing_leaves_no_reach_and_all_identity_leaves_no_bound() {
+        let soc = soc_dma_ranges(&[(0xc000_0000, 0x0, 0x4000_0000)]);
+        assert_eq!(dma_reach(&pi_levels(&soc, None), 3), None);
+        // A window wholly outside every outer entry is dropped.
+        let sub = sub_dma_ranges(&[(0x0, 0x1000, 0x1000)]);
+        assert_eq!(windows(&pi_levels(&soc, Some(&sub)), 3), []);
+        let identity = [
+            BusLevel::DEFAULT,
+            BusLevel {
+                dma_ranges: Some(&[]),
+                ..BusLevel::DEFAULT
+            },
+        ];
+        for depth in [1, 2] {
+            let reach = dma_reach(&identity, depth).expect("an identity reach");
+            assert_eq!(reach.windows(), None);
+        }
+    }
+
+    #[test]
+    fn composed_windows_are_bounded() {
+        let soc_entries: Vec<(u32, u64, u32)> = (0..8u32)
+            .map(|i| {
+                (
+                    0xc000_0000 + i * 0x0100_0000,
+                    u64::from(i) * 0x1000_0000,
+                    0x0100_0000,
+                )
+            })
+            .collect();
+        let soc = soc_dma_ranges(&soc_entries);
+        let sub_entries: Vec<(u32, u32, u32)> = (0..8u32)
+            .map(|i| (i * 0x1000_0000, 0xc000_0000, 0x0800_0000))
+            .collect();
+        let sub = sub_dma_ranges(&sub_entries);
+        let composed = windows(&pi_levels(&soc, Some(&sub)), 3);
+        assert_eq!(composed.len(), MAX_DMA_WINDOWS);
     }
 
     #[test]

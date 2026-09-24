@@ -37,9 +37,9 @@ pub mod fixture;
 pub mod bus;
 
 pub use bus::{
-    bus_level, dma_ranges, dma_ranges_aperture, dma_ranges_aperture_of, outbound_mmio_window,
-    reg_entry_count, scan_translated, translate, translate_dma, translated_reg, BusLevel, DmaRange,
-    DmaRanges, MAX_WALK_DEPTH,
+    bus_level, dma_ranges, dma_ranges_aperture, dma_ranges_aperture_of, dma_reach,
+    outbound_mmio_window, reg_entry_count, scan_translated, translate, translated_reg, BusLevel,
+    DmaRange, DmaRanges, DmaReach, DmaWindow, MAX_DMA_WINDOWS, MAX_WALK_DEPTH,
 };
 
 /// FDT header magic (`0xd00dfeed`, big-endian on the wire).

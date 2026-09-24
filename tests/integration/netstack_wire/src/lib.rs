@@ -760,6 +760,43 @@ pub const fn link_local(iid: [u8; 8]) -> Ipv6Addr {
     ])
 }
 
+// --- Link-local service discovery (plans/ZEROCONF.md Z4) -------------------
+
+/// The service type the peer publishes an instance of.
+pub const MDNS_SERVICE: &str = "_tairix._tcp";
+
+/// The instance label the peer publishes under [`MDNS_SERVICE`], spelled so
+/// that nothing but a browse which reached the peer can print it.
+pub const MDNS_INSTANCE: &str = "z4-discovery-peer";
+
+/// The host the instance's `SRV` names, whose `AAAA` is the peer's link-local
+/// address.
+pub const MDNS_HOST: &str = "tairixpeer.local";
+
+/// The port the instance's `SRV` names.
+pub const MDNS_SERVICE_PORT: u16 = 4242;
+
+/// The one `TXT` string the instance publishes.
+pub const MDNS_TXT: &str = "vertical=zeroconf";
+
+/// The guest's browse, as the runner types it. It outlasts a NIC still
+/// autoloading when the prompt appears, since no answer can arrive before the
+/// link is up.
+pub const MDNS_BROWSE_LINE: &str = "dns-sd -t 60 -B _tairix._tcp\n";
+
+/// The guest's resolve of the browsed instance.
+pub const MDNS_RESOLVE_LINE: &str = "dns-sd -t 10 -L z4-discovery-peer _tairix._tcp\n";
+
+/// The guest's lookup of the resolved host's addresses.
+pub const MDNS_HOST_LINE: &str = "dns-sd -t 10 -G v6 tairixpeer.local\n";
+
+/// What `dns-sd` prints once the resolve has the peer's `SRV`.
+pub const MDNS_RESOLVE_MARKER: &str = "can be reached at tairixpeer.local.:4242";
+
+/// What `dns-sd` prints once the host lookup has the peer's `AAAA`: the
+/// address, then the column padding that follows it.
+pub const MDNS_HOST_MARKER: &str = "fe80::2 ";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,6 +806,34 @@ mod tests {
         let addr = link_local(PEER_IID);
         assert_eq!(addr.octets()[..2], [0xFE, 0x80]);
         assert_eq!(addr.octets()[8..], PEER_IID);
+    }
+
+    #[test]
+    fn the_discovery_script_asks_for_what_the_peer_publishes() {
+        extern crate std;
+        use std::format;
+
+        assert!(MDNS_BROWSE_LINE.contains(&format!(" -B {MDNS_SERVICE}\n")));
+        assert!(MDNS_RESOLVE_LINE.contains(&format!(" -L {MDNS_INSTANCE} {MDNS_SERVICE}\n")));
+        assert!(MDNS_HOST_LINE.contains(&format!(" {MDNS_HOST}\n")));
+        assert_eq!(
+            MDNS_RESOLVE_MARKER,
+            format!("can be reached at {MDNS_HOST}.:{MDNS_SERVICE_PORT}")
+        );
+        assert_eq!(MDNS_HOST_MARKER, format!("{} ", link_local(PEER_IID)));
+        // Each step waits for its marker after the line before it was typed,
+        // so no line up to and including its own may contain the marker: the
+        // console echoes what is typed.
+        let steps = [
+            (MDNS_BROWSE_LINE, MDNS_INSTANCE),
+            (MDNS_RESOLVE_LINE, MDNS_RESOLVE_MARKER),
+            (MDNS_HOST_LINE, MDNS_HOST_MARKER),
+        ];
+        for (at, &(_, marker)) in steps.iter().enumerate() {
+            for &(line, _) in &steps[..=at] {
+                assert!(!line.contains(marker), "{line:?} echoes {marker:?}");
+            }
+        }
     }
 
     #[test]

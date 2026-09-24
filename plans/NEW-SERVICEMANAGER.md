@@ -185,7 +185,9 @@ merely *spawned*. Add:
 - **Named readiness conditions / targets** (`network-up`,
   `filesystems-mounted`, `boot-complete`, `display-present`,
   `seat-available`, …). A service declares the conditions it requires; the
-  manager releases it only when all are satisfied.
+  manager releases it only when all are satisfied, and it runs only while
+  they hold: a provided condition holds only while a provider is ready, and
+  its withdrawal stops what requires it and holds it for re-admission.
   A condition is only ever satisfied by a principal that genuinely knows it,
   which is the whole of its value: `display-present` has no truthful producer
   today (`seatmgr` and `devmgr` both reach ready on a headless machine), so
@@ -429,11 +431,23 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   `is_ready()` and every required condition is satisfied, never on merely
   spawned. `immediate` services reach ready on spawn success; `notify`
   services wait for `Init::notify`. `satisfy_condition` records
-  externally/kernel-signalled conditions; a provider satisfies its `provides`
-  on readiness. Everything fails closed: a never-ready dependency leaves its
-  dependent `inactive`, and `notify` is refused (`NotifyError`) for an
-  unknown or non-`starting` service. New audit IDs `SERVICE_READY` (9008),
-  `CONDITION_SATISFIED` (9009), `NOTIFY_REJECTED` (9010).
+  externally/kernel-signalled conditions, which nothing withdraws; a provider
+  satisfies its `provides` on readiness and holds them only while it is
+  ready. When the last ready provider of a condition stops being ready — a
+  reaped exit, a watchdog kill, or a stop — the condition is withdrawn
+  (`CONDITION_WITHDRAWN`, 9029) and every live requirer, with its
+  name-dependents, is stopped and *held*: its reap returns it to `inactive`,
+  and the pump that follows admits it at once if the condition is already
+  back. A hold spends no restart budget; a stop or shutdown is final and
+  cancels any hold, pending restart, or pending admission. Everything fails
+  closed: a never-ready dependency leaves its dependent `inactive`, and
+  `notify` is refused (`NotifyError`) for an unknown or non-`starting`
+  service. Audit IDs `SERVICE_READY` (9008), `CONDITION_SATISFIED` (9009),
+  `NOTIFY_REJECTED` (9010).
+- `netstack` is the first truthful producer: it is `notify`-ready, announces
+  once its endpoints are bound, and provides `network-up`, which `discoveryd`
+  requires — its sockets live in the stack, so a stack relaunch brings it
+  back against the new one rather than leaving it deaf.
 - Because `immediate` is the readiness default, the existing bring-up
   semantics (and their tests) are preserved unchanged; new host tests cover
   the `notify`/condition gating, the never-ready and explicit-failure paths,
@@ -1018,7 +1032,9 @@ it does not.
     false kill. `fontd`'s private `announce_ready` was deleted for it.
   - **The floor directive carries the unit metadata, as `key=value`
     options.** `service|enrolled|ondemand <path> <account>
-    [watchdog=<n>s] [restart=…]`: the floor description is the one place a
+    [watchdog=<n>s] [restart=…] [requires=<cond>,…] [provides=<cond>,…]`,
+    a provider being `notify`-ready; a `session` takes none, and a repeated
+    option refuses the config: the floor description is the one place a
     floor service's unit metadata has ever lived, and a discovered bundle
     takes the same fields from its signed manifest. Named options rather
     than positions because a third and fourth position would be unreadable;
@@ -1079,12 +1095,15 @@ service simply outlives its last user, which is exactly the behaviour the
 for clients that exit cleanly enough to say so, and `lib/font` deliberately
 does not (a process cannot promise to run its own teardown).
 
-What this needs is client liveness the manager does not have: a kernel-side
-signal that the principal holding a connection is gone. The shape worth
-considering first is the one the endpoint already knows — the kernel owns the
-call endpoint and the process table, so it can retire a connection with its
-process — rather than a manager-side reaper, which would have to poll.
-Surfaced here rather than papered over with a heartbeat or a scan.
+What this needs is client liveness, and the kernel now provides it: the
+`peer_watch` exit feed (`plans/ZEROCONF.md` Z4) tells a thread, through one
+wait-set source, that a process instance it named by its attested `ProcId` has
+gone — never missed, since a watch on an instance already gone is refused and
+read as its exit. `netstack` and `discoveryd` release a dead principal's state
+on it. What remains is the manager watching each connected client's instance
+from the `Origin` of its `connect` and releasing that client's reference when
+the exit lands, so the linger bites for a client that dies as for one that
+disconnects — an event, never a heartbeat or a scan.
 
 ### SVC-10 — Readiness as a wake source a client can combine with its own
 

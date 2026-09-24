@@ -1110,3 +1110,32 @@ fn name_rendering_escapes_bytes_a_terminal_could_act_on() {
     // comparison, so the `J` reads back as it was sent.
     assert_eq!(alloc::format!("{name}"), "\\027[2J.a\\.\\\\");
 }
+
+#[test]
+fn a_name_outside_a_message_reads_only_in_canonical_form() {
+    let name = Name::encode("Printer.local").unwrap();
+    assert_eq!(Name::from_wire(name.as_wire()), Some(name));
+    assert_eq!(Name::from_wire(&[0]), Some(Name::root()));
+    for refused in [
+        &[][..],
+        &[5, b'l', b'o', b'c', b'a', b'l'][..],
+        &[5, b'l', b'o', b'c', b'a', b'l', 0, 0][..],
+        &[0xC0, 0x00][..],
+        &[0x40, 0][..],
+        &[3, b'a', b'b'][..],
+    ] {
+        assert_eq!(Name::from_wire(refused), None, "{refused:?}");
+    }
+    let mut long = Vec::new();
+    for _ in 0..4 {
+        long.push(63);
+        long.extend_from_slice(&[b'x'; 63]);
+    }
+    long.push(0);
+    assert_eq!(Name::from_wire(&long), None, "256 octets is past the bound");
+    long.truncate(255 - 1);
+    assert!(
+        Name::from_wire(&long).is_none(),
+        "and a truncation is unterminated"
+    );
+}

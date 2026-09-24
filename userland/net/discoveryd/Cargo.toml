@@ -46,12 +46,18 @@ tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # The self-wiping buffers the decoder's keys are drawn into, and fallible
 # allocation for the relay's frame buffer.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The bounded, allocation-free lists a request's questions and the recent
+# askers are held in.
+tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
 
 # The `Run` binary's freestanding userland runtime: `_start`, the global
 # allocator, the socket and wait-set wrappers, the clock, and the random
 # syscall. Pulled only for the bare-metal targets the program is built for.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The empty capability sets the discovery endpoint is bound with: every call
+# is admitted by the front against the caller's attested origin.
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 
 [dev-dependencies]
 # The fuzz harness draws its inputs through the shared seed/budget seam.

@@ -1,0 +1,26 @@
+[package]
+name = "tairix-test-fatal-fault-percpu-qemu-x86_64"
+description = "QEMU integration test: a page fault taken after a minimal x86_64 kernel has loaded its per-CPU descriptor tables, with no fault handler installed, is reported and ends the run on that report's record — the per-CPU table routes every exception exactly as the boot tables do, rather than parking the CPU in silence."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding kernel ELF QEMU loads with `-kernel` on the x86_64 PC. It links
+# the port alone; on the host target the crate contributes nothing to
+# `cargo test`, and the orchestrator is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-fatal-fault-percpu-qemu-x86_64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

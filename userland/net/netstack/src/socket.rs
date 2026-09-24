@@ -79,8 +79,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::net::{
     encode_bind_reply, encode_send_reply, encode_socket_reply, ShutdownHow, SocketAddr,
-    SocketDatagram, SocketEcho, SocketId, SocketRequest, SocketStreamEvent, SocketType,
-    StreamCloseReason, SOCKET_MAX_DATAGRAM, SOCKET_PRIVILEGED_PORT_MAX,
+    SocketDatagram, SocketEcho, SocketId, SocketLinkEvent, SocketRequest, SocketStreamEvent,
+    SocketType, StreamCloseReason, SOCKET_MAX_DATAGRAM, SOCKET_PRIVILEGED_PORT_MAX,
 };
 use tairix_abi::net_ipc::{
     address_parts, ip_from_parts, NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord,
@@ -100,7 +100,7 @@ use tairix_net::tcp::listen::{CookieSecret, ListenConfig, Listener, ListenerStat
 use tairix_net::tcp::{TcpSegment, TcpSegmentMeta};
 
 use crate::events;
-use crate::iface::{FrameBatch, Netstack};
+use crate::iface::{FrameBatch, Netstack, PublishedLink};
 use crate::service::Caller;
 
 /// One outbound TCP segment drained from a connection: its header, its
@@ -134,12 +134,17 @@ struct DatagramState {
     peer: Option<SocketAddr>,
     /// Multicast groups this socket joined (for leave-on-close).
     groups: Vec<[u8; 16]>,
+    /// The links this socket has been told its memberships ride, as of each
+    /// one's epoch then.
+    told: Vec<PublishedLink>,
+    /// Whether it is in the service's `behind` list, so it is listed once.
+    listed: bool,
 }
 
 /// Per-socket state of an ICMP/`ICMPv6` echo socket (the `ping` path).
 ///
 /// The socket's stack-assigned ICMP *identifier* lives in the entry's
-/// `local_port` field (globally unique across every socket, so a reply
+/// `local_port` field (unique in its family's port space, so a reply
 /// can never be routed to the wrong socket). Only the connected default
 /// peer, if any, is transport-specific state.
 struct EchoState {
@@ -371,6 +376,10 @@ pub struct SocketReply {
     /// newly [`Accept`](SocketRequest::Accept)ed connection already holds).
     /// Empty for every other operation; the glue `ipc_send`s each.
     pub deliveries: Vec<Delivery>,
+    /// A principal this request gave its first socket. The glue watches it
+    /// for exit, so the sockets it leaves behind are reclaimed rather than
+    /// held — ports and all — for the rest of the boot.
+    pub watch: Option<ProcId>,
 }
 
 /// One message to deliver to a socket's client: the async port to
@@ -426,6 +435,11 @@ struct PortSlot {
     demux: Option<SocketId>,
 }
 
+/// A local port in one family's port space. A socket has one family and never
+/// receives the other's traffic, so the two spaces are disjoint and a service
+/// holds a port in both.
+type PortKey = (NetAddrFamily, u16);
+
 /// The socket table and its dispatcher.
 ///
 /// # Lookup
@@ -446,7 +460,7 @@ pub struct SocketService {
     /// Established stream four-tuple to its handle.
     by_conn: HashMap<ConnKey, SocketId, BuildSipHash13>,
     /// Local port to what holds it.
-    by_port: HashMap<u16, PortSlot, BuildSipHash13>,
+    by_port: HashMap<PortKey, PortSlot, BuildSipHash13>,
     /// What each owning principal holds, for the per-principal share.
     owned: HashMap<ProcId, OwnerUsage, BuildSipHash13>,
     /// Bytes every live socket accounts for, summed. The stack-wide budget
@@ -459,6 +473,10 @@ pub struct SocketService {
     /// the set of bound ports may have changed, so the broadcast-consumer
     /// ports are republished without any operation having to say so.
     port_assignments: u64,
+    /// Member sockets whose told links may lag the published ones.
+    behind: Vec<SocketId>,
+    /// The link epoch every member socket was last marked behind for.
+    links_seen: u64,
     /// Connection-defence totals of listeners that have since closed,
     /// folded in as each one is dropped. Without this the stack-wide
     /// counters would fall when a listener closes, so a flood that ended
@@ -486,6 +504,8 @@ impl SocketService {
             bytes_total: 0,
             next_id: 0,
             port_assignments: 0,
+            behind: Vec::new(),
+            links_seen: 0,
             retired_defence: ListenerStats::default(),
         }
     }
@@ -600,9 +620,15 @@ impl SocketService {
         // which the set comparison below then finds unchanged.
         let assignments = self.port_assignments;
         let population = self.sockets.len();
-        let result = self.dispatch(
+        let held_any = self.owned.get(&owner).is_some();
+        let mut result = self.dispatch(
             interfaces, caller, audit, entropy, decoded, owner, response, now,
         );
+        if let Ok(reply) = &mut result {
+            if !held_any && self.owned.get(&owner).is_some() {
+                reply.watch = Some(owner);
+            }
+        }
         if self.port_assignments != assignments || self.sockets.len() != population {
             interfaces.publish_datagram_ports(broadcast_consumer_ports(&self.sockets));
         }
@@ -624,6 +650,16 @@ impl SocketService {
         response: &mut [u8],
         now: Duration64,
     ) -> Result<SocketReply, Errno> {
+        if claims_multicast_dns(&decoded) && !is_discovery(caller) {
+            emit(
+                audit,
+                Level::Warn,
+                events::SOCKET_DENIED,
+                "socket request denied: the multicast DNS port and groups are reserved to the discovery service",
+                &[op_field(&decoded)],
+            );
+            return Err(Errno::PermissionDenied);
+        }
         match decoded {
             SocketRequest::Socket {
                 family,
@@ -666,9 +702,10 @@ impl SocketService {
             SocketRequest::Send {
                 socket,
                 dest,
+                interface,
                 payload,
             } => self.send(
-                interfaces, entropy, audit, owner, socket, dest, payload, now, response,
+                interfaces, entropy, audit, owner, socket, dest, interface, payload, now, response,
             ),
             SocketRequest::Close { socket } => self.close(interfaces, owner, socket, now, response),
             SocketRequest::Shutdown { socket, how } => {
@@ -767,6 +804,8 @@ impl SocketService {
             SocketType::Datagram => Proto::Datagram(DatagramState {
                 peer: None,
                 groups: Vec::new(),
+                told: Vec::new(),
+                listed: false,
             }),
             SocketType::Stream => Proto::Stream(None),
         };
@@ -794,6 +833,7 @@ impl SocketService {
             len,
             tx: Vec::new(),
             deliveries: Vec::new(),
+            watch: None,
         })
     }
 
@@ -823,7 +863,7 @@ impl SocketService {
             return Err(Errno::AddressUnavailable);
         }
         self.reserve_index_rows()?;
-        let port = self.assign_port(entropy, local.port)?;
+        let port = self.assign_port(entropy, local.family, local.port)?;
         self.unindex_entry(index);
         let entry = &mut self.sockets[index];
         entry.local_addr = local.addr;
@@ -834,6 +874,7 @@ impl SocketService {
             len,
             tx: Vec::new(),
             deliveries: Vec::new(),
+            watch: None,
         })
     }
 
@@ -896,6 +937,7 @@ impl SocketService {
         owner: ProcId,
         socket: SocketId,
         dest: Option<SocketAddr>,
+        interface: Option<[u8; IF_NAME_LEN]>,
         payload: &[u8],
         now: Duration64,
         response: &mut [u8],
@@ -903,11 +945,12 @@ impl SocketService {
         let index = self.owned_index(owner, socket)?;
         match self.sockets[index].proto {
             Proto::Datagram(_) => self.send_datagram(
-                interfaces, entropy, audit, index, dest, payload, now, response,
+                interfaces, entropy, audit, index, dest, interface, payload, now, response,
             ),
             Proto::Stream(_) => {
-                // A connected stream has no per-datagram destination.
-                if dest.is_some() {
+                // A connected stream has no per-datagram destination, and
+                // is bound to its egress for life.
+                if dest.is_some() || interface.is_some() {
                     return Err(Errno::OutOfRange);
                 }
                 self.send_stream(interfaces, index, payload, now, response)
@@ -997,6 +1040,7 @@ impl SocketService {
             len,
             tx,
             deliveries: Vec::new(),
+            watch: None,
         })
     }
 
@@ -1045,6 +1089,7 @@ impl SocketService {
             len,
             tx,
             deliveries: Vec::new(),
+            watch: None,
         })
     }
 
@@ -1183,6 +1228,7 @@ impl SocketService {
             len,
             tx,
             deliveries,
+            watch: None,
         })
     }
 }
@@ -1198,6 +1244,7 @@ impl SocketService {
         audit: &dyn Sink,
         index: usize,
         dest: Option<SocketAddr>,
+        interface: Option<[u8; IF_NAME_LEN]>,
         payload: &[u8],
         now: Duration64,
         response: &mut [u8],
@@ -1218,13 +1265,21 @@ impl SocketService {
             return Err(Errno::OutOfRange);
         }
         let source_port = self.ensure_local_port(entropy, index)?;
-        match interfaces.originate(ip_of(target), source_port, target.port, payload, now) {
+        match interfaces.originate(
+            ip_of(target),
+            source_port,
+            target.port,
+            payload,
+            interface,
+            now,
+        ) {
             Ok(tx) => {
                 let len = status_reply(response)?.len;
                 Ok(SocketReply {
                     len,
                     tx,
                     deliveries: Vec::new(),
+                    watch: None,
                 })
             }
             Err(err) => refuse(audit, "socket send refused", err),
@@ -1278,6 +1333,7 @@ impl SocketService {
                     len,
                     tx,
                     deliveries: Vec::new(),
+                    watch: None,
                 })
             }
             Err(err) => refuse(audit, "socket echo refused", err),
@@ -1356,6 +1412,7 @@ impl SocketService {
             len,
             tx,
             deliveries: Vec::new(),
+            watch: None,
         })
     }
 
@@ -1384,6 +1441,7 @@ impl SocketService {
             len,
             tx,
             deliveries: Vec::new(),
+            watch: None,
         })
     }
 
@@ -1475,7 +1533,7 @@ impl SocketService {
             };
         }
         // 2. A passive listener on the destination port demultiplexes it.
-        if let Some(lindex) = self.demux_index(dst_port) {
+        if let Some(lindex) = self.demux_index(fam, dst_port) {
             let entry = &self.sockets[lindex];
             if entry.family == fam && matches!(&entry.proto, Proto::Listen(_)) {
                 let io =
@@ -1828,15 +1886,24 @@ impl SocketService {
                 return Err(Errno::LimitExceeded);
             }
         }
+        self.behind.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
         let tx = interfaces.join_multicast_all(ip_of(group), now)?;
+        // A first membership is owed every link it already rides.
+        let mut enlist = false;
         if let Proto::Datagram(dg) = &mut self.sockets[index].proto {
+            enlist = dg.groups.is_empty() && !dg.listed;
+            dg.listed |= enlist;
             dg.groups.push(group.addr);
+        }
+        if enlist {
+            self.behind.push(socket);
         }
         let len = status_reply(response)?.len;
         Ok(SocketReply {
             len,
             tx,
             deliveries: Vec::new(),
+            watch: None,
         })
     }
 
@@ -1874,7 +1941,147 @@ impl SocketService {
             len,
             tx,
             deliveries: Vec::new(),
+            watch: None,
         })
+    }
+
+    /// Tell each member socket what moved on the links its memberships
+    /// ride since it was last told, through `send`, and return the delivery
+    /// ports that had no room: each is owed the rest, which the next call
+    /// delivers once it drains.
+    ///
+    /// A socket is told the difference between its view and `links`: a link
+    /// that came up, one that went down or left, and one whose epoch moved
+    /// while its state did not, which is a flap told as down then up so the
+    /// reader discards what it learned before. Only a socket marked behind is
+    /// visited, and every member is marked when `epoch` moves.
+    pub fn tell_links(
+        &mut self,
+        links: &[PublishedLink],
+        epoch: u64,
+        send: &mut Post<'_>,
+    ) -> Vec<u64> {
+        if epoch != self.links_seen && self.mark_members_behind() {
+            self.links_seen = epoch;
+        }
+        let mut blocked: Vec<u64> = Vec::new();
+        let mut position = 0;
+        while position < self.behind.len() {
+            let socket = self.behind[position];
+            let Some(&index) = self.by_id.get(&socket) else {
+                self.behind.swap_remove(position);
+                continue;
+            };
+            let entry = &mut self.sockets[index];
+            let port = entry.deliver_port;
+            if blocked.contains(&port) {
+                position += 1;
+                continue;
+            }
+            match tell_one(entry.id, entry.family, port, &mut entry.proto, links, send) {
+                Told::Caught => {
+                    self.behind.swap_remove(position);
+                }
+                Told::Blocked => {
+                    if blocked.try_reserve(1).is_ok() {
+                        blocked.push(port);
+                    }
+                    position += 1;
+                }
+                Told::Short => position += 1,
+            }
+        }
+        blocked
+    }
+
+    /// Mark every socket holding a membership behind, reporting whether all
+    /// of them could be.
+    fn mark_members_behind(&mut self) -> bool {
+        let Self {
+            sockets, behind, ..
+        } = self;
+        for entry in sockets.iter_mut() {
+            let Proto::Datagram(dg) = &mut entry.proto else {
+                continue;
+            };
+            if dg.groups.is_empty() || dg.listed {
+                continue;
+            }
+            if behind.try_reserve(1).is_err() {
+                return false;
+            }
+            dg.listed = true;
+            behind.push(entry.id);
+        }
+        true
+    }
+
+    /// Release everything `owner` held, because it has exited: its groups
+    /// are left, its connections aborted, its listeners and their unclaimed
+    /// connections dropped, and every port freed. Returns the frames that
+    /// takes to say so on the wire.
+    ///
+    /// A scan of the table, as the listener close is: an exit is driven by
+    /// the owner, never by a remote peer, and a principal the table holds no
+    /// row for costs one lookup.
+    pub fn reclaim_owner(
+        &mut self,
+        interfaces: &mut Netstack,
+        owner: ProcId,
+        now: Duration64,
+    ) -> FrameBatch {
+        let mut tx = FrameBatch::new();
+        if self.owned.get(&owner).is_none() {
+            return tx;
+        }
+        // Highest position first, so each removal only moves an entry from
+        // beyond the ones still to visit.
+        let mut position = self.sockets.len();
+        while position > 0 {
+            position -= 1;
+            if self
+                .sockets
+                .get(position)
+                .is_none_or(|entry| entry.owner != owner)
+            {
+                continue;
+            }
+            tx.extend(self.abandon_at(interfaces, position, now));
+        }
+        interfaces.publish_datagram_ports(broadcast_consumer_ports(&self.sockets));
+        #[cfg(test)]
+        self.assert_indices_agree();
+        tx
+    }
+
+    /// Drop the socket at `position` whose owner is gone: nothing remains to
+    /// be told, so a stream is reset rather than closed gracefully.
+    fn abandon_at(
+        &mut self,
+        interfaces: &mut Netstack,
+        position: usize,
+        now: Duration64,
+    ) -> FrameBatch {
+        let family = self.sockets[position].family;
+        let mut tx = FrameBatch::new();
+        match &mut self.sockets[position].proto {
+            Proto::Datagram(dg) => {
+                for group in core::mem::take(&mut dg.groups) {
+                    tx.extend(interfaces.leave_multicast_all(ip_from_parts(family, group), now));
+                }
+            }
+            Proto::Stream(Some(conn)) => {
+                conn.client_closed = true;
+                conn.tcb.abort(now);
+                tx = self.pump_stream(interfaces, position, now);
+            }
+            Proto::Listen(listener) => {
+                self.retired_defence = fold_defence(self.retired_defence, listener.stats());
+            }
+            Proto::Stream(None) | Proto::Echo(_) => {}
+        }
+        self.remove_at(position);
+        tx
     }
 
     /// Route one engine receive [`StackEvent`] the logical interface
@@ -1906,9 +2113,12 @@ impl SocketService {
         };
         let (src_family, src_bytes) = address_parts(*source);
         let mut out = Vec::new();
-        // The identifier lives in `local_port` and is globally unique, so
-        // at most one socket matches — a reply never crosses sockets.
-        if let Some(entry) = self.demux_index(*identifier).map(|i| &self.sockets[i]) {
+        // The identifier lives in `local_port` and is unique in its family,
+        // so at most one socket matches — a reply never crosses sockets.
+        if let Some(entry) = self
+            .demux_index(src_family, *identifier)
+            .map(|i| &self.sockets[i])
+        {
             let Proto::Echo(echo) = &entry.proto else {
                 return out;
             };
@@ -1961,10 +2171,10 @@ impl SocketService {
         let (src_family, src_bytes) = address_parts(*source);
         let dest_multicast = is_multicast_ip(*destination);
         let mut out = Vec::new();
-        // A port is bound by at most one socket, so the destination port
-        // names the one candidate rather than selecting from a scan.
+        // A port is bound by at most one socket of a family, so the
+        // destination port names the one candidate rather than a scan.
         if let Some(entry) = self
-            .demux_index(*destination_port)
+            .demux_index(dest_family, *destination_port)
             .map(|index| &self.sockets[index])
         {
             let Proto::Datagram(dg) = &entry.proto else {
@@ -2186,12 +2396,13 @@ impl SocketService {
             );
         }
         if port != 0 {
-            let mut slot = self.by_port.get(&port).copied().unwrap_or_default();
+            let key = (self.sockets[index].family, port);
+            let mut slot = self.by_port.get(&key).copied().unwrap_or_default();
             slot.holders = slot.holders.saturating_add(1);
             if conn.is_none() {
                 slot.demux = Some(id);
             }
-            let _ = self.by_port.try_insert(port, slot);
+            let _ = self.by_port.try_insert(key, slot);
         }
         if let Some(key) = conn {
             let _ = self.by_conn.try_insert(key, id);
@@ -2214,15 +2425,16 @@ impl SocketService {
             }
         }
         if port != 0 {
-            if let Some(mut slot) = self.by_port.get(&port).copied() {
+            let key = (self.sockets[index].family, port);
+            if let Some(mut slot) = self.by_port.get(&key).copied() {
                 slot.holders = slot.holders.saturating_sub(1);
                 if slot.demux == Some(id) {
                     slot.demux = None;
                 }
                 if slot.holders == 0 {
-                    self.by_port.remove(&port);
+                    self.by_port.remove(&key);
                 } else {
-                    let _ = self.by_port.try_insert(port, slot);
+                    let _ = self.by_port.try_insert(key, slot);
                 }
             }
         }
@@ -2239,7 +2451,16 @@ impl SocketService {
     /// tests see it, so a release can be asserted rather than inferred.
     #[cfg(test)]
     pub(crate) fn port_is_held(&self, port: u16) -> bool {
-        self.port_in_use(port)
+        [NetAddrFamily::V4, NetAddrFamily::V6]
+            .into_iter()
+            .any(|family| self.port_in_use(family, port))
+    }
+
+    /// How many member sockets are listed behind, so the tests can see each
+    /// is listed once.
+    #[cfg(test)]
+    pub(crate) fn behind_len(&self) -> usize {
+        self.behind.len()
     }
 
     /// Bytes charged to `owner`, so the tests can assert the share is
@@ -2275,7 +2496,7 @@ impl SocketService {
 
         assert_eq!(self.by_id.len(), self.sockets.len(), "by_id row count");
         let mut conns = 0usize;
-        let mut ports: BTreeMap<u16, PortSlot> = BTreeMap::new();
+        let mut ports: BTreeMap<PortKey, PortSlot> = BTreeMap::new();
         let mut owners: BTreeMap<ProcId, OwnerUsage> = BTreeMap::new();
         let mut total = 0u64;
         for (index, entry) in self.sockets.iter().enumerate() {
@@ -2296,7 +2517,7 @@ impl SocketService {
                 conns += 1;
             }
             if entry.local_port != 0 {
-                let slot = ports.entry(entry.local_port).or_default();
+                let slot = ports.entry((entry.family, entry.local_port)).or_default();
                 slot.holders += 1;
                 if conn.is_none() {
                     assert!(slot.demux.is_none(), "two binders on one port");
@@ -2306,10 +2527,10 @@ impl SocketService {
         }
         assert_eq!(self.by_conn.len(), conns, "by_conn row count");
         assert_eq!(self.by_port.len(), ports.len(), "by_port row count");
-        for (port, want) in ports {
-            let got = self.by_port.get(&port).expect("indexed port");
-            assert_eq!(got.holders, want.holders, "port {port} holders");
-            assert_eq!(got.demux, want.demux, "port {port} demux");
+        for (key, want) in ports {
+            let got = self.by_port.get(&key).expect("indexed port");
+            assert_eq!(got.holders, want.holders, "port {key:?} holders");
+            assert_eq!(got.demux, want.demux, "port {key:?} demux");
         }
         assert_eq!(self.owned.len(), owners.len(), "owned row count");
         for (who, want) in owners {
@@ -2392,7 +2613,7 @@ impl SocketService {
     ) -> Result<u16, Errno> {
         if self.sockets[index].local_port == 0 {
             self.reserve_index_rows()?;
-            let port = self.assign_port(entropy, 0)?;
+            let port = self.assign_port(entropy, self.sockets[index].family, 0)?;
             self.unindex_entry(index);
             self.sockets[index].local_port = port;
             self.index_entry(index);
@@ -2401,17 +2622,18 @@ impl SocketService {
     }
 
     /// Assign a local port: the requested port if free, or a CSPRNG-drawn
-    /// ephemeral one when `requested` is `0`. Ports are globally unique
-    /// across all sockets (no silent reuse); fail closed with
-    /// [`Errno::AddressInUse`].
+    /// ephemeral one when `requested` is `0`. A port is unique in its
+    /// family's space across every socket (no silent reuse); fail closed
+    /// with [`Errno::AddressInUse`].
     fn assign_port(
         &mut self,
         entropy: &mut dyn FnMut() -> u32,
+        family: NetAddrFamily,
         requested: u16,
     ) -> Result<u16, Errno> {
         self.port_assignments = self.port_assignments.wrapping_add(1);
         if requested != 0 {
-            if self.port_in_use(requested) {
+            if self.port_in_use(family, requested) {
                 return Err(Errno::AddressInUse);
             }
             return Ok(requested);
@@ -2422,7 +2644,7 @@ impl SocketService {
             // truncates a meaningful bit.
             #[allow(clippy::cast_possible_truncation)]
             let candidate = EPHEMERAL_MIN + (entropy() % span) as u16;
-            if !self.port_in_use(candidate) {
+            if !self.port_in_use(family, candidate) {
                 return Ok(candidate);
             }
         }
@@ -2433,14 +2655,16 @@ impl SocketService {
     /// goes to, if any. Never an established stream: those are reached by
     /// their four-tuple, so a listener and its accepted children on one
     /// port do not contend for this row.
-    fn demux_index(&self, port: u16) -> Option<usize> {
-        let id = self.by_port.get(&port)?.demux?;
+    fn demux_index(&self, family: NetAddrFamily, port: u16) -> Option<usize> {
+        let id = self.by_port.get(&(family, port))?.demux?;
         self.by_id.get(&id).copied()
     }
 
     /// Whether any live socket already holds local `port`.
-    fn port_in_use(&self, port: u16) -> bool {
-        self.by_port.get(&port).is_some_and(|slot| slot.holders > 0)
+    fn port_in_use(&self, family: NetAddrFamily, port: u16) -> bool {
+        self.by_port
+            .get(&(family, port))
+            .is_some_and(|slot| slot.holders > 0)
     }
 
     /// Allocate a socket handle not currently held by any live socket.
@@ -2570,6 +2794,134 @@ fn peer_closed(state: State) -> bool {
 }
 
 /// Write the success status frame into `response`.
+/// The link event a datagram socket holding memberships is owed for one
+/// edge, or `None` for a socket that holds none.
+/// Posts one message to a delivery port.
+pub type Post<'a> = dyn FnMut(u64, &[u8]) -> Result<(), Errno> + 'a;
+
+/// How far one socket's view was brought to the published links.
+enum Told {
+    /// It holds exactly what is published.
+    Caught,
+    /// Its port had no room; the rest waits for it to drain.
+    Blocked,
+    /// Its view could not grow for want of memory; the next call resumes.
+    Short,
+}
+
+/// Bring one socket's told view to `links`, one event at a time: a link's
+/// view changes only once its event has landed, so an interrupted pass
+/// resumes exactly where it stopped. A port that is gone takes nothing
+/// further and reads as caught up, as a datagram to it would be dropped.
+fn tell_one(
+    socket: SocketId,
+    family: NetAddrFamily,
+    port: u64,
+    proto: &mut Proto,
+    links: &[PublishedLink],
+    send: &mut Post<'_>,
+) -> Told {
+    let Proto::Datagram(dg) = proto else {
+        return Told::Caught;
+    };
+    if dg.groups.is_empty() {
+        dg.told.clear();
+        dg.listed = false;
+        return Told::Caught;
+    }
+    let mut landed = |interface, up| {
+        let Ok(frame) = (SocketLinkEvent {
+            socket,
+            interface,
+            up,
+        })
+        .encode() else {
+            return true;
+        };
+        !matches!(send(port, &frame), Err(Errno::WouldBlock))
+    };
+    let mut at = 0;
+    while at < dg.told.len() {
+        let told = dg.told[at];
+        if links
+            .iter()
+            .any(|link| link.family == family && link.name == told.name)
+        {
+            at += 1;
+            continue;
+        }
+        if told.up && !landed(told.name, false) {
+            return Told::Blocked;
+        }
+        dg.told.swap_remove(at);
+    }
+    for link in links.iter().filter(|link| link.family == family) {
+        let Some(at) = told_index(&dg.told, link.name) else {
+            if dg.told.try_reserve(1).is_err() {
+                return Told::Short;
+            }
+            if link.up && !landed(link.name, true) {
+                return Told::Blocked;
+            }
+            dg.told.push(*link);
+            continue;
+        };
+        if dg.told[at].epoch == link.epoch {
+            continue;
+        }
+        // Up then up again under a new epoch is a flap: said as down first,
+        // so the reader drops what it learned before it.
+        if dg.told[at].up {
+            if !landed(link.name, false) {
+                return Told::Blocked;
+            }
+            dg.told[at].up = false;
+        }
+        if link.up && !landed(link.name, true) {
+            return Told::Blocked;
+        }
+        dg.told[at] = *link;
+    }
+    dg.listed = false;
+    Told::Caught
+}
+
+fn told_index(told: &[PublishedLink], name: [u8; IF_NAME_LEN]) -> Option<usize> {
+    told.iter().position(|link| link.name == name)
+}
+
+/// The multicast DNS port every mDNS message is sent from and to.
+const MDNS_PORT: u16 = tairix_net::mdns::PORT;
+
+/// Whether `request` binds the multicast DNS port — in any transport, since
+/// they share one port space — or addresses a multicast DNS group. Both are
+/// the discovery service's alone: a query sent to the group from any other
+/// port is answered unicast by every responder on the segment, and a second
+/// listener on the port would hear the segment's answers without its checks.
+fn claims_multicast_dns(request: &SocketRequest<'_>) -> bool {
+    match *request {
+        SocketRequest::Bind { local, .. } => local.port == MDNS_PORT,
+        SocketRequest::Connect { peer, .. } => is_multicast_dns(peer),
+        SocketRequest::Send { dest, .. } => dest.is_some_and(is_multicast_dns),
+        _ => false,
+    }
+}
+
+/// Whether `peer` is a multicast DNS group on the mDNS port.
+fn is_multicast_dns(peer: SocketAddr) -> bool {
+    peer.port == MDNS_PORT
+        && match ip_of(peer) {
+            IpAddr::V4(group) => group == tairix_net::mdns::GROUP_V4,
+            IpAddr::V6(group) => group == tairix_net::mdns::GROUP_V6,
+        }
+}
+
+/// Whether the caller is the discovery service's account, the one principal
+/// the multicast DNS port and groups are reserved to.
+fn is_discovery(caller: &Caller) -> bool {
+    tairix_abi::discovery_ipc::from_discovery_service(caller.origin())
+}
+
 fn status_reply(response: &mut [u8]) -> Result<SocketReply, Errno> {
     if response.len() < STATUS_REPLY_LEN {
         return Err(Errno::BufferTooSmall);
@@ -2579,6 +2931,7 @@ fn status_reply(response: &mut [u8]) -> Result<SocketReply, Errno> {
         len: STATUS_REPLY_LEN,
         tx: Vec::new(),
         deliveries: Vec::new(),
+        watch: None,
     })
 }
 

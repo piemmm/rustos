@@ -201,6 +201,11 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 ///   the network stack, or the clock affects every principal on the machine
 ///   rather than the caller's own work, so it is administrative; an ordinary
 ///   session holding it could disable most of the system.
+/// * `CAP_NET_DISCOVER_ALL` — browse the link for every service type, and
+///   enumerate the types themselves (`dns-sd`, `plans/ZEROCONF.md` Z4).
+///   Listing what every host on a segment offers is the reconnaissance
+///   class `CAP_SYSINFO_GLOBAL` guards for processes; an ordinary program
+///   browses only the types its bundle is granted.
 pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::USER_ADMIN,
     CapabilityId::FS_CHOWN,
@@ -220,6 +225,7 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::SYSTEM_POWER,
     CapabilityId::STORAGE_ADMIN,
     CapabilityId::SERVICE_CONTROL,
+    CapabilityId::NET_DISCOVER_ALL,
 ];
 
 /// The `devmgr` service account's grant ceiling: read the hardware tree,
@@ -324,6 +330,25 @@ pub const TIMED_CEILING: &[CapabilityId] = &[
     CapabilityId::TIME_SET,
     CapabilityId::NET,
     CapabilityId::SANDBOX_SPAWN,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::LOG_EMIT,
+];
+
+/// The `discoveryd` link-local discovery service account's grant ceiling:
+/// hold the multicast DNS sockets, parse every datagram in a capability-empty
+/// worker, serve the reserved discovery endpoint, read the grant store, and
+/// emit its audit records — nothing more.
+///
+/// The network stack reserves the multicast DNS port and groups to this
+/// account, so no other principal can speak multicast DNS around the grants
+/// it enforces. It holds `CAP_NET` alone of the network authorities — no
+/// `CAP_NET_RAW`, no `CAP_NET_ADMIN` — and neither the `CAP_NET_DISCOVER_ALL`
+/// it enforces against its callers nor any spawn authority beyond the canonical
+/// parser sandbox.
+pub const DISCOVERYD_CEILING: &[CapabilityId] = &[
+    CapabilityId::NET,
+    CapabilityId::SANDBOX_SPAWN,
+    CapabilityId::IPC_BIND_PRIVILEGED,
     CapabilityId::FS_ACCESS,
     CapabilityId::LOG_EMIT,
 ];
@@ -460,7 +485,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 29);
+        assert_eq!(set.len(), 30);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
@@ -483,6 +508,7 @@ mod tests {
             CapabilityId::SYSTEM_POWER,
             CapabilityId::STORAGE_ADMIN,
             CapabilityId::SERVICE_CONTROL,
+            CapabilityId::NET_DISCOVER_ALL,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the ceiling");
         }
@@ -499,6 +525,10 @@ mod tests {
         assert_eq!(SEATMGR_CEILING.len(), 3);
         assert_eq!(LOGIN_CEILING.len(), 9);
         assert_eq!(GREETER_CEILING.len(), 7);
+        assert_eq!(DISCOVERYD_CEILING.len(), 5);
+        // The discovery service enforces the whole-segment grant; it never
+        // holds it.
+        assert!(!capability_set(DISCOVERYD_CEILING).contains(CapabilityId::NET_DISCOVER_ALL));
         let devmgr = capability_set(DEVMGR_CEILING);
         let sysinfod = capability_set(SYSINFOD_CEILING);
         let netstack = capability_set(NETSTACK_CEILING);
