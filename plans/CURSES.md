@@ -77,7 +77,7 @@ not start a stage before its predecessor is green on the whole-project gate
 
 ### Stage C1 — `lib/vt`: the shared escape/attribute vocabulary
 
-**Status: done** (see `PLAN.md`, "CURSES Stage C1").
+**Status: done.**
 
 **Deliverables**
 - New `no_std` crate `lib/vt` (the canonical ANSI/VT/xterm vocabulary):
@@ -106,7 +106,7 @@ target for the parser (untrusted input, §19.5/§19.6) registered in
 
 ### Stage C2 — Refactor `userland/apps/terminal` onto `lib/vt`
 
-**Status: done** (see `PLAN.md`, "CURSES Stage C2").
+**Status: done.**
 
 **Deliverables**
 - Replace the terminal's private `parser.rs` control set with `lib/vt`'s
@@ -134,7 +134,7 @@ divergence.
 
 ### Stage C3 — `lib/termcap`: the compiled-in capability database
 
-**Status: done** (see `PLAN.md`, "CURSES Stage C3").
+**Status: done.**
 
 **Deliverables**
 - New `no_std` crate `lib/termcap`:
@@ -157,7 +157,7 @@ falls back safely" test; a test that no record emits a sequence absent from
 
 ### Stage C4 — `lib/curses`: the TUI/screen-model library (core)
 
-**Status: done** (see `PLAN.md`, "CURSES Stage C4").
+**Status: done.**
 
 **Deliverables**
 - New `no_std` + `alloc` crate `lib/curses`, I/O-injected, building on
@@ -185,7 +185,7 @@ SUMMARY.md entry.
 
 ### Stage C5 — Curses completeness + a demo/port
 
-**Status: done** (see `PLAN.md`, "CURSES Stage C5"). The consumer is the
+**Status: done.** The consumer is the
 `top` process-overview viewer (`userland/apps/top`). Panels-equivalent
 stacking is deferred until a consumer needs it (§2.3); overlays compose
 through ordered `wnoutrefresh`.

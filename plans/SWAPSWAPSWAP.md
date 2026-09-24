@@ -7,8 +7,8 @@ compress-before-encrypt authenticated store over the shared
 `kernel/mem::seal` primitives, pressure-gated compress-out with
 decompression-floor preservation, move-only fault-in, bounded
 clustering and warm-up, deterministic thrash detection and escalation;
-see `PLAN.md` §SWAPSWAPSWAP and `docs/src/architecture/memory.md` §7n
-for the done-state summaries). Switching it on for arbitrary *running*
+see `docs/src/architecture/memory.md` §7n for the done-state
+summary). Switching it on for arbitrary *running*
 tasks needs two things, staged in this plan: the
 restartable user page-fault path (which **already exists** — the arch
 ports resolve a not-present user fault through

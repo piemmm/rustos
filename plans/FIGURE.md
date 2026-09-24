@@ -402,8 +402,8 @@ against its stated property, not against a screenshot.
 
 ## 4. FG5 — making quality provable
 
-This is the heart of the plan, and it is done. Three mechanisms, and none of
-them is optional.
+This is the heart of the plan. Three mechanisms, and none of them is
+optional.
 
 ### The golden is a committed ledger; the sheets are on-demand output
 
@@ -544,7 +544,7 @@ read it.
 
 ## 5. FG6/FG7 — the parameter space and the designer
 
-**FG6 is done.** A figure's identity is `figure::identity::Identity`, a
+**FG6.** A figure's identity is `figure::identity::Identity`, a
 validated nineteen-byte record: a version byte, a species (human, elf, dwarf,
 beastkin, dragonkin — chosen by the user), five build settings, a face shape,
 an eye shape, an ear form, optional horns, tail and hair, a hair volume, and
@@ -604,7 +604,7 @@ What the finished part guarantees:
   species' palest and darkest covering, and every cell clears every §4 bound.
   The digest folds all of it, each record's bytes included.
 
-**FG7 is done.** The designer engine is the parameter model, the preview it is
+**FG7.** The designer engine is the parameter model, the preview it is
 watched in, presets and plausible generation; the surfaces — sliders, windows,
 the character library — are the game's (`plans/WINTERSUN.md` WS17). What the
 finished part guarantees:

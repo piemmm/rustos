@@ -426,7 +426,7 @@ interface reconfiguration.
 
 ## 12. Stages
 
-### Z1 — the pure `lib/net::mdns` engine — **done**
+### Z1 — the pure `lib/net::mdns` engine
 
 `lib/net/src/mdns.rs` and its `codec` / `cache` / engine submodules carry the
 whole of it: the message codec over `lib/net::dns`'s own `Name` and
@@ -482,7 +482,7 @@ re-derive:
   rate limit reaches for these, never a private copy and never across a layer
   into `icmp`.
 
-### Z2 — `lib/net::dnssd` vocabulary — **done**
+### Z2 — `lib/net::dnssd` vocabulary
 
 `lib/net/src/dnssd.rs` carries the RFC 6763 §4.1 naming grammar and the §6
 `TXT` key/value rules: `ServiceInstance` / `ServiceType` / `InstanceName` /
@@ -531,7 +531,7 @@ re-derive:
   name needs nothing: it is instance-shaped and the ordinary triple reads
   it.
 
-### Z3 — `discoveryd`: the split process — **done**
+### Z3 — `discoveryd`: the split process
 
 `userland/net/discoveryd/` is the front and the decoder (§4) in one bundle,
 `/System/Services/discoveryd.app`. `lib/sandbox/src/supervise.rs` is the
@@ -576,7 +576,7 @@ re-derive:
   replacement starts only after the paced delay on a real one-shot wait and
   serves on a fresh pipe pair.
 
-### Z4 — browse, resolve, `.local` routing — **done**
+### Z4 — browse, resolve, `.local` routing
 
 A program browses, resolves, and looks up link-local services through
 `lib/discovery` and the `discovery-v1` session ABI (`lib/abi::discovery_ipc`)

@@ -14,7 +14,7 @@ its own detailed plan where one exists and this file is the umbrella.
 Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 `plans/WIRING.md` (Arch HAL parity), `plans/ARCHSUPPORT.md`
 (x86_64 product parity), `plans/CODEVERIFY.md` (the §27 sweep spirit),
-`PLAN.md` immediate-work P-series (P-6 at ~line 2075).
+`PLAN.md`'s P-series ("Preemption and blocking", P-6).
 
 ## Ledger
 
@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 75 open, 145 closed, 220 total.
+**closed**, and a partial fix stays **open**. 81 open, 144 closed, 225 total.
 
-### Open (75)
+### Open (81)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -71,6 +71,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D155 | the breadcrumb's collapse cell draws a private `...` where every other cut text ends in `…` | blocked on a decision: `plans/GUI-CONTROLS-DESIGN.md` §11 fixes "three periods, not `…`" so the mark renders under any coverage, but the console atlas covers U+2026 (`lib/font`'s `coverage_reaches_beyond_ascii`) and the shipped faces draw it (the Settings vertical's Appearance description ends in `…`). Either the plan's rule is retired and `nav.rs` draws `tairix_font::ELLIPSIS`, or it stands and its rationale is restated; a regression test lands with whichever |
 | D164 | 22 userland programs allocate fixed start-up buffers with `vec!`, whose allocation failure panics rather than returning a typed error | a sweep, one program at a time; new code takes `tairix_util::fallible::filled`. See the Scope bullet |
 | D166 | x86_64's only platform entropy source is `RDSEED`/`RDRAND`, so a part or hypervisor that does not enumerate them leaves the kernel's random reserve unseeded for the whole boot | noticed when `netstack` began refusing to serve without a keyed SYN-cookie secret, instead of running with an unkeyed one, and every x86_64 network vertical went red: the QEMU harness presented `qemu64`, which has neither instruction, so each x86_64 guest booted `entropy reserve unseeded cause=draw_failed` and every CSPRNG consumer failed closed. The harness now presents both (`tools/qemu/src/x86_64.rs` `CPU`), as current silicon does; that corrects the test machine, not this defect. The kernel still trusts one source alone where the randomness design mixes several (`plans/FIX-RANDOMNESS.md`), so older parts that predate the instructions and hypervisors that mask their CPUID bits get no randomness at all. The fix is a second source the port can always reach, mixed with the first — a seed the boot loader hands over (its UEFI shell can draw one from `EFI_RNG_PROTOCOL`, `plans/BOOTLOADER.md`), and conditioned interrupt-timing jitter — never a fallback to predictable bytes. **Re-check trigger:** the next change to `kernel/arch/x86_64/src/entropy.rs` or to the boot hand-off |
+| D167 | a dead driver's DMA memory was freed while its device could still master it | partly fixed: node custody (DMA shared regions included), admission generations and the drivers' reset-confirmed declarations are landed, but the guarantee does not yet hold where D225 (the kernel premises it rests on) and D226 (the drivers' own frees) record; it closes with them |
 | D168 | the shared device-tree walk emits nodes the firmware marked `status = "disabled"` or `"reserved"`, and drivers bind them | noticed against the pinned Pi 4 tree while designing SND5; not absorbed, because changing the rule can unbind a path metal already accepts. See the section |
 | D169 | stable audit event ids collide across components: about thirty are claimed by two or three unrelated emitters | noticed while allocating the D167 ids; not absorbed — the fix is an id registry, a renumbering, and a `ci` uniqueness check. See the section |
 | D170 | direct reclaim allocates on the kernel heap, infallibly, on the path memory pressure triggers | noticed while making `LiveSpace::drop`'s walk allocation-free (D167); not absorbed, because the cold scanner's interface changes. See the section |
@@ -85,7 +86,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D202 | a limited `dma_alloc` scans the frame bitmap under the global allocator lock | noticed merging the DMA engine; not absorbed. `alloc_order_under` walks the bitmap below the ceiling holding the frame-allocator lock, O(frames) on fragmented RAM for every carve with an address limit |
 | D203 | a DMA carve no window can name is still zeroed and mapped | noticed merging the DMA engine; not absorbed. `alloc_dma_region` ignores a translated window's lower CPU bound, so when nothing inside the window fits it still carves, zeroes up to `2^MAX_ORDER` pages, maps and unmaps before `translate_device_addr` refuses — always, for the Pi's peripheral window |
 | D204 | DMA controller resolution re-walks the device tree per consumer phandle | noticed merging the DMA engine; not absorbed. `resolve_dma_controller` walks the whole tree for each distinct phandle of each consumer, O(nodes × consumers); one pre-pass building a phandle-to-id map is the fix |
-| D205 | `HW_NODE_MAX_RESOURCES` is a fixed ceiling raised for one node type | noticed merging the DMA engine; not absorbed. Raising it from 8 to 16 grew every node from 577 to 833 bytes to fit the DMA controller; a node's resource set should scale with what it carries rather than take the widest node's size |
+| D205 | `HW_NODE_MAX_RESOURCES` is a fixed ceiling raised for one node type | noticed merging the DMA engine; not absorbed. Raising it from 8 to 16 grew every node from 577 to 833 bytes to fit the DMA controller; a node's resource set should scale with what it carries rather than take the widest node's size. Past the ceiling the walk drops a node's further resources without a record, so its driver binds a partial set unannounced (found reviewing D167's change, when the ceiling was 8) |
 | D206 | `dma_ranges_aperture_of` folds a multi-entry `dma-ranges` into one translation | noticed merging the DMA engine; not absorbed. It reports the lowest entry's child base for the whole span, wrong for every other entry; no caller reads it translated today, and `dma_reach` is the correct composition |
 | D207 | the served-caller checks are copied into four handlers | noticed merging the DMA engine; not absorbed. The endpoint-owner, receive-capability and `peer_origin` sequence appears in `call_peer_origin`, `call_peer_seat`, `call_peer_holds` and `shm_grant_peer`, and `shm_create_dma`'s opening repeats `dma_alloc`'s grant, constraint and custodian checks |
 | D208 | aarch64's fatal record reports a fault address and syndrome the CPU never gave | noticed merging the fault-path rework; not absorbed. It passes the live `FAR_EL1` for every exception class and `ESR_EL1` for FIQ and SError entries, both architecturally UNKNOWN there, and reads `FAR`/`ELR` after the terminator callback rather than from the saved frame; FAR belongs only to EC `0x20`/`0x21`/`0x22`/`0x24`/`0x25`/`0x34`/`0x35` with `FnV` clear |
@@ -104,6 +105,10 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D221 | the figure crate keeps per-species data and motion order in several places | noticed merging the WinterSun designer; not absorbed. `plausible::carried` holds per-species odds outside `species.rs` (four of five rows unread); the motion-kind order is written in `motion::Set::new`, `Set::clips` and `preview::STATES`, and the six transition edges by hand; and the art gate's worst cell now meets `MIN_REGIONS` with no margin |
 | D222 | the WinterSun figure plans and comments contradict the code | noticed merging the WinterSun designer; not absorbed. `plans/FIGURE.md` owes `Tints` on a species change where the code rebuilds the rig; `plausible.rs` says beastkin are never horned against odds of 3 in 16; `digest.rs` claims every clip outlasts its fade while the last does not; `AGENTS.md`, `plans/FIGURE.md` and `plans/WINTERSUN.md` still home presets in the figure crate; and `plans/WINTERSUN.md` promises an `artsheet` render of bundle presets no deliverable carries |
 | D223 | the kernel's shared-region and call registries are global statics | noticed merging the DMA engine; not absorbed. `sharedreg::REGIONS` and `callreg` keep their state in global `SpinLock` statics the syscall and teardown paths reach directly; the owned-registry shape `PeerWatch` took, injected where it is used, is the fix |
+| D224 | the tree has two secure-wipe primitives: the `zeroize` crate (a direct dependency of 12 crates) and the first-party `tairix_util::secret` (`wipe`, `Wiped`; used by nine crates, among them `kernel/core`, `lib/rt`, and `netstack`) | noticed while moving `lib/sandbox`'s session queue onto `lib/collections`' `ByteQueue`, which wipes through `zeroize` where the queue it replaced wiped through `lib/util`. Both are volatile stores behind a fence, so neither is weaker; the defect is that one job has two implementations, and their stated reasons contradict each other — `lib/log` and `lib/rng` chose `zeroize` for "no hand-rolled wiping", while `lib/util` is exactly a hand-rolled wipe. Needs a decision on which is canonical before a sweep: `zeroize` stays in the graph either way, because `lib/crypto`'s audited cipher crates depend on it, and the charter otherwise prefers the first-party one. Then every consumer moves to the one, and the other is deleted. **Re-check trigger:** the next crate that needs to wipe a secret |
+| D225 | the DMA quarantine rests on premises the kernel does not enforce | a node can hold two live drivers (`AddressSpaceRegistry::set_loaded_node` never refuses a second load), and `dma_quiesced` frees everything below the caller's generation without checking for a live earlier instance, so one instance's reset can free memory another still programs; an orderly removal leaves a node's blocks under the id the next published device reuses (`hwtree_store` assigns `max + 1`); a surprise removal reads the generation high-water mark after the removal is already visible; and `DmaQuarantine::hold` allocates on the teardown path and leaks the block when that fails. Found reviewing D167's change; latent today, since nothing re-binds a DMA-carving node |
+| D226 | live drivers free DMA memory their device may still own, outside the quarantine | no `Drop` guard on `VirtioNet`, `VirtioSnd`, `VirtioInput`, `Genet` or `lib/usb`'s `UsbDevice`/`SlabBank`, so an early return from `lib/netchan`/`lib/audiochan` `serve`, `virtio_kbd` or the xHCI main frees their slabs through `dma_free` while the device runs; `vcmailbox` frees its property buffer when the firmware-revision probe added with D167 fails after posting; `virtio_snd`'s `release()` drops its periods after a failed `PCM_STOP`/`PCM_RELEASE`; and `lib/usb` releases a slot's region before Disable Slot and drops the `SlabBank` when `start` fails after Run/Stop. Found reviewing D167's change |
+| D227 | `virtio_blk` and `virtio_crypto` take any completion as the current request's once a chain is abandoned | after `DeviceOffline` the device may still own the abandoned chain and the next request reuses its staging, so the late completion is returned as the new request's success: the wrong LBA's data, or one caller's output to the next. Found reviewing D167's change |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -130,7 +135,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (145)
+### Closed (144)
 
 | ID | Subject |
 |---|---|
@@ -255,7 +260,6 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D162 | the kernel never seeded its CSPRNG on a port whose hardware RNG is declared `Pending`, though the boot seed it had captured could have |
 | D163 | `netstack` exited on every start-up failure without stating why |
 | D165 | the SVG decoder admitted a pattern tile magnified past what the renderer can size, which the renderer then refused to draw at all |
-| D167 | a dead driver's DMA memory was freed while its device could still master it |
 | D173 | a DMA carve under an addressing limit took whichever block the free lists offered first, and refused it when that block lay above the limit |
 | D174 | adjacent usable boot-map regions were populated as separate runs, so the buddies at their seam never merged |
 | D176 | the userland runtime and its C stubs were outside the UB oracle, and three findings kept them there |
@@ -8340,7 +8344,7 @@ exposed it. The two halves of the witness are host-tested beside the service
 `a_bar_slot_whose_artwork_is_refused_settles_on_its_glyph`), each guard
 verified to fail the test when removed.
 
-## D167 — a dead driver's DMA memory was freed while its device could still master it — FIXED
+## D167 — a dead driver's DMA memory was freed while its device could still master it — PARTLY FIXED (open: D225, D226)
 
 A driver that ends with its device still running — a crash, a kill, an exit
 that skipped the reset — no longer returns its DMA memory to the allocator.
@@ -8360,10 +8364,14 @@ What it guarantees:
   spawn a successor — before the scheduler's reap drops the dead space, so a
   block can reach custody after its successor released. The node's quiet
   bound frees such a block on arrival; a block of the releaser's own or a
-  later generation is never freed.
+  later generation is never freed. The bound assumes one live driver per
+  node, which the kernel does not yet enforce (D225).
 - **A surprise removal retires the node** at the admission high-water mark,
   so a vanished device's memory frees and a reused node id's next driver keeps
   its protection; an orderly removal leaves release to the next instance.
+  D225 records where each falls short: the mark is read after the removal is
+  visible, and an orderly removal's blocks wait under an id the next device
+  reuses.
 - **Custody never fails open.** A block for an unbound node, or one the
   registry cannot record, keeps its frames allocated for good; a kernel with
   no direct physical map wires `NULL_DMA_QUARANTINE`, which refuses the carve.
@@ -8374,16 +8382,22 @@ What it guarantees:
   for `DMA_DISABLED` on both engines; EMMC2 declares after its `SRST_HC`
   bring-up; the VideoCore mailbox service declares after a firmware-revision
   probe, resting on the firmware answering property requests in posting
-  order (the metal acceptance confirms it), and an exchange drains a stale
-  property completion rather than failing on it.
-- **A live driver's own frees follow the same rule.** The virtio drivers
-  carve everything fallible before `DRIVER_OK` and reset again before
-  releasing when a later step fails; a `close` whose reset does not confirm,
-  a GENET engine that will not stop, and a virtio-net control command the
-  device never returned are withheld for the quarantine rather than freed.
+  order (its metal acceptance is pending, `plans/PI.md`), and an exchange
+  drains a stale property completion rather than failing on it.
+- **A live driver's own frees follow the same rule**, except where D226
+  records. The virtio drivers carve everything fallible before `DRIVER_OK`
+  and reset again before releasing when a later step fails; a `close` whose
+  reset does not confirm, a GENET engine that will not stop, and a virtio-net
+  control command the device never returned are withheld for the quarantine
+  rather than freed.
+- **DMA shared regions join the same custody.** A `shm_create_dma` region
+  binds its creator's node for its life; a creator that ends still mapping it
+  orphans it, and its frames reach the quarantine under the creator's
+  generation when the last mapping goes (`plans/SOUND.md` SND5b).
 - **The teardown walk allocates nothing.** `LiveSpace::drop` drains its pages
   through `AddressSpace::unmap_lowest`, so a space dying under memory
-  pressure cannot fail for want of the memory it is returning.
+  pressure cannot fail for want of the memory it is returning; recording each
+  block in custody still allocates (D225).
 
 Regression tests: `kernel/core/src/dmaquarantine/tests.rs` (held until a
 later generation releases, late arrival freed, retire at the high-water mark
@@ -8393,7 +8407,8 @@ tests and the `unmap_lowest` drain; `kernel/core/src/syscalls.rs`'s
 caller-scoped release, surprise-only
 retire and quarantine audit; `lib/virtio`'s bounded reset wait; and per
 driver a declaration-after-reset test and a wedged-device test proving the
-memory withheld.
+memory withheld — except EMMC2, which has only the wedged-device test, and
+`vcmailbox`, which has neither.
 
 ## D168 — the shared device-tree walk emits nodes the firmware marked disabled or reserved, and drivers bind them (OPEN)
 

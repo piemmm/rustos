@@ -58,12 +58,12 @@ in all of them applies here without exception.
   `plans/NETWORK.md`).
 - **Hardening debt is tracked, not hidden.** KPTI and the x86_64
   speculation barriers (IBRS/IBPB/STIBP/SSBD) are `Pending` in the port's
-  honest §19.1 profile, blocked on the Stage 6 user/kernel page-table
-  boundary and marked "[DO IMMEDIATELY ON UNBLOCK]" in `PLAN.md`. That work
-  is A7 here so this plan cannot be called done while the profile still says
-  `Pending` — but it is gated separately because its blocker is not an
-  aarch64-parity item (aarch64 carries its own `Pending` KPTI/Spectre-v2
-  rows).
+  honest §19.1 profile. They waited on the Stage 6 user/kernel page-table
+  boundary, which has landed, and carry "[DO IMMEDIATELY ON UNBLOCK]" in
+  `PLAN.md` (§19 item 10). That work is A8 here so this plan cannot be called
+  done while the profile still says `Pending` — but it is tracked separately
+  because it is not an aarch64-parity item (aarch64 carries its own `Pending`
+  KPTI/Spectre-v2 rows).
 
 ## 1. Current state (what already exists — do not rebuild)
 
@@ -298,14 +298,14 @@ the PM1a/PM1b control block and sleep-type values, then writes the `SLP_TYP`
 x86_64 scenario asserting the guest exits on `PowerOff`, mirroring the
 equivalents on the two ports that have it.
 
-### A8 — x86_64 hardening unblock (`blocked` on Stage 6 page-table boundary)
+### A8 — x86_64 hardening unblock (`planned`)
 
 KPTI + IBRS/IBPB/STIBP/SSBD move from `Pending` to `Supported` in the
-port's §19.1 profile the moment the Stage 6 user/kernel page-table
-boundary lands ("[DO IMMEDIATELY ON UNBLOCK]", `PLAN.md`), with the
-side-channel conformance vertical proving the barriers. Tracked here so
-this plan is not "done" while the profile is `Pending`; gated separately
-because its blocker is not an aarch64-parity item.
+port's §19.1 profile, with the side-channel conformance vertical proving
+the barriers. The Stage 6 user/kernel page-table boundary they waited on
+has landed, so the "[DO IMMEDIATELY ON UNBLOCK]" order in `PLAN.md` now
+applies. Tracked here so this plan is not "done" while the profile is
+`Pending`; tracked separately because it is not an aarch64-parity item.
 
 ## 3. Invariants (hold across every increment)
 
@@ -342,5 +342,4 @@ because its blocker is not an aarch64-parity item.
   live verticals are blocked on `plans/OPEN-DEFECTS.md` D7 (the production
   MSI-X kthread disk-completion never wakes the parked bring-up), a separate
   A2 defect.
-- **A1, A4, A5, A6, A7 `planned`**; **A8 `blocked`** on the Stage 6
-  user/kernel page-table boundary.
+- **A1, A4, A5, A6, A7, A8 `planned`.**

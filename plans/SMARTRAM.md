@@ -31,8 +31,9 @@ thrash, and benchmark-evidence suites over one shared gauge), and
 SMART11 (the whole-disk block-level LRU cache,
 `kernel/tairix-kernel::block_cache::BlockCache`: the classified,
 budgeted, pressure-governed, zeroing per-block cache the boot path
-installs under the block-sharing layer; see `PLAN.md` §SMARTRAM for
-the done-state summaries), and SMART5 (the desktop/UI cache: the
+installs under the block-sharing layer; see
+`docs/src/architecture/memory.md` §7g–§7m for the done-state
+summaries), and SMART5 (the desktop/UI cache: the
 reclaimable-memory model hoisted whole into the shared `lib/reclaim`
 crate so kernel and userland share one classification, one budget
 derivation, one band vocabulary and one `ReclaimCache`; the

@@ -421,7 +421,7 @@ Docs: `docs/src/desktop/seat.md` (D6 section),
 What D6 deliberately does **not** do: assigning *which input device*
 feeds *which seat* beyond the boot seat's directly attached keyboard is
 seat-topology policy for the seat manager, staged with the desktop
-session work (`plans/PI.md` P11 / `PLAN.md` CU6), not a kernel-side
+session work (`plans/PI.md` P11 / `plans/CAPABILITY_USE.md` CU6), not a kernel-side
 default.
 
 ### Stage D7 — the display-client present path (the graphical session goes live)

@@ -915,7 +915,7 @@ rung short spells the top of its own domain as four figures of the rung below.
 
 ### DS6 — the elevated-apply seam, and General
 
-**Done.** `ElevateRequest::Run` carries a bounded argv — at most
+`ElevateRequest::Run` carries a bounded argv — at most
 `ELEVATE_MAX_ARGS` (16) arguments, `ELEVATE_MAX_ARG_LEN` (512) bytes each,
 `ELEVATE_MAX_ARGV_BYTES` (1024) in all, one admissibility rule shared by the
 encoder and the decoder — so a caller can run the tool that already owns a
@@ -967,8 +967,8 @@ authentication and a store write.
 
 ### DS7 — Networking: read, and the stack-wide options
 
-**Done.** Two composed panes, and the authority line between them and the
-third is the point of the stage.
+Two composed panes, and the authority line between them and the third is the
+point of the stage.
 
 **TCP/IP** is the six stack-wide `net.*` keys (IPv4/IPv6 enable, IPv6 privacy
 addresses, SYN cookies, keepalive, ECN) as six more `MachineSetting`s in a
@@ -1010,7 +1010,7 @@ throughout, and every surface reads it.
 
 ### DS8a — the elevated-read seam
 
-**Done.** The prerequisite DS8b and DS9 both wait on.
+This is the prerequisite DS8b and DS9 both build on.
 `ElevateReply::Completed` carried an exit code and nothing else, so no
 authenticated run could *show* a caller anything.
 
@@ -1063,7 +1063,7 @@ states the refusal and leaves the pane saying nothing was read.
 
 ### DS8 — the network store's writer
 
-**Done.** `configure` could resolve and show a `<iface>.<suffix>` key but
+`configure` could resolve and show a `<iface>.<suffix>` key but
 could not set one; the store had a parser and a render and no mutation API
 at all.
 
@@ -1124,7 +1124,7 @@ admits cannot drift.
 
 ### DS8b — Ethernet and DNS stage and apply
 
-**Done.** DS8a gave the Ethernet pane a *reading* of the configured
+DS8a gave the Ethernet pane a *reading* of the configured
 addressing and DS8 gave the system a writer; what remained was the pane that
 stages a change over that reading and applies it.
 
@@ -1207,7 +1207,7 @@ used.
 
 ### DS9 — Users & Groups
 
-**Done.** The pane composes its three reads, stages a per-account change, and
+The pane composes its three reads, stages a per-account change, and
 applies it as one elevated run; the ledger above records what that now
 guarantees.
 
@@ -1263,7 +1263,7 @@ never-widen and last-administrator rules remain the only arbiters.
 
 ### DS10 — Notifications
 
-**Done.** What it guarantees:
+What it guarantees:
 
 - **One gate, at the one intake.** `serve_notify` attributes every notice to
   the bundle the kernel attests its producer runs (`Origin::app`), and holds
@@ -1287,13 +1287,13 @@ never-widen and last-administrator rules remain the only arbiters.
   alone (`is_settings_surface`: the attested `SETTINGS_BUNDLE_ID` under the
   session's own publisher). The reply is the shared name-list codec the cursor
   sets already used, now one definition for both.
-- **The two defects the intake carried are gone.** The notification area was
-  unbounded — any program could grow the session without limit — and is now
-  `NOTIFICATIONS_MAX` in all and `SOURCE_NOTIFICATIONS_MAX` per source, a raise
-  past either refused `LimitExceeded`. It was keyed on the recyclable pid, so a
-  later process under the same pid could replace or clear another's notice; it
-  is keyed on the attested `ProcId`, and a reaped child's notices are dropped
-  by its pid.
+- **The intake is bounded and keyed on the instance.** The notification area
+  holds at most `NOTIFICATIONS_MAX` notices in all and
+  `SOURCE_NOTIFICATIONS_MAX` per source, a raise past either refused
+  `LimitExceeded`, so no program can grow the session without limit. A notice
+  is keyed on the attested `ProcId`, never the recyclable pid, so a later
+  process under the same pid cannot replace or clear another's, and a reaped
+  child's notices are dropped by its pid.
 - **The pane** lists the union of the seen sources and the policy's own, in
   identity order, or *None*; states it when the desktop would not say, and when
   the policy is full.
@@ -1304,11 +1304,10 @@ glyphs' defect, not the policy's, and stays recorded in
 
 ### DS11 — Keyboard and Mouse
 
-**Done.** The plan's premise that the file manager kept a private interval was
-stale: every resolver — the file manager's listing and chooser, the desktop's
-icons, the window manager's title bars — paired presses under `lib/input`'s
-fixed default. That default is deleted; `DoubleClickTracker::register` takes
-the interval, and there is one.
+One double-click interval serves the desktop. Every resolver — the file
+manager's listing and chooser, the desktop's icons, the window manager's title
+bars — pairs presses under it: `DoubleClickTracker::register` takes the
+interval, and `lib/input` keeps no default of its own.
 
 - **Five keys** (`lib/wallpaper::input`): `pointer.primary`,
   `pointer.double_click_ms`, `pointer.speed`, `key.repeat_delay_ms` and
@@ -1336,7 +1335,7 @@ the interval, and there is one.
 
 ### DS12 — Lock Screen and Screensaver: the idle interface
 
-**Done.** What it guarantees:
+What it guarantees:
 
 - **One idle deadline** (`idle::IdleClock`): the last seat input, a key's
   repeat included, and `screensaver.after_min` / `lock.after_min` (`never` or
@@ -1418,11 +1417,10 @@ on the confd page.
 
 ### DS14 — retire the second form idiom
 
-Every form in the desktop is now drawn with `lib/controls::form`, and neither
-private layout survives. `datetime.app`'s six-field row landed with DS1. The
+Every form in the desktop is drawn with `lib/controls::form`, and none carries
+a private layout. `datetime.app` composes its six fields from it (DS1), and the
 file manager's Permissions tab is an **Access** group (the mode as a reading,
-then one Owner/Group/Other row of flags each) over an **Ownership** group, and
-`PermGrid`, `PermsLayout` and `OwnerRows` are deleted with their arithmetic.
+then one Owner/Group/Other row of flags each) over an **Ownership** group.
 
 - **One new slot, `FieldControl::Flags`.** A `FlagSet` is a row of checkboxes
   in one slot, reported as `FieldAction::SetFlag { index, on }`. Every box
@@ -1431,7 +1429,7 @@ then one Owner/Group/Other row of flags each) over an **Ownership** group, and
 - **The column placement is shared.** `tairix_controls::stack` (`gap`,
   `plate_width`, `height`, `column_width`, `place`, `reveal_from`,
   `as_extent`) is the one placement both Settings and the Properties window
-  use; Settings' copy is deleted, not kept beside it.
+  use, and neither keeps a copy of it.
 - **The tab has keyboard reach.** The arrows walk rows and flags, Space and
   Enter act, and Tab or Escape give the keyboard back to the tab strip. Paint,
   hit-testing and keys read one placement, so they cannot disagree.
@@ -1443,8 +1441,8 @@ Host tests cover the `FlagSet` contract across the dark, light,
 high-contrast and monochrome fixtures, the flags seated whole at the default
 size and 200 %, every toggle reachable and apart at the minimum window, the
 keyboard reaching all eleven controls, and damage scoped to the rows that
-changed. No QEMU vertical dumps the Properties window, so none was
-re-baselined.
+changed. No QEMU vertical dumps the Properties window yet; that is
+`plans/NEW-FILEMANAGER.md` FM8d.
 
 ---
 

@@ -42,6 +42,8 @@ which the drift guard enforces.
 | FM7b | Move, copy, paste, delete, new folder — with interleaved progress and cancel | done |
 | FM8a | The pure properties view model | done |
 | FM8b | The Properties surfaces: the picker's read-only panel and the manager's Properties window, with permission, ownership, and extended-attribute editing | done |
+| FM8c | Keyboard reach in the Properties window's attributes section | planned |
+| FM8d | The QEMU vertical for the Properties window and the folder cue | planned |
 | FM9-pre | Filesystem-mutation audit gates: `FsNodeMutated` / `FsMutationDenied`, the kernel-attested witness a vertical keys on | done |
 | FM9-a | New Folder + inline rename: the product half and the create's guest click-through | blocked: D98 — the rename commit and the toolbar gesture need an ordered typed-key-after-click script the harness cannot yet produce |
 | FM9-b | Open a file into the viewer via CU6 delegation, product and guest | done |
@@ -1581,12 +1583,12 @@ syscall each on a discrete press, like every other write gesture in this app
 (rename, mkdir, delete, paste). Moving the app's write gestures to the worker
 is `plans/FIX-DESKTOP.md`'s staged work, not this increment's.
 
-**Remaining: keyboard reach in the attributes section.** Its *Remove* action
+**FM8c — keyboard reach in the attributes section.** Its *Remove* action
 has no key, and `Left`/`Right` walk the strip there rather than the attribute
 editor's caret. Which key removes a row, and whether the section takes the
 keyboard from the strip as the Permissions section does, is undecided.
 
-**Remaining: a QEMU vertical for the window and the cue.** Two loop-level
+**FM8d — a QEMU vertical for the window and the cue.** Two loop-level
 behaviours the host tests structurally cannot reach are covered only by the
 desk-level seam today — that a Properties window opens on the session and
 adopts its deferred answer, and that a delivered folder-cue batch reaches the

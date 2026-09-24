@@ -141,8 +141,8 @@ modules; the reference documentation is `docs/src/architecture/threads.md`.
 
 ## What each part now guarantees
 
-Named by their stage letters, because the surrounding documentation and
-`PLAN.md` refer to them that way.
+Named by their stage letters, because the surrounding documentation refers
+to them that way.
 
 ### T1 — the riscv64 `tp`/`sscratch` trap protocol
 
