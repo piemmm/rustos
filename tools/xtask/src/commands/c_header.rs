@@ -645,6 +645,11 @@ fn generate_hwtree() -> String {
     );
     let _ = writeln!(
         out,
+        "#define TAIRIX_HW_RES_FLAG_DMA_TRANSLATED {}u",
+        HwResource::DMA_TRANSLATED
+    );
+    let _ = writeln!(
+        out,
         "#define TAIRIX_HW_NODE_HEADER_LEN {HW_NODE_HEADER_LEN}u"
     );
     let _ = writeln!(out, "#define TAIRIX_HW_NODE_WIRE_LEN {}u", HwNode::WIRE_LEN);
@@ -677,6 +682,7 @@ fn hwtree_enum_macros(out: &mut String) {
         ("RTC", HwDeviceClass::Rtc),
         ("ACCELERATOR", HwDeviceClass::Accelerator),
         ("AUDIO", HwDeviceClass::Audio),
+        ("DMA", HwDeviceClass::Dma),
         ("OTHER", HwDeviceClass::Other),
     ] {
         let _ = writeln!(
@@ -731,6 +737,8 @@ fn resource_kind_name(kind: HwResourceKind) -> &'static str {
         HwResourceKind::Framebuffer => "FRAMEBUFFER",
         HwResourceKind::LinkAddress => "LINK_ADDRESS",
         HwResourceKind::BusChild => "BUS_CHILD",
+        HwResourceKind::DmaController => "DMA_CONTROLLER",
+        HwResourceKind::DmaRequest => "DMA_REQUEST",
     }
 }
 

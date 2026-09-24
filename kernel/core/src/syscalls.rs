@@ -1563,12 +1563,15 @@ where
     }
 
     /// Record that the dying driver `process` left DMA memory to its node's
-    /// quarantine — read before its load record is withdrawn.
-    fn audit_dma_quarantined(&self, process: ProcessId) {
+    /// quarantine — its own carves and the `orphaned_regions` bytes of DMA
+    /// regions it carved and still mapped — read before its load record is
+    /// withdrawn.
+    fn audit_dma_quarantined(&self, process: ProcessId, orphaned_regions: u64) {
         let Some(driver) = self.aspaces.read().loaded_driver(process) else {
             return;
         };
-        if driver.dma_bytes == 0 {
+        let bytes = driver.dma_bytes.saturating_add(orphaned_regions);
+        if bytes == 0 {
             return;
         }
         crate::audit::emit(
@@ -1586,7 +1589,7 @@ where
                 },
                 Field {
                     key: "bytes",
-                    value: tairix_log::FieldValue::UnsignedInt(driver.dma_bytes),
+                    value: tairix_log::FieldValue::UnsignedInt(bytes),
                 },
             ],
         );
@@ -3167,7 +3170,7 @@ where
         // freed region's frames through the kernel direct map, so the
         // reclaim works from the dying process's own `exit` and from a
         // killer's context alike.
-        crate::sharedreg::reclaim_process(self.shared_mem_facility, process);
+        let orphaned_dma = crate::sharedreg::reclaim_process(self.shared_mem_facility, process);
         // Drop every wait-set this process owned. A wait-set holds no
         // resource of its own (its members only *name* endpoints and IRQ
         // lines, reclaimed around here), so dropping the sets is the
@@ -3194,7 +3197,7 @@ where
         // A driver dying with DMA carves leaves them to its node's quarantine
         // when its space is torn down; say so while its load record still
         // stands.
-        self.audit_dma_quarantined(process);
+        self.audit_dma_quarantined(process, orphaned_dma);
         // Tear down the process-bookkeeping subset — signal gates,
         // parent/child wait rows, capability record, and address-space
         // registry entry — through the one helper the deferred-launch
@@ -8521,11 +8524,23 @@ where
         // endpoint first and feed its driver forged registers. Refused
         // before the endpoint exists, and audited like any other denied
         // bind.
-        if tairix_abi::hwtree::is_bus_child_endpoint(endpoint_id)
+        if tairix_abi::hwtree::BUS_CHILD_ENDPOINTS.contains(endpoint_id)
             && !self
                 .aspaces
                 .read()
                 .grant_covers(caller.process(), &HwResource::endpoint(endpoint_id))
+        {
+            CallEndpoint::record_create_denied(EndpointId(endpoint_id), self.audit);
+            return Err(Errno::PermissionDenied);
+        }
+        // A DMA controller's endpoint is served under its node's duty alone:
+        // every consumer holds a request line naming the same id, and one of
+        // them serving it would answer all the others.
+        if tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS.contains(endpoint_id)
+            && !self
+                .aspaces
+                .read()
+                .holds_dma_controller_duty(caller.process(), endpoint_id)
         {
             CallEndpoint::record_create_denied(EndpointId(endpoint_id), self.audit);
             return Err(Errno::PermissionDenied);
@@ -8841,6 +8856,43 @@ where
         // unacknowledged eviction), `NotFound` (no such seat).
         let lease = self.seat_registry.live_lease(seat, SeatOwner(peer.pid()))?;
         Ok(lease.generation)
+    }
+
+    fn call_peer_holds(
+        &self,
+        caller: &CallerContext<'_>,
+        endpoint: u64,
+        ticket: u64,
+        resource: u64,
+    ) -> SyscallResult {
+        // Gated as `call_peer_seat`: only the endpoint's server, holding its
+        // receive capability, learns anything, and only about the caller it
+        // is serving.
+        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
+            return Err(Errno::NotFound);
+        };
+        if !ep
+            .required_recv_caps()
+            .is_subset_of(caller.caps.effective())
+            || ep.owner() != caller.caps.process().0
+        {
+            return Err(Errno::PermissionDenied);
+        }
+        let Some(peer) = ep.peer_origin(CallTicket(ticket)) else {
+            return Err(Errno::NotFound);
+        };
+        let mut record = [0u8; HwResource::WIRE_LEN];
+        self.copy_in_user(caller, resource, &mut record)?;
+        let resource = HwResource::from_bytes(&record)?;
+        if self
+            .aspaces
+            .read()
+            .grant_covers(ProcessId(peer.pid()), &resource)
+        {
+            Ok(0)
+        } else {
+            Err(Errno::PermissionDenied)
+        }
     }
 
     fn self_origin(&self, caller: &CallerContext<'_>, out: u64, out_cap: usize) -> SyscallResult {
@@ -9404,12 +9456,138 @@ where
         // Mint the recipient its own unforgeable handle for the region. The
         // handle value travels back to the caller (who forwards it in-band
         // to the service); it resolves only when presented by the recipient
-        // task itself, so the number is useless to a bystander.
-        let handle = self
+        // task itself, so the number is useless to a bystander. A server that
+        // ended since the lookup receives nothing.
+        self.aspaces
+            .write()
+            .mint_grant_live(ProcessId(ep.owner()), wanted)
+            .ok_or(Errno::NotFound)
+    }
+
+    fn shm_create_dma(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        len: usize,
+        id_out: u64,
+        device_out: u64,
+    ) -> SyscallResult {
+        // The dispatcher enforced `CAP_MEM_DMA`; a shared region takes the
+        // `CAP_SHM` every other one does.
+        if !caller.caps.has(tairix_abi::CapabilityId::SHM) {
+            return Err(Errno::PermissionDenied);
+        }
+        let (resource, driver) = {
+            let aspaces = self.aspaces.read();
+            (
+                aspaces.grant(caller.process(), handle),
+                aspaces.loaded_driver(caller.process()),
+            )
+        };
+        let Some(resource) = resource else {
+            return Err(Errno::NotFound);
+        };
+        let constraint = dma_constraint(&resource)?;
+        if len == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if constraint.max_len != 0 && (len as u64) > constraint.max_len {
+            return Err(Errno::OutOfRange);
+        }
+        // The device may outlive the caller, so the region needs custody for
+        // the node the caller drives: only a driver loaded for one may carve.
+        let Some(driver) = driver else {
+            return Err(Errno::PermissionDenied);
+        };
+        let custodian = DmaCustodian {
+            node: driver.node,
+            generation: driver.generation,
+            custody: self.dma_quarantine,
+        };
+        let pages = (len as u64).div_ceil(PAGE_SIZE as u64);
+        let made = crate::sharedreg::create_dma(
+            self.shared_mem_facility,
+            caller.process(),
+            custodian,
+            pages,
+            constraint.addr_limit,
+        )?;
+        // A block the grant's bus window cannot name is released before the
+        // caller learns anything about it.
+        let device_addr = match translate_device_addr(&constraint, made.phys_base) {
+            Ok(addr) => addr,
+            Err(err) => {
+                self.release_shared_mapping(caller.process(), made.base_va);
+                return Err(err);
+            }
+        };
+        self.publish_region_mapping(caller.process(), made.base_va, made.pages);
+        let written = self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(
+                space,
+                physmap,
+                VirtAddr::new(id_out),
+                &made.id.to_le_bytes(),
+            )?;
+            copy_out(
+                space,
+                physmap,
+                VirtAddr::new(device_out),
+                &device_addr.to_le_bytes(),
+            )
+        });
+        match written {
+            Some(Ok(())) => {}
+            Some(Err(err)) => {
+                self.release_shared_mapping(caller.process(), made.base_va);
+                return Err(copy_fault_errno(err));
+            }
+            None => {
+                self.release_shared_mapping(caller.process(), made.base_va);
+                return Err(Errno::BadAddress);
+            }
+        }
+        // The creator's own forwardable right to the region, as `shm_create`.
+        let _handle = self
             .aspaces
             .write()
-            .mint_grant(ProcessId(ep.owner()), wanted);
-        Ok(handle)
+            .mint_grant(caller.process(), HwResource::shared(made.id));
+        Ok(made.base_va)
+    }
+
+    fn shm_grant_peer(
+        &self,
+        caller: &CallerContext<'_>,
+        region: u64,
+        endpoint: u64,
+        ticket: u64,
+    ) -> SyscallResult {
+        // The dispatcher enforced `CAP_SHM`. The caller can share only a
+        // region it can map itself, checked before any endpoint state is read;
+        // an unheld and an unknown region are the same `NotFound`.
+        let wanted = HwResource::shared(region);
+        if !self.aspaces.read().grant_covers(caller.process(), &wanted) {
+            return Err(Errno::NotFound);
+        }
+        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
+            return Err(Errno::NotFound);
+        };
+        if !ep
+            .required_recv_caps()
+            .is_subset_of(caller.caps.effective())
+            || ep.owner() != caller.caps.process().0
+        {
+            return Err(Errno::PermissionDenied);
+        }
+        // The recipient is the task the kernel recorded as posting the call
+        // being served, and only while it is being served.
+        let Some(peer) = ep.peer_origin(CallTicket(ticket)) else {
+            return Err(Errno::NotFound);
+        };
+        self.aspaces
+            .write()
+            .mint_grant_live(ProcessId(peer.pid()), wanted)
+            .ok_or(Errno::NotFound)
     }
 
     fn call_grant(
@@ -9452,12 +9630,12 @@ where
         // the service); it resolves only when presented by the recipient task
         // itself, so the number is useless to a bystander. Minting is
         // idempotent, so repeating the delegation cannot grow the recipient's
-        // grant table.
-        let handle = self
-            .aspaces
+        // grant table, and a server that ended since the lookup receives
+        // nothing.
+        self.aspaces
             .write()
-            .mint_grant(ProcessId(ep.owner()), wanted);
-        Ok(handle)
+            .mint_grant_live(ProcessId(ep.owner()), wanted)
+            .ok_or(Errno::NotFound)
     }
 
     fn shm_unmap(&self, caller: &CallerContext<'_>, base: u64, _len: usize) -> SyscallResult {
@@ -26420,10 +26598,11 @@ mod tests {
         fn free_dma(&mut self, _cpu_va: u64) -> Result<usize, LiveSpaceError> {
             Err(LiveSpaceError::Dma(DmaError::UnknownBuffer))
         }
-        fn map_shared(&mut self, _phys: u64, _len: usize) -> Result<u64, LiveSpaceError> {
-            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
-        }
-        fn map_shared_chunks(&mut self, _chunks: &[(u64, u64)]) -> Result<u64, LiveSpaceError> {
+        fn map_shared_chunks(
+            &mut self,
+            _chunks: &[(u64, u64)],
+            _memory: tairix_kernel_mem::SharedMemory,
+        ) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
         fn unmap_shared(&mut self, _base: u64, _len: usize) -> Result<(), LiveSpaceError> {
@@ -33667,8 +33846,8 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
 
-        let served = tairix_abi::hwtree::bus_child_endpoint(41);
-        let neighbour = tairix_abi::hwtree::bus_child_endpoint(42);
+        let served = tairix_abi::hwtree::BUS_CHILD_ENDPOINTS.endpoint(41);
+        let neighbour = tairix_abi::hwtree::BUS_CHILD_ENDPOINTS.endpoint(42);
 
         // The privileged-bind capability alone is not enough: a driver with
         // no duty for this child cannot bind its transfer endpoint and feed
@@ -33912,14 +34091,42 @@ mod tests {
                 pages,
             }])
         }
-        fn map_region(&self, _chunks: &[crate::devres::SharedChunk]) -> Result<u64, Errno> {
+        fn alloc_dma_region(
+            &self,
+            pages: u64,
+            addr_limit: u64,
+        ) -> Result<crate::devres::SharedChunk, Errno> {
+            let chunk = crate::devres::SharedChunk {
+                phys_base: RECORDING_DMA_REGION_PHYS,
+                order: pages.next_power_of_two().trailing_zeros(),
+                pages: pages.next_power_of_two(),
+            };
+            let end = chunk.phys_base + chunk.pages * tairix_kernel_mem::PAGE_SIZE as u64;
+            if addr_limit != 0 && end > addr_limit {
+                return Err(Errno::OutOfRange);
+            }
+            Ok(chunk)
+        }
+        fn map_region(
+            &self,
+            _chunks: &[crate::devres::SharedChunk],
+            _memory: tairix_kernel_mem::SharedMemory,
+        ) -> Result<u64, Errno> {
             Ok(self.va)
         }
         fn unmap_region(&self, _base: u64, _len: usize) -> Result<(), Errno> {
             Ok(())
         }
-        fn free_region(&self, _chunks: &[crate::devres::SharedChunk]) {}
+        fn free_region(
+            &self,
+            _chunks: &[crate::devres::SharedChunk],
+            _memory: tairix_kernel_mem::SharedMemory,
+        ) {
+        }
     }
+
+    /// Where [`RecordingSharedFacility`] places a DMA region's block.
+    const RECORDING_DMA_REGION_PHYS: u64 = 0x3000_0000;
 
     /// `shm_create` maps the region into the caller, mints the caller the
     /// per-region `HwResource::shared(id)` grant (so it can forward it onto a
@@ -34258,6 +34465,15 @@ mod tests {
             .expect("unrestricted endpoint"),
         );
         crate::callreg::register(ep.clone(), sink).expect("registered");
+        // A server that has ended receives nothing, even through a live
+        // endpoint record.
+        assert_eq!(h.shm_grant(&ctx, 42, id), Err(Errno::NotFound));
+        assert_eq!(aspaces.read().grant(ProcessId(server), 1), None);
+        let (space, physmap) = call_aspace(b"");
+        aspaces
+            .write()
+            .register(ProcessId(server), space, physmap)
+            .expect("registration succeeds");
         let handle = h.shm_grant(&ctx, 42, id).expect("grant mints a handle");
         // The recipient resolves it to exactly the shared region…
         assert_eq!(
@@ -34332,6 +34548,15 @@ mod tests {
             .expect("unrestricted endpoint"),
         );
         crate::callreg::register(ep.clone(), sink).expect("registered");
+        // A server that has ended receives nothing, even through a live
+        // endpoint record.
+        assert_eq!(h.call_grant(&ctx, member, registry), Err(Errno::NotFound));
+        assert_eq!(aspaces.read().grant(ProcessId(composer), 1), None);
+        let (space, physmap) = call_aspace(b"");
+        aspaces
+            .write()
+            .register(ProcessId(composer), space, physmap)
+            .expect("registration succeeds");
         let handle = h
             .call_grant(&ctx, member, registry)
             .expect("grant mints a handle");
@@ -35208,6 +35433,540 @@ mod tests {
             Err(Errno::SeatRevoked)
         );
         crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// A served endpoint with one call posted by `client` and received, so the
+    /// call is in service: the state every peer query answers about.
+    fn in_service_call(
+        id: u64,
+        server_caps: &TaskCapabilities,
+        client: u64,
+        sink: &'static (dyn Sink + Sync),
+    ) -> (Arc<CallEndpoint>, CallTicket) {
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                server_caps,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("unrestricted endpoint"),
+        );
+        crate::callreg::register(ep.clone(), sink).expect("registered");
+        let client_caps = make_caps_record(client, &[], sink);
+        let ticket = ep
+            .post(&client_caps, client, b"open", u64::MAX, sink)
+            .expect("posted");
+        let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
+            panic!("posted call is receivable");
+        };
+        assert_eq!(call.ticket, ticket);
+        (ep, ticket)
+    }
+
+    fn dma_request_record() -> tairix_abi::HwResource {
+        use tairix_abi::driver::dmaengine::{DmaRequestLine, DMA_CONTROLLER_ENDPOINTS};
+        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(31);
+        tairix_abi::HwResource::dma_request(
+            &DmaRequestLine::new(endpoint, 0, &[2], b"tx").expect("valid line"),
+        )
+    }
+
+    /// `call_peer_holds` answers the endpoint's server, about the caller it is
+    /// serving, whether that caller holds a grant covering a quoted record.
+    #[test]
+    fn call_peer_holds_answers_only_about_the_caller_being_served() {
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let server = crate::test_boot::claim_peer_task();
+        let foreign = crate::test_boot::claim_peer_task();
+        let client = crate::test_boot::claim_task();
+        let server_caps = make_caps_record(server, &[], sink);
+        let id = 0xCA11_401D;
+        let (_ep, ticket) = in_service_call(id, &server_caps, client, sink);
+        let request = dma_request_record();
+        aspaces.write().mint_grant(ProcessId(client), request);
+        aspaces.write().mint_grant(
+            ProcessId(client),
+            tairix_abi::HwResource::mmio(0xFE20_3000, 0x24),
+        );
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(server),
+            caps: &server_caps,
+        };
+        // The server quotes each record from its own memory at `0x1000`.
+        let quote = |record: &[u8]| {
+            aspaces.write().withdraw(ProcessId(server));
+            let (space, physmap) = call_aspace(record);
+            aspaces
+                .write()
+                .register(ProcessId(server), space, physmap)
+                .expect("registration succeeds");
+        };
+
+        quote(&request.to_le_bytes());
+        assert_eq!(h.call_peer_holds(&ctx, id, ticket.0, 0x1000), Ok(0));
+        // A FIFO inside the client's window is covered; one past it is not.
+        quote(&tairix_abi::HwResource::mmio(0xFE20_3004, 4).to_le_bytes());
+        assert_eq!(h.call_peer_holds(&ctx, id, ticket.0, 0x1000), Ok(0));
+        quote(&tairix_abi::HwResource::mmio(0xFE20_3024, 4).to_le_bytes());
+        assert_eq!(
+            h.call_peer_holds(&ctx, id, ticket.0, 0x1000),
+            Err(Errno::PermissionDenied)
+        );
+        // Another request line on the same controller is a different grant.
+        let other = {
+            use tairix_abi::driver::dmaengine::{DmaRequestLine, DMA_CONTROLLER_ENDPOINTS};
+            tairix_abi::HwResource::dma_request(
+                &DmaRequestLine::new(DMA_CONTROLLER_ENDPOINTS.endpoint(31), 1, &[3], b"rx")
+                    .expect("valid line"),
+            )
+        };
+        quote(&other.to_le_bytes());
+        assert_eq!(
+            h.call_peer_holds(&ctx, id, ticket.0, 0x1000),
+            Err(Errno::PermissionDenied)
+        );
+        // An undecodable record is refused on its own terms.
+        quote(&[0xFF; tairix_abi::HwResource::WIRE_LEN]);
+        assert_eq!(
+            h.call_peer_holds(&ctx, id, ticket.0, 0x1000),
+            Err(Errno::OutOfRange)
+        );
+
+        // Only the endpoint's server may ask, and only about a call in service.
+        quote(&request.to_le_bytes());
+        let foreign_caps = make_caps_record(foreign, &[], sink);
+        let foreign_ctx = CallerContext {
+            task_id: SecTaskId(foreign),
+            caps: &foreign_caps,
+        };
+        assert_eq!(
+            h.call_peer_holds(&foreign_ctx, id, ticket.0, 0x1000),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.call_peer_holds(&ctx, id, ticket.0 + 1, 0x1000),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            h.call_peer_holds(&ctx, id + 1, ticket.0, 0x1000),
+            Err(Errno::NotFound)
+        );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `shm_grant_peer` mints a region the server holds to the task whose
+    /// call it is serving, and to no one once that task has ended.
+    #[test]
+    fn shm_grant_peer_mints_to_the_caller_being_served_while_it_lives() {
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let server = crate::test_boot::claim_peer_task();
+        let foreign = crate::test_boot::claim_peer_task();
+        let client = crate::test_boot::claim_task();
+        let (space, physmap) = call_aspace(b"");
+        aspaces
+            .write()
+            .register(ProcessId(client), space, physmap)
+            .expect("registration succeeds");
+        let server_caps = make_caps_record(server, &[CapabilityId::SHM], sink);
+        let id = 0xCA11_6A47;
+        let (_ep, ticket) = in_service_call(id, &server_caps, client, sink);
+        let region = 0x5EED_0001;
+        let shared = tairix_abi::HwResource::shared(region);
+        aspaces.write().mint_grant(ProcessId(server), shared);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(server),
+            caps: &server_caps,
+        };
+
+        // A region the server does not hold is the same `NotFound` as none.
+        assert_eq!(
+            h.shm_grant_peer(&ctx, region + 1, id, ticket.0),
+            Err(Errno::NotFound)
+        );
+        let foreign_caps = make_caps_record(foreign, &[CapabilityId::SHM], sink);
+        aspaces.write().mint_grant(ProcessId(foreign), shared);
+        let foreign_ctx = CallerContext {
+            task_id: SecTaskId(foreign),
+            caps: &foreign_caps,
+        };
+        assert_eq!(
+            h.shm_grant_peer(&foreign_ctx, region, id, ticket.0),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.shm_grant_peer(&ctx, region, id, ticket.0 + 1),
+            Err(Errno::NotFound)
+        );
+
+        let handle = h
+            .shm_grant_peer(&ctx, region, id, ticket.0)
+            .expect("the served caller is granted");
+        assert_eq!(
+            aspaces.read().grant(ProcessId(client), handle),
+            Some(shared)
+        );
+
+        // Once the caller has ended, nothing is minted and no grant table is
+        // recreated for a task that draws its id later.
+        aspaces.write().withdraw(ProcessId(client));
+        assert_eq!(
+            h.shm_grant_peer(&ctx, region, id, ticket.0),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(aspaces.read().grant(ProcessId(client), handle), None);
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// The fixture every `shm_create_dma` test builds on: a registered,
+    /// loaded driver holding `SHM` and a DMA grant, reaching memory through
+    /// the Pi 4 legacy engine's window (CPU `0..1 GiB` at bus `0xC000_0000`).
+    struct DmaRegionScene {
+        arch: Arc<TestArch>,
+        table: RwLock<CapTable>,
+        ipc: RwLock<PortRegistry>,
+        aspaces: RwLock<AddressSpaceRegistry>,
+        rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        irq: IrqTable,
+        task: u64,
+    }
+
+    impl DmaRegionScene {
+        fn new(window: tairix_abi::HwResource) -> (Self, u64) {
+            let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+            let task = crate::test_boot::claim_task();
+            let (space, physmap) = call_aspace(b"");
+            aspaces
+                .write()
+                .register(ProcessId(task), space, physmap)
+                .expect("registration succeeds");
+            aspaces.write().set_loaded_node(ProcessId(task), 0x44);
+            let handle = aspaces.write().mint_grant(ProcessId(task), window);
+            (
+                Self {
+                    arch,
+                    table,
+                    ipc,
+                    aspaces,
+                    rng,
+                    irq,
+                    task,
+                },
+                handle,
+            )
+        }
+    }
+
+    fn legacy_dma_window() -> tairix_abi::HwResource {
+        tairix_abi::HwResource::dma_translated(0x4000_0000, 0x4000_0000, 0xC000_0000)
+    }
+
+    #[test]
+    fn shm_create_dma_carves_under_the_grant_and_names_the_bus_address() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let sink = make_sink();
+        let (scene, handle) = DmaRegionScene::new(legacy_dma_window());
+        let sched = make_sched(scene.arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(scene.task, &[CapabilityId::SHM], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(scene.task),
+            caps: &caps,
+        };
+        let facility: &'static RecordingSharedFacility =
+            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_3000 }));
+        let h = KernelSyscallHandlers::new(
+            &sched,
+            &scene.table,
+            &scene.arch,
+            sink,
+            &scene.irq,
+            &ctl,
+            &scene.ipc,
+            &scene.aspaces,
+            &scene.rng,
+        )
+        .with_shared_mem_facility(facility)
+        .with_dma_quarantine(&QUARANTINE);
+
+        let va = h
+            .shm_create_dma(&ctx, handle, 3000, 0x2000, 0x2008)
+            .expect("carves");
+        assert_eq!(va, 0x2_0000_3000);
+        let out = read_reply_page(
+            scene
+                .aspaces
+                .read()
+                .resolve(ProcessId(scene.task))
+                .expect("registered")
+                .1,
+            16,
+        );
+        let id = u64::from_le_bytes(out[..8].try_into().expect("8 bytes"));
+        let device = u64::from_le_bytes(out[8..].try_into().expect("8 bytes"));
+        // The CPU block at 0x3000_0000 is named on the far side of the window.
+        assert_eq!(device, 0xC000_0000 + RECORDING_DMA_REGION_PHYS);
+        assert!(scene
+            .aspaces
+            .read()
+            .grant_covers(ProcessId(scene.task), &tairix_abi::HwResource::shared(id)));
+        let _ = crate::sharedreg::unmap(facility, ProcessId(scene.task), va);
+    }
+
+    #[test]
+    fn shm_create_dma_refuses_every_caller_or_request_it_cannot_honour() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let sink = make_sink();
+        let (scene, handle) = DmaRegionScene::new(legacy_dma_window());
+        let sched = make_sched(scene.arch.clone());
+        let ctl = UnsupportedController;
+        let facility: &'static RecordingSharedFacility =
+            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_4000 }));
+        let h = KernelSyscallHandlers::new(
+            &sched,
+            &scene.table,
+            &scene.arch,
+            sink,
+            &scene.irq,
+            &ctl,
+            &scene.ipc,
+            &scene.aspaces,
+            &scene.rng,
+        )
+        .with_shared_mem_facility(facility)
+        .with_dma_quarantine(&QUARANTINE);
+        let caps = make_caps_record(scene.task, &[CapabilityId::SHM], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(scene.task),
+            caps: &caps,
+        };
+
+        // A shared region takes `CAP_SHM` beside the dispatcher's `MEM_DMA`.
+        let bare = make_caps_record(scene.task, &[], sink);
+        let bare_ctx = CallerContext {
+            task_id: SecTaskId(scene.task),
+            caps: &bare,
+        };
+        assert_eq!(
+            h.shm_create_dma(&bare_ctx, handle, 4096, 0x2000, 0x2008),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.shm_create_dma(&ctx, handle + 99, 4096, 0x2000, 0x2008),
+            Err(Errno::NotFound)
+        );
+        let window = scene.aspaces.write().mint_grant(
+            ProcessId(scene.task),
+            tairix_abi::HwResource::mmio(0xFE00_7000, 0xB00),
+        );
+        assert_eq!(
+            h.shm_create_dma(&ctx, window, 4096, 0x2000, 0x2008),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            h.shm_create_dma(&ctx, handle, 0, 0x2000, 0x2008),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            h.shm_create_dma(&ctx, handle, 0x4000_0001, 0x2000, 0x2008),
+            Err(Errno::OutOfRange)
+        );
+        // Below the reach of a 256 MiB limit the block at 0x3000_0000 lies
+        // past it.
+        let low = scene.aspaces.write().mint_grant(
+            ProcessId(scene.task),
+            tairix_abi::HwResource::dma(0x1000_0000, 0x1000_0000),
+        );
+        assert_eq!(
+            h.shm_create_dma(&ctx, low, 4096, 0x2000, 0x2008),
+            Err(Errno::OutOfRange)
+        );
+        // A window whose bus side cannot name the block releases it unseen.
+        let high = scene.aspaces.write().mint_grant(
+            ProcessId(scene.task),
+            tairix_abi::HwResource::dma_translated(0x8000_0000, 0x1000_0000, 0xC000_0000),
+        );
+        assert_eq!(
+            h.shm_create_dma(&ctx, high, 4096, 0x2000, 0x2008),
+            Err(Errno::OutOfRange)
+        );
+        // A caller not loaded for a node has no custody to bind.
+        scene.aspaces.write().withdraw(ProcessId(scene.task));
+        let (space, physmap) = call_aspace(b"");
+        scene
+            .aspaces
+            .write()
+            .register(ProcessId(scene.task), space, physmap)
+            .expect("registration succeeds");
+        let regrant = scene
+            .aspaces
+            .write()
+            .mint_grant(ProcessId(scene.task), legacy_dma_window());
+        assert_eq!(
+            h.shm_create_dma(&ctx, regrant, 4096, 0x2000, 0x2008),
+            Err(Errno::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn shm_create_dma_without_a_quarantine_is_not_implemented() {
+        let sink = make_sink();
+        let (scene, handle) = DmaRegionScene::new(legacy_dma_window());
+        let sched = make_sched(scene.arch.clone());
+        let ctl = UnsupportedController;
+        let facility: &'static RecordingSharedFacility =
+            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_5000 }));
+        let h = KernelSyscallHandlers::new(
+            &sched,
+            &scene.table,
+            &scene.arch,
+            sink,
+            &scene.irq,
+            &ctl,
+            &scene.ipc,
+            &scene.aspaces,
+            &scene.rng,
+        )
+        .with_shared_mem_facility(facility);
+        let caps = make_caps_record(scene.task, &[CapabilityId::SHM], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(scene.task),
+            caps: &caps,
+        };
+        assert_eq!(
+            h.shm_create_dma(&ctx, handle, 4096, 0x2000, 0x2008),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// A driver ending while it still maps a DMA region it carved reports the
+    /// region with its own carves in the quarantine record.
+    #[test]
+    fn an_orphaned_dma_region_joins_the_quarantine_record() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let sink = make_sink();
+        let (scene, handle) = DmaRegionScene::new(legacy_dma_window());
+        let sched = make_sched(scene.arch.clone());
+        let ctl = UnsupportedController;
+        let facility: &'static RecordingSharedFacility =
+            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_6000 }));
+        let h = KernelSyscallHandlers::new(
+            &sched,
+            &scene.table,
+            &scene.arch,
+            sink,
+            &scene.irq,
+            &ctl,
+            &scene.ipc,
+            &scene.aspaces,
+            &scene.rng,
+        )
+        .with_shared_mem_facility(facility)
+        .with_dma_quarantine(&QUARANTINE);
+        let caps = make_caps_record(scene.task, &[CapabilityId::SHM], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(scene.task),
+            caps: &caps,
+        };
+        h.shm_create_dma(&ctx, handle, 3 * 4096, 0x2000, 0x2008)
+            .expect("carves");
+        h.reclaim_process_resources(ProcessId(scene.task));
+        let record = sink
+            .snapshot()
+            .into_iter()
+            .find(|ev| ev.id == AuditEvent::DmaQuarantined.id())
+            .expect("the orphaned region is recorded");
+        // Three pages round up to the four-page block the region holds.
+        assert!(record
+            .fields
+            .iter()
+            .any(|(k, value)| k == "bytes" && value == "16384"));
+    }
+
+    /// Only the node's controller duty authorises serving its DMA endpoint;
+    /// a consumer's request line naming the same endpoint never does.
+    #[test]
+    fn call_create_admits_a_dma_endpoint_only_to_its_controllers_driver() {
+        use tairix_abi::driver::dmaengine::{DmaControllerDuty, DMA_CONTROLLER_ENDPOINTS};
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(&one_cap_image(CapabilityId::IPC_ENDPOINT));
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let driver = crate::test_boot::claim_task();
+        aspaces
+            .write()
+            .register(ProcessId(driver), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(driver, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(driver),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(31);
+
+        assert_eq!(
+            h.call_create(&ctx, endpoint, 0x1000, 0x2000, 64, 64, 4),
+            Err(Errno::PermissionDenied)
+        );
+        // A consumer holding a request line may call the endpoint, never
+        // serve it.
+        aspaces
+            .write()
+            .mint_grant(ProcessId(driver), dma_request_record());
+        assert_eq!(
+            h.call_create(&ctx, endpoint, 0x1000, 0x2000, 64, 64, 4),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(crate::callreg::lookup(EndpointId(endpoint)).is_none());
+        // The controller's duty is the authority.
+        let duty = DmaControllerDuty::new(endpoint, Some(0x7F5)).expect("valid");
+        aspaces.write().mint_grant(
+            ProcessId(driver),
+            tairix_abi::HwResource::dma_controller(&duty),
+        );
+        assert_eq!(
+            h.call_create(&ctx, endpoint, 0x1000, 0x2000, 64, 64, 4),
+            Ok(0)
+        );
+        // The duty names one endpoint and no other.
+        assert_eq!(
+            h.call_create(&ctx, endpoint + 1, 0x1000, 0x2000, 64, 64, 4),
+            Err(Errno::PermissionDenied)
+        );
+        crate::callreg::unregister(EndpointId(endpoint));
     }
 
     /// Adding a `SeatInput` wait-set member is owner-checked against the

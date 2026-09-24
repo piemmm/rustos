@@ -18,7 +18,7 @@
 //! count bounds it, read once before the walk, so a device is never bound to
 //! a line the controller cannot raise.
 
-use crate::fdt::{plic_ndev, plic_source_in_range, Fdt, PLIC_SOURCE_NONE};
+use crate::fdt::{plic_ndev, plic_phandle, plic_source_in_range, Fdt, PLIC_SOURCE_NONE};
 use tairix_arch_api::fdtwalk::FdtPlatform;
 use tairix_fdt::read_cells;
 
@@ -28,6 +28,8 @@ pub struct Riscv64Fdt {
     /// The PLIC's `riscv,ndev` source count, or `None` when the tree
     /// describes no PLIC or its node carries no readable count.
     ndev: Option<u32>,
+    /// The PLIC's phandle, when the tree gives it one.
+    plic: Option<u32>,
 }
 
 impl FdtPlatform for Riscv64Fdt {
@@ -38,7 +40,12 @@ impl FdtPlatform for Riscv64Fdt {
     fn from_tree(fdt: &Fdt<'_>) -> Self {
         Self {
             ndev: plic_ndev(fdt),
+            plic: plic_phandle(fdt),
         }
+    }
+
+    fn root_interrupt_controller(&self) -> Option<u32> {
+        self.plic
     }
 
     /// The cell is the PLIC source number itself. The reserved `0` sentinel

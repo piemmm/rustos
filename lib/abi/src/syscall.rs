@@ -473,8 +473,8 @@ impl SyscallNumber {
     /// address is the CPU-physical base; a translating inbound viewport
     /// (`dma_translated`) maps it onto the far-side bus address. Gated by
     /// [`crate::CapabilityId::MEM_DMA`]; an unknown or non-owned handle, a
-    /// grant of the wrong kind, a region exceeding the grant's limit, or a
-    /// build with no DMA facility wired fails closed.
+    /// grant of the wrong kind, a limit no free block lies below, or a build
+    /// with no DMA facility wired fails closed.
     pub const DMA_ALLOC: Self = Self(27);
     /// Enumerate the device-resource grants the kernel minted for the
     /// calling driver task, delivering the unforgeable handles the driver
@@ -2516,6 +2516,61 @@ impl SyscallNumber {
     /// [`Errno::NotFound`] for a caller that was not loaded for a node.
     /// Gated by [`crate::CapabilityId::MEM_DMA`].
     pub const DMA_QUIESCED: Self = Self(126);
+
+    /// Create a shared region a DMA master may reach (`plans/SOUND.md`
+    /// SND5b): one physically contiguous, zeroed block carved under a DMA
+    /// grant's addressing constraint and mapped coherent in every process
+    /// that maps it, so no mapping can hold a line the device never sees.
+    ///
+    /// Arguments: the handle of the caller's `Dma` grant, the byte length,
+    /// then the user pointers the region id and the block's device address —
+    /// translated through the grant's bus window — are written to. Returns
+    /// the base virtual address of the caller's mapping, or `-errno`:
+    /// [`Errno::NotFound`] for a handle the caller does not hold,
+    /// [`Errno::OutOfRange`] for a grant that is not `Dma`, a length past its
+    /// extent, or a block the device could not reach, and
+    /// [`Errno::PermissionDenied`] for a caller not loaded for a node or
+    /// lacking `CAP_SHM`. The region binds the caller's node quarantine
+    /// (`plans/OPEN-DEFECTS.md` D167). The caller's own unmap is its word that
+    /// its device is done with the region, as [`SyscallNumber::DMA_FREE`] is
+    /// for a carve; should the caller end still mapping it, its frames go to
+    /// the quarantine when the last mapping goes, because the device may still
+    /// be mastering them. Gated by [`crate::CapabilityId::MEM_DMA`]; audited.
+    pub const SHM_CREATE_DMA: Self = Self(127);
+
+    /// Grant the in-service caller of an endpoint the caller owns the right
+    /// to map a shared region the caller holds — the reply-side counterpart
+    /// of [`SyscallNumber::SHM_GRANT`], which reaches only an endpoint's
+    /// server.
+    ///
+    /// Arguments: the region id, the endpoint id, then the ticket of the call
+    /// being served (as [`SyscallNumber::CALL_PEER_ORIGIN`]). The caller must
+    /// hold a `Shared` grant for the region and must own the endpoint with its
+    /// receive capability; the recipient is the task the kernel recorded as
+    /// posting that call, never a caller-supplied id, and a recipient that has
+    /// already ended receives nothing. Returns the minted grant handle, which
+    /// the caller forwards in its reply; it resolves only for the recipient.
+    /// Fails closed with [`Errno::NotFound`] (no such region held, endpoint,
+    /// in-service ticket, or live recipient) or
+    /// [`Errno::PermissionDenied`] (not the endpoint's server). Gated by
+    /// [`crate::CapabilityId::SHM`]; audited.
+    pub const SHM_GRANT_PEER: Self = Self(128);
+
+    /// Report whether the in-service caller of an endpoint the caller owns
+    /// holds a grant covering a quoted resource — the grant counterpart of
+    /// [`SyscallNumber::CALL_PEER_SEAT`].
+    ///
+    /// Arguments: the endpoint id, the ticket of the call being served, then
+    /// a user pointer to one wire-encoded
+    /// [`crate::hwtree::HwResource`]. The caller must own the endpoint and
+    /// hold its receive capability, so a server learns this only about a task
+    /// it is actively serving. Returns `0` when one of the peer's grants
+    /// covers the resource, or `-errno`: [`Errno::PermissionDenied`] when
+    /// none does or the caller is not the endpoint's server,
+    /// [`Errno::NotFound`] for an unknown endpoint or ticket, and the record's
+    /// own decode error. No capability beyond the endpoint's receive gate;
+    /// not audited — the decision it feeds is the server's to log.
+    pub const CALL_PEER_HOLDS: Self = Self(129);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;

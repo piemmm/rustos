@@ -123,6 +123,7 @@
 - [Input drivers](./drivers/input.md)
 - [Real-time-clock drivers](./drivers/rtc.md)
 - [Audio drivers](./drivers/audio.md)
+- [DMA-engine drivers](./drivers/dma.md)
 - [Accelerator drivers](./drivers/accelerator.md)
 
 # Filesystem

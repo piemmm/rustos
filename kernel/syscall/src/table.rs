@@ -1259,6 +1259,63 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Carve a shared region a DMA master may reach under the caller's `Dma`
+    /// grant `handle`, writing its id to `id_out` and its device address to
+    /// `device_out`, and return the base of the caller's coherent mapping.
+    ///
+    /// The dispatcher has already checked [`CapabilityId::MEM_DMA`] and that
+    /// both out pointers are non-null; the implementation also demands
+    /// [`CapabilityId::SHM`], resolves the grant owner-checked, and binds the
+    /// region to the caller's node quarantine.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn shm_create_dma(
+        &self,
+        _caller: &CallerContext<'_>,
+        _handle: u64,
+        _len: usize,
+        _id_out: u64,
+        _device_out: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Grant the task that posted the in-service call `ticket` on `endpoint`
+    /// the right to map shared region `region`, returning the minted handle.
+    ///
+    /// The dispatcher has already checked [`CapabilityId::SHM`]; the
+    /// implementation checks the caller holds the region and serves the
+    /// endpoint, and mints only to a recipient that is still alive.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn shm_grant_peer(
+        &self,
+        _caller: &CallerContext<'_>,
+        _region: u64,
+        _endpoint: u64,
+        _ticket: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Answer `Ok(0)` when the task that posted the in-service call `ticket`
+    /// on `endpoint` holds a grant covering the resource record at
+    /// `resource`, and [`Errno::PermissionDenied`] when it holds none.
+    ///
+    /// The dispatcher has already checked `resource` is non-null; the
+    /// implementation gates on the caller serving the endpoint.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn call_peer_holds(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _resource: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Enumerate the device-resource grants the kernel minted for the
     /// calling driver task, delivering its unforgeable handles
     /// (`plans/PI.md` P10 chunk 5d-2).
@@ -3390,6 +3447,26 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.dma_free(caller, args.0[0], args.0[1])
             }
             SyscallNumber::DMA_QUIESCED => self.handlers.dma_quiesced(caller),
+            SyscallNumber::SHM_CREATE_DMA => {
+                // args[0] is an opaque `Handle` resolved against the caller's
+                // grants; args[1] the byte length; args[2] and args[3] the
+                // non-null `id_out` and `device_out` pointers.
+                let len = decode_len(args.0[1])?;
+                self.handlers
+                    .shm_create_dma(caller, args.0[0], len, args.0[2], args.0[3])
+            }
+            SyscallNumber::SHM_GRANT_PEER => {
+                // The region id, the endpoint id and the in-service ticket,
+                // all resolved and owner-checked by the handler.
+                self.handlers
+                    .shm_grant_peer(caller, args.0[0], args.0[1], args.0[2])
+            }
+            SyscallNumber::CALL_PEER_HOLDS => {
+                // The endpoint id, the in-service ticket, then the non-null
+                // pointer to the quoted resource record.
+                self.handlers
+                    .call_peer_holds(caller, args.0[0], args.0[1], args.0[2])
+            }
             SyscallNumber::RESOURCE_GRANTS => {
                 // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
                 // is the buffer capacity.
@@ -4752,6 +4829,40 @@ mod tests {
 
         fn dma_quiesced(&self, _c: &CallerContext<'_>) -> SyscallResult {
             self.record("dma_quiesced");
+            Ok(0)
+        }
+
+        fn shm_create_dma(
+            &self,
+            _c: &CallerContext<'_>,
+            _handle: u64,
+            _len: usize,
+            _id_out: u64,
+            _device_out: u64,
+        ) -> SyscallResult {
+            self.record("shm_create_dma");
+            Ok(0)
+        }
+
+        fn shm_grant_peer(
+            &self,
+            _c: &CallerContext<'_>,
+            _region: u64,
+            _endpoint: u64,
+            _ticket: u64,
+        ) -> SyscallResult {
+            self.record("shm_grant_peer");
+            Ok(0)
+        }
+
+        fn call_peer_holds(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _ticket: u64,
+            _resource: u64,
+        ) -> SyscallResult {
+            self.record("call_peer_holds");
             Ok(0)
         }
 

@@ -913,11 +913,7 @@ pub fn build_i2c_bcm2835_bundle(
         ctx,
         arch,
         "tairix-drv-bus-i2c-bcm2835",
-        &[
-            CapabilityId::MMIO_MAP,
-            CapabilityId::IRQ_BIND,
-            CapabilityId::IPC_BIND_PRIVILEGED,
-        ],
+        tairix_drv_bus_i2c_bcm2835::REQUIRED_CAPABILITIES,
         tairix_drv_bus_i2c_bcm2835::BIND_KEYS,
         profile,
     )

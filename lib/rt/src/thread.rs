@@ -625,6 +625,8 @@ mod tests {
         assert_eq!(cell.state.load(Ordering::Relaxed), JOINABLE);
         assert!(cell.outcome.load(Ordering::Relaxed).is_null());
         assert!(!cell.thread_is_dead());
+        // No thread ever held it, so it may go straight back.
+        release_cell(cell);
     }
 
     /// A cell whose thread is provably gone is reused rather than reallocated —
@@ -648,6 +650,7 @@ mod tests {
         assert_eq!(second.alive.load(Ordering::Relaxed), ALIVE);
         assert_eq!(second.state.load(Ordering::Relaxed), JOINABLE);
         assert!(second.outcome.load(Ordering::Relaxed).is_null());
+        release_cell(second);
     }
 
     /// A retired (detached) cell is **not** reused while its thread may still
@@ -668,16 +671,15 @@ mod tests {
             "a live thread's cell must never be recycled — the kernel still \
              writes that word at its death"
         );
+        release_cell(other);
 
-        // The kernel records the death; the next acquisition sweeps it back.
+        // The kernel records the death; the next acquisition sweeps it onto
+        // the top of the free list and hands it straight back.
         cell.alive.store(DEAD, Ordering::Relaxed);
-        let recycled = loop {
-            let candidate = acquire_cell();
-            if core::ptr::from_ref(candidate) as usize == address {
-                break candidate;
-            }
-        };
+        let recycled = acquire_cell();
+        assert_eq!(core::ptr::from_ref(recycled) as usize, address);
         assert_eq!(recycled.alive.load(Ordering::Relaxed), ALIVE);
+        release_cell(recycled);
     }
 
     #[test]
@@ -704,14 +706,20 @@ mod tests {
             body: || 7u8,
             _outcome: PhantomData,
         });
-        let base = core::ptr::from_ref(payload.as_ref()) as usize;
-        let head = core::ptr::from_ref(&payload.run) as usize;
-        assert_eq!(head, base, "the runner must be the payload's first field");
+        let base = core::ptr::from_ref(payload.as_ref());
+        let head = core::ptr::from_ref(&payload.run);
+        assert_eq!(
+            head.addr(),
+            base.addr(),
+            "the runner must be the payload's first field"
+        );
         // SAFETY: reading the head back out is exactly what the erased entry
         // does; comparing the function addresses proves it recovers the right
         // monomorphisation.
-        let read: Runner = unsafe { core::ptr::read(base as *const Runner) };
+        let read: Runner = unsafe { core::ptr::read(base.cast::<Runner>()) };
         assert_eq!(read as *const (), runner as *const ());
+        drop(payload);
+        release_cell(cell);
     }
 
     /// On the host there is no trap, so a spawn fails closed — and it must
@@ -719,23 +727,27 @@ mod tests {
     #[test]
     fn a_refused_spawn_returns_its_cell_and_frees_its_payload() {
         let _g = registry_lock();
-        let before = {
+        // Seed the top of the free list, so the spawn takes this very cell.
+        let seeded = acquire_cell();
+        release_cell(seeded);
+        let free = || {
             let registry = REGISTRY.lock();
-            registry.free.len()
+            (
+                registry.free.len(),
+                registry.free.last().map(|cell| core::ptr::from_ref(*cell)),
+            )
         };
+        let before = free();
         let refused = Thread::spawn(|| 0u8);
         assert!(
             refused.is_err(),
             "the host has no syscall trap, so a spawn must fail closed"
         );
-        let after = {
-            let registry = REGISTRY.lock();
-            registry.free.len()
-        };
         assert_eq!(
-            after,
-            before + 1,
+            free(),
+            before,
             "the refused spawn's cell is returned for immediate reuse"
         );
+        assert_eq!(before.1, Some(core::ptr::from_ref(seeded)));
     }
 }

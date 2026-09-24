@@ -55,6 +55,7 @@ pub mod block;
 pub mod bus;
 pub mod display;
 pub mod dma;
+pub mod dmaengine;
 pub mod filesystem;
 pub mod i2c;
 pub mod input;

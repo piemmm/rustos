@@ -146,23 +146,7 @@ impl<'a, B: Block + 'static> KernelSupervisorHost<'a, B> {
 
     /// The human-facing name of a hardware-tree device class.
     fn class_name(class: Option<HwDeviceClass>) -> &'static str {
-        match class {
-            Some(HwDeviceClass::Root) => "root",
-            Some(HwDeviceClass::Bus) => "bus",
-            Some(HwDeviceClass::Cpu) => "cpu",
-            Some(HwDeviceClass::Memory) => "memory",
-            Some(HwDeviceClass::Timer) => "timer",
-            Some(HwDeviceClass::InterruptController) => "irqchip",
-            Some(HwDeviceClass::Display) => "display",
-            Some(HwDeviceClass::Input) => "input",
-            Some(HwDeviceClass::Network) => "network",
-            Some(HwDeviceClass::Storage) => "storage",
-            Some(HwDeviceClass::Serial) => "serial",
-            Some(HwDeviceClass::Rtc) => "rtc",
-            Some(HwDeviceClass::Accelerator) => "accel",
-            Some(HwDeviceClass::Audio) => "audio",
-            Some(HwDeviceClass::Other) | None => "other",
-        }
+        class.map_or("other", HwDeviceClass::name)
     }
 
     /// The human-facing name of a partition's TAIRiX role.

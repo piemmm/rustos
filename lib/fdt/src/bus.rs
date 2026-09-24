@@ -85,10 +85,29 @@ fn cells_property(node: &Node<'_>, name: &str) -> Option<u32> {
 /// directly under the root need no translation.
 #[must_use]
 pub fn translate(levels: &[BusLevel<'_>], depth: usize, addr: u64) -> Option<u64> {
+    translate_through(levels, depth, addr, |level| level.ranges)
+}
+
+/// [`translate`] for a DMA address: `addr` is a bus address in the space of
+/// the node at `depth`, carried towards memory by each ancestor bus's
+/// `dma-ranges` rather than its `ranges`. A bus with no `dma-ranges` has no
+/// mapping for its children (Devicetree Spec v0.4 §2.3.9), so the address is
+/// refused.
+#[must_use]
+pub fn translate_dma(levels: &[BusLevel<'_>], depth: usize, addr: u64) -> Option<u64> {
+    translate_through(levels, depth, addr, |level| level.dma_ranges)
+}
+
+fn translate_through<'a>(
+    levels: &[BusLevel<'a>],
+    depth: usize,
+    addr: u64,
+    ranges_of: impl Fn(&BusLevel<'a>) -> Option<&'a [u8]>,
+) -> Option<u64> {
     let mut translated = addr;
     for bus in (1..depth).rev() {
         let level = levels.get(bus)?;
-        let ranges = level.ranges?;
+        let ranges = ranges_of(level)?;
         if ranges.is_empty() {
             continue;
         }
@@ -155,6 +174,104 @@ fn apply_ranges(ranges: &[u8], cells: RangeCells, addr: u64) -> Option<u64> {
     None
 }
 
+/// One `dma-ranges` entry (Devicetree Spec v0.4 §2.3.9): `size` bytes of the
+/// child bus from `child`, reaching the parent bus at `parent`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DmaRange {
+    /// Child-bus base. A three-cell PCI address contributes its low 64 bits
+    /// (`phys.mid`/`phys.lo`); its `phys.hi` cell carries flags, not address.
+    pub child: u64,
+    /// Parent-bus base.
+    pub parent: u64,
+    /// Window size in bytes.
+    pub size: u64,
+}
+
+/// The entries of a `dma-ranges` value, in order; built by [`dma_ranges`].
+#[derive(Clone)]
+pub struct DmaRanges<'a> {
+    value: &'a [u8],
+    cells: RangeCells,
+    off: usize,
+}
+
+impl DmaRanges<'_> {
+    fn entry_len(&self) -> usize {
+        ((self.cells.child_address + self.cells.parent_address + self.cells.child_size) * 4)
+            as usize
+    }
+}
+
+impl Iterator for DmaRanges<'_> {
+    type Item = DmaRange;
+
+    fn next(&mut self) -> Option<DmaRange> {
+        let RangeCells {
+            child_address,
+            parent_address,
+            child_size,
+        } = self.cells;
+        let off = self.off;
+        if off + self.entry_len() > self.value.len() {
+            return None;
+        }
+        self.off += self.entry_len();
+        // A three-cell child is a PCI address: its low two cells are the base.
+        let child = if child_address == 3 {
+            read_cells(self.value, off + 4, 2)?
+        } else {
+            read_cells(self.value, off, child_address)?
+        };
+        let parent_at = off + (child_address as usize) * 4;
+        Some(DmaRange {
+            child,
+            parent: read_cells(self.value, parent_at, parent_address)?,
+            size: read_cells(
+                self.value,
+                parent_at + (parent_address as usize) * 4,
+                child_size,
+            )?,
+        })
+    }
+}
+
+/// The entries of a `dma-ranges` `value`, decoded with the child bus's own
+/// `#address-cells` and `#size-cells` and its parent's `#address-cells`.
+///
+/// Returns `None` — so every entry yielded is whole — when a cell count is
+/// outside `1..=2` (`1..=3` for the child address, the PCI triple) or the
+/// value is not a whole, non-empty number of entries.
+#[must_use]
+pub fn dma_ranges(
+    value: &[u8],
+    child_address: u32,
+    parent_address: u32,
+    child_size: u32,
+) -> Option<DmaRanges<'_>> {
+    if child_address == 0
+        || child_address > 3
+        || parent_address == 0
+        || parent_address > 2
+        || child_size == 0
+        || child_size > 2
+    {
+        return None;
+    }
+    let ranges = DmaRanges {
+        value,
+        cells: RangeCells {
+            child_address,
+            parent_address,
+            child_size,
+        },
+        off: 0,
+    };
+    if value.is_empty() || !value.len().is_multiple_of(ranges.entry_len()) {
+        return None;
+    }
+    Some(ranges)
+}
+
 /// Decode a PCI host bridge's `dma-ranges` into the inbound DMA aperture
 /// it grants devices behind it (Devicetree Spec v0.4 §2.3.9): the
 /// CPU-physical window `[base, base + len)` a device on the bus may DMA
@@ -173,15 +290,13 @@ fn apply_ranges(ranges: &[u8], cells: RangeCells, addr: u64) -> Option<u64> {
 ///
 /// Returns `(top, len, bus_base)` — never an invented aperture — where `top` is the *exclusive* upper bound of the
 /// CPU-physical window a device behind the bridge may reach, `len` its
-/// extent, and `bus_base` the bus/PCIe-space address the lowest entry's
-/// viewport starts at (the inbound translation, the counterpart of
-/// [`outbound_mmio_window`]'s `pcie_base`). For a PCI bus
-/// (`child_address == 3`) `bus_base` is the low 64 bits
-/// (`phys.mid`/`phys.lo`) of the lowest entry's child PCI triple;
-/// otherwise it is `0`. Returns [`None`] when the node carries no
-/// `dma-ranges`, a cell count is out of range, the value is not a whole
-/// number of entries, or a `base + len` overflows. With multiple entries
-/// the aperture spans the lowest base to the highest top.
+/// extent, and `bus_base` the bus-space address the lowest entry's viewport
+/// starts at (the inbound translation, the counterpart of
+/// [`outbound_mmio_window`]'s `pcie_base`; a [`DmaRange::child`]). Returns
+/// [`None`] when the node carries no `dma-ranges`, a cell count is out of
+/// range, the value is not a whole number of entries, or a `base + len`
+/// overflows. With multiple entries the aperture spans the lowest base to the
+/// highest top; [`dma_ranges`] yields the entries themselves.
 #[must_use]
 pub fn dma_ranges_aperture(
     node: &Node<'_>,
@@ -206,49 +321,16 @@ pub fn dma_ranges_aperture_of(
     parent_address: u32,
     child_size: u32,
 ) -> Option<(u64, u64, u64)> {
-    if child_address == 0
-        || child_address > 3
-        || parent_address == 0
-        || parent_address > 2
-        || child_size == 0
-        || child_size > 2
-    {
-        return None;
-    }
-    let entry = ((child_address + parent_address + child_size) * 4) as usize;
-    if value.is_empty() || !value.len().is_multiple_of(entry) {
-        return None;
-    }
-    let mut min_base: Option<u64> = None;
+    let mut lowest: Option<DmaRange> = None;
     let mut max_top: u64 = 0;
-    // Bus/PCIe-space base of the entry with the lowest CPU base — the
-    // inbound viewport's far-side start. A 3-cell PCI child carries it in
-    // `phys.mid`/`phys.lo` (the two cells after `phys.hi`); a non-PCI
-    // child has no translation, so it stays `0`.
-    let mut bus_base_at_min: u64 = 0;
-    let mut off = 0;
-    while off + entry <= value.len() {
-        let parent_base = read_cells(value, off + (child_address as usize) * 4, parent_address)?;
-        let size = read_cells(
-            value,
-            off + ((child_address + parent_address) as usize) * 4,
-            child_size,
-        )?;
-        let top = parent_base.checked_add(size)?;
-        if min_base.is_none_or(|b| parent_base < b) {
-            bus_base_at_min = if child_address == 3 {
-                read_cells(value, off + 4, 2)?
-            } else {
-                0
-            };
+    for range in dma_ranges(value, child_address, parent_address, child_size)? {
+        max_top = max_top.max(range.parent.checked_add(range.size)?);
+        if lowest.is_none_or(|l| range.parent < l.parent) {
+            lowest = Some(range);
         }
-        min_base = Some(min_base.map_or(parent_base, |b| b.min(parent_base)));
-        max_top = max_top.max(top);
-        off += entry;
     }
-    let base = min_base?;
-    let len = max_top.checked_sub(base)?;
-    Some((max_top, len, bus_base_at_min))
+    let lowest = lowest?;
+    Some((max_top, max_top.checked_sub(lowest.parent)?, lowest.child))
 }
 
 /// Decode a PCI host bridge's outbound `ranges` memory window
@@ -423,9 +505,101 @@ pub fn scan_translated<'a, T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{dma_ranges_aperture, outbound_mmio_window, Fdt};
+    use super::{dma_ranges, dma_ranges_aperture, dma_ranges_aperture_of, outbound_mmio_window};
+    use super::{DmaRange, Fdt};
     use crate::fixture::DtbBuilder;
     use alloc::vec::Vec;
+
+    /// A one-cell child, two-cell parent, one-cell size `dma-ranges`, the
+    /// shape of an on-chip bus under a 64-bit root.
+    fn soc_dma_ranges(entries: &[(u32, u64, u32)]) -> Vec<u8> {
+        let mut v = Vec::new();
+        for &(child, parent, size) in entries {
+            v.extend_from_slice(&child.to_be_bytes());
+            v.extend_from_slice(&parent.to_be_bytes());
+            v.extend_from_slice(&size.to_be_bytes());
+        }
+        v
+    }
+
+    #[test]
+    fn each_dma_ranges_entry_is_decoded_on_its_own() {
+        let value = soc_dma_ranges(&[
+            (0xc000_0000, 0x0, 0x4000_0000),
+            (0x7c00_0000, 0xfc00_0000, 0x0380_0000),
+        ]);
+        let entries: Vec<DmaRange> = dma_ranges(&value, 1, 2, 1).expect("whole").collect();
+        assert_eq!(
+            entries,
+            [
+                DmaRange {
+                    child: 0xc000_0000,
+                    parent: 0x0,
+                    size: 0x4000_0000,
+                },
+                DmaRange {
+                    child: 0x7c00_0000,
+                    parent: 0xfc00_0000,
+                    size: 0x0380_0000,
+                },
+            ]
+        );
+        // The fold spans both windows and reports the lowest one's real child
+        // base, where a non-PCI bus once reported none.
+        assert_eq!(
+            dma_ranges_aperture_of(&value, 1, 2, 1),
+            Some((0xff80_0000, 0xff80_0000, 0xc000_0000))
+        );
+    }
+
+    #[test]
+    fn a_dma_address_is_carried_through_every_bus_or_refused() {
+        use super::{translate_dma, BusLevel};
+        let soc = soc_dma_ranges(&[(0xc000_0000, 0x0, 0x4000_0000)]);
+        let sub: Vec<u8> = [0u32, 0xc000_0000, 0x1000_0000]
+            .iter()
+            .flat_map(|cell| cell.to_be_bytes())
+            .collect();
+        let level = |dma_ranges| BusLevel {
+            addr_cells: 1,
+            size_cells: 1,
+            ranges: Some(&[][..]),
+            dma_ranges,
+        };
+        let root = BusLevel {
+            addr_cells: 2,
+            ..BusLevel::DEFAULT
+        };
+        let levels = [root, level(Some(&soc)), level(Some(&sub))];
+        assert_eq!(translate_dma(&levels, 3, 0x1000), Some(0x1000));
+        // Outside the inner bus's only window.
+        assert_eq!(translate_dma(&levels, 3, 0x2000_0000), None);
+        // An empty property is the identity; an absent one maps nothing.
+        let identity = [root, level(Some(&soc)), level(Some(&[]))];
+        assert_eq!(translate_dma(&identity, 3, 0xc000_1000), Some(0x1000));
+        let unmapped = [root, level(Some(&soc)), level(None)];
+        assert_eq!(translate_dma(&unmapped, 3, 0x1000), None);
+    }
+
+    #[test]
+    fn a_dma_ranges_value_that_is_not_whole_decodes_to_nothing() {
+        let value = soc_dma_ranges(&[(0xc000_0000, 0x0, 0x4000_0000)]);
+        assert!(dma_ranges(&value[..value.len() - 4], 1, 2, 1).is_none());
+        assert!(dma_ranges(&[], 1, 2, 1).is_none());
+        for (child, parent, size) in [
+            (0, 2, 1),
+            (4, 2, 1),
+            (1, 0, 1),
+            (1, 3, 1),
+            (1, 2, 0),
+            (1, 2, 3),
+        ] {
+            assert!(
+                dma_ranges(&value, child, parent, size).is_none(),
+                "{child}/{parent}/{size}"
+            );
+        }
+    }
 
     /// Build a single-node tree whose `pcie` node carries `dma-ranges`,
     /// then hand that node to `f`. The `PCIe` binding's cells are fixed:

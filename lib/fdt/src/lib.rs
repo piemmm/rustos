@@ -37,8 +37,9 @@ pub mod fixture;
 pub mod bus;
 
 pub use bus::{
-    bus_level, dma_ranges_aperture, dma_ranges_aperture_of, outbound_mmio_window, reg_entry_count,
-    scan_translated, translate, translated_reg, BusLevel, MAX_WALK_DEPTH,
+    bus_level, dma_ranges, dma_ranges_aperture, dma_ranges_aperture_of, outbound_mmio_window,
+    reg_entry_count, scan_translated, translate, translate_dma, translated_reg, BusLevel, DmaRange,
+    DmaRanges, MAX_WALK_DEPTH,
 };
 
 /// FDT header magic (`0xd00dfeed`, big-endian on the wire).
@@ -781,6 +782,30 @@ impl<'a> Node<'a> {
             None => false,
         }
     }
+
+    /// The node's phandle: its `phandle` property, or the older
+    /// `linux,phandle` spelling. `0` and `0xFFFF_FFFF` name no node
+    /// (Devicetree Spec v0.4 §2.3.3), so neither is returned.
+    #[must_use]
+    pub fn phandle(&self) -> Option<u32> {
+        let property = self
+            .property("phandle")
+            .or_else(|| self.property("linux,phandle"))?;
+        if property.value().len() != 4 {
+            return None;
+        }
+        phandle_ref(property.read_be_u32(0).ok()?)
+    }
+}
+
+/// A cell read as a phandle reference: `0` and `0xFFFF_FFFF` name no node
+/// (Devicetree Spec v0.4 §2.3.3), so both are refused.
+#[must_use]
+pub const fn phandle_ref(cell: u32) -> Option<u32> {
+    match cell {
+        0 | u32::MAX => None,
+        phandle => Some(phandle),
+    }
 }
 
 /// Iterator over the properties immediately under a [`Node`].
@@ -1015,6 +1040,47 @@ mod tests {
     use super::*;
     use crate::fixture::{arm_with_cpus, virt_like, virt_like_arm, DtbBuilder};
     use alloc::vec::Vec;
+
+    #[test]
+    fn a_phandle_is_read_from_either_spelling_and_never_a_reserved_value() {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        for (name, property, value) in [
+            ("modern", "phandle", 7u32),
+            ("legacy", "linux,phandle", 9),
+            ("zero", "phandle", 0),
+            ("all-ones", "phandle", u32::MAX),
+        ] {
+            b.begin_node(name);
+            b.prop_u32(property, value);
+            b.end_node();
+        }
+        b.begin_node("wide");
+        b.prop("phandle", &[0, 0, 0, 1, 0, 0, 0, 2]);
+        b.end_node();
+        b.begin_node("none");
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let phandles: Vec<(Vec<u8>, Option<u32>)> = fdt
+            .nodes()
+            .skip(1)
+            .map(|n| n.expect("well formed"))
+            .map(|n| (n.name().to_vec(), n.phandle()))
+            .collect();
+        assert_eq!(
+            phandles,
+            [
+                (b"modern".to_vec(), Some(7)),
+                (b"legacy".to_vec(), Some(9)),
+                (b"zero".to_vec(), None),
+                (b"all-ones".to_vec(), None),
+                (b"wide".to_vec(), None),
+                (b"none".to_vec(), None),
+            ]
+        );
+    }
 
     #[test]
     fn rejects_bad_magic() {

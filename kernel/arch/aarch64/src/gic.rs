@@ -127,6 +127,9 @@ pub struct DiscoveredGic<'a> {
     /// CPU-physical MMIO base of the CPU interface (the node's second
     /// `reg` region, decoded and translated likewise).
     pub gicc_base: u64,
+    /// The node's phandle: what a device's effective `interrupt-parent`
+    /// must name for its specifiers to be this controller's.
+    pub phandle: Option<u32>,
 }
 
 /// Locate the GICv2 interrupt controller in `fdt`.
@@ -158,6 +161,7 @@ pub fn find_gic<'a>(fdt: &Fdt<'a>) -> Option<DiscoveredGic<'a>> {
             compatible: matched,
             gicd_base: distributor,
             gicc_base: cpu_iface,
+            phandle: node.phandle(),
         })
     })
 }

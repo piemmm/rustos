@@ -55,8 +55,9 @@ pub const IPC_CALL_CAPACITY_MAX: usize = 256;
 /// ([`crate::driver::audio_channel::AUDIO_CHANNEL_ENDPOINT_BASE`] through
 /// `+ AUDIO_CHANNEL_ENDPOINT_COUNT`), the per-console elevation
 /// supervisors ([`crate::elevate::ELEVATE_ENDPOINT_BASE`] through
-/// `ELEVATE_ENDPOINT_BASE + CONSOLE_INDEX_MAX`), and the per-bus-child
-/// transfer endpoints ([`crate::hwtree::is_bus_child_endpoint`]).
+/// `ELEVATE_ENDPOINT_BASE + CONSOLE_INDEX_MAX`), and every per-node block
+/// ([`crate::hwtree::NodeEndpointBlock::ALL`]: bus children, DMA
+/// controllers).
 ///
 /// Binding a reserved id requires
 /// [`crate::CapabilityId::IPC_BIND_PRIVILEGED`] even when the endpoint
@@ -95,9 +96,16 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
     }
     if crate::driver::net_channel::is_net_channel_endpoint(id)
         || crate::driver::audio_channel::is_audio_channel_endpoint(id)
-        || crate::hwtree::is_bus_child_endpoint(id)
     {
         return true;
+    }
+    let blocks = crate::hwtree::NodeEndpointBlock::ALL;
+    let mut i = 0;
+    while i < blocks.len() {
+        if blocks[i].contains(id) {
+            return true;
+        }
+        i += 1;
     }
     let elevate_base = crate::elevate::ELEVATE_ENDPOINT_BASE;
     id >= elevate_base && id <= elevate_base + crate::process::CONSOLE_INDEX_MAX as u64

@@ -43,7 +43,7 @@ turns it into a kill. A measured warm run:
 | `image` gate | 193 s over 319 spawns | sequential |
 | `clippy` host + 11 target passes | 330 s | sequential |
 | `test --qemu` (host matrix + 168 guests + 3 fixture cross-compiles) | 417 s | guests concurrent, `nproc/3` weighted budget |
-| `miri` (the UB oracle over the hand-written `unsafe` cores, the three paging ports, and `kernel/mem`) | 383 s | one process per crate, concurrent; `kernel/mem` dealt across the host's cores |
+| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, and `kernel/mem`) | 383 s | one process per crate, concurrent; `kernel/mem`, `lib/abi` and `lib/rt` dealt across the host's cores |
 
 Miri runs one interpreted thread at a time and reports a single CPU to the
 program, so libtest takes a crate's tests one after another whatever the host

@@ -14,8 +14,8 @@ use tairix_abi::{
 
 use super::{
     phase_deadline_ns, register, Bsc, BusWait, Registers, BIND_KEYS, BSC_COMPATIBLE, C_CLEAR,
-    C_I2CEN, C_INTD, C_INTR, C_INTT, C_READ, C_ST, REGISTER_BLOCK_LEN, S_CLKT, S_DONE, S_ERR,
-    S_RXD, S_TXD,
+    C_I2CEN, C_INTD, C_INTR, C_INTT, C_READ, C_ST, REGISTER_BLOCK_LEN, REQUIRED_CAPABILITIES,
+    S_CLKT, S_DONE, S_ERR, S_RXD, S_TXD,
 };
 
 /// The controller's own FIFO depth in bytes (BCM2835 ARM Peripherals §3.2),
@@ -522,4 +522,11 @@ fn the_bind_table_names_the_controller_and_fits_the_abi_bound() {
     assert!(BSC_COMPATIBLE.len() <= HW_COMPATIBLE_MAX);
     let expected = HwMatchKey::compatible(BSC_COMPATIBLE).expect("fits");
     assert_eq!(BIND_KEYS[0].key, expected);
+}
+
+/// The bind records go to the system log, which refuses a process that was
+/// never granted it, so the manifest must ask.
+#[test]
+fn the_manifest_requests_the_log_its_records_go_to() {
+    assert!(REQUIRED_CAPABILITIES.contains(&CapabilityId::LOG_EMIT));
 }

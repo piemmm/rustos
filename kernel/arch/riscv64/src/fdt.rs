@@ -19,6 +19,7 @@
 //! device node carries the PLIC line its interrupt-driven user-space driver
 //! parks on — a discovered value, never a board constant.
 
+use tairix_fdt::Node;
 pub use tairix_fdt::{Fdt, FdtError};
 
 /// PLIC interrupt source `0` is the reserved "no interrupt" sentinel: a
@@ -48,10 +49,24 @@ pub fn plic_source_in_range(source: u32, ndev: u32) -> bool {
 /// own arm-time range check as the backstop.
 #[must_use]
 pub fn plic_ndev(fdt: &Fdt<'_>) -> Option<u32> {
+    plic_node(fdt)?.property("riscv,ndev")?.read_be_u32(0).ok()
+}
+
+/// The PLIC's phandle, read from the first PLIC node the tree describes: what
+/// a device's effective `interrupt-parent` must name for its `interrupts`
+/// cell to be a PLIC source.
+#[must_use]
+pub fn plic_phandle(fdt: &Fdt<'_>) -> Option<u32> {
+    plic_node(fdt)?.phandle()
+}
+
+/// The first PLIC node the tree describes (`riscv,plic0` /
+/// `sifive,plic-1.0.0`); a malformed node before it ends the search.
+fn plic_node<'a>(fdt: &Fdt<'a>) -> Option<Node<'a>> {
     for node in fdt.nodes() {
         let node = node.ok()?;
         if node.is_compatible("riscv,plic0") || node.is_compatible("sifive,plic-1.0.0") {
-            return node.property("riscv,ndev")?.read_be_u32(0).ok();
+            return Some(node);
         }
     }
     None
@@ -67,13 +82,7 @@ pub fn plic_ndev(fdt: &Fdt<'_>) -> Option<u32> {
 /// dispatch and interrupt-driven bring-up fails closed).
 #[must_use]
 pub fn plic_base(fdt: &Fdt<'_>) -> Option<u64> {
-    for node in fdt.nodes() {
-        let node = node.ok()?;
-        if node.is_compatible("riscv,plic0") || node.is_compatible("sifive,plic-1.0.0") {
-            return node.property("reg")?.read_be_u64(0).ok();
-        }
-    }
-    None
+    plic_node(fdt)?.property("reg")?.read_be_u64(0).ok()
 }
 
 /// Decode the PLIC interrupt source of the `virtio,mmio` node whose `reg`
@@ -127,8 +136,22 @@ pub(crate) mod tests {
     pub(crate) use tairix_fdt::fixture::{virt_like, virt_like_with_virtio};
 
     use super::{
-        plic_base, plic_device_source, plic_ndev, plic_source_in_range, Fdt, PLIC_SOURCE_NONE,
+        plic_base, plic_device_source, plic_ndev, plic_phandle, plic_source_in_range, Fdt,
+        PLIC_SOURCE_NONE,
     };
+
+    #[test]
+    fn the_plic_phandle_is_what_devices_name_as_their_interrupt_parent() {
+        let blob = tree_with(96, &[(0x1000_1000, 1)]);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(
+            plic_phandle(&fdt),
+            Some(tairix_fdt::fixture::VIRT_PLIC_PHANDLE)
+        );
+        let blob = virt_like(0x8000_0000, 0x1000_0000, 10_000_000);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(plic_phandle(&fdt), None);
+    }
 
     /// A `virt`-shaped tree with the given virtio-MMIO slots and PLIC
     /// source count, ready for the resolver assertions.

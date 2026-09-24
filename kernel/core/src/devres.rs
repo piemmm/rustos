@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::hwtree::{FramebufferMemory, HwResource, HwResourceKind};
 use tairix_abi::{Errno, MsiAllocation, PortValue, PortWidth};
-use tairix_kernel_mem::{DmaBlock, DmaCustodian, DmaCustody, DmaError};
+use tairix_kernel_mem::{DmaBlock, DmaCustodian, DmaCustody, DmaError, SharedMemory};
 
 /// The memory type a mapped device window is given.
 ///
@@ -159,8 +159,9 @@ pub trait DmaAllocFacility: Sync {
     /// # Errors
     ///
     /// Returns a stable [`Errno`] — [`Errno::OutOfMemory`] when no
-    /// contiguous block or page-table frame is available (deterministic OOM), [`Errno::OutOfRange`] when the request
-    /// exceeds the addressing limit or the maximum contiguous block, or
+    /// contiguous block below the addressing limit or page-table frame is
+    /// available (deterministic OOM), [`Errno::OutOfRange`] when no RAM lies
+    /// below the limit or the request exceeds the maximum contiguous block, or
     /// another stable code the platform reports. The default producer
     /// ([`NullDmaAllocFacility`]) returns [`Errno::NotImplemented`].
     fn alloc(
@@ -461,11 +462,15 @@ pub struct SharedChunk {
 ///
 /// * [`alloc_region`](Self::alloc_region) — allocate a **zeroed** chunk-set
 ///   backing of `pages` frames (no cross-process leak);
+/// * [`alloc_dma_region`](Self::alloc_dma_region) — allocate one zeroed,
+///   physically contiguous block a DMA master may reach;
 /// * [`map_region`](Self::map_region) — map an existing region into the
 ///   **calling** task's own live space as one contiguous window;
 /// * [`unmap_region`](Self::unmap_region) — release the caller's mapping;
 /// * [`free_region`](Self::free_region) — zero (zero-on-free) and return a
-///   region's chunks to the allocator at its last reference.
+///   region's chunks to the allocator at its last reference;
+/// * [`surrender_region`](Self::surrender_region) — hand a DMA region whose
+///   device may still master it to its node's quarantine instead.
 ///
 /// Zeroing on allocation and on free is done through the kernel direct map
 /// of *whatever task is currently running* (the map is identical in every
@@ -492,17 +497,33 @@ pub trait SharedMemFacility: Sync {
     /// or [`Errno::NotImplemented`] for the inert default.
     fn alloc_region(&self, pages: u64) -> Result<Vec<SharedChunk>, Errno>;
 
+    /// Allocate one **zeroed**, physically contiguous block of at least
+    /// `pages` frames lying wholly below `addr_limit` (`0` declares no limit),
+    /// cleaned to memory so a coherent mapping and the device read the zeros.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for zero pages or a block past the largest
+    /// buddy order, [`Errno::OutOfRange`] when no RAM lies below the limit,
+    /// [`Errno::OutOfMemory`] when no free block does, or
+    /// [`Errno::NotImplemented`] for the inert default.
+    fn alloc_dma_region(&self, pages: u64, addr_limit: u64) -> Result<SharedChunk, Errno> {
+        let _ = (pages, addr_limit);
+        Err(Errno::NotImplemented)
+    }
+
     /// Map the existing region backed by `chunks` into the calling task's own
-    /// live space as one contiguous window, returning its base user virtual
-    /// address. A single-chunk region maps one block; a multi-chunk region
-    /// maps every block back-to-back so the caller sees one flat buffer.
+    /// live space as one contiguous window with the region's `memory`
+    /// attribute, returning its base user virtual address. A single-chunk
+    /// region maps one block; a multi-chunk region maps every block
+    /// back-to-back so the caller sees one flat buffer.
     ///
     /// # Errors
     ///
     /// [`Errno::OutOfMemory`] (no virtual slot), [`Errno::NotImplemented`]
     /// (no live space / inert default), or another stable code the platform
     /// reports.
-    fn map_region(&self, chunks: &[SharedChunk]) -> Result<u64, Errno>;
+    fn map_region(&self, chunks: &[SharedChunk], memory: SharedMemory) -> Result<u64, Errno>;
 
     /// Release the calling task's shared mapping based at `base` (`len`
     /// bytes), tearing down only its page-table entries.
@@ -514,9 +535,19 @@ pub trait SharedMemFacility: Sync {
     fn unmap_region(&self, base: u64, len: usize) -> Result<(), Errno>;
 
     /// Zero (zero-on-free) and return every block in `chunks` to the
-    /// allocator. Best-effort: a frame that cannot be reached for scrubbing
+    /// allocator, cleaning a coherent region's zeros to memory so no dirty
+    /// line of the cacheable direct map is written back over the frames'
+    /// next owner. Best-effort: a frame that cannot be reached for scrubbing
     /// is dropped rather than panicking (the inert default is a no-op).
-    fn free_region(&self, chunks: &[SharedChunk]);
+    fn free_region(&self, chunks: &[SharedChunk], memory: SharedMemory);
+
+    /// Zero every block of a DMA region and pass it, frames still allocated,
+    /// to `custodian`'s quarantine, which frees it once the device is proven
+    /// quiet. The default frees nothing: the frames stay allocated for good,
+    /// which costs memory and never lets a device reach reused RAM.
+    fn surrender_region(&self, chunks: &[SharedChunk], custodian: &DmaCustodian) {
+        let _ = (chunks, custodian);
+    }
 
     /// Translate the `len` bytes of a region backed by `chunks` into a
     /// kernel-reachable pointer (the kernel direct map), for a **kernel**
@@ -550,13 +581,13 @@ impl SharedMemFacility for NullSharedMemFacility {
     fn alloc_region(&self, _pages: u64) -> Result<Vec<SharedChunk>, Errno> {
         Err(Errno::NotImplemented)
     }
-    fn map_region(&self, _chunks: &[SharedChunk]) -> Result<u64, Errno> {
+    fn map_region(&self, _chunks: &[SharedChunk], _memory: SharedMemory) -> Result<u64, Errno> {
         Err(Errno::NotImplemented)
     }
     fn unmap_region(&self, _base: u64, _len: usize) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
-    fn free_region(&self, _chunks: &[SharedChunk]) {}
+    fn free_region(&self, _chunks: &[SharedChunk], _memory: SharedMemory) {}
 }
 
 /// The boot-installed production shared-memory facility, recorded once so
@@ -666,9 +697,12 @@ pub struct DmaConstraint {
     /// Maximum buffer extent in bytes the grant permits (`0` declares no
     /// declared maximum).
     pub max_len: u64,
-    /// Far-side (bus/PCIe-space) base of a translating inbound viewport, or
-    /// `0` for an untranslated (coherent) constraint.
+    /// Far-side (bus/PCIe-space) base of a translating inbound viewport,
+    /// which may itself be `0`.
     pub translated_base: u64,
+    /// The grant is a translating viewport, whose `max_len` is the window's
+    /// extent, rather than an untranslated constraint.
+    pub translated: bool,
 }
 
 /// Validate that a granted [`HwResource`] is a DMA constraint `dma_alloc`
@@ -700,6 +734,7 @@ pub fn dma_constraint(resource: &HwResource) -> Result<DmaConstraint, Errno> {
         addr_limit: resource.base(),
         max_len: resource.length(),
         translated_base: resource.translated_base(),
+        translated: resource.is_translated_dma_window(),
     })
 }
 
@@ -734,7 +769,7 @@ pub fn dma_constraint(resource: &HwResource) -> Result<DmaConstraint, Errno> {
 /// [`Errno::OutOfRange`] when the CPU-physical base does not lie within the
 /// translating viewport's CPU window, or the translated address overflows.
 pub fn translate_device_addr(constraint: &DmaConstraint, cpu_phys: u64) -> Result<u64, Errno> {
-    if constraint.translated_base == 0 {
+    if !constraint.translated {
         return Ok(cpu_phys);
     }
     let cpu_base = constraint
@@ -920,6 +955,7 @@ mod tests {
                 addr_limit: 0x4000_0000,
                 max_len: 0x1_0000,
                 translated_base: 0,
+                translated: false,
             })
         );
 
@@ -931,6 +967,7 @@ mod tests {
                 addr_limit: 0xC000_0000,
                 max_len: 0x10_0000,
                 translated_base: 0x4_0000_0000,
+                translated: true,
             })
         );
     }
@@ -1007,6 +1044,24 @@ mod tests {
         // A base at the aperture top is out of the viewport.
         assert_eq!(
             translate_device_addr(&viewport, 0x3000),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn translate_device_addr_rebases_a_window_whose_bus_side_starts_at_zero() {
+        // `dma-ranges` mapping bus 0 onto CPU 0x8000_0000: the device names a
+        // buffer by its offset into the window, never by its CPU address.
+        let window = dma_constraint(&HwResource::dma_translated(
+            0x8000_0000 + 0x4000_0000,
+            0x4000_0000,
+            0,
+        ))
+        .unwrap();
+        assert!(window.translated);
+        assert_eq!(translate_device_addr(&window, 0x8000_1000), Ok(0x1000));
+        assert_eq!(
+            translate_device_addr(&window, 0x7FFF_F000),
             Err(Errno::OutOfRange)
         );
     }

@@ -47,7 +47,7 @@ use crate::coldscan::{ColdPageScanner, ColdScanError};
 use crate::dma::{DmaCustodian, DmaError, DmaWindowMap};
 use crate::filemap::{map_file_page, unmap_file_region};
 use crate::frame::{Frame, FrameAllocator, MemoryClass, PAGE_SIZE};
-use crate::mmio::{MmioError, MmioWindowMap};
+use crate::mmio::{MmioError, MmioWindowMap, SharedMemory};
 use crate::phys::PhysMap;
 use crate::ramzip::{
     FaultError, PageCandidate, Ramzip, RamzipFaultOutcome, RamzipReclaimSummary, VmContext,
@@ -406,51 +406,31 @@ pub trait LiveUserSpace: Send {
     /// not the base of a live DMA carve of this space.
     fn free_dma(&mut self, cpu_va: u64) -> Result<usize, LiveSpaceError>;
 
-    /// Map `len` bytes of an existing, kernel-owned, physically-contiguous
-    /// **shared-memory region** beginning at `phys_base` into this space as
-    /// cacheable `RW|USER` (never executable), guard-bracketed, returning the
-    /// kernel-chosen base user virtual address.
-    ///
-    /// Unlike [`Self::map_device_window`] the frames are ordinary RAM (mapped
-    /// cacheable, not device-ordered); unlike [`Self::alloc_dma`] the frames
-    /// are **not** allocated or owned by this space \u2014 they belong to the
-    /// shared-region registry, which zeroed them on allocation and frees them
-    /// only when the owner and every grantee have released the region. This
-    /// installs page-table entries only, so a space drop or
-    /// [`Self::unmap_shared`] releases the *mapping* without touching the
-    /// frames (a second process may still map them).
-    ///
-    /// The producer has already resolved and owner-checked the per-region
-    /// grant the region comes from; this only performs the page-table
-    /// mechanism.
-    ///
-    /// # Errors
-    ///
-    /// [`LiveSpaceError::Mmio`] carrying the precise [`MmioError`] (no free
-    /// virtual slot, page-table refusal, \u2026) \u2014 the shared mapping reuses the
-    /// guarded-window mechanism.
-    fn map_shared(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError>;
-
     /// Map an existing, kernel-owned **shared-memory region** whose backing
     /// is a *list* of physically-contiguous chunks (`(phys_base, pages)`)
-    /// into this space as one contiguous, cacheable `RW|USER` (never
-    /// executable), guard-bracketed window, returning the kernel-chosen base
-    /// user virtual address.
+    /// into this space as one contiguous `RW|USER` (never executable),
+    /// guard-bracketed window mapped as `memory` says, returning the
+    /// kernel-chosen base user virtual address.
     ///
-    /// The chunked form of [`Self::map_shared`]: a region larger than the
-    /// frame allocator's single-block ceiling is backed by several
-    /// blocks the shared-region registry allocated, and this maps them
-    /// back-to-back in virtual space so the process sees one flat buffer (the
-    /// display frame ring). As with [`Self::map_shared`] the frames belong to
-    /// the registry; this installs page-table entries only, released by
-    /// [`Self::unmap_shared`] or a space drop without freeing the frames.
+    /// A region larger than the frame allocator's single-block ceiling is
+    /// backed by several blocks the shared-region registry allocated, and this
+    /// maps them back-to-back in virtual space so the process sees one flat
+    /// buffer (the display frame ring). The frames belong to the registry,
+    /// which zeroed them on allocation and frees them only when the owner and
+    /// every grantee have released the region; this installs page-table
+    /// entries only, released by [`Self::unmap_shared`] or a space drop
+    /// without freeing the frames.
     ///
     /// # Errors
     ///
     /// [`LiveSpaceError::Mmio`] carrying the precise [`MmioError`] (an empty
     /// or malformed chunk list, no free virtual run, a page-table refusal) —
     /// the shared mapping reuses the guarded-window mechanism.
-    fn map_shared_chunks(&mut self, chunks: &[(u64, u64)]) -> Result<u64, LiveSpaceError>;
+    fn map_shared_chunks(
+        &mut self,
+        chunks: &[(u64, u64)],
+        memory: SharedMemory,
+    ) -> Result<u64, LiveSpaceError>;
 
     /// Release the shared-region mapping based at `base_va` from this space,
     /// tearing down only its page-table entries (the registry owns the
@@ -1077,25 +1057,14 @@ where
         Ok(released)
     }
 
-    fn map_shared(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError> {
-        // Reuse the guarded-window mechanism, mapping cacheable RAM rather
-        // than device registers. The frames are owned by the shared-region
-        // registry, so the space installs page-table entries only.
+    fn map_shared_chunks(
+        &mut self,
+        chunks: &[(u64, u64)],
+        memory: SharedMemory,
+    ) -> Result<u64, LiveSpaceError> {
         let region = self
             .shared
-            .map_cacheable_into(&mut self.space, phys_base, len)?;
-        Ok(region.virt().as_u64())
-    }
-
-    fn map_shared_chunks(&mut self, chunks: &[(u64, u64)]) -> Result<u64, LiveSpaceError> {
-        // Reuse the guarded-window mechanism, mapping the chunk list into one
-        // contiguous virtual window (cacheable RAM). The frames belong to the
-        // shared-region registry, so the space installs page-table entries
-        // only — released without freeing the frames (a second process may
-        // still map them).
-        let region = self
-            .shared
-            .map_cacheable_chunks_into(&mut self.space, chunks)?;
+            .map_chunks_into(&mut self.space, chunks, memory)?;
         Ok(region.virt().as_u64())
     }
 
@@ -1364,7 +1333,9 @@ mod tests {
     use super::{LiveSpace, LiveSpaceError, LiveUserSpace};
     use crate::anon::AnonError;
     use crate::dma::{DmaCustodian, DmaError};
+    use crate::error::AllocError;
     use crate::frame::{FrameAllocator, MemoryClass, PhysAddr, PAGE_SIZE};
+    use crate::mmio::SharedMemory;
     use crate::phys::SimPhysMap;
     use crate::test_fixture::{custody, frame_backing};
     use crate::uaccess::{copy_in, copy_out};
@@ -1915,20 +1886,31 @@ mod tests {
     }
 
     #[test]
-    fn alloc_dma_rejects_a_block_above_the_addressing_limit() {
+    fn alloc_dma_refuses_a_limit_no_ram_lies_below() {
         let mut live = live_space!();
-        // An addressing limit below the allocator's RAM window cannot be
-        // satisfied by any block, so the carve is refused fail-closed and no
-        // pages are mapped.
         assert_eq!(
             live.alloc_dma(PAGE_SIZE, SIM_BASE, custodian(custody!())),
-            Err(LiveSpaceError::Dma(DmaError::AddrLimitExceeded))
+            Err(LiveSpaceError::Dma(DmaError::Alloc(AllocError::OutOfRange)))
         );
         assert_eq!(
             live.space().mapped_pages(),
             0,
             "no buffer mapped on refusal"
         );
+    }
+
+    #[test]
+    fn alloc_dma_carves_below_a_limit_inside_ram_whatever_the_free_lists_offer_first() {
+        // The free lists offer the top of the window first, so a carve that
+        // took their front block and refused one above the limit failed here
+        // with half the window free beneath it.
+        let mut live = live_space!();
+        let limit = SIM_BASE + (SIM_BYTES / 2) as u64;
+        let mapping = live
+            .alloc_dma(2 * PAGE_SIZE, limit, custodian(custody!()))
+            .expect("free RAM lies below the limit");
+        assert!(mapping.phys_base >= SIM_BASE);
+        assert!(mapping.phys_base + 2 * PAGE_SIZE as u64 <= limit);
     }
 
     #[test]
@@ -2124,8 +2106,11 @@ mod tests {
                 .expect("dma carve");
             live.map_device_window(0xFE98_0000, 0x2000)
                 .expect("device window");
-            live.map_shared(region_frame.start().as_u64(), PAGE_SIZE)
-                .expect("shared region");
+            live.map_shared_chunks(
+                &[(region_frame.start().as_u64(), 1)],
+                SharedMemory::Cacheable,
+            )
+            .expect("shared region");
 
             // A recognisable secret in a fixed anonymous page, so the
             // zero-on-free scrub below is observable.
@@ -2234,13 +2219,15 @@ mod tests {
     }
 
     #[test]
-    fn map_shared_maps_a_cacheable_region_in_its_window_and_unmaps_by_base() {
+    fn map_shared_chunks_maps_a_region_in_its_window_and_unmaps_by_base() {
         let mut live = live_space!();
-        // A real frame reachable through the sim direct map; map_shared only
+        // A real frame reachable through the sim direct map; the map only
         // installs page-table entries (the registry owns/zeroes the frames).
         let phys = SIM_BASE;
         let len = 2 * PAGE_SIZE;
-        let base = live.map_shared(phys, len).expect("maps the region");
+        let base = live
+            .map_shared_chunks(&[(phys, 2)], SharedMemory::Cacheable)
+            .expect("maps the region");
         // The mapping lands inside the configured shared window, past the
         // leading guard page, and clear of the DMA window below it.
         assert!(
@@ -2280,7 +2267,7 @@ mod tests {
         let chunk_a = SIM_BASE; // 2 pages
         let chunk_b = SIM_BASE + 4 * PAGE_SIZE as u64; // 1 page, past chunk_a
         let base = live
-            .map_shared_chunks(&[(chunk_a, 2), (chunk_b, 1)])
+            .map_shared_chunks(&[(chunk_a, 2), (chunk_b, 1)], SharedMemory::Cacheable)
             .expect("chunk list maps into one window");
         assert!(
             base > SHARED_WINDOW_BASE

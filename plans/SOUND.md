@@ -20,7 +20,9 @@ seek slider.
 | SND2 | `lib/abi`: `HwDeviceClass::Audio`, the PCM vocabulary, `audio_ring`, `audiochan-v1`, `audio-v1` | done |
 | SND3 | `lib/audio`: conversion, mixer, resampler, channel mapping, clock model, routing policy, volume model, the stream client — all host-tested, plus the ring's loom model | done |
 | SND4 | `lib/audiochan` serve loop; `drivers/audio/virtio_snd`; `userland/system/audiod`; `CAP_AUDIO_DEVICE` and `CAP_AUDIO_CAPTURE`; the end-to-end QEMU vertical asserting a sample-exact host WAV | done |
-| SND5 | `lib/abi` DMA-engine class trait (`DmaEngine`/`DmaChannel`, cyclic chains, discovered request lines); the discovery, hardware-tree and kernel prerequisites §The DMA-engine seam names; `drivers/dma/bcm2835` | planned |
+| SND5a | The DMA seam's ABI and discovery: `HwDeviceClass::Dma`, the `DmaController` duty and `DmaRequest` resources, the sixteen-resource node, the endpoint block and its wire protocol; the shared walk's `dmas` binding, per-entry `dma-ranges` and `interrupt-parent`; the Broadcom channel mask | done |
+| SND5b | The three kernel prerequisites — `shm_create_dma` (quarantined with its creator), `shm_grant_peer`, `call_peer_holds` — and the duty-gated controller endpoint | done |
+| SND5c | The `DmaEngine`/`DmaChannel` class trait and `drivers/dma/bcm2835`, host-tested against a register-level model that fetches control blocks | planned |
 | SND6 | Isochronous transfer support: the endpoint kind and service-interval scheduling in `lib/usb`, and periodic bandwidth reservation, frame-indexed rings and feedback endpoints in `drivers/bus/usb/xhci` | planned |
 | SND7 | `drivers/audio/usb_uac`: UAC1 and UAC2, clock and feature units, explicit and implicit feedback | planned |
 | SND8 | `drivers/audio/bcm2711_pwm` with noise shaping; `drivers/audio/bcm2711_i2s` with a separately-bound codec | planned |
@@ -61,6 +63,31 @@ plays a silence pad and the comparison trims it. The comparison itself is
 exact and must stay so: relaxing it to a frame-count tolerance would excuse
 genuinely dropped frames, which is the one thing this vertical exists to
 catch.
+
+**What SND5a guarantees.** Every FDT port publishes a DMA controller as a
+`Dma` node carrying its `DmaController` duty — its endpoint from the reserved
+`DMA_CONTROLLER_ENDPOINTS` block, its channel mask in node-relative numbering,
+and whether the tree stated one — and one translated `Dma` window per entry of
+its bus's `dma-ranges`, flagged `DMA_TRANSLATED` so a window starting at bus
+`0` is never read as a plain limit (`plans/OPEN-DEFECTS.md` D178). Each consumer `dmas` entry becomes a `DmaRequest`
+naming its controller's endpoint, including a consumer met before its
+controller. Both records decode only from their canonical encoding and
+`dmaengine-v1`'s frames only at their exact length; `fuzz_dmaengine` holds
+that every accepted record and frame re-encodes to its own bytes.
+
+**What SND5b guarantees.** An endpoint in `DMA_CONTROLLER_ENDPOINTS` binds
+only for the holder of the `DmaController` duty naming it. `shm_create_dma`
+carves one contiguous block below a `Dma` grant's ceiling — the highest free
+one, found by the frame allocator's search below the ceiling rather than by
+the order of its lists (`plans/OPEN-DEFECTS.md` D173) — maps it
+`DMA_COHERENT` in every process that maps it, and reports its bus address
+through the grant's window. The region binds its creator's node quarantine:
+the creator's own unmap is its word that the device is done, and a creator
+that ends still mapping it orphans it, so its frames join the quarantine when
+the last mapping goes. `shm_grant_peer` mints a region to the caller an
+endpoint's server is serving, and `call_peer_holds` answers whether that caller
+holds a grant covering a quoted record; both answer only about a caller being
+served, and every delegated mint refuses a recipient that has ended.
 
 **Why the two capabilities sit in SND4 rather than beside the ABI.** A
 capability is added with the subsystem that enforces it, never ahead of it: it
@@ -976,21 +1003,23 @@ for every FDT port rather than `kernel/arch/aarch64` alone:
   where that fits the record's eight bytes. A phandle resolves to the id the
   walk will assign by replaying the walk's own emission rule, so a consumer met
   before its controller still names the right endpoint.
-- The Broadcom mask is a vendor property, so `kernel/arch/aarch64`'s
-  augmentation reads it and converts it to window-relative numbering; the
-  shared walk reads the generic `dma-channel-mask` otherwise. The duty records
+- The Broadcom mask is a vendor property, so `kernel/arch/aarch64` overrides
+  the walk's `FdtPlatform::dma_channel_mask` hook to read it and convert it to
+  window-relative numbering; the hook's default reads the generic
+  `dma-channel-mask`. The duty records
   whether the tree stated a mask at all, and the Broadcom driver serves nothing
   without one, because its binding makes the property mandatory.
 
-Two defects in the walk are fixed with it, both found against the pinned tree:
+Two properties of the walk hold with it, both found wanting against the pinned
+tree:
 
-- **`HW_NODE_MAX_RESOURCES` is 8**, so the legacy controller's eleven
-  interrupts are cut to seven today and channels 7–10 cannot be reached. It
-  becomes 16; the controller node needs 15.
-- **`interrupt-parent` is ignored**, so a node wired to a nested interrupt
-  controller has its specifiers decoded as the GIC's: `hdmi0` is granted INTID
-  33, an ARM mailbox line. A specifier is mapped only when the node's effective
-  interrupt parent is the port's root controller.
+- **A node carries up to sixteen resources** (`HW_NODE_MAX_RESOURCES`): the
+  legacy controller needs fifteen, and at eight its channels 7–10 had no line.
+- **A specifier is mapped only under the port's root controller**, the
+  effective `interrupt-parent` found as Linux's `of_irq_find_parent` finds it;
+  each port names its controller's phandle (`find_gic`, the PLIC node). Read
+  as the GIC's, `hdmi0`'s `aon_intr` specifiers granted INTID 33, an ARM
+  mailbox line.
 
 **Kernel prerequisites.** Three general mechanisms, each with its holder and
 enforcement point in this change:
@@ -1617,8 +1646,8 @@ SND5's design surfaced two decisions, both taken:
   learn which of its bind keys matched — `devmgr` hands a driver only its
   grants — and a DMA4 model nothing exercises before SND19.
 
-SND8 inherits three facts from the pinned tree, each needing a home before its
-drivers can bind:
+SND8 inherits four facts, each needing a home before its drivers can bind or
+its metal acceptance can pass:
 
 - **Neither PWM node carries `dmas`**, so the jack's request line (DREQ 5 for
   PWM0, per the peripherals document) has no discovered source. The image
@@ -1630,6 +1659,10 @@ drivers can bind:
 - **Their pins need their alternate function**, and nothing in the tree sets
   one: no pinctrl or GPIO driver exists. The firmware's `config.txt` `gpio=`
   directive can set it at boot.
+- **Memory below the legacy engines' 1 GiB ceiling has no reserve** against
+  ordinary allocations (`plans/OPEN-DEFECTS.md` D175), so on a Pi with more
+  RAM a buffer carved late on a busy system can be refused while memory above
+  the ceiling is free.
 
 One decision inside this plan is worth surfacing because it is visible to
 users: **HDA codecs get no quirk table.** A small number of laptops whose

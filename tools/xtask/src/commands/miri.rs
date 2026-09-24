@@ -226,6 +226,30 @@ pub const TARGETS: &[Target] = &[
         ),
     },
     Target {
+        package: "tairix-rt",
+        description: "the userland global allocator's arena pointers, the thread payload's \
+                      type-erased runner and its recycled rendezvous cells, and every syscall \
+                      wrapper's marshalling of borrowed buffers",
+        features: &[],
+        scope: Scope::LibOnly(
+            "the library is the crate's only test target; naming it is what lets its tests be \
+             dealt across cores",
+        ),
+        spread: Spread::PerCore(
+            "280 tests, and interpreted they cost over three minutes in one single-core \
+             process. Dealt across the host's cores the work is unchanged and the makespan \
+             falls to the longest single test",
+        ),
+    },
+    Target {
+        package: "tairix-abi-sys",
+        description: "the C-callable syscall stubs' marshalling of caller pointers into trap \
+                      arguments",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
         package: "tairix-arch-api",
         description: "the HAL's shared unsafe floor: the frame-pointer unwinder's walk over a \
                       hostile stack, the page-table reclaim walk, and the per-CPU and quiesce \

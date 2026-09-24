@@ -138,6 +138,15 @@ const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
 const NUM_DMA_FREE: u64 = SyscallNumber::DMA_FREE.as_u16() as u64;
 /// `dma_quiesced` syscall number (as above).
 const NUM_DMA_QUIESCED: u64 = SyscallNumber::DMA_QUIESCED.as_u16() as u64;
+
+/// `shm_create_dma` syscall number (as above).
+const NUM_SHM_CREATE_DMA: u64 = SyscallNumber::SHM_CREATE_DMA.as_u16() as u64;
+
+/// `shm_grant_peer` syscall number (as above).
+const NUM_SHM_GRANT_PEER: u64 = SyscallNumber::SHM_GRANT_PEER.as_u16() as u64;
+
+/// `call_peer_holds` syscall number (as above).
+const NUM_CALL_PEER_HOLDS: u64 = SyscallNumber::CALL_PEER_HOLDS.as_u16() as u64;
 const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 const NUM_HW_TREE_READ: u64 = SyscallNumber::HW_TREE_READ.as_u16() as u64;
 const NUM_HW_TREE_WAIT: u64 = SyscallNumber::HW_TREE_WAIT.as_u16() as u64;
@@ -2391,6 +2400,71 @@ pub extern "C" fn sys_call_peer_seat(endpoint: u64, ticket: u64, seat: u64) -> u
     unsafe { raw_syscall(NUM_CALL_PEER_SEAT, [endpoint, ticket, seat, 0, 0, 0]) }
 }
 
+/// `shm_create_dma`: carve a shared region a DMA master may reach under the
+/// caller's `Dma` grant `handle` (`SyscallNumber::SHM_CREATE_DMA`). Returns the
+/// base **user virtual address** of the caller's coherent mapping, or a
+/// `TAIRIX_E_*` code reinterpreted into the result. The region id and the
+/// block's device address are written to `id_out` and `device_out`, both
+/// untouched on failure. Gated kernel-side on `TAIRIX_CAP_MEM_DMA` and
+/// `TAIRIX_CAP_SHM`, for a caller loaded for a node.
+#[must_use]
+#[export_name = "tairix_sys_shm_create_dma"]
+pub extern "C" fn sys_shm_create_dma(
+    handle: u64,
+    len: usize,
+    id_out: *mut c_void,
+    device_out: *mut c_void,
+) -> u64 {
+    // SAFETY: see `sys_dma_alloc`; the kernel validates both out pointers
+    // against the caller's address space before writing to them.
+    unsafe {
+        raw_syscall(
+            NUM_SHM_CREATE_DMA,
+            [
+                handle,
+                len as u64,
+                ptr_arg(id_out),
+                ptr_arg(device_out),
+                0,
+                0,
+            ],
+        )
+    }
+}
+
+/// `shm_grant_peer`: grant the task whose call `ticket` on `endpoint` the
+/// caller is serving the right to map shared region `region`
+/// (`SyscallNumber::SHM_GRANT_PEER`). Returns the minted handle, or a
+/// `TAIRIX_E_*` code reinterpreted into the result; the handle resolves only
+/// for the recipient's `tairix_sys_shm_map`. Gated kernel-side on
+/// `TAIRIX_CAP_SHM`.
+#[must_use]
+#[export_name = "tairix_sys_shm_grant_peer"]
+pub extern "C" fn sys_shm_grant_peer(region: u64, endpoint: u64, ticket: u64) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
+    // checks the region grant and the endpoint's ownership before minting.
+    unsafe { raw_syscall(NUM_SHM_GRANT_PEER, [region, endpoint, ticket, 0, 0, 0]) }
+}
+
+/// `call_peer_holds`: whether the task whose call `ticket` on `endpoint` the
+/// caller is serving holds a grant covering the wire-encoded resource record
+/// at `resource` (`SyscallNumber::CALL_PEER_HOLDS`). Returns `0` when it does,
+/// else a negative `TAIRIX_E_*` — `TAIRIX_E_PERMISSION_DENIED` when it holds
+/// none.
+#[must_use]
+#[export_name = "tairix_sys_call_peer_holds"]
+pub extern "C" fn sys_call_peer_holds(endpoint: u64, ticket: u64, resource: *mut c_void) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel copies exactly one record in from
+    // `resource`, validated against the caller's address space, and writes
+    // nothing back.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_CALL_PEER_HOLDS,
+            [endpoint, ticket, ptr_arg(resource), 0, 0, 0],
+        ))
+    }
+}
+
 /// `waitset_create`: create a caller-owned wait-set that multiplexes the
 /// readiness of several event sources (`SyscallNumber::WAITSET_CREATE`).
 /// Returns the kernel-minted, opaque wait-set handle, or a `TAIRIX_E_*` code
@@ -3289,6 +3363,9 @@ mod tests {
         (NUM_DMA_ALLOC, "dma_alloc", 3),
         (NUM_DMA_FREE, "dma_free", 2),
         (NUM_DMA_QUIESCED, "dma_quiesced", 0),
+        (NUM_SHM_CREATE_DMA, "shm_create_dma", 4),
+        (NUM_SHM_GRANT_PEER, "shm_grant_peer", 3),
+        (NUM_CALL_PEER_HOLDS, "call_peer_holds", 3),
         (NUM_RESOURCE_GRANTS, "resource_grants", 2),
         (NUM_HW_TREE_READ, "hw_tree_read", 2),
         (NUM_HW_TREE_WAIT, "hw_tree_wait", 2),
@@ -4016,7 +4093,7 @@ mod tests {
     fn thread_create_marshals_entry_arg_stack_tls_and_clear_word() {
         let mut clear = 1u32;
         let clear_ptr = core::ptr::addr_of_mut!(clear).cast::<c_void>();
-        let entry = 0x40_1000usize as *mut c_void;
+        let entry = core::ptr::without_provenance_mut::<c_void>(0x40_1000);
         let (number, args) = capture(7, || {
             assert_eq!(
                 sys_thread_create(entry, 0xABCD, 0x2000, 0x7F00, clear_ptr),
@@ -4036,7 +4113,7 @@ mod tests {
 
     #[test]
     fn thread_create_marshals_the_absent_clear_word_and_default_stack() {
-        let entry = 0x40_2000usize as *mut c_void;
+        let entry = core::ptr::without_provenance_mut::<c_void>(0x40_2000);
         let (number, args) = capture(9, || {
             assert_eq!(
                 sys_thread_create(
@@ -4200,6 +4277,46 @@ mod tests {
         assert_eq!(args[0], 0xD15_1001);
         assert_eq!(args[1], 9);
         assert_eq!(args[2], 0);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn shm_create_dma_marshals_the_grant_length_and_both_out_pointers() {
+        let mut id = 0u64;
+        let mut device = 0u64;
+        let id_ptr = core::ptr::addr_of_mut!(id).cast::<c_void>();
+        let device_ptr = core::ptr::addr_of_mut!(device).cast::<c_void>();
+        let (number, args) = capture(0x7000, || {
+            assert_eq!(sys_shm_create_dma(3, 0x2000, id_ptr, device_ptr), 0x7000);
+        });
+        assert_eq!(number, NUM_SHM_CREATE_DMA);
+        assert_eq!(&args[..2], &[3, 0x2000]);
+        assert_eq!(args[2], id_ptr as usize as u64);
+        assert_eq!(args[3], device_ptr as usize as u64);
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn shm_grant_peer_marshals_region_endpoint_and_ticket() {
+        let (number, args) = capture(4, || {
+            assert_eq!(sys_shm_grant_peer(42, 0xD15_1001, 9), 4);
+        });
+        assert_eq!(number, NUM_SHM_GRANT_PEER);
+        assert_eq!(&args[..3], &[42, 0xD15_1001, 9]);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn call_peer_holds_marshals_the_record_and_narrows_the_status() {
+        let mut record = [0u8; 32];
+        let ptr = record.as_mut_ptr().cast::<c_void>();
+        let denied = u64::from_ne_bytes((-6i64).to_ne_bytes());
+        let (number, args) = capture(denied, || {
+            assert_eq!(sys_call_peer_holds(0xD15_1001, 9, ptr), -6);
+        });
+        assert_eq!(number, NUM_CALL_PEER_HOLDS);
+        assert_eq!(&args[..2], &[0xD15_1001, 9]);
+        assert_eq!(args[2], ptr as usize as u64);
         assert_eq!(&args[3..], &[0, 0, 0]);
     }
 

@@ -257,6 +257,26 @@ driver that parks on its granted line waits on the interrupt its device
 actually raises. A specifier this GICv2 port cannot represent (a GICv3-only
 extended-SPI binding) is dropped rather than guessed at.
 
+A specifier is mapped only when the node's **effective interrupt parent**
+is the port's root controller (the GIC, the PLIC). The parent is found as
+Linux's `of_irq_find_parent` finds it: the node's own `interrupt-parent`,
+else the one its tree parent hands down, where a node carrying
+`#interrupt-cells` hands down itself. A node wired to any other controller
+carries none of its specifiers, because they are numbers in that
+controller's space, and a tree that names no parent at all maps nothing.
+
+The generic DMA binding is read for every FDT port. A node with
+`#dma-cells` is classed `Dma` and carries a `DmaController` duty naming its
+endpoint, with the channel mask the tree states, and one `Dma` window per
+entry of its parent bus's `dma-ranges`, translated to CPU addresses and
+carrying the bus address it starts at. A window is flagged
+`HwResource::DMA_TRANSLATED`, because its bus address may be `0`: an
+unflagged `Dma` resource is a plain addressing limit, whose length is the
+largest buffer rather than a window's extent. Each entry of a consumer's `dmas`
+becomes a `DmaRequest` naming its controller's endpoint, the specifier (up
+to two cells), the entry's position, and its `dma-names` string. The
+[DMA-engine class](dma.md) page covers both.
+
 Two further facts ride on a node when its tree declares them, so a
 user-space driver learns them from discovery rather than a board constant.
 A **DMA constraint** is read from the node's *parent bus* `dma-ranges` —

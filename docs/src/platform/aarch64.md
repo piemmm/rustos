@@ -1335,15 +1335,28 @@ through every ancestor bus's `ranges` into a CPU-physical address, and
 emitted as a capability-gated MMIO resource — an entry an ancestor
 cannot translate is dropped, never emitted untranslated. Each
 `interrupts` specifier (the three-cell GIC form both supported boards
-use) becomes a capability-gated (`CAP_IRQ_BIND`) IRQ resource. The
-device class is derived from the node's own data (`device_type`, the
-`interrupt-controller` marker, or the spec-recommended generic
-node-name stem), defaulting to `Other`; class is advisory — binding is
-by match key. Interior buses (e.g. a `simple-bus` `/soc`) are emitted
+use) becomes a capability-gated (`CAP_IRQ_BIND`) IRQ resource — but only
+on a node whose effective `interrupt-parent` is the GIC, which the port
+identifies by the phandle of the controller `gic::find_gic` locates. A
+node wired to a second-level controller keeps none of its specifiers: on
+the Pi 4 both HDMI blocks name `aon_intr`, and their one-cell specifiers
+read as GIC triples would have granted INTID 33, another device's line.
+The device class is derived from the node's own data (`device_type`,
+`#dma-cells`, the `interrupt-controller` marker, or the spec-recommended
+generic node-name stem), defaulting to `Other`; class is advisory —
+binding is by match key. Interior buses (e.g. a `simple-bus` `/soc`) are emitted
 as `Bus` nodes before their children, so the flat stream reconstructs
 the tree shape, and a node describing nothing bindable (no
-representable match key, not memory) is not emitted. Two nodes carry a
-per-device augmentation only the platform's tree can size:
+representable match key, not memory) is not emitted. The generic DMA
+binding (a controller's duty and windows, each consumer's request lines)
+is read by the shared walk for every FDT port; see the
+[DMA-engine class](../drivers/dma.md). The Broadcom DMA binding states its
+channel mask in `brcm,dma-channel-mask`, numbering channels across the
+whole DMA block, so the port converts it to the generic node-relative
+numbering: a node's first channel is its window's offset into the 4 KiB
+DMA page over the `0x100` channel stride (0 for the legacy block, 11 for
+DMA4). Two nodes carry a per-device augmentation only the platform's tree
+can size:
 
 - the VideoCore firmware mailbox (`brcm,bcm2835-mbox`, PI Stage P7) — a
   `Dma` request for a one-page property-buffer carve bounded by the

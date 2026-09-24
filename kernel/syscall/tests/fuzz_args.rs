@@ -445,6 +445,37 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn shm_create_dma(
+        &self,
+        _c: &CallerContext<'_>,
+        _handle: u64,
+        _len: usize,
+        _id_out: u64,
+        _device_out: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn shm_grant_peer(
+        &self,
+        _c: &CallerContext<'_>,
+        _region: u64,
+        _endpoint: u64,
+        _ticket: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn call_peer_holds(
+        &self,
+        _c: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _resource: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn resource_grants(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

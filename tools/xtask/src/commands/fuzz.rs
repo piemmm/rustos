@@ -66,6 +66,11 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-abi",
+        test: "fuzz_dmaengine",
+        description: "lib/abi dmaengine-v1 surface (controller-endpoint requests, their replies, the DMA request-line and controller-duty records)",
+    },
+    Target {
+        package: "tairix-abi",
         test: "fuzz_desktop_layer",
         description: "lib/abi desktop-layer surface wire surface (the capability-gated requests, the two feed events, the terrain reply)",
     },

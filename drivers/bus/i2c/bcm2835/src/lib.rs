@@ -51,6 +51,16 @@ use tairix_abi::{
 #[cfg(test)]
 mod tests;
 
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the register window, the interrupt, the per-child endpoints, and the log
+/// its bind records go to.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::MMIO_MAP,
+    CapabilityId::IRQ_BIND,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+];
+
 /// Per-driver `DriverHandle` marker returned by [`register`], mirroring the
 /// convention every driver crate uses: the host re-issues its own host-local
 /// handle when binding the driver, and this constant is the on-the-wire

@@ -101,9 +101,9 @@ mod program {
     /// and re-checks every trap.
     fn driver_caps() -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::MMIO_MAP);
-        caps.insert(CapabilityId::IRQ_BIND);
-        caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
+        for cap in tairix_drv_bus_i2c_bcm2835::REQUIRED_CAPABILITIES {
+            caps.insert(*cap);
+        }
         caps
     }
 

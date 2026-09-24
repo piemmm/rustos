@@ -77,24 +77,7 @@ mod program {
     /// unknown (un-modelled) discriminant is reported as `?`, never
     /// guessed.
     fn class_name(class: Option<HwDeviceClass>) -> &'static str {
-        match class {
-            Some(HwDeviceClass::Root) => "root",
-            Some(HwDeviceClass::Bus) => "bus",
-            Some(HwDeviceClass::Cpu) => "cpu",
-            Some(HwDeviceClass::Memory) => "memory",
-            Some(HwDeviceClass::Timer) => "timer",
-            Some(HwDeviceClass::InterruptController) => "intc",
-            Some(HwDeviceClass::Display) => "display",
-            Some(HwDeviceClass::Input) => "input",
-            Some(HwDeviceClass::Network) => "network",
-            Some(HwDeviceClass::Storage) => "storage",
-            Some(HwDeviceClass::Serial) => "serial",
-            Some(HwDeviceClass::Rtc) => "rtc",
-            Some(HwDeviceClass::Accelerator) => "accel",
-            Some(HwDeviceClass::Audio) => "audio",
-            Some(HwDeviceClass::Other) => "other",
-            None => "?",
-        }
+        class.map_or("?", HwDeviceClass::name)
     }
 
     /// The production [`HwTreeService`] backing: the reactive observe loop

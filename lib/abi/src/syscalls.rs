@@ -3140,6 +3140,70 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::MEM_DMA),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::SHM_CREATE_DMA,
+        name: "shm_create_dma",
+        arg_count: 4,
+        args: [
+            // The `Dma` grant handle, the byte length, then the out pointers
+            // for the region id and the device address.
+            AbiType::Handle,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // The base virtual address of the caller's mapping, or `-errno`.
+        ret: AbiType::U64,
+        // A carve the hardware reaches, so `CAP_MEM_DMA` as `dma_alloc`; the
+        // handler also demands the `CAP_SHM` any shared region takes. Audited:
+        // a device-reachable grant, minted once per transfer set-up.
+        required_capability: Some(CapabilityId::MEM_DMA),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::SHM_GRANT_PEER,
+        name: "shm_grant_peer",
+        arg_count: 3,
+        args: [
+            // The region id, the endpoint the caller serves, and the ticket
+            // of the call whose poster receives the grant.
+            AbiType::Handle,
+            AbiType::IpcEndpoint,
+            AbiType::Handle,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // The minted grant handle, or `-errno`.
+        ret: AbiType::U64,
+        // Delegating a shared mapping, gated and audited exactly as
+        // `shm_grant`.
+        required_capability: Some(CapabilityId::SHM),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CALL_PEER_HOLDS,
+        name: "call_peer_holds",
+        arg_count: 3,
+        args: [
+            // The endpoint id, the in-service ticket, then the non-null
+            // pointer to the quoted resource record.
+            AbiType::IpcEndpoint,
+            AbiType::Handle,
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Gated like `call_peer_seat` by the endpoint's receive capability
+        // against its owner, in the handler. Not audited: a query whose
+        // decision is the server's to record.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

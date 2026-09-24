@@ -209,21 +209,8 @@ pub fn keep_with_ancestors(nodes: &[HwNode], selected_ids: &[u32]) -> Vec<bool> 
 #[must_use]
 pub fn class_label(class: Option<HwDeviceClass>) -> &'static str {
     match class {
-        Some(HwDeviceClass::Root) => "root",
-        Some(HwDeviceClass::Bus) => "bus",
-        Some(HwDeviceClass::Cpu) => "cpu",
-        Some(HwDeviceClass::Memory) => "memory",
-        Some(HwDeviceClass::Display) => "display",
-        Some(HwDeviceClass::Input) => "input",
-        Some(HwDeviceClass::Network) => "network",
-        Some(HwDeviceClass::Storage) => "storage",
-        Some(HwDeviceClass::Timer) => "timer",
-        Some(HwDeviceClass::InterruptController) => "interrupt-controller",
-        Some(HwDeviceClass::Serial) => "serial",
-        Some(HwDeviceClass::Rtc) => "rtc",
-        Some(HwDeviceClass::Accelerator) => "accelerator",
-        Some(HwDeviceClass::Audio) => "audio",
         Some(HwDeviceClass::Other) | None => "device",
+        Some(class) => class.name(),
     }
 }
 

@@ -14,10 +14,13 @@
 //!   flags>` form whose `number` is relative to its type, so the shared
 //!   walk is handed the cell width and the type-relative INTID mapping
 //!   ([`crate::fdt::gic_intid_from_cells`]);
+//! * **the GIC's identity**, so a node wired to a second-level controller
+//!   keeps none of its specifiers rather than having them read as the GIC's;
 //! * **the board augmentation** the shared walk cannot know: the
 //!   `VideoCore` mailbox's DMA property-buffer carve, the GENET MAC's DMA
-//!   reach read from its parent bus, and the BCM2711 PCIe host bridge's
-//!   inbound aperture and outbound window;
+//!   reach read from its parent bus, the BCM2711 PCIe host bridge's
+//!   inbound aperture and outbound window, and the Broadcom DMA binding's
+//!   channel mask, which counts channels across the whole DMA block;
 //! * **`pcie_bringup`**, the pre-MMU read of those PCIe windows the
 //!   in-kernel USB bring-up needs before any hardware tree exists.
 //!
@@ -80,19 +83,63 @@ pub const PCIE_COMPATIBLE: &[u8] = b"brcm,bcm2711-pcie";
 /// its bind table; this is the discovery side of that contract.
 pub const GENET_COMPATIBLE: &[u8] = b"brcm,bcm2711-genet-v5";
 
+/// The Broadcom DMA binding's channel mask, which numbers channels across the
+/// whole DMA block rather than from the node's own first channel.
+const BRCM_DMA_CHANNEL_MASK: &str = "brcm,dma-channel-mask";
+
+/// The Broadcom DMA block's channel register stride, and the page its
+/// channels share: a node's first channel is its window's offset into that
+/// page over the stride.
+const BRCM_DMA_CHANNEL_STRIDE: u64 = 0x100;
+const BRCM_DMA_PAGE: u64 = 0x1000;
+
 /// This port's half of the shared device-tree walk: the GIC interrupt
 /// specifier and the BCM2711 board augmentation.
-pub struct Aarch64Fdt;
+pub struct Aarch64Fdt {
+    /// The GIC's phandle, when the tree gives it one.
+    gic: Option<u32>,
+}
 
 impl FdtPlatform for Aarch64Fdt {
     /// The three-cell `<type, number, flags>` GIC binding both supported
     /// boards describe interrupts with.
     const INTERRUPT_CELLS: usize = 3;
 
-    /// The GIC mapping is a pure function of the specifier's own cells, so
-    /// nothing tree-wide is read.
-    fn from_tree(_fdt: &Fdt<'_>) -> Self {
-        Self
+    /// The GIC mapping is a pure function of the specifier's own cells; only
+    /// the GIC's identity is read, to know which nodes it serves.
+    fn from_tree(fdt: &Fdt<'_>) -> Self {
+        Self {
+            gic: crate::gic::find_gic(fdt).and_then(|gic| gic.phandle),
+        }
+    }
+
+    fn root_interrupt_controller(&self) -> Option<u32> {
+        self.gic
+    }
+
+    /// The Broadcom binding's mask converted to the generic, node-relative
+    /// numbering, masked to the channels the node's window covers; any other
+    /// node reads the generic property.
+    fn dma_channel_mask(
+        &self,
+        node: &Node<'_>,
+        depth: usize,
+        levels: &[BusLevel<'_>],
+    ) -> Option<u64> {
+        let Some(vendor) = node.property(BRCM_DMA_CHANNEL_MASK) else {
+            return tairix_arch_api::fdtwalk::dma_channel_mask(node);
+        };
+        if vendor.value().len() != 4 {
+            return None;
+        }
+        let absolute = u64::from(vendor.read_be_u32(0).ok()?);
+        let (base, len) = translated_reg(node, depth, levels, 0)?;
+        let first = (base % BRCM_DMA_PAGE) / BRCM_DMA_CHANNEL_STRIDE;
+        let covered = match len / BRCM_DMA_CHANNEL_STRIDE {
+            count @ 0..=63 => (1u64 << count) - 1,
+            _ => u64::MAX,
+        };
+        Some((absolute >> first) & covered)
     }
 
     /// Map a GIC specifier to the global INTID `irq_bind` and the GIC
@@ -879,5 +926,150 @@ mod tests {
             FdtDiscovery::new(fdt).discover(&mut sink),
             Err(DiscoveryError::MalformedSource)
         );
+    }
+
+    fn be_cells(values: &[u32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_be_bytes()).collect()
+    }
+
+    /// The pinned Pi 4 tree's interrupt wiring: a GIC-400 the root names, and
+    /// the `aon_intr` second-level controller both HDMI blocks name instead.
+    fn nested_intc_tree() -> Vec<u8> {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 1);
+        b.prop_u32("interrupt-parent", 1);
+        b.begin_node("soc");
+        b.prop_str("compatible", "simple-bus");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.prop(
+            "ranges",
+            &be_cells(&[0x4000_0000, 0, 0xff80_0000, 0x0080_0000]),
+        );
+        b.begin_node("interrupt-controller@40041000");
+        b.prop_str("compatible", "arm,gic-400");
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 3);
+        b.prop(
+            "reg",
+            &be_cells(&[0x4004_1000, 0x1000, 0x4004_2000, 0x2000]),
+        );
+        b.prop_u32("phandle", 1);
+        b.end_node();
+        b.begin_node("interrupt-controller@7ef00100");
+        b.prop_str("compatible", "brcm,bcm2711-l2-intc");
+        b.prop("interrupts", &be_cells(&[0, 0x60, 1]));
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 1);
+        b.prop_u32("phandle", 0x2c);
+        b.end_node();
+        b.begin_node("hdmi@7ef00700");
+        b.prop_str("compatible", "brcm,bcm2711-hdmi0");
+        b.prop_u32("interrupt-parent", 0x2c);
+        b.prop("interrupts", &be_cells(&[0, 1, 2, 3, 4, 5]));
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    fn irq_lines(node: &HwNode) -> Vec<u64> {
+        node.resources()
+            .iter()
+            .filter(|r| r.kind() == Some(HwResourceKind::Irq))
+            .map(HwResource::base)
+            .collect()
+    }
+
+    #[test]
+    fn a_node_wired_to_a_second_level_controller_gets_no_gic_line() {
+        let nodes = discover_all(&nested_intc_tree());
+        // Its one-cell specifiers read as GIC triples would have granted
+        // SPI 1 — INTID 33, a line another device raises.
+        assert!(irq_lines(by_key(&nodes, b"brcm,bcm2711-hdmi0")).is_empty());
+        // The second-level controller's own line is the GIC's.
+        assert_eq!(
+            irq_lines(by_key(&nodes, b"brcm,bcm2711-l2-intc")),
+            [u64::from(MIN_SPI_INTID + 0x60)]
+        );
+    }
+
+    /// Both Pi 4 DMA controller nodes: the legacy block's first node at the
+    /// start of the DMA page, and DMA4's four channels starting at channel
+    /// eleven of the same page, each stating the Broadcom absolute mask.
+    fn bcm_dma_tree(legacy_mask: &[u8]) -> Vec<u8> {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 1);
+        b.begin_node("soc");
+        b.prop_str("compatible", "simple-bus");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.prop(
+            "ranges",
+            &be_cells(&[0x7e00_0000, 0, 0xfe00_0000, 0x0180_0000]),
+        );
+        b.begin_node("dma-controller@7e007000");
+        b.prop_str("compatible", "brcm,bcm2835-dma");
+        b.prop("reg", &be_cells(&[0x7e00_7000, 0xb00]));
+        b.prop_u32("#dma-cells", 1);
+        b.prop("brcm,dma-channel-mask", legacy_mask);
+        b.end_node();
+        b.end_node();
+        b.begin_node("scb");
+        b.prop_str("compatible", "simple-bus");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.prop(
+            "ranges",
+            &be_cells(&[0, 0x7c00_0000, 0, 0xfc00_0000, 0, 0x0380_0000]),
+        );
+        b.begin_node("dma@7e007b00");
+        b.prop_str("compatible", "brcm,bcm2711-dma");
+        b.prop("reg", &be_cells(&[0, 0x7e00_7b00, 0, 0x400]));
+        b.prop_u32("#dma-cells", 1);
+        b.prop_u32("brcm,dma-channel-mask", 0x7000);
+        b.end_node();
+        b.begin_node("generic-dma");
+        b.prop_str("compatible", "test,generic-dma");
+        b.prop("reg", &be_cells(&[0, 0x7e01_0000, 0, 0x100]));
+        b.prop_u32("#dma-cells", 1);
+        b.prop_u32("dma-channel-mask", 0x3);
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    fn channel_mask(nodes: &[HwNode], compatible: &[u8]) -> Option<u64> {
+        by_key(nodes, compatible)
+            .resources()
+            .iter()
+            .find_map(|r| r.dma_controller_duty().ok())
+            .expect("a controller duty")
+            .channels()
+    }
+
+    #[test]
+    fn the_broadcom_channel_mask_is_numbered_from_each_nodes_first_channel() {
+        let nodes = discover_all(&bcm_dma_tree(&0x7f5u32.to_be_bytes()));
+        // The legacy node starts at channel 0 and covers eleven channels.
+        assert_eq!(channel_mask(&nodes, b"brcm,bcm2835-dma"), Some(0x7f5));
+        // DMA4's node starts at channel 11: channels 12–14 are its 1–3.
+        assert_eq!(channel_mask(&nodes, b"brcm,bcm2711-dma"), Some(0b1110));
+        // A controller of any other binding reads the generic property.
+        assert_eq!(channel_mask(&nodes, b"test,generic-dma"), Some(0x3));
+    }
+
+    #[test]
+    fn a_broadcom_mask_outside_the_nodes_window_or_malformed_is_not_stated() {
+        // Channel 15 lies past the legacy node's eleven.
+        let nodes = discover_all(&bcm_dma_tree(&0x8000u32.to_be_bytes()));
+        assert_eq!(channel_mask(&nodes, b"brcm,bcm2835-dma"), Some(0));
+        let nodes = discover_all(&bcm_dma_tree(&[0, 0, 7]));
+        assert_eq!(channel_mask(&nodes, b"brcm,bcm2835-dma"), None);
     }
 }

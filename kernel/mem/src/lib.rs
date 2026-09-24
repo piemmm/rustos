@@ -99,7 +99,7 @@ pub use kvmap::{back_run, release_run, KernelRemap, KernelVirtMap, RemapError};
 pub use kvslots::{SlotError, SlotWindow};
 pub use live::{DmaMapping, LiveSpace, LiveSpaceError, LiveUserSpace};
 pub use loader::{map_flags_for, map_image, LoadError};
-pub use mmio::{MmioError, MmioMap, MmioRegion, MmioWindowMap};
+pub use mmio::{MmioError, MmioMap, MmioRegion, MmioWindowMap, SharedMemory};
 pub use pagetables::FrameTableSource;
 pub use phys::{DirectPhysMap, PhysMap};
 pub use pressure::{

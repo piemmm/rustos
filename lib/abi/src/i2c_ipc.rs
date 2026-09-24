@@ -15,7 +15,7 @@
 //! # Which endpoint
 //!
 //! There is no well-known id here. Each child's id comes from
-//! [`crate::hwtree::bus_child_endpoint`] over its hardware-tree node id, so
+//! [`crate::hwtree::BUS_CHILD_ENDPOINTS`] over its hardware-tree node id, so
 //! the bus driver learns the ids it must serve from its duty grants and the
 //! chip driver learns its own from its endpoint grant. Neither guesses, and
 //! the block is reserved ([`crate::ipc::is_reserved_endpoint`]) so a

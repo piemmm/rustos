@@ -1949,7 +1949,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // though this teardown runs in the driver-store service's context, not
         // the driver's own (a driver may be the region owner whose last
         // grantee already vanished).
-        crate::sharedreg::reclaim_process(self.shared_mem_facility, sec_id);
+        // An orderly unload leaves its node's quarantine to the next instance
+        // and audits none of the driver's DMA memory, regions included.
+        let _ = crate::sharedreg::reclaim_process(self.shared_mem_facility, sec_id);
 
         // Destroy every synchronous call endpoint the driver served before
         // dropping its capability record, mirroring the `exit` syscall: a

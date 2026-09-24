@@ -13,7 +13,8 @@
 //!   SPI/PPI offsets, the PLIC's bare source number);
 //! * **board augmentation** — extra resources only the platform's own tree
 //!   can describe (a firmware mailbox's DMA carve, a root complex's
-//!   windows). Ports with none leave the default empty.
+//!   windows, a vendor spelling of a generic property). Ports with none
+//!   leave the defaults.
 //!
 //! A port therefore contributes an [`FdtPlatform`] impl and spells its
 //! discovery type as [`FdtDiscovery`] over it; the walk itself has one
@@ -21,13 +22,23 @@
 //! ([`FdtPlatform::from_tree`]), so a port whose interrupt mapping depends
 //! on a tree-wide fact — the RISC-V PLIC's `riscv,ndev` source count — reads
 //! it before the walk rather than per node.
+//!
+//! The generic DMA binding is read here for every port: a node with
+//! `#dma-cells` is a controller carrying a [`DmaControllerDuty`] and its
+//! bus's DMA windows, and each `dmas` entry of a consumer becomes a
+//! [`DmaRequestLine`] naming the controller's endpoint (`plans/SOUND.md`
+//! SND5).
 
+use tairix_abi::driver::dmaengine::{
+    DmaControllerDuty, DmaRequestLine, DMA_CONTROLLER_ENDPOINTS, DMA_REQUEST_NAME_MAX,
+    DMA_SPECIFIER_MAX_CELLS,
+};
 use tairix_abi::driver::net::MAC_ADDRESS_LEN;
-use tairix_abi::hwtree::bus_child_endpoint;
+use tairix_abi::hwtree::BUS_CHILD_ENDPOINTS;
 use tairix_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
 use tairix_fdt::{
-    bus_level, name_stem, read_cells, reg_entry_count, translated_reg, BusLevel, Fdt, Node,
-    NodeIter, MAX_WALK_DEPTH,
+    bus_level, dma_ranges, name_stem, phandle_ref, read_cells, reg_entry_count, translate_dma,
+    translated_reg, BusLevel, Fdt, Node, NodeIter, MAX_WALK_DEPTH,
 };
 
 use crate::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
@@ -53,10 +64,46 @@ pub trait FdtPlatform {
     /// walk never guesses a line.
     fn interrupt_line(&self, specifier: &[u8]) -> Option<u32>;
 
+    /// The phandle of the controller [`Self::interrupt_line`] decodes
+    /// specifiers for, read from the tree once.
+    ///
+    /// A node whose effective interrupt parent is any other controller keeps
+    /// none of its specifiers: decoding them as this controller's would grant
+    /// its driver another device's line.
+    fn root_interrupt_controller(&self) -> Option<u32>;
+
+    /// The channels DMA controller `node` leaves to this system, numbered
+    /// from the node's own first channel, when the tree states them.
+    ///
+    /// The default reads the generic [`dma_channel_mask`]; a port whose
+    /// vendor binding states the mask another way overrides it.
+    fn dma_channel_mask(
+        &self,
+        node: &Node<'_>,
+        _depth: usize,
+        _levels: &[BusLevel<'_>],
+    ) -> Option<u64> {
+        dma_channel_mask(node)
+    }
+
     /// Push any resource only this platform's tree can describe onto a node
     /// the walk has already built. Ports with no board augmentation leave
     /// the default.
     fn augment(&self, _node: &Node<'_>, _depth: usize, _levels: &[BusLevel<'_>], _hw: &mut HwNode) {
+    }
+}
+
+/// A DMA controller's generic `dma-channel-mask`: bit `n` for its channel
+/// `n`, one cell per thirty-two channels, lowest channels first. `None` when
+/// the property is absent or not one or two whole cells.
+#[must_use]
+pub fn dma_channel_mask(node: &Node<'_>) -> Option<u64> {
+    let property = node.property("dma-channel-mask")?;
+    let low = u64::from(property.read_be_u32(0).ok()?);
+    match property.value().len() {
+        4 => Some(low),
+        8 => Some(low | (u64::from(property.read_be_u32(4).ok()?) << 32)),
+        _ => None,
     }
 }
 
@@ -100,6 +147,8 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
         let mut ancestors = [0u32; MAX_WALK_DEPTH];
         let mut duties = [0usize; MAX_WALK_DEPTH];
         let mut children_seen = [0usize; MAX_WALK_DEPTH];
+        // The interrupt parent the children of the node at each depth inherit.
+        let mut interrupt_parents = [None; MAX_WALK_DEPTH];
 
         let mut nodes = self.fdt.nodes();
         while let Some(node) = nodes.next() {
@@ -121,13 +170,16 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
                 ancestors[0] = HW_NODE_ROOT_ID;
                 duties[0] = 0;
                 children_seen[0] = 0;
+                interrupt_parents[0] =
+                    children_interrupt_parent(&node, own_interrupt_parent(&node, None));
                 continue;
             }
 
+            let interrupt_parent = own_interrupt_parent(&node, interrupt_parents[depth - 1]);
             let mut ancestor = ancestors[depth - 1];
             let mut accepted = 0;
             if let Some(mut emitted) =
-                build_node(&self.platform, &node, depth, &levels, ancestor, next_id)
+                self.build_node(&node, depth, &levels, ancestor, next_id, interrupt_parent)
             {
                 // A child of an addressed, non-enumerable bus carries the
                 // *authority* half of its existence: an endpoint grant
@@ -139,8 +191,9 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
                     let index = children_seen[depth - 1];
                     children_seen[depth - 1] = index + 1;
                     if index < duties[depth - 1] {
-                        let _ = emitted
-                            .push_resource(HwResource::endpoint(bus_child_endpoint(next_id)));
+                        let _ = emitted.push_resource(HwResource::endpoint(
+                            BUS_CHILD_ENDPOINTS.endpoint(next_id),
+                        ));
                     }
                 }
                 // The *duty* half: this node's own children, if it is such
@@ -160,66 +213,275 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
             ancestors[depth] = ancestor;
             duties[depth] = accepted;
             children_seen[depth] = 0;
+            interrupt_parents[depth] = children_interrupt_parent(&node, interrupt_parent);
         }
 
         Ok(())
     }
 }
 
-/// Build the hardware-tree node for one device-tree node, or `None` when
-/// the node describes nothing the tree can carry (no representable match
-/// key and not a memory node — the matcher could never bind it).
-fn build_node<P: FdtPlatform>(
-    platform: &P,
-    node: &Node<'_>,
-    depth: usize,
-    levels: &[BusLevel<'_>],
-    parent: u32,
-    id: u32,
-) -> Option<HwNode> {
-    if !is_emitted(node) {
-        return None;
-    }
-    let mut hw = HwNode::new(id, parent, classify(node));
+impl<P: FdtPlatform> FdtDiscovery<'_, P> {
+    /// Build the hardware-tree node for one device-tree node, or `None` when
+    /// the node describes nothing the tree can carry (no representable match
+    /// key and not a memory node — the matcher could never bind it).
+    fn build_node(
+        &self,
+        node: &Node<'_>,
+        depth: usize,
+        levels: &[BusLevel<'_>],
+        parent: u32,
+        id: u32,
+        interrupt_parent: Option<u32>,
+    ) -> Option<HwNode> {
+        if !is_emitted(node) {
+            return None;
+        }
+        let class = classify(node);
+        let mut hw = HwNode::new(id, parent, class);
 
-    if let Some(compat) = node.property("compatible") {
-        for s in compat.iter_strings() {
-            // A string longer than the ABI's bound is rejected on *both*
-            // sides — a driver bind key could never carry it either — so
-            // skipping it provably loses no match. Keys past the node
-            // capacity are dropped most-specific-first preserved (the
-            // devicetree list order).
-            let Ok(key) = HwMatchKey::compatible(s) else {
-                continue;
-            };
-            if hw.push_match_key(key).is_err() {
-                break;
+        if let Some(compat) = node.property("compatible") {
+            for s in compat.iter_strings() {
+                // A string longer than the ABI's bound is rejected on *both*
+                // sides — a driver bind key could never carry it either — so
+                // skipping it provably loses no match. Keys past the node
+                // capacity are dropped most-specific-first preserved (the
+                // devicetree list order).
+                let Ok(key) = HwMatchKey::compatible(s) else {
+                    continue;
+                };
+                if hw.push_match_key(key).is_err() {
+                    break;
+                }
             }
         }
+
+        push_mmio_resources(node, depth, levels, &mut hw);
+        if interrupt_parent.is_some()
+            && interrupt_parent == self.platform.root_interrupt_controller()
+        {
+            push_irq_resources(&self.platform, node, &mut hw);
+        }
+
+        // A NIC's own hardware address, where its node carries one: the
+        // standard ethernet-controller binding, so it is read for every node
+        // rather than gated on a board.
+        if let Some(octets) = local_mac_address(node) {
+            let _ = hw.push_resource(HwResource::link_address(octets));
+        }
+
+        if class == HwDeviceClass::Dma {
+            let channels = self.platform.dma_channel_mask(node, depth, levels);
+            if let Ok(duty) =
+                DmaControllerDuty::new(DMA_CONTROLLER_ENDPOINTS.endpoint(id), channels)
+            {
+                if hw.push_resource(HwResource::dma_controller(&duty)).is_ok() {
+                    push_dma_windows(depth, levels, &mut hw);
+                }
+            }
+        }
+        push_dma_requests(&self.fdt, node, &mut hw);
+
+        self.platform.augment(node, depth, levels, &mut hw);
+
+        Some(hw)
     }
+}
 
-    push_mmio_resources(node, depth, levels, &mut hw);
-    push_irq_resources(platform, node, &mut hw);
-
-    // A NIC's own hardware address, where its node carries one: the
-    // standard ethernet-controller binding, so it is read for every node
-    // rather than gated on a board.
-    if let Some(octets) = local_mac_address(node) {
-        let _ = hw.push_resource(HwResource::link_address(octets));
+/// A node's effective interrupt parent (Devicetree Spec v0.4 §2.4.1): its own
+/// `interrupt-parent`, else the one its tree parent hands down. A present but
+/// malformed property names no parent rather than inheriting one.
+fn own_interrupt_parent(node: &Node<'_>, inherited: Option<u32>) -> Option<u32> {
+    match node.property("interrupt-parent") {
+        None => inherited,
+        Some(property) if property.value().len() == 4 => {
+            property.read_be_u32(0).ok().and_then(phandle_ref)
+        }
+        Some(_) => None,
     }
+}
 
-    platform.augment(node, depth, levels, &mut hw);
+/// The interrupt parent `node`'s children inherit: `node` itself when it is
+/// an interrupt controller or nexus, which `#interrupt-cells` marks, else
+/// `node`'s own. A node's `#interrupt-cells` never makes it its *own* parent:
+/// a nexus's own interrupts go to the controller above it.
+fn children_interrupt_parent(node: &Node<'_>, own: Option<u32>) -> Option<u32> {
+    if node.property("#interrupt-cells").is_some() {
+        node.phandle()
+    } else {
+        own
+    }
+}
 
-    Some(hw)
+/// Push the windows a DMA controller at `depth` reaches memory through: one
+/// per entry of its parent bus's `dma-ranges`, each translated to CPU
+/// addresses and carrying the bus address it starts at. A controller with no
+/// bus between it and the root, or on a bus whose property is empty, reaches
+/// memory untranslated: one unconstrained window. A bus with no property maps
+/// nothing, so the controller gets no window.
+fn push_dma_windows(depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) {
+    let Some(bus_depth) = depth.checked_sub(1) else {
+        return;
+    };
+    let Some(above_depth) = bus_depth.checked_sub(1) else {
+        let _ = hw.push_resource(HwResource::dma(0, 0));
+        return;
+    };
+    let (Some(bus), Some(above)) = (levels.get(bus_depth), levels.get(above_depth)) else {
+        return;
+    };
+    let Some(value) = bus.dma_ranges else {
+        return;
+    };
+    if value.is_empty() {
+        let _ = hw.push_resource(HwResource::dma(0, 0));
+        return;
+    }
+    let Some(ranges) = dma_ranges(value, bus.addr_cells, above.addr_cells, bus.size_cells) else {
+        return;
+    };
+    for range in ranges {
+        let Some(top) = translate_dma(levels, bus_depth, range.parent)
+            .and_then(|cpu| cpu.checked_add(range.size))
+        else {
+            continue;
+        };
+        if hw
+            .push_resource(HwResource::dma_translated(top, range.size, range.child))
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// A DMA controller a `dmas` entry names: the id the walk gives it and its
+/// `#dma-cells`.
+#[derive(Copy, Clone)]
+struct DmaControllerRef {
+    id: u32,
+    cells: u32,
+}
+
+/// Push one [`DmaRequestLine`] per `dmas` entry, each naming the endpoint of
+/// the controller its phandle resolves to and paired with the `dma-names`
+/// string in the same position.
+///
+/// An entry is as wide as its controller's `#dma-cells`, so an entry whose
+/// controller cannot be resolved ends the list: nothing after it can be
+/// found. An entry wider than a record carries is dropped whole, never
+/// truncated, and a name longer than a record holds leaves its line unnamed.
+fn push_dma_requests(fdt: &Fdt<'_>, node: &Node<'_>, hw: &mut HwNode) {
+    let Some(dmas) = node.property("dmas") else {
+        return;
+    };
+    let value = dmas.value();
+    let mut names = node.property("dma-names").map(|p| p.iter_strings());
+    // A node's entries usually all name one controller, so the last
+    // resolution is kept rather than replayed.
+    let mut resolved: Option<(u32, DmaControllerRef)> = None;
+    let mut off = 0;
+    for index in 0..=u8::MAX {
+        if off >= value.len() {
+            return;
+        }
+        let Some(phandle) = be_cell(value, off).and_then(phandle_ref) else {
+            return;
+        };
+        let controller = match resolved {
+            Some((known, controller)) if known == phandle => controller,
+            _ => {
+                let Some(controller) = resolve_dma_controller(fdt, phandle) else {
+                    return;
+                };
+                resolved = Some((phandle, controller));
+                controller
+            }
+        };
+        let start = off + CELL_BYTES;
+        let Some(end) = usize::try_from(controller.cells)
+            .ok()
+            .and_then(|cells| cells.checked_mul(CELL_BYTES))
+            .and_then(|len| start.checked_add(len))
+        else {
+            return;
+        };
+        let Some(specifier_bytes) = value.get(start..end) else {
+            return;
+        };
+        off = end;
+        let name = names
+            .as_mut()
+            .and_then(Iterator::next)
+            .filter(|name| name.len() <= DMA_REQUEST_NAME_MAX)
+            .unwrap_or_default();
+        if specifier_bytes.len() > DMA_SPECIFIER_MAX_CELLS * CELL_BYTES {
+            continue;
+        }
+        let mut specifier = [0u32; DMA_SPECIFIER_MAX_CELLS];
+        let (cells, _) = specifier_bytes.as_chunks::<CELL_BYTES>();
+        for (slot, cell) in specifier.iter_mut().zip(cells) {
+            *slot = u32::from_be_bytes(*cell);
+        }
+        let cells = cells.len();
+        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(controller.id);
+        let Ok(line) = DmaRequestLine::new(endpoint, index, &specifier[..cells], name) else {
+            continue;
+        };
+        if hw.push_resource(HwResource::dma_request(&line)).is_err() {
+            return;
+        }
+    }
+}
+
+/// The id the walk gives the DMA controller whose phandle is `phandle`, and
+/// its `#dma-cells`, found by replaying the walk's own emission rule — so a
+/// consumer met before its controller names the id the controller will get.
+///
+/// One pass over the tree per controller a node names; a controller the walk
+/// does not emit has no id, and a node with no `#dma-cells` is no controller.
+fn resolve_dma_controller(fdt: &Fdt<'_>, phandle: u32) -> Option<DmaControllerRef> {
+    let mut id = HW_NODE_ROOT_ID;
+    for node in fdt.nodes() {
+        let node = node.ok()?;
+        let depth = node.depth() as usize;
+        if depth >= MAX_WALK_DEPTH {
+            return None;
+        }
+        if depth == 0 {
+            continue;
+        }
+        let emitted = is_emitted(&node);
+        if emitted {
+            id = id.checked_add(1)?;
+        }
+        if node.phandle() == Some(phandle) {
+            let cells = node.property("#dma-cells")?;
+            if !emitted || cells.value().len() != CELL_BYTES {
+                return None;
+            }
+            return Some(DmaControllerRef {
+                id,
+                cells: cells.read_be_u32(0).ok()?,
+            });
+        }
+    }
+    None
+}
+
+/// The big-endian cell at byte `off` of `value`.
+fn be_cell(value: &[u8], off: usize) -> Option<u32> {
+    let bytes = value.get(off..off.checked_add(CELL_BYTES)?)?;
+    Some(u32::from_be_bytes(bytes.try_into().ok()?))
 }
 
 /// Whether the walk emits a hardware-tree node for this device-tree node.
 ///
 /// A node with no representable match key and no memory `device_type` is one
 /// the matcher could never bind, so it is spliced out. The single definition
-/// of that rule: [`build_node`] applies it, and the bus-child look-ahead
-/// replays it to predict the ids the walk is about to assign — a second
-/// spelling would let the two disagree and mis-pair a chip with its endpoint.
+/// of that rule: [`FdtDiscovery::build_node`] applies it, and the bus-child
+/// look-ahead and [`resolve_dma_controller`] replay it to predict the ids the
+/// walk assigns — a second spelling would let them disagree and pair a chip or
+/// a DMA consumer with another node's endpoint.
 fn is_emitted(node: &Node<'_>) -> bool {
     if classify(node) == HwDeviceClass::Memory {
         return true;
@@ -305,7 +567,10 @@ fn push_bus_child_duties(
             continue;
         };
         if hw
-            .push_resource(HwResource::bus_child(bus_child_endpoint(id), address))
+            .push_resource(HwResource::bus_child(
+                BUS_CHILD_ENDPOINTS.endpoint(id),
+                address,
+            ))
             .is_err()
         {
             return accepted;
@@ -393,7 +658,8 @@ fn local_mac_address(node: &Node<'_>) -> Option<[u8; MAC_ADDRESS_LEN]> {
 
 /// Derive the device class from the node's own data, most authoritative
 /// source first: `device_type` (the spec keeps it for `memory` and `cpu`),
-/// the `interrupt-controller` marker property, then the spec-recommended
+/// the `#dma-cells` a DMA controller's binding requires, the
+/// `interrupt-controller` marker property, then the spec-recommended
 /// generic node-name stem. Anything else is honestly
 /// [`HwDeviceClass::Other`] — the class is advisory; binding is by match
 /// key.
@@ -404,6 +670,9 @@ fn classify(node: &Node<'_>) -> HwDeviceClass {
             Some(b"cpu") => return HwDeviceClass::Cpu,
             _ => {}
         }
+    }
+    if node.property("#dma-cells").is_some() {
+        return HwDeviceClass::Dma;
     }
     if node.property("interrupt-controller").is_some() {
         return HwDeviceClass::InterruptController;
@@ -436,10 +705,16 @@ mod tests {
     use super::{FdtDiscovery, FdtPlatform};
     use crate::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
     use std::vec::Vec;
-    use tairix_abi::hwtree::bus_child_endpoint;
+    use tairix_abi::driver::dmaengine::{
+        DmaControllerDuty, DmaRequestLine, DMA_CONTROLLER_ENDPOINTS,
+    };
+    use tairix_abi::hwtree::BUS_CHILD_ENDPOINTS;
     use tairix_abi::{HwDeviceClass, HwNode, HwResource, HwResourceKind, HW_NODE_MAX_RESOURCES};
     use tairix_fdt::fixture::DtbBuilder;
     use tairix_fdt::{BusLevel, Fdt, Node};
+
+    /// The phandle every fixture gives its root interrupt controller.
+    const ROOT_INTC: u32 = 1;
 
     /// The smallest honest port: one interrupt cell mapped straight through,
     /// no board augmentation. Enough to exercise the shared walk.
@@ -455,6 +730,10 @@ mod tests {
         fn interrupt_line(&self, specifier: &[u8]) -> Option<u32> {
             let bytes: [u8; 4] = specifier.try_into().ok()?;
             Some(u32::from_be_bytes(bytes))
+        }
+
+        fn root_interrupt_controller(&self) -> Option<u32> {
+            Some(ROOT_INTC)
         }
     }
 
@@ -513,6 +792,7 @@ mod tests {
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
+        b.prop_u32("interrupt-parent", ROOT_INTC);
         b.begin_node("memory@40000000");
         b.prop_str("device_type", "memory");
         b.prop(
@@ -617,17 +897,20 @@ mod tests {
         assert_eq!(
             duties(bus),
             std::vec![
-                (bus_child_endpoint(ds3231.id()), 0x68),
-                (bus_child_endpoint(pcf.id()), 0x51),
+                (BUS_CHILD_ENDPOINTS.endpoint(ds3231.id()), 0x68),
+                (BUS_CHILD_ENDPOINTS.endpoint(pcf.id()), 0x51),
             ]
         );
         // The authority half names only the endpoint: a chip driver never
         // learns a bus address, so it cannot address a neighbour.
         assert_eq!(
             endpoints(ds3231),
-            std::vec![bus_child_endpoint(ds3231.id())]
+            std::vec![BUS_CHILD_ENDPOINTS.endpoint(ds3231.id())]
         );
-        assert_eq!(endpoints(pcf), std::vec![bus_child_endpoint(pcf.id())]);
+        assert_eq!(
+            endpoints(pcf),
+            std::vec![BUS_CHILD_ENDPOINTS.endpoint(pcf.id())]
+        );
         assert!(duties(ds3231).is_empty());
         // The two halves agree, and the two children never share an id.
         assert_ne!(ds3231.id(), pcf.id());
@@ -677,14 +960,14 @@ mod tests {
         assert!(children.len() > served.len());
         for (index, child) in children.iter().enumerate() {
             let expected: Vec<u64> = if index < served.len() {
-                std::vec![bus_child_endpoint(child.id())]
+                std::vec![BUS_CHILD_ENDPOINTS.endpoint(child.id())]
             } else {
                 Vec::new()
             };
             assert_eq!(endpoints(child), expected, "child {index}");
         }
         for (endpoint, child) in served.iter().zip(children.iter()) {
-            assert_eq!(*endpoint, bus_child_endpoint(child.id()));
+            assert_eq!(*endpoint, BUS_CHILD_ENDPOINTS.endpoint(child.id()));
         }
     }
 
@@ -770,14 +1053,17 @@ mod tests {
         assert_eq!(
             duties(bus),
             std::vec![
-                (bus_child_endpoint(mux.id()), 0x70),
-                (bus_child_endpoint(ds3231.id()), 0x68),
+                (BUS_CHILD_ENDPOINTS.endpoint(mux.id()), 0x70),
+                (BUS_CHILD_ENDPOINTS.endpoint(ds3231.id()), 0x68),
             ]
         );
-        assert_eq!(endpoints(mux), std::vec![bus_child_endpoint(mux.id())]);
+        assert_eq!(
+            endpoints(mux),
+            std::vec![BUS_CHILD_ENDPOINTS.endpoint(mux.id())]
+        );
         assert_eq!(
             endpoints(ds3231),
-            std::vec![bus_child_endpoint(ds3231.id())]
+            std::vec![BUS_CHILD_ENDPOINTS.endpoint(ds3231.id())]
         );
         // The nested grandchild is not this bus's child and gets nothing.
         assert!(endpoints(by_key(&nodes, b"vendor,nested")).is_empty());
@@ -830,6 +1116,341 @@ mod tests {
             addr_cells: 2,
             ..addressed
         }));
+    }
+
+    fn irqs(node: &HwNode) -> Vec<u64> {
+        node.resources()
+            .iter()
+            .filter(|r| r.kind() == Some(HwResourceKind::Irq))
+            .map(HwResource::base)
+            .collect()
+    }
+
+    /// A device carrying `interrupts = <line>` and, optionally, its own
+    /// `interrupt-parent`.
+    fn device(b: &mut DtbBuilder, name: &str, compatible: &str, line: u32, parent: Option<u32>) {
+        b.begin_node(name);
+        b.prop_str("compatible", compatible);
+        b.prop("interrupts", &line.to_be_bytes());
+        if let Some(parent) = parent {
+            b.prop_u32("interrupt-parent", parent);
+        }
+        b.end_node();
+    }
+
+    /// A tree whose root names the root controller, with a nested
+    /// one-cell controller (phandle 2) that has devices of its own.
+    fn nested_interrupt_tree() -> Vec<u8> {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.prop_u32("interrupt-parent", ROOT_INTC);
+        b.begin_node("intc");
+        b.prop_str("compatible", "test,root-intc");
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 1);
+        b.prop_u32("phandle", ROOT_INTC);
+        b.end_node();
+        // A nested controller: its own line goes to the root controller,
+        // its children's to it.
+        b.begin_node("gpio");
+        b.prop_str("compatible", "test,gpio");
+        b.prop("interrupts", &40u32.to_be_bytes());
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 1);
+        b.prop_u32("phandle", 2);
+        device(&mut b, "button", "test,button", 3, None);
+        b.end_node();
+        device(&mut b, "inherits", "test,inherits", 50, None);
+        device(&mut b, "rewired", "test,rewired", 0, Some(2));
+        device(&mut b, "named-root", "test,named-root", 51, Some(ROOT_INTC));
+        b.begin_node("malformed");
+        b.prop_str("compatible", "test,malformed");
+        b.prop("interrupts", &52u32.to_be_bytes());
+        b.prop("interrupt-parent", &[0, 1]);
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    #[test]
+    fn a_specifier_is_mapped_only_under_the_root_interrupt_controller() {
+        let nodes = discover(&nested_interrupt_tree());
+        assert_eq!(irqs(by_key(&nodes, b"test,inherits")), std::vec![50]);
+        assert_eq!(irqs(by_key(&nodes, b"test,named-root")), std::vec![51]);
+        // A nested controller's own line is the root controller's.
+        assert_eq!(irqs(by_key(&nodes, b"test,gpio")), std::vec![40]);
+        // Its children's lines, and a device wired to it by phandle, are
+        // numbers in the nested controller's space: decoding them as the
+        // root's would grant another device's line.
+        assert!(irqs(by_key(&nodes, b"test,button")).is_empty());
+        assert!(irqs(by_key(&nodes, b"test,rewired")).is_empty());
+        // A malformed reference names no parent rather than inheriting one.
+        assert!(irqs(by_key(&nodes, b"test,malformed")).is_empty());
+    }
+
+    #[test]
+    fn a_tree_that_names_no_interrupt_parent_maps_no_specifier() {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        device(&mut b, "orphan", "test,orphan", 9, None);
+        b.end_node();
+        let nodes = discover(&b.build());
+        assert!(irqs(by_key(&nodes, b"test,orphan")).is_empty());
+    }
+
+    /// The legacy controller's `/soc` in the shape of the pinned Pi 4 tree:
+    /// a one-cell bus under a two-cell root, translating the peripherals and
+    /// reaching RAM and the peripherals through two `dma-ranges` windows.
+    /// A consumer sits ahead of its controller in document order, so its
+    /// requests name an id the walk has not yet assigned.
+    fn dma_tree() -> Vec<u8> {
+        let cells =
+            |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 1);
+        b.prop_u32("interrupt-parent", ROOT_INTC);
+        b.begin_node("soc");
+        b.prop_str("compatible", "simple-bus");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.prop(
+            "ranges",
+            &cells(&[0x7e00_0000, 0, 0xfe00_0000, 0x0180_0000]),
+        );
+        b.prop(
+            "dma-ranges",
+            &cells(&[
+                0xc000_0000,
+                0,
+                0,
+                0x4000_0000,
+                0x7c00_0000,
+                0,
+                0xfc00_0000,
+                0x0380_0000,
+            ]),
+        );
+        b.begin_node("i2s@7e203000");
+        b.prop_str("compatible", "brcm,bcm2835-i2s");
+        b.prop("reg", &cells(&[0x7e20_3000, 0x24]));
+        b.prop("dmas", &cells(&[0x0c, 2, 0x0c, 3]));
+        b.prop("dma-names", b"tx\0rx\0");
+        b.end_node();
+        b.begin_node("dma-controller@7e007000");
+        b.prop_str("compatible", "brcm,bcm2835-dma");
+        b.prop("reg", &cells(&[0x7e00_7000, 0xb00]));
+        b.prop(
+            "interrupts",
+            &cells(&[80, 81, 82, 83, 84, 85, 86, 87, 87, 88, 88]),
+        );
+        b.prop_u32("#dma-cells", 1);
+        b.prop_u32("dma-channel-mask", 0x7f5);
+        b.prop_u32("phandle", 0x0c);
+        b.end_node();
+        b.begin_node("mmc@7e202000");
+        b.prop_str("compatible", "brcm,bcm2835-sdhost");
+        b.prop("reg", &cells(&[0x7e20_2000, 0x100]));
+        b.prop("dmas", &cells(&[0x0c, 0x2000_000d]));
+        b.prop("dma-names", b"rx-tx-and-more\0");
+        b.end_node();
+        // A controller whose binding is wider than a record: its entries are
+        // dropped, but the entry after one still parses.
+        b.begin_node("wide-dma");
+        b.prop_str("compatible", "test,wide-dma");
+        b.prop_u32("#dma-cells", 3);
+        b.prop_u32("phandle", 0x20);
+        b.end_node();
+        b.begin_node("mixed");
+        b.prop_str("compatible", "test,mixed");
+        b.prop("dmas", &cells(&[0x20, 1, 2, 3, 0x0c, 6]));
+        b.prop("dma-names", b"wide\0narrow\0");
+        b.end_node();
+        b.begin_node("dangling");
+        b.prop_str("compatible", "test,dangling");
+        b.prop("dmas", &cells(&[0x0c, 7, 0x99, 1, 0x0c, 8]));
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    fn requests(node: &HwNode) -> Vec<DmaRequestLine> {
+        node.resources()
+            .iter()
+            .filter_map(|r| r.dma_request_line().ok())
+            .collect()
+    }
+
+    #[test]
+    fn a_dma_controller_carries_its_duty_and_each_window_it_reaches_memory_through() {
+        let nodes = discover(&dma_tree());
+        let dma = by_key(&nodes, b"brcm,bcm2835-dma");
+        assert_eq!(dma.class(), Some(HwDeviceClass::Dma));
+        let duties: Vec<DmaControllerDuty> = dma
+            .resources()
+            .iter()
+            .filter_map(|r| r.dma_controller_duty().ok())
+            .collect();
+        assert_eq!(
+            duties,
+            std::vec![DmaControllerDuty::new(
+                DMA_CONTROLLER_ENDPOINTS.endpoint(dma.id()),
+                Some(0x7f5)
+            )
+            .expect("valid")]
+        );
+        let windows: Vec<HwResource> = dma
+            .resources()
+            .iter()
+            .copied()
+            .filter(|r| r.kind() == Some(HwResourceKind::Dma))
+            .collect();
+        assert_eq!(
+            windows,
+            std::vec![
+                HwResource::dma_translated(0x4000_0000, 0x4000_0000, 0xc000_0000),
+                HwResource::dma_translated(0xff80_0000, 0x0380_0000, 0x7c00_0000),
+            ]
+        );
+        // Every line fits: the window, eleven lines, the duty and two windows.
+        assert_eq!(irqs(dma).len(), 11);
+        assert_eq!(dma.resources().len(), 15);
+        assert!(dma
+            .resources()
+            .iter()
+            .any(|r| r.kind() == Some(HwResourceKind::Mmio) && r.base() == 0xfe00_7000));
+    }
+
+    #[test]
+    fn a_consumer_names_its_controller_even_before_the_walk_reaches_it() {
+        let nodes = discover(&dma_tree());
+        let dma = by_key(&nodes, b"brcm,bcm2835-dma");
+        let i2s = by_key(&nodes, b"brcm,bcm2835-i2s");
+        assert!(i2s.id() < dma.id());
+        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(dma.id());
+        assert_eq!(
+            requests(i2s),
+            std::vec![
+                DmaRequestLine::new(endpoint, 0, &[2], b"tx").expect("valid"),
+                DmaRequestLine::new(endpoint, 1, &[3], b"rx").expect("valid"),
+            ]
+        );
+        // A name longer than a record holds leaves the line unnamed rather
+        // than truncated; the specifier's serving bits ride along whole.
+        let mmc = by_key(&nodes, b"brcm,bcm2835-sdhost");
+        assert_eq!(
+            requests(mmc),
+            std::vec![DmaRequestLine::new(endpoint, 0, &[0x2000_000d], b"").expect("valid")]
+        );
+    }
+
+    #[test]
+    fn an_entry_wider_than_a_record_is_dropped_and_a_dangling_one_ends_the_list() {
+        let nodes = discover(&dma_tree());
+        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(by_key(&nodes, b"brcm,bcm2835-dma").id());
+        // The three-cell entry is dropped whole; the next keeps its position
+        // and its own name.
+        assert_eq!(
+            requests(by_key(&nodes, b"test,mixed")),
+            std::vec![DmaRequestLine::new(endpoint, 1, &[6], b"narrow").expect("valid")]
+        );
+        // Past an unresolvable phandle nothing can be found, not even the
+        // well-formed entry after it.
+        assert_eq!(
+            requests(by_key(&nodes, b"test,dangling")),
+            std::vec![DmaRequestLine::new(endpoint, 0, &[7], b"").expect("valid")]
+        );
+        // The wide controller is still a controller, with its own duty.
+        let wide = by_key(&nodes, b"test,wide-dma");
+        assert_eq!(wide.class(), Some(HwDeviceClass::Dma));
+    }
+
+    #[test]
+    fn a_controller_off_any_translating_bus_reaches_memory_untranslated() {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.begin_node("top-dma");
+        b.prop_str("compatible", "test,top-dma");
+        b.prop_u32("#dma-cells", 1);
+        b.end_node();
+        b.begin_node("identity-bus");
+        b.prop_str("compatible", "simple-bus");
+        b.prop("ranges", &[]);
+        b.prop("dma-ranges", &[]);
+        b.begin_node("identity-dma");
+        b.prop_str("compatible", "test,identity-dma");
+        b.prop_u32("#dma-cells", 1);
+        b.end_node();
+        b.end_node();
+        b.begin_node("opaque-bus");
+        b.prop_str("compatible", "simple-bus");
+        b.prop("ranges", &[]);
+        b.begin_node("opaque-dma");
+        b.prop_str("compatible", "test,opaque-dma");
+        b.prop_u32("#dma-cells", 1);
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        let nodes = discover(&b.build());
+        let windows = |compatible: &[u8]| -> Vec<HwResource> {
+            by_key(&nodes, compatible)
+                .resources()
+                .iter()
+                .copied()
+                .filter(|r| r.kind() == Some(HwResourceKind::Dma))
+                .collect()
+        };
+        assert_eq!(windows(b"test,top-dma"), std::vec![HwResource::dma(0, 0)]);
+        assert_eq!(
+            windows(b"test,identity-dma"),
+            std::vec![HwResource::dma(0, 0)]
+        );
+        // A bus with no `dma-ranges` maps nothing for its children.
+        assert!(windows(b"test,opaque-dma").is_empty());
+        // No mask stated, so the duty says so.
+        let duty = by_key(&nodes, b"test,top-dma")
+            .resources()
+            .iter()
+            .find_map(|r| r.dma_controller_duty().ok())
+            .expect("a duty");
+        assert_eq!(duty.channels(), None);
+    }
+
+    #[test]
+    fn the_generic_channel_mask_reads_one_cell_per_thirty_two_channels() {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        for (name, value) in [
+            ("one", &[0u8, 0, 0x07, 0xf5][..]),
+            ("two", &[0, 0, 0, 1, 0x80, 0, 0, 0][..]),
+            ("ragged", &[0, 0, 1][..]),
+        ] {
+            b.begin_node(name);
+            b.prop("dma-channel-mask", value);
+            b.end_node();
+        }
+        b.begin_node("none");
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let masks: Vec<Option<u64>> = fdt
+            .nodes()
+            .skip(1)
+            .map(|n| super::dma_channel_mask(&n.expect("well formed")))
+            .collect();
+        assert_eq!(
+            masks,
+            std::vec![Some(0x7f5), Some(0x8000_0000_0000_0001), None, None]
+        );
     }
 
     /// Silence the unused-import warning `Node` would otherwise raise while

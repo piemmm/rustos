@@ -695,7 +695,7 @@ from the device tree**:
   — parent `#address-cells = <1>` with `#size-cells = <0>` — so it stays
   platform-neutral. `/cpus` spells itself the same way, so a CPU node is
   excluded by its own spec-defined `device_type`. Each such child's endpoint id
-  is `hwtree::bus_child_endpoint` over its hardware-tree node id; the child
+  is `hwtree::BUS_CHILD_ENDPOINTS` indexed by its hardware-tree node id; the child
   node gets a plain `Endpoint` resource naming it and the **parent** gets a new
   `HwResourceKind::BusChild = 9` pairing that id with the child's bus address
   (`base`/`xlate`, the `Framebuffer` precedent for a paired record).

@@ -134,13 +134,17 @@ impl SharedMemFacility for TestFacility {
             pages,
         }])
     }
-    fn map_region(&self, chunks: &[SharedChunk]) -> Result<u64, Errno> {
+    fn map_region(
+        &self,
+        chunks: &[SharedChunk],
+        _memory: tairix_kernel_mem::SharedMemory,
+    ) -> Result<u64, Errno> {
         Ok(0x9000_0000 + chunks[0].phys_base)
     }
     fn unmap_region(&self, _base: u64, _len: usize) -> Result<(), Errno> {
         Ok(())
     }
-    fn free_region(&self, _chunks: &[SharedChunk]) {}
+    fn free_region(&self, _chunks: &[SharedChunk], _memory: tairix_kernel_mem::SharedMemory) {}
     fn kernel_window(&self, chunks: &[SharedChunk], _len: usize) -> Option<core::ptr::NonNull<u8>> {
         // The single-chunk region resolves to the one leaked test window.
         if chunks.len() == 1 {

@@ -221,6 +221,10 @@ pub fn virt_like(base: u64, size: u64, timebase: u32) -> Vec<u8> {
     b.build()
 }
 
+/// The phandle QEMU's riscv64 `virt` board gives its PLIC, which every device
+/// names as its `interrupt-parent`.
+pub const VIRT_PLIC_PHANDLE: u32 = 3;
+
 /// A QEMU-`virt`-shaped riscv64 tree with a PLIC and one or more
 /// `virtio_mmio` slots, for exercising the riscv64 bootstrap-floor
 /// virtio-MMIO discovery + PLIC interrupt-line decode.
@@ -264,8 +268,10 @@ pub fn virt_like_with_virtio(
     // decode reads its `riscv,ndev` to bound a device's source.
     b.begin_node("plic@c000000");
     b.prop_str("compatible", "riscv,plic0");
+    b.prop("interrupt-controller", &[]);
     b.prop_u32("#interrupt-cells", 1);
     b.prop_u32("riscv,ndev", ndev);
+    b.prop_u32("phandle", VIRT_PLIC_PHANDLE);
     // A two-cell `<base size>` reg matching the node's unit address, as the
     // real `virt` board declares it, so the PLIC-base resolver has an address
     // to read.
@@ -283,6 +289,7 @@ pub fn virt_like_with_virtio(
         vreg.extend_from_slice(&0x1000u64.to_be_bytes());
         b.prop("reg", &vreg);
         b.prop_u32("interrupts", *plic_irq);
+        b.prop_u32("interrupt-parent", VIRT_PLIC_PHANDLE);
         b.end_node();
     }
 
@@ -383,6 +390,10 @@ pub fn arm_with_spin_table_cpus(base: u64, size: u64, cpus: &[(u64, Option<u64>)
     b.build()
 }
 
+/// The phandle the Pi 4 tree gives its GIC-400, which the root names as every
+/// node's `interrupt-parent`.
+pub const RASPI_GIC_PHANDLE: u32 = 1;
+
 /// A Raspberry-Pi-shaped aarch64 tree carrying the two console UARTs the
 /// Pi exposes — a PrimeCell PL011 (`arm,pl011`) and a BCM2835 AUX
 /// mini-UART (`brcm,bcm2835-aux-uart`) — a GIC-400 interrupt controller
@@ -412,6 +423,7 @@ pub fn raspi_like_arm(pl011_base: u64, miniuart_base: u64) -> Vec<u8> {
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 1);
+    b.prop_u32("interrupt-parent", RASPI_GIC_PHANDLE);
 
     b.begin_node("psci");
     b.prop_str("compatible", "arm,psci-1.0");
@@ -454,6 +466,9 @@ pub fn raspi_like_arm(pl011_base: u64, miniuart_base: u64) -> Vec<u8> {
     // 0xFF80_0000` range): four `reg` regions — GICD, GICC, GICH, GICV.
     b.begin_node("interrupt-controller@40041000");
     b.prop_str("compatible", "arm,gic-400");
+    b.prop("interrupt-controller", &[]);
+    b.prop_u32("#interrupt-cells", 3);
+    b.prop_u32("phandle", RASPI_GIC_PHANDLE);
     let mut gic_reg = soc_reg(0x4004_1000, 0x1000);
     gic_reg.extend_from_slice(&soc_reg(0x4004_2000, 0x2000));
     gic_reg.extend_from_slice(&soc_reg(0x4004_4000, 0x2000));
@@ -509,6 +524,10 @@ pub fn raspi_like_arm(pl011_base: u64, miniuart_base: u64) -> Vec<u8> {
     b.build()
 }
 
+/// The phandle QEMU's aarch64 `virt` board gives its GIC, which the root names
+/// as every node's `interrupt-parent`.
+pub const VIRT_GIC_PHANDLE: u32 = 0x8002;
+
 /// A QEMU-`virt`-shaped aarch64 tree: 2/2 root cells, a `/memory` node, a
 /// `/psci` node with a `method` (`hvc`/`smc`), and a `/timer` node with an
 /// `interrupts` cell list (the per-CPU PPI the generic timer raises).
@@ -518,6 +537,7 @@ pub fn virt_like_arm(base: u64, size: u64, psci_method: &str, timer_ppi: u32) ->
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
+    b.prop_u32("interrupt-parent", VIRT_GIC_PHANDLE);
 
     b.begin_node("psci");
     b.prop_str("compatible", "arm,psci-1.0");
@@ -530,6 +550,9 @@ pub fn virt_like_arm(base: u64, size: u64, psci_method: &str, timer_ppi: u32) ->
     // GIC discovery reads.
     b.begin_node("intc@8000000");
     b.prop_str("compatible", "arm,cortex-a15-gic");
+    b.prop("interrupt-controller", &[]);
+    b.prop_u32("#interrupt-cells", 3);
+    b.prop_u32("phandle", VIRT_GIC_PHANDLE);
     let mut gic_reg = Vec::new();
     for cell in [0x0800_0000u64, 0x1_0000, 0x0801_0000, 0x1_0000] {
         gic_reg.extend_from_slice(&cell.to_be_bytes());

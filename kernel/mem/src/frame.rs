@@ -457,7 +457,7 @@ impl FrameAllocatorState {
                 break;
             }
         }
-        let mut cur = found.ok_or(AllocError::OutOfMemory)?;
+        let cur = found.ok_or(AllocError::OutOfMemory)?;
         // Pop the front block at `cur`. The intrusive list is LIFO, so the
         // front is the most recently freed/split block of this order —
         // deterministic, and O(1).
@@ -468,23 +468,126 @@ impl FrameAllocatorState {
         if !self.remove_free_block(start, cur)? {
             return Err(AllocError::InvariantViolation);
         }
+        self.split_around(start, cur, start, order)?;
+        self.charge(start, order, class);
+        Ok(start)
+    }
 
-        // Split down to the requested order.
-        while cur > order {
-            cur -= 1;
-            let buddy = start + (1usize << cur);
-            self.add_free_block(buddy, cur)?;
+    /// Carve a `2^order` block lying wholly below frame `ceiling`.
+    ///
+    /// The free lists are LIFO and address-blind, so their front block says
+    /// nothing about where a free block below the ceiling is: this searches
+    /// the bitmap instead, and takes the *highest* such block so memory lower
+    /// still stays for devices that reach less.
+    fn alloc_order_under(
+        &mut self,
+        class: MemoryClass,
+        order: u32,
+        ceiling: usize,
+    ) -> Result<usize, AllocError> {
+        if order > MAX_ORDER {
+            return Err(AllocError::SizeUnsupported);
         }
+        if ceiling >= self.base_frame + self.span {
+            return self.alloc_order(class, order);
+        }
+        if ceiling <= self.base_frame {
+            return Err(AllocError::OutOfRange);
+        }
+        let start = self
+            .highest_free_run_under(order, ceiling)
+            .ok_or(AllocError::OutOfMemory)?;
+        self.claim_free_run(start, order)?;
+        self.charge(start, order, class);
+        Ok(start)
+    }
 
+    /// The start of the highest aligned `2^order` run of free frames lying
+    /// wholly below frame `ceiling`.
+    ///
+    /// Walks maximal free runs downward a bitmap word at a time: one step per
+    /// word and per free run it passes below the ceiling.
+    fn highest_free_run_under(&self, order: u32, ceiling: usize) -> Option<usize> {
+        let n = 1usize << order;
+        let mut end = ceiling.checked_sub(self.base_frame)?.min(self.span);
+        while let Some(last) = self.last_slot_before(end, |word| !word) {
+            let first = self
+                .last_slot_before(last, |word| word)
+                .map_or(0, |used| used + 1);
+            let candidate = ((self.base_frame + last + 1) / n).checked_sub(1)? * n;
+            if candidate >= self.base_frame + first {
+                return Some(candidate);
+            }
+            end = first;
+        }
+        None
+    }
+
+    /// The highest slot below `end` whose bit `select` keeps set: `!word`
+    /// finds a free slot, `word` a used one.
+    fn last_slot_before(&self, end: usize, select: impl Fn(u64) -> u64) -> Option<usize> {
+        let mut word = end / 64;
+        let mut below = (1u64 << (end % 64)) - 1;
+        loop {
+            if let Some(&bits) = self.bitmap.get(word) {
+                let hits = select(bits) & below;
+                if hits != 0 {
+                    return Some(word * 64 + (63 - hits.leading_zeros() as usize));
+                }
+            }
+            word = word.checked_sub(1)?;
+            below = u64::MAX;
+        }
+    }
+
+    /// Take the free, aligned `2^order` run at `start` off the free lists,
+    /// splitting the free block that encloses it around it.
+    ///
+    /// Population and eager merging leave every aligned all-free run inside
+    /// one free block, so a run no block encloses is bookkeeping that has
+    /// diverged, refused with the lists untouched.
+    fn claim_free_run(&mut self, start: usize, order: u32) -> Result<(), AllocError> {
+        for enclosing in order..=MAX_ORDER {
+            let head = start & !((1usize << enclosing) - 1);
+            if self.remove_free_block(head, enclosing)? {
+                return self.split_around(head, enclosing, start, order);
+            }
+        }
+        Err(AllocError::InvariantViolation)
+    }
+
+    /// Split the just-unlinked free block at `head` of order `from` down to
+    /// the `2^to` block at `keep`, returning every other part to the lists.
+    fn split_around(
+        &mut self,
+        mut head: usize,
+        from: u32,
+        keep: usize,
+        to: u32,
+    ) -> Result<(), AllocError> {
+        let mut cur = from;
+        while cur > to {
+            cur -= 1;
+            let half = 1usize << cur;
+            if keep >= head + half {
+                self.add_free_block(head, cur)?;
+                head += half;
+            } else {
+                self.add_free_block(head + half, cur)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Mark the claimed `2^order` block at `start` used and charge it.
+    fn charge(&mut self, start: usize, order: u32, class: MemoryClass) {
         let n = 1usize << order;
         self.mark_range_used(start, n);
         // Charge every frame of the block, so a free of any part of it reads
         // its own charge back rather than trusting a caller to restate one.
-        // A contiguous fill, on the same frames `mark_range_used` just walked.
         let rel = start - self.base_frame;
         self.tags[rel..rel + n].fill(FrameTag::allocated(class));
         self.class_frames[class.index()] += n;
-        Ok(start)
     }
 
     fn free_order(&mut self, start: usize, order: u32) -> Result<(), AllocError> {
@@ -701,7 +804,12 @@ impl FrameAllocator {
             }
             lo = lo.min(first);
             hi = hi.max(last_excl);
-            runs.push((first, last_excl));
+            // Adjacent regions are one run, or the buddies at their seam
+            // would be populated apart and never merge.
+            match runs.last_mut() {
+                Some((_, prev_end)) if *prev_end == first => *prev_end = last_excl,
+                _ => runs.push((first, last_excl)),
+            }
         }
         if runs.is_empty() {
             return Err(AllocError::OutOfMemory);
@@ -788,6 +896,34 @@ impl FrameAllocator {
     pub fn alloc_order(&self, class: MemoryClass, order: u32) -> Result<Frame, AllocError> {
         let mut g = self.inner.lock();
         g.alloc_order(class, order).map(Frame)
+    }
+
+    /// [`Self::alloc_order`] for a device that reaches only part of RAM:
+    /// every frame of the block lies below `ceiling` when one is given.
+    ///
+    /// The block is the highest one below the ceiling, so a device reaching
+    /// less keeps the memory beneath it. A ceiling above every usable frame
+    /// constrains nothing and costs nothing; one inside RAM costs a search
+    /// of the bitmap below it, a step per word and per free run it passes.
+    ///
+    /// # Errors
+    ///
+    /// - [`AllocError::SizeUnsupported`] if `order > MAX_ORDER`.
+    /// - [`AllocError::OutOfRange`] if no usable frame lies below the ceiling.
+    /// - [`AllocError::OutOfMemory`] if no free block of the order does.
+    pub fn alloc_order_under(
+        &self,
+        class: MemoryClass,
+        order: u32,
+        ceiling: Option<PhysAddr>,
+    ) -> Result<Frame, AllocError> {
+        let Some(ceiling) = ceiling else {
+            return self.alloc_order(class, order);
+        };
+        // A ceiling past the frame index space constrains nothing.
+        let ceiling = usize::try_from(ceiling.frame_index()).unwrap_or(usize::MAX);
+        let mut g = self.inner.lock();
+        g.alloc_order_under(class, order, ceiling).map(Frame)
     }
 
     /// Allocate a single frame on behalf of **userland** (reserve-gated),
@@ -2053,5 +2189,178 @@ mod tests {
         }
         assert_eq!(FrameTag::UNTRACKED.free_order(), None);
         assert_eq!(FrameTag::UNTRACKED.class(), None);
+    }
+
+    #[test]
+    fn a_ceiling_carve_takes_the_highest_free_block_below_it_not_the_list_front() {
+        // Frames 16..80, and the lists offer the top of them first.
+        let a = FrameAllocator::new(&small_map(64)).unwrap();
+        let front = a.alloc_order(MemoryClass::Kernel, 0).unwrap();
+        assert!(front.0 >= 48, "the list front lies above the ceiling");
+
+        let one = a
+            .alloc_order_under(MemoryClass::Dma, 0, Some(Frame(48).start()))
+            .unwrap();
+        assert_eq!(one, Frame(47));
+        let four = a
+            .alloc_order_under(MemoryClass::Dma, 2, Some(Frame(48).start()))
+            .unwrap();
+        assert_eq!(four, Frame(40), "44..48 holds the frame already taken");
+        assert_eq!(a.snapshot().class[MemoryClass::Dma.index()], 5);
+        assert_partitions(&a, 64);
+
+        a.free_order(four, 2).unwrap();
+        a.free(one).unwrap();
+        a.free(front).unwrap();
+        assert_eq!(a.free_frames(), 64);
+        assert_eq!(
+            a.alloc_order(MemoryClass::Kernel, 5),
+            Ok(Frame(32)),
+            "every split merged back"
+        );
+    }
+
+    #[test]
+    fn a_ceiling_carve_refuses_only_when_nothing_below_the_ceiling_is_free() {
+        let a = FrameAllocator::new(&small_map(64)).unwrap();
+        let low = a
+            .alloc_order_under(MemoryClass::Dma, 4, Some(Frame(32).start()))
+            .unwrap();
+        assert_eq!(low, Frame(16));
+        assert_eq!(
+            a.alloc_order_under(MemoryClass::Dma, 0, Some(Frame(32).start())),
+            Err(AllocError::OutOfMemory)
+        );
+        assert_eq!(a.free_frames(), 48, "memory above the ceiling is untouched");
+        a.free_order(low, 4).unwrap();
+        assert_eq!(
+            a.alloc_order_under(MemoryClass::Dma, 0, Some(Frame(32).start())),
+            Ok(Frame(31))
+        );
+    }
+
+    #[test]
+    fn a_ceiling_carve_fails_closed_on_every_request_it_cannot_honour() {
+        let a = FrameAllocator::new(&small_map(64)).unwrap();
+        for ceiling in [0, 10, 16] {
+            assert_eq!(
+                a.alloc_order_under(MemoryClass::Dma, 0, Some(Frame(ceiling).start())),
+                Err(AllocError::OutOfRange),
+                "no usable frame lies below frame {ceiling}"
+            );
+        }
+        assert_eq!(
+            a.alloc_order_under(MemoryClass::Dma, MAX_ORDER + 1, Some(Frame(48).start())),
+            Err(AllocError::SizeUnsupported)
+        );
+        // A ceiling part-way into a frame excludes that frame.
+        let unaligned = Some(PhysAddr::new(Frame(17).start().as_u64() + 1));
+        assert_eq!(
+            a.alloc_order_under(MemoryClass::Dma, 0, unaligned),
+            Ok(Frame(16))
+        );
+        assert_eq!(
+            a.alloc_order_under(MemoryClass::Dma, 0, unaligned),
+            Err(AllocError::OutOfMemory)
+        );
+    }
+
+    #[test]
+    fn a_ceiling_above_every_usable_frame_is_an_ordinary_allocation() {
+        let constrained = FrameAllocator::new(&small_map(64)).unwrap();
+        let ordinary = FrameAllocator::new(&small_map(64)).unwrap();
+        for ceiling in [None, Some(Frame(80).start()), Some(PhysAddr::new(u64::MAX))] {
+            assert_eq!(
+                constrained.alloc_order_under(MemoryClass::Kernel, 1, ceiling),
+                ordinary.alloc_order(MemoryClass::Kernel, 1),
+                "{ceiling:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adjacent_boot_regions_populate_as_one_run() {
+        // Populated apart, the halves of the order-5 block at frame 32 would
+        // never merge, and no order-5 block would exist.
+        let mut m = BootMemoryMap::new();
+        for start in [32, 48] {
+            m.push(MemoryRegion {
+                start: Frame(start).start(),
+                length: (16 * PAGE_SIZE) as u64,
+                kind: RegionKind::Usable,
+            });
+        }
+        let a = FrameAllocator::new(&m).unwrap();
+        assert_eq!(a.alloc_order(MemoryClass::Kernel, 5), Ok(Frame(32)));
+    }
+
+    #[test]
+    fn proptest_ceiling_carves_take_the_highest_free_block_or_prove_none() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+
+        const FIRST: usize = 16;
+        const END: usize = 80;
+        let strat = proptest::collection::vec((any::<u8>(), 0u32..=4, 0usize..=96), 1..160);
+        let mut runner = TestRunner::new(Config {
+            cases: 64,
+            ..Config::default()
+        });
+        runner
+            .run(&strat, |ops| {
+                let a = FrameAllocator::new(&small_map(END - FIRST)).unwrap();
+                let mut held: Vec<(Frame, u32)> = Vec::new();
+                let mut used = [false; END];
+                // The highest aligned all-free block below `ceiling`, by brute
+                // force over the frames the model holds.
+                let best = |used: &[bool; END], order: u32, ceiling: usize| {
+                    let n = 1usize << order;
+                    (FIRST.div_ceil(n) * n..=ceiling.min(END).saturating_sub(n))
+                        .step_by(n)
+                        .filter(|&s| used[s..s + n].iter().all(|u| !u))
+                        .last()
+                };
+                for (op, order, ceiling) in ops {
+                    if op % 3 == 2 && !held.is_empty() {
+                        let (frame, order) = held.swap_remove(usize::from(op) % held.len());
+                        used[frame.0..frame.0 + (1 << order)].fill(false);
+                        a.free_order(frame, order).unwrap();
+                        continue;
+                    }
+                    let got = if op % 3 == 0 {
+                        a.alloc_order_under(MemoryClass::Dma, order, Some(Frame(ceiling).start()))
+                    } else {
+                        a.alloc_order(MemoryClass::Kernel, order)
+                    };
+                    let n = 1usize << order;
+                    if op % 3 == 0 && ceiling < END {
+                        match (got, best(&used, order, ceiling)) {
+                            (Ok(frame), Some(want)) => prop_assert_eq!(frame.0, want),
+                            (Err(AllocError::OutOfRange), None) => prop_assert!(ceiling <= FIRST),
+                            (Err(AllocError::OutOfMemory), None) => prop_assert!(ceiling > FIRST),
+                            (got, want) => {
+                                return Err(TestCaseError::fail(format!(
+                                    "{got:?} against {want:?}"
+                                )));
+                            }
+                        }
+                    }
+                    if let Ok(frame) = got {
+                        prop_assert_eq!(frame.0 % n, 0);
+                        prop_assert!(frame.0 >= FIRST && frame.0 + n <= END);
+                        prop_assert!(used[frame.0..frame.0 + n].iter().all(|u| !u), "overlap");
+                        used[frame.0..frame.0 + n].fill(true);
+                        held.push((frame, order));
+                    }
+                }
+                let held_frames: usize = held.iter().map(|&(_, order)| 1usize << order).sum();
+                prop_assert_eq!(a.free_frames() + held_frames, END - FIRST);
+                for (frame, order) in held {
+                    a.free_order(frame, order).unwrap();
+                }
+                prop_assert_eq!(a.free_frames(), END - FIRST);
+                Ok(())
+            })
+            .unwrap();
     }
 }

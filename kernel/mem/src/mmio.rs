@@ -130,6 +130,26 @@ impl MmioRegion {
     }
 }
 
+/// How a shared region's pages are mapped into each process that maps it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SharedMemory {
+    /// Ordinary write-back RAM two processes exchange data through.
+    Cacheable,
+    /// A buffer a DMA master reads or writes, mapped coherent in every
+    /// process so no mapping can hold a line the device never sees.
+    DmaCoherent,
+}
+
+impl SharedMemory {
+    fn data_flags(self) -> MapFlags {
+        let data = MapFlags::READ | MapFlags::WRITE | MapFlags::USER;
+        match self {
+            Self::Cacheable => data,
+            Self::DmaCoherent => data | MapFlags::DMA_COHERENT,
+        }
+    }
+}
+
 /// Per-task guard-bracketed MMIO virtual-window allocator, **independent of
 /// the address space it maps into**.
 ///
@@ -360,8 +380,9 @@ impl MmioWindowMap {
 
     /// Map an existing, kernel-owned **shared-memory region** whose backing
     /// is a *list* of physically-contiguous chunks into one contiguous,
-    /// guard-bracketed virtual window, mapped **cacheable** `RW|USER` (never
-    /// executable). Returns the [`MmioRegion`] spanning the whole window.
+    /// guard-bracketed virtual window, mapped `RW|USER` (never executable)
+    /// with the attribute `memory` names. Returns the [`MmioRegion`] spanning
+    /// the whole window.
     ///
     /// This is [`Self::map_cacheable_into`] generalised from a single block
     /// to several: a region larger than the frame allocator's single-block
@@ -382,10 +403,11 @@ impl MmioWindowMap {
     /// * [`MmioError::NoVirtualSpace`] — no free run of the required length.
     /// * [`MmioError::PageTable`] — propagated from [`AddressSpace::map`]
     ///   (a partial map is rolled back before the error returns).
-    pub fn map_cacheable_chunks_into<P: PageTable>(
+    pub fn map_chunks_into<P: PageTable>(
         &mut self,
         space: &mut AddressSpace<P>,
         chunks: &[(u64, u64)],
+        memory: SharedMemory,
     ) -> Result<MmioRegion, MmioError> {
         if chunks.is_empty() {
             return Err(MmioError::InvalidRegion);
@@ -443,7 +465,7 @@ impl MmioWindowMap {
                 page,
                 Frame(start_frame_index),
                 pages_usize,
-                MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+                memory.data_flags(),
             ) {
                 self.unwind_run(space, leading_guard_slot, gi);
                 return Err(MmioError::PageTable(err));
@@ -477,7 +499,7 @@ impl MmioWindowMap {
 
     /// Describe the run claimed at `leading_guard_slot` as the
     /// [`MmioRegion`] its caller holds. The single tail shared by
-    /// [`Self::map_with_flags`] and [`Self::map_cacheable_chunks_into`], so
+    /// [`Self::map_with_flags`] and [`Self::map_chunks_into`], so
     /// the window address arithmetic has one definition.
     fn region_of(
         &self,

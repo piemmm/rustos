@@ -170,6 +170,9 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 124 | `notice_read`  | `u32 topic`, `user_ptr`, `len`          | `u64` (bytes) | —                       | no      |
 | 125 | `notice_publish` | `u32 topic`, `user_ptr`, `len`        | `errno`       | — (per-topic authority) | yes     |
 | 126 | `dma_quiesced` | —                                       | `u64` (bytes freed) | `CAP_MEM_DMA`     | yes     |
+| 127 | `shm_create_dma` | `Handle` (`Dma` grant), `len`, `user_ptr` (id out), `user_ptr` (device address out) | `u64` (base VA) | `CAP_MEM_DMA` | yes |
+| 128 | `shm_grant_peer` | `Handle` (region), `IpcEndpoint`, `Handle` (ticket) | `u64` (handle) | `CAP_SHM`    | yes     |
+| 129 | `call_peer_holds` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (resource) | `errno` | —              | no      |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -445,10 +448,10 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_INPUT_INJECT` | `key_inject`, `pointer_inject` |
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
 | `CAP_INPUT_READ`   | `keyboard_read`, `pointer_read` |
-| `CAP_SHM`          | `shm_create`, `shm_map`, `shm_grant` |
+| `CAP_SHM`          | `shm_create`, `shm_map`, `shm_grant`, `shm_grant_peer`, and `shm_create_dma` (checked in-handler, in addition to the dispatcher's `CAP_MEM_DMA`) |
 | `CAP_IPC_ENDPOINT` | `call_grant` (the dispatch gate); also the per-endpoint gate a grant-restricted endpoint's *senders* must hold, enforced in `ipc_call`/`call_post` alongside the per-endpoint grant |
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
-| `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`, `dma_quiesced` |
+| `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`, `dma_quiesced`, `shm_create_dma` |
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
@@ -955,6 +958,58 @@ holder's next call fails closed rather than retargeting onto whatever bound
 the id next. Minting is also idempotent — granting a task a resource it
 already holds returns the handle it already has — so authority is a set and
 repeating a delegation cannot grow a recipient's kernel-side grant table.
+Every delegated mint is also live-checked: a recipient that ended between the
+endpoint lookup and the mint receives nothing and the call answers
+`NotFound`, because a grant table minted for a gone task would outlive the
+withdrawal that cleared it.
+
+`shm_create_dma` (no. 127), `shm_grant_peer` (no. 128) and `call_peer_holds`
+(no. 129) are the kernel half of the DMA-engine seam (`plans/SOUND.md` SND5b,
+`docs/src/drivers/dma.md`): they let a DMA controller's driver hand a client a
+buffer the controller reaches, and check the client's claim to a device FIFO,
+without the client ever naming an address.
+
+`shm_create_dma(handle, len, id_out, device_out)` is `shm_create` for memory a
+DMA master reaches. The caller presents one of its own `Dma` grants; the kernel
+carves one physically contiguous, power-of-two block below the grant's
+addressing limit, zeroes it and cleans it to memory, maps it `DMA_COHERENT` —
+as it maps it in every process that later maps it, so no mapping can hold a
+line the device never sees — and writes out the region id and the block's
+**device** address, translated through the grant's bus window. A block the
+window cannot name is released before anything is written. The dispatcher
+demands `CAP_MEM_DMA` and the handler `CAP_SHM`, and only a driver loaded for a
+hardware node may carve, because the region binds that node's DMA quarantine
+(D167). The creator's own unmap is its word that its device is done with the
+region, as `dma_free` is for a carve. Should the creator end still mapping
+it — killed, faulted, exiting, or unloaded — the region is orphaned: when its
+last mapping goes its frames join the quarantine rather than the allocator,
+because the device may still be mastering them, and an exit's
+`DMA_QUARANTINED` record counts them with the process's own carves. Audited as
+`dma_alloc`. Wrapper `tairix_rt::shm_create_dma`; C stub
+`tairix_sys_shm_create_dma`.
+
+`shm_grant_peer(region, endpoint, ticket)` is `shm_grant` pointed the other
+way: it mints the region to the task whose call the server is serving, named by
+the ticket as `call_peer_origin` names it, rather than to an endpoint's server.
+The caller must hold a `Shared` grant for the region — checked before any
+endpoint state is read, so an unheld and an unknown region are the same
+`NotFound` — and must own the endpoint and hold its receive capability. The
+recipient is the task the kernel recorded as posting the call, and one that
+has ended receives nothing. A DMA-engine driver uses it to return the buffer it
+carved for a client inside its `Prepare` reply. Audited as `shm_grant`.
+Wrapper `tairix_rt::shm_grant_peer`; C stub `tairix_sys_shm_grant_peer`.
+
+`call_peer_holds(endpoint, ticket, resource)` is the grant twin of
+`call_peer_seat`: it answers `0` when one of the served caller's grants covers
+the quoted wire-encoded `HwResource`, and `PermissionDenied` when none does,
+under the same gate — the caller owns the endpoint and holds its receive
+capability — so a server learns grants only of a task it is actively serving,
+and never which grant covered. A record that does not decode is refused with
+its own decode error. A DMA-engine driver uses it to confirm a client holds the
+register window it asks a channel to feed, so a client can aim a channel only
+at a FIFO it could map itself. Not audited: the decision it feeds is the
+server's to record. Wrapper `tairix_rt::call_peer_holds`; C stub
+`tairix_sys_call_peer_holds`.
 
 `fd_grant` (no. 90) and `fd_redeem` (no. 91) are the one-shot,
 user-mediated **file** delegation (`plans/CAPABILITY_USE.md` CU6,
@@ -1970,9 +2025,12 @@ re-validates arguments — the dispatcher does that first.
 | `pty_create`    | validates `rows`/`cols` (non-zero, `u16`-bounded) into a `TerminalSize`, then mints one kernel pseudo-terminal (`kernel/core::pty` — two `PIPE_CAPACITY` rings carrying the shared `lib/tty` line discipline + a `ForegroundOwnership`) as a master/slave read-write descriptor pair in the caller's own open table (`AddressSpaceRegistry::open_pty`) and writes the two `u32` fds out (master first) through `copy_to_user`; the ends are served by `stream_read`/`stream_write` and `fs_read`/`fs_write` alike, through the one shared parked read/write loop (a master write feeds the input discipline and delivers cooked `^C`/`^Z` to the slave's foreground job via `procsignal`; a master read drains cooked output; a slave read drains input, echoing in cooked mode; a slave write cooks `ONLCR`). The slave is a tty for `stream_input_mode`/`terminal_size`/`console_foreground` (`plans/PTY.md`) | Zero/oversized dimension → `OutOfRange`. Faulting out-pointer / no registered address space → `BadAddress`, with the half-built pair unwound whole. Otherwise `Ok(0)`. |
 | `stream_input_mode` | decodes the mode fail-closed, resolves `fd` against the caller's per-process descriptor table (direction first), then the descriptor's console index against the installed console list, and selects that console's read discipline (`ConsoleDevice::set_input_mode`, which also resets the line-discipline column): cooked echoes the consumed bytes back to the console write half (`AGENTS.md` §20 — terminal local echo, with CR/LF cooked to CR-LF and the column-bounded `BS SP BS` rub-out), secret suppresses echo and arms the activity indicator, raw suppresses both | Reserved/unknown `mode` → `OutOfRange`. `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. Otherwise `Ok(0)`. |
 | `mmio_map`      | resolves `handle` against the caller (`AddressSpaceRegistry::grant(caller.task_id, handle)`, owner-checked per-task grant table; a task with no minted grant resolves to nothing), validates the granted resource is a memory window and the `[offset, offset + len)` sub-region lies wholly inside it (`devres::mappable_subwindow` — `Mmio` / `BusWindow`, non-zero `len`, in-bounds, non-overflowing), then maps **only** that sub-region `(grant_base + offset, len)` into the caller's own address space through the installed `MmioMapFacility` (`with_mmio_map_facility`; default `NULL_MMIO_MAP_FACILITY`), returning its base virtual address — so a large outbound bus-window grant maps just one enumerated BAR, not the whole window (`AGENTS.md` §24.1; `plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-window grant or a sub-region escaping it → `OutOfRange` / `LengthOutOfRange`. No map facility wired → `NotImplemented`. Frame/virtual-window exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
-| `dma_alloc`     | resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), rejects a zero / over-the-grant-maximum `len`, then carves a physically-contiguous, zeroed, coherent `RW` buffer bounded by the grant's CPU-side `addr_limit` into the caller's own address space through the installed `DmaAllocFacility` (`with_dma_alloc_facility`; default `NULL_DMA_ALLOC_FACILITY`), resolves the device-visible base via `devres::translate_device_addr` (CPU-physical for a coherent constraint, re-based onto the far side for a translating inbound viewport, `HwResource::dma_translated`), and copies it out to `device_out`, returning the buffer's base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `len == 0` → `LengthOutOfRange`. Over-max / over-limit, or a carve escaping a translating viewport → `OutOfRange`. No DMA facility wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Faulting `device_out` → `BadAddress`. Otherwise `Ok(base)`. |
+| `dma_alloc`     | resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), rejects a zero / over-the-grant-maximum `len`, then carves a physically-contiguous, zeroed, coherent `RW` buffer below the grant's CPU-side `addr_limit` (`FrameAllocator::alloc_order_under`) into the caller's own address space through the installed `DmaAllocFacility` (`with_dma_alloc_facility`; default `NULL_DMA_ALLOC_FACILITY`), resolves the device-visible base via `devres::translate_device_addr` (CPU-physical for a coherent constraint, re-based onto the far side for a translating inbound viewport, `HwResource::dma_translated`), and copies it out to `device_out`, returning the buffer's base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `len == 0` → `LengthOutOfRange`. Over-max, a limit no RAM lies below, or a carve escaping a translating viewport → `OutOfRange`. No DMA facility wired → `NotImplemented`. No free block below the limit → `OutOfMemory`. Faulting `device_out` → `BadAddress`. Otherwise `Ok(base)`. |
 | `dma_free`      | the symmetric free for `dma_alloc`: resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), then releases the buffer based at `cpu_va` from the caller's own address space through the same `DmaAllocFacility` (`free`), zeroing every backing byte (zero-on-free, `AGENTS.md` §4) before its frames return to the allocator, and drops the buffer's own pages from the caller's address-space snapshot (the allocator reports the extent it released, so the drop costs the buffer, not the whole space). Only `cpu_va` is taken from the caller; the buffer's extent is the allocator's authoritative record. A long-running driver reclaims each transfer's bounce buffers through this rather than leaking DMA frames until it exits (`plans/PI.md` P10) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `cpu_va` not the base of a live carve in the caller's DMA window (covers a stale, double, or cross-task free) → `OutOfRange`. No DMA facility wired → `NotImplemented`. Otherwise `Ok(0)`. |
 | `dma_quiesced`  | reads the caller's own load record (hardware-tree node and admission generation, kernel-attested; no argument crosses the trap) and has the installed `DmaQuarantineFacility` (`with_dma_quarantine`; default `NULL_DMA_QUARANTINE`) free, scrubbed, every block the node's quarantine holds from an earlier generation, auditing `DMA_QUARANTINE_RELEASED` with `cause=reset` (D167) | No load record → `NotFound`. No quarantine wired → `NotImplemented`. Otherwise `Ok(bytes freed)`. |
+| `shm_create_dma` | demands `CAP_SHM` in the handler, resolves `handle` against the caller (owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`) and `len` against it, requires the caller's load record, then has `sharedreg::create_dma` bind the node's quarantine and the installed `SharedMemFacility` carve one block below the grant's `addr_limit` (`alloc_dma_region`, `FrameAllocator::alloc_order_under`) and map it `DmaCoherent`; translates the block through `devres::translate_device_addr`, publishes the mapping, copies the id and device address out, and mints the caller the region's `Shared` grant | No `CAP_SHM`, or no load record → `PermissionDenied`. Unknown / non-owned handle → `NotFound`. Non-DMA grant, over-the-grant-maximum `len`, a limit no RAM lies below, or a block the window cannot name → `OutOfRange`. `len == 0`, or past the largest contiguous block → `LengthOutOfRange`. No quarantine or no DMA-capable facility wired → `NotImplemented`. No free block below the limit → `OutOfMemory`. Faulting out pointer → `BadAddress` (the region released). Otherwise `Ok(base)`. |
+| `shm_grant_peer` | checks the caller's own `Shared` grant for the region, resolves the endpoint and gates the caller against its `recv_caps` and owner, resolves the ticket to the kernel-recorded poster (`CallEndpoint::peer_origin`), and mints the poster the region grant only while it lives (`AddressSpaceRegistry::mint_grant_live`) | Unheld region, unknown endpoint or ticket, or an ended recipient → `NotFound`. Not the endpoint's server → `PermissionDenied`. Otherwise `Ok(handle)`. |
+| `call_peer_holds` | resolves the endpoint and gates the caller against its `recv_caps` and owner, resolves the ticket to the kernel-recorded poster, copies the `HwResource` record in and decodes it canonically, then tests the poster's grants (`AddressSpaceRegistry::grant_covers`) | Unknown endpoint or ticket → `NotFound`. Not the endpoint's server, or no covering grant → `PermissionDenied`. Faulting pointer → `BadAddress`. Undecodable record → its decode error. Otherwise `Ok(0)`. |
 
 `spawn` also carries the **parser-sandbox mode**
 (`docs/src/security/sandbox.md`): an attach block whose `flags` word

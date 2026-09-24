@@ -181,6 +181,15 @@ const NUM_DMA_FREE: u64 = SyscallNumber::DMA_FREE.as_u16() as u64;
 /// `dma_quiesced` syscall number (as above).
 const NUM_DMA_QUIESCED: u64 = SyscallNumber::DMA_QUIESCED.as_u16() as u64;
 
+/// `shm_create_dma` syscall number (as above).
+const NUM_SHM_CREATE_DMA: u64 = SyscallNumber::SHM_CREATE_DMA.as_u16() as u64;
+
+/// `shm_grant_peer` syscall number (as above).
+const NUM_SHM_GRANT_PEER: u64 = SyscallNumber::SHM_GRANT_PEER.as_u16() as u64;
+
+/// `call_peer_holds` syscall number (as above).
+const NUM_CALL_PEER_HOLDS: u64 = SyscallNumber::CALL_PEER_HOLDS.as_u16() as u64;
+
 /// `wait` syscall number (as above).
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 
@@ -4219,6 +4228,73 @@ pub fn call_peer_seat(endpoint: u64, ticket: u64, seat: u64) -> i64 {
     ret as i64
 }
 
+/// Carve a shared region a DMA master may reach under the caller's `Dma` grant
+/// `handle` (`SyscallNumber::SHM_CREATE_DMA`).
+///
+/// Returns the base virtual address of the caller's coherent mapping, or
+/// `-errno`. On success the region id and the block's device address —
+/// translated through the grant's bus window — are written to `id_out` and
+/// `device_out`. The kernel demands `CAP_MEM_DMA`,
+/// `CAP_SHM`, and a caller loaded for a node, whose quarantine the region
+/// binds.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 base-or-errno encoding (base ≥ 0, else -errno).
+pub fn shm_create_dma(handle: u64, len: usize, id_out: &mut u64, device_out: &mut u64) -> i64 {
+    let id_ptr = core::ptr::from_mut::<u64>(id_out) as usize as u64;
+    let device_ptr = core::ptr::from_mut::<u64>(device_out) as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap. Both outputs are live exclusive
+    // `&mut u64`s for the call's duration, which the kernel validates against
+    // the caller's own address space before writing.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_SHM_CREATE_DMA,
+            [handle, len as u64, id_ptr, device_ptr, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Grant the task whose call `ticket` on `endpoint` the caller is serving the
+/// right to map shared region `region` (`SyscallNumber::SHM_GRANT_PEER`),
+/// returning the minted handle (≥ 1) or `-errno`.
+///
+/// The reply-side counterpart of [`shm_grant`]: the caller forwards the handle
+/// in its reply, and it resolves only for the recipient's [`shm_map`]. The
+/// kernel demands `CAP_SHM`, the caller's own grant for the region, and that
+/// the caller serves `endpoint`; a recipient that has ended receives nothing.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 handle-or-errno encoding (handle ≥ 1, else -errno).
+pub fn shm_grant_peer(region: u64, endpoint: u64, ticket: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the call carries no
+    // pointers, and the kernel checks the region grant and the endpoint's
+    // ownership before minting anything.
+    let ret = unsafe { raw_syscall(NUM_SHM_GRANT_PEER, [region, endpoint, ticket, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Whether the task whose call `ticket` on `endpoint` the caller is serving
+/// holds a grant covering `resource` (`SyscallNumber::CALL_PEER_HOLDS`).
+///
+/// `0` when it does, else `-errno`: `PermissionDenied` when it holds none or
+/// the caller does not serve `endpoint`, `NotFound` for an unknown endpoint or
+/// a call not in service.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 zero-or-errno encoding.
+pub fn call_peer_holds(
+    endpoint: u64,
+    ticket: u64,
+    resource: &tairix_abi::hwtree::HwResource,
+) -> i64 {
+    let record = resource.to_le_bytes();
+    let record_ptr = record.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke. `record` outlives the
+    // call and holds exactly the one wire-encoded record the kernel copies
+    // in; it writes nothing back.
+    let ret = unsafe { raw_syscall(NUM_CALL_PEER_HOLDS, [endpoint, ticket, record_ptr, 0, 0, 0]) };
+    ret as i64
+}
+
 /// Create a kernel **wait-set**: a multiplexing object that observes the
 /// readiness of several event sources so one task can service them all
 /// without a busy-poll (`SyscallNumber::WAITSET_CREATE`; `plans/USB.md` U3a3
@@ -6514,6 +6590,45 @@ mod tests {
         assert_eq!(args[0], 0xD15_1001);
         assert_eq!(args[1], 9);
         assert_eq!(args[2], 0);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn shm_create_dma_marshals_the_grant_length_and_both_out_pointers() {
+        let mut id = 0u64;
+        let mut device = 0u64;
+        let (number, args) = capture(0x7000, || {
+            assert_eq!(shm_create_dma(3, 0x2000, &mut id, &mut device), 0x7000);
+        });
+        assert_eq!(number, NUM_SHM_CREATE_DMA);
+        assert_eq!(args[0], 3);
+        assert_eq!(args[1], 0x2000);
+        assert_eq!(args[2], core::ptr::addr_of_mut!(id) as usize as u64);
+        assert_eq!(args[3], core::ptr::addr_of_mut!(device) as usize as u64);
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn shm_grant_peer_marshals_region_endpoint_and_ticket() {
+        let (number, args) = capture(4, || {
+            assert_eq!(shm_grant_peer(42, 0xD15_1001, 9), 4);
+        });
+        assert_eq!(number, NUM_SHM_GRANT_PEER);
+        assert_eq!(&args[..3], &[42, 0xD15_1001, 9]);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn call_peer_holds_marshals_endpoint_ticket_and_a_record_pointer() {
+        let resource = tairix_abi::hwtree::HwResource::mmio(0xFE20_3004, 4);
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (number, args) = capture(neg, || {
+            assert_eq!(call_peer_holds(0xD15_1001, 9, &resource), want);
+        });
+        assert_eq!(number, NUM_CALL_PEER_HOLDS);
+        assert_eq!(&args[..2], &[0xD15_1001, 9]);
+        assert_ne!(args[2], 0);
         assert_eq!(&args[3..], &[0, 0, 0]);
     }
 

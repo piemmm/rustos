@@ -140,6 +140,10 @@ trait Pager {
     /// a failed shrink leaves the pages mapped (the heap keeps them as a free
     /// span rather than losing track of them).
     fn unmap(&self, base: u64, pages: usize) -> bool;
+
+    /// The pointer this process reaches arena byte `addr` through: the pager
+    /// made the mapping, so only it knows how the memory came to exist.
+    fn pointer(&self, addr: usize) -> *mut u8;
 }
 
 /// The growable backing store for the free-span table.
@@ -759,7 +763,7 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
         let mut state = self.state.lock();
         let policy = Self::policy(&state);
         match state.alloc(layout, &self.pager, policy) {
-            Some(addr) => addr as *mut u8,
+            Some(addr) => self.pager.pointer(addr),
             None => core::ptr::null_mut(),
         }
     }
@@ -767,7 +771,7 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let mut state = self.state.lock();
         let policy = Self::policy(&state);
-        state.free(ptr as usize, layout, &self.pager, policy);
+        state.free(ptr.addr(), layout, &self.pager, policy);
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
@@ -777,7 +781,7 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
         {
             let mut state = self.state.lock();
             let policy = Self::policy(&state);
-            if state.resize_in_place(ptr as usize, layout, new_size, &self.pager, policy) {
+            if state.resize_in_place(ptr.addr(), layout, new_size, &self.pager, policy) {
                 return ptr;
             }
         }
@@ -792,7 +796,7 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
             let mut state = self.state.lock();
             let policy = Self::policy(&state);
             match state.alloc(new_layout, &self.pager, policy) {
-                Some(addr) => addr as *mut u8,
+                Some(addr) => self.pager.pointer(addr),
                 None => return core::ptr::null_mut(),
             }
         };
@@ -806,7 +810,7 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
         }
         let mut state = self.state.lock();
         let policy = Self::policy(&state);
-        state.free(ptr as usize, layout, &self.pager, policy);
+        state.free(ptr.addr(), layout, &self.pager, policy);
         new_ptr
     }
 }
@@ -832,6 +836,12 @@ impl Pager for SyscallPager {
 
     fn unmap(&self, base: u64, pages: usize) -> bool {
         crate::mem_unmap(base, pages * PAGE_SIZE) == 0
+    }
+
+    fn pointer(&self, addr: usize) -> *mut u8 {
+        // The kernel mapped the arena outside the abstract machine, so its
+        // provenance is exposed by definition.
+        core::ptr::with_exposed_provenance_mut(addr)
     }
 }
 
@@ -957,6 +967,9 @@ mod tests {
             self.events.borrow_mut().push((false, base, pages));
             true
         }
+        fn pointer(&self, addr: usize) -> *mut u8 {
+            unbacked(addr)
+        }
     }
 
     /// A pager that grants a map of at most `limit` pages, to drive the case
@@ -989,6 +1002,9 @@ mod tests {
         fn unmap(&self, _base: u64, _pages: usize) -> bool {
             true
         }
+        fn pointer(&self, addr: usize) -> *mut u8 {
+            unbacked(addr)
+        }
     }
 
     /// A pager that maps but refuses every release, counting the attempts —
@@ -1014,6 +1030,9 @@ mod tests {
             self.attempts.set(self.attempts.get() + 1);
             false
         }
+        fn pointer(&self, addr: usize) -> *mut u8 {
+            unbacked(addr)
+        }
     }
 
     /// A pager whose `map` always fails, to drive the deterministic-OOM path.
@@ -1025,6 +1044,15 @@ mod tests {
         fn unmap(&self, _base: u64, _pages: usize) -> bool {
             false
         }
+        fn pointer(&self, addr: usize) -> *mut u8 {
+            unbacked(addr)
+        }
+    }
+
+    /// The tests' arena is addresses alone and is never dereferenced, so its
+    /// pointers carry no provenance at all.
+    fn unbacked(addr: usize) -> *mut u8 {
+        core::ptr::without_provenance_mut(addr)
     }
 
     /// A host [`SpanStore`] backed by a `Vec`, the safe analogue of the
@@ -1676,7 +1704,7 @@ mod tests {
         let l = layout(128, 16);
         // SAFETY: `l` is a valid non-zero layout; the wrapper is freshly built.
         let p = unsafe { heap.alloc(l) };
-        assert_eq!(p as usize, base());
+        assert_eq!(p.addr(), base());
         // SAFETY: `p` was just returned by this allocator for `l`.
         unsafe { heap.dealloc(p, l) };
         // The page is free again and the next allocation of it costs no
@@ -1686,7 +1714,7 @@ mod tests {
         // band-change trim is what surrenders it.
         assert_eq!(heap.pager.unmaps(), 0);
         // SAFETY: `l` is the layout just freed.
-        assert_eq!(unsafe { heap.alloc(l) } as usize, base());
+        assert_eq!(unsafe { heap.alloc(l) }.addr(), base());
         assert_eq!(
             heap.pager.maps(),
             1,

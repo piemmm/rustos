@@ -33,6 +33,7 @@
 
 use crate::blkio::{BlkStatus, FaultDomainState};
 use crate::driver::display::{DisplayFormat, DisplayMode};
+use crate::driver::dmaengine::{DmaControllerDuty, DmaRequestLine, DMA_SPECIFIER_MAX_CELLS};
 use crate::driver::net::MAC_ADDRESS_LEN;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::{CapabilityId, Errno};
@@ -93,7 +94,11 @@ pub const HW_VIRTUAL_BUS_COMPATIBLE: &[u8] = b"tairix,virtual-bus";
 pub const HW_NODE_MAX_MATCH_KEYS: usize = 4;
 
 /// Maximum number of [`HwResource`]s a single node carries.
-pub const HW_NODE_MAX_RESOURCES: usize = 8;
+///
+/// Wide enough for a DMA controller with a window, a line per channel, its
+/// duty and its bus's DMA windows; an entry past it is dropped by discovery,
+/// never truncated.
+pub const HW_NODE_MAX_RESOURCES: usize = 16;
 
 /// Bytes the fixed [`HwNode`] header occupies on the wire, before the
 /// match-key and resource arrays: `id`, `parent`, `address`, `class`, the two
@@ -140,6 +145,8 @@ pub enum HwDeviceClass {
     /// An audio device: a sound card, codec controller, or digital audio
     /// interface presenting sinks and sources.
     Audio = 13,
+    /// A DMA controller whose channels move data for other devices.
+    Dma = 14,
     /// A device whose class is not modelled by `abi-v1`.
     Other = 65535,
 }
@@ -149,6 +156,29 @@ impl HwDeviceClass {
     #[must_use]
     pub const fn as_u16(self) -> u16 {
         self as u16
+    }
+
+    /// The class's name, as every tool that labels a node spells it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::Bus => "bus",
+            Self::Cpu => "cpu",
+            Self::Memory => "memory",
+            Self::Timer => "timer",
+            Self::InterruptController => "interrupt-controller",
+            Self::Display => "display",
+            Self::Input => "input",
+            Self::Network => "network",
+            Self::Storage => "storage",
+            Self::Serial => "serial",
+            Self::Rtc => "rtc",
+            Self::Accelerator => "accelerator",
+            Self::Audio => "audio",
+            Self::Dma => "dma",
+            Self::Other => "other",
+        }
     }
 
     /// Inverse of [`Self::as_u16`]; `None` for an unknown discriminant.
@@ -169,6 +199,7 @@ impl HwDeviceClass {
             11 => Some(Self::Rtc),
             12 => Some(Self::Accelerator),
             13 => Some(Self::Audio),
+            14 => Some(Self::Dma),
             65535 => Some(Self::Other),
             _ => None,
         }
@@ -516,37 +547,71 @@ pub enum HwResourceKind {
     /// because the two facts must arrive paired, and because `Endpoint` means
     /// "may submit to", never "must serve".
     BusChild = 9,
+    /// The **duty to serve a DMA controller's endpoint**: `base` is the
+    /// endpoint id, `len` is `1`, and `xlate` holds the channels the tree
+    /// left to this system, numbered from the node's own first channel, when
+    /// `flags` bit 0 says the tree stated them. Recovered through
+    /// [`HwResource::dma_controller_duty`].
+    DmaController = 10,
+    /// One entry of a consumer's `dmas`: the **right to call** the controller
+    /// endpoint in `base` for the request line it names. `xlate` holds the
+    /// specifier cells, the first in its low half; `len` the entry's
+    /// `dma-names` string NUL-padded into eight bytes; `flags` the entry's
+    /// position (bits 0–7) and cell count (bits 8–15). Recovered through
+    /// [`HwResource::dma_request_line`].
+    ///
+    /// It covers calling that endpoint and never binding it, so no consumer
+    /// can serve the rendezvous every other consumer of its controller calls.
+    DmaRequest = 11,
 }
 
-/// Base of the reserved block of per-bus-child transfer-endpoint ids.
+/// A reserved block of call-endpoint ids, one per hardware-tree node id.
 ///
-/// The block spans one `u32` above this base, indexed by the child's
-/// hardware-tree node id — unique per tree, so the mapping is collision-free
-/// by construction. Reserved (see
-/// [`crate::ipc::is_reserved_endpoint`]) because a squatter binding a chip's
-/// transfer endpoint first would serve that chip's driver forged register
-/// contents; binding one additionally requires the caller to hold the
-/// matching [`HwResourceKind::BusChild`] duty grant, so only the driver
-/// discovery bound to the *parent bus* may serve it. The high bytes spell
-/// `"BC"`.
-pub const BUS_CHILD_ENDPOINT_BASE: u64 = 0x4243_0000_0000_0000;
-
-/// Number of ids the [`BUS_CHILD_ENDPOINT_BASE`] block reserves: one per
-/// representable hardware-tree node id.
-const BUS_CHILD_ENDPOINT_SPAN: u64 = 1 << u32::BITS;
-
-/// The transfer-endpoint id reserved for the bus child whose hardware-tree
-/// node id is `node_id`.
-#[must_use]
-pub fn bus_child_endpoint(node_id: u32) -> u64 {
-    BUS_CHILD_ENDPOINT_BASE + u64::from(node_id)
+/// The block spans the whole `u32` node-id space above its base, so the
+/// mapping is collision-free by construction. Every block is reserved
+/// ([`crate::ipc::is_reserved_endpoint`]) because binding one of its ids is
+/// authorised by a duty on one specific node: a squatter serving it first
+/// would answer that node's clients with forgeries.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NodeEndpointBlock {
+    base: u64,
 }
 
-/// Whether `id` lies in the reserved per-bus-child transfer-endpoint block.
-#[must_use]
-pub const fn is_bus_child_endpoint(id: u64) -> bool {
-    id >= BUS_CHILD_ENDPOINT_BASE && id < BUS_CHILD_ENDPOINT_BASE + BUS_CHILD_ENDPOINT_SPAN
+impl NodeEndpointBlock {
+    const SPAN: u64 = 1 << u32::BITS;
+
+    /// Every block, so reserving them is one rule rather than a list to keep
+    /// in step.
+    pub const ALL: &'static [Self] = &[
+        BUS_CHILD_ENDPOINTS,
+        crate::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS,
+    ];
+
+    /// The block whose ids' two high bytes spell `tag`.
+    pub(crate) const fn tagged(tag: [u8; 2]) -> Self {
+        Self {
+            base: u64::from_be_bytes([tag[0], tag[1], 0, 0, 0, 0, 0, 0]),
+        }
+    }
+
+    /// The id reserved for the node whose hardware-tree id is `node_id`.
+    #[must_use]
+    pub fn endpoint(self, node_id: u32) -> u64 {
+        self.base + u64::from(node_id)
+    }
+
+    /// Whether `id` lies in this block.
+    #[must_use]
+    pub const fn contains(self, id: u64) -> bool {
+        id >= self.base && id - self.base < Self::SPAN
+    }
 }
+
+/// The transfer endpoints of an addressed bus's children, indexed by the
+/// child's node id. Serving one takes the matching
+/// [`HwResourceKind::BusChild`] duty, which discovery gives only the driver
+/// bound to the child's parent bus.
+pub const BUS_CHILD_ENDPOINTS: NodeEndpointBlock = NodeEndpointBlock::tagged(*b"BC");
 
 /// CPU mapping policy for a linear framebuffer resource.
 ///
@@ -597,6 +662,8 @@ impl HwResourceKind {
         Self::Framebuffer,
         Self::LinkAddress,
         Self::BusChild,
+        Self::DmaController,
+        Self::DmaRequest,
     ];
 
     /// Raw on-wire discriminant.
@@ -619,6 +686,8 @@ impl HwResourceKind {
             7 => Some(Self::Framebuffer),
             8 => Some(Self::LinkAddress),
             9 => Some(Self::BusChild),
+            10 => Some(Self::DmaController),
+            11 => Some(Self::DmaRequest),
             _ => None,
         }
     }
@@ -638,8 +707,9 @@ impl HwResourceKind {
             Self::Dma => CapabilityId::MEM_DMA,
             // Submitting to a grant-restricted call endpoint is gated by the
             // generic per-endpoint call-IPC capability; the per-endpoint
-            // grant (this resource) scopes it to one endpoint id.
-            Self::Endpoint => CapabilityId::IPC_ENDPOINT,
+            // grant (this resource, or a DMA request line naming its
+            // controller) scopes it to one endpoint id.
+            Self::Endpoint | Self::DmaRequest => CapabilityId::IPC_ENDPOINT,
             // Mapping a granted shared-memory region is gated by the generic
             // shared-memory capability; the per-region grant (this resource)
             // scopes it to one region id.
@@ -647,9 +717,9 @@ impl HwResourceKind {
             // A link-layer address is read straight out of the grant record:
             // no syscall resolves it and holding it authorises nothing.
             Self::LinkAddress => return None,
-            // A bus-child duty authorises binding that child's transfer
-            // endpoint, which is a privileged bind of a reserved id.
-            Self::BusChild => CapabilityId::IPC_BIND_PRIVILEGED,
+            // A bus-child or DMA-controller duty authorises binding a
+            // reserved id, which is a privileged bind.
+            Self::BusChild | Self::DmaController => CapabilityId::IPC_BIND_PRIVILEGED,
         })
     }
 }
@@ -709,6 +779,8 @@ impl HwResource {
     const FRAMEBUFFER_MEMORY_SHIFT: u32 = 8;
     const FRAMEBUFFER_FLAGS_MASK: u32 =
         Self::FRAMEBUFFER_FORMAT_MASK | Self::FRAMEBUFFER_MEMORY_MASK;
+
+    const DMA_CHANNELS_STATED: u32 = 1;
 
     /// A memory-mapped register/framebuffer window.
     #[must_use]
@@ -775,7 +847,27 @@ impl HwResource {
     /// [`translated_base`](Self::translated_base).
     #[must_use]
     pub fn dma_translated(addr_limit: u64, len: u64, bus_base: u64) -> Self {
-        Self::new_xlate(HwResourceKind::Dma, addr_limit, len, 0, bus_base)
+        Self::new_xlate(
+            HwResourceKind::Dma,
+            addr_limit,
+            len,
+            Self::DMA_TRANSLATED,
+            bus_base,
+        )
+    }
+
+    /// The [`flags`](Self::flags) bit marking a [`Dma`](HwResourceKind::Dma)
+    /// resource as a translated window from
+    /// [`dma_translated`](Self::dma_translated): its `length` is the window's
+    /// extent and its [`translated_base`](Self::translated_base) the bus
+    /// address the window starts at, which may be `0`.
+    pub const DMA_TRANSLATED: u32 = 1;
+
+    /// Whether this is a translated [`Dma`](HwResourceKind::Dma) window
+    /// rather than a plain addressing constraint.
+    #[must_use]
+    pub const fn is_translated_dma_window(&self) -> bool {
+        self.kind == HwResourceKind::Dma.as_u16() && self.flags & Self::DMA_TRANSLATED != 0
     }
 
     /// An outbound bus address window: `cpu_base`..`cpu_base+len` on the
@@ -837,6 +929,98 @@ impl HwResource {
     #[must_use]
     pub fn bus_child_pair(&self) -> Option<(u64, u64)> {
         (self.kind() == Some(HwResourceKind::BusChild)).then_some((self.base, self.xlate))
+    }
+
+    /// The duty to serve a DMA controller's endpoint
+    /// ([`HwResourceKind::DmaController`]).
+    #[must_use]
+    pub fn dma_controller(duty: &DmaControllerDuty) -> Self {
+        let (flags, channels) = match duty.channels() {
+            Some(mask) => (Self::DMA_CHANNELS_STATED, mask),
+            None => (0, 0),
+        };
+        Self::new_xlate(
+            HwResourceKind::DmaController,
+            duty.endpoint(),
+            1,
+            flags,
+            channels,
+        )
+    }
+
+    /// The duty a [`HwResourceKind::DmaController`] resource carries.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for another kind, or [`Errno::BadMagic`] for a
+    /// field the kind does not define: a capability other than the kind's
+    /// own, a length other than one endpoint, an unknown flag, channels the
+    /// flags say were never stated, or an endpoint outside the controller
+    /// block.
+    pub fn dma_controller_duty(&self) -> Result<DmaControllerDuty, Errno> {
+        if self.kind() != Some(HwResourceKind::DmaController) {
+            return Err(Errno::OutOfRange);
+        }
+        let stated = self.flags == Self::DMA_CHANNELS_STATED;
+        if self.capability != CapabilityId::IPC_BIND_PRIVILEGED.as_u16()
+            || self.len != 1
+            || !(stated || (self.flags == 0 && self.xlate == 0))
+        {
+            return Err(Errno::BadMagic);
+        }
+        DmaControllerDuty::new(self.base, stated.then_some(self.xlate)).map_err(|_| Errno::BadMagic)
+    }
+
+    /// The right to call a DMA controller for one request line
+    /// ([`HwResourceKind::DmaRequest`]).
+    #[must_use]
+    pub fn dma_request(line: &DmaRequestLine) -> Self {
+        let [low, high] = line.specifier_cells();
+        Self::new_xlate(
+            HwResourceKind::DmaRequest,
+            line.endpoint(),
+            u64::from_le_bytes(line.name_bytes()),
+            u32::from(line.index()) | (u32::from(line.cell_count()) << 8),
+            u64::from(low) | (u64::from(high) << 32),
+        )
+    }
+
+    /// The request line a [`HwResourceKind::DmaRequest`] resource carries.
+    ///
+    /// Only the canonical encoding [`Self::dma_request`] produces decodes, so
+    /// an accepted record re-encodes to exactly its own bytes — the record a
+    /// controller asks the kernel whether its caller holds.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for another kind, or [`Errno::BadMagic`] for a
+    /// non-canonical field: a capability other than the kind's own, a flag
+    /// outside the position and cell count, more than two cells, a set bit in
+    /// an unused cell, a name that is not a NUL-free prefix of zero padding,
+    /// or an endpoint outside the controller block.
+    pub fn dma_request_line(&self) -> Result<DmaRequestLine, Errno> {
+        if self.kind() != Some(HwResourceKind::DmaRequest) {
+            return Err(Errno::OutOfRange);
+        }
+        let index = (self.flags & 0xFF) as u8;
+        let cells = usize::from(((self.flags >> 8) & 0xFF) as u8);
+        if self.capability != CapabilityId::IPC_ENDPOINT.as_u16()
+            || self.flags >> 16 != 0
+            || cells > DMA_SPECIFIER_MAX_CELLS
+        {
+            return Err(Errno::BadMagic);
+        }
+        let specifier = [(self.xlate & 0xFFFF_FFFF) as u32, (self.xlate >> 32) as u32];
+        if specifier[cells..].iter().any(|&cell| cell != 0) {
+            return Err(Errno::BadMagic);
+        }
+        let name = self.len.to_le_bytes();
+        let name_len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+        if name[name_len..].iter().any(|&b| b != 0) {
+            return Err(Errno::BadMagic);
+        }
+        DmaRequestLine::new(self.base, index, &specifier[..cells], &name[..name_len])
+            .map_err(|_| Errno::BadMagic)
     }
 
     /// The link-layer address a [`HwResourceKind::LinkAddress`] resource
@@ -1012,7 +1196,8 @@ impl HwResource {
         self.len
     }
 
-    /// Implementation-defined per-resource flags (`0` today).
+    /// Per-resource flags: [`Self::DMA_TRANSLATED`] on a translated DMA
+    /// window, and the kind's own bits on a duty or request record.
     #[must_use]
     pub const fn flags(&self) -> u32 {
         self.flags
@@ -1022,8 +1207,9 @@ impl HwResource {
     /// address translation: the bus/device-side address `base` maps to.
     /// Set for a [`BusWindow`](HwResourceKind::BusWindow) (outbound) and
     /// for an inbound [`Dma`](HwResourceKind::Dma) viewport built with
-    /// [`dma_translated`](Self::dma_translated); `0` for a plain
-    /// register/port window or an untranslated DMA constraint.
+    /// [`dma_translated`](Self::dma_translated), where `0` is a real bus
+    /// address ([`Self::is_translated_dma_window`] tells the two apart); `0`
+    /// for a plain register/port window or an untranslated DMA constraint.
     #[must_use]
     pub const fn translated_base(&self) -> u64 {
         self.xlate
@@ -1098,6 +1284,10 @@ impl HwResource {
     ///   exclusive address ceiling `base` and an extent `len`), not a mapped
     ///   window: the child may be no more permissive — no higher ceiling, no
     ///   larger extent, and the same bus translation.
+    /// * [`DmaController`](HwResourceKind::DmaController) and
+    ///   [`DmaRequest`](HwResourceKind::DmaRequest) cover only themselves,
+    ///   and a request line also covers an [`Endpoint`](HwResourceKind::Endpoint)
+    ///   naming its controller: calling it, never binding it.
     #[must_use]
     pub fn covers(&self, child: &HwResource) -> bool {
         let (Some(parent_kind), Some(child_kind)) = (self.kind(), child.kind()) else {
@@ -1166,6 +1356,15 @@ impl HwResource {
                 // scan-out node (the display bring-up path): pure CPU-side
                 // containment — the geometry adds description, never reach.
                 self.flags == 0 && interval_contains(self.base, self.len, child.base, child.len)
+            }
+            (HwResourceKind::DmaController, HwResourceKind::DmaController)
+            | (HwResourceKind::DmaRequest, HwResourceKind::DmaRequest) => {
+                // Granted whole: another mask or another request line is a
+                // different authority, never a part of this one.
+                self.base == child.base && self.len == child.len && self.xlate == child.xlate
+            }
+            (HwResourceKind::DmaRequest, HwResourceKind::Endpoint) => {
+                child.flags == 0 && interval_contains(self.base, 1, child.base, child.len)
             }
             // Every other kind pairing fails closed.
             _ => false,
@@ -2179,13 +2378,26 @@ mod tests {
             HwDeviceClass::Rtc,
             HwDeviceClass::Accelerator,
             HwDeviceClass::Audio,
+            HwDeviceClass::Dma,
             HwDeviceClass::Other,
         ] {
             assert_eq!(HwDeviceClass::from_u16(class.as_u16()), Some(class));
         }
-        assert_eq!(HwDeviceClass::from_u16(14), None);
+        assert_eq!(HwDeviceClass::from_u16(15), None);
         assert_eq!(HwDeviceClass::from_u16(64_000), None);
         assert_eq!(HwDeviceClass::default(), HwDeviceClass::Root);
+    }
+
+    #[test]
+    fn every_device_class_has_its_own_name() {
+        extern crate alloc;
+        let names: alloc::collections::BTreeSet<&str> = (0..=u16::MAX)
+            .filter_map(HwDeviceClass::from_u16)
+            .map(HwDeviceClass::name)
+            .collect();
+        assert_eq!(names.len(), 16);
+        assert!(names.iter().all(|name| !name.is_empty()));
+        assert_eq!(HwDeviceClass::Dma.name(), "dma");
     }
 
     #[test]
@@ -2555,7 +2767,7 @@ mod tests {
 
     #[test]
     fn a_bus_child_resource_pairs_an_endpoint_with_an_address() {
-        let endpoint = bus_child_endpoint(7);
+        let endpoint = BUS_CHILD_ENDPOINTS.endpoint(7);
         let duty = HwResource::bus_child(endpoint, 0x68);
         assert_eq!(duty.kind(), Some(HwResourceKind::BusChild));
         assert_eq!(duty.bus_child_pair(), Some((endpoint, 0x68)));
@@ -2571,7 +2783,7 @@ mod tests {
 
     #[test]
     fn a_bus_child_duty_covers_its_own_endpoint_and_nothing_else() {
-        let endpoint = bus_child_endpoint(7);
+        let endpoint = BUS_CHILD_ENDPOINTS.endpoint(7);
         let duty = HwResource::bus_child(endpoint, 0x68);
         // The duty authorises naming exactly its own child's endpoint.
         assert!(duty.covers(&HwResource::endpoint(endpoint)));
@@ -2588,32 +2800,172 @@ mod tests {
     }
 
     #[test]
-    fn the_bus_child_endpoint_block_is_reserved_and_collision_free() {
-        assert_eq!(bus_child_endpoint(0), BUS_CHILD_ENDPOINT_BASE);
-        assert_eq!(
-            bus_child_endpoint(u32::MAX),
-            BUS_CHILD_ENDPOINT_BASE + BUS_CHILD_ENDPOINT_SPAN - 1
-        );
-        // Distinct node ids never share an endpoint.
-        assert_ne!(bus_child_endpoint(1), bus_child_endpoint(2));
-        for id in [0u32, 1, 4096, u32::MAX] {
-            let endpoint = bus_child_endpoint(id);
-            assert!(is_bus_child_endpoint(endpoint));
-            // Squatting a chip's transfer endpoint would let a bystander
-            // feed that chip's driver forged registers, so the whole block
-            // is a privileged bind.
-            assert!(crate::ipc::is_reserved_endpoint(endpoint));
+    fn every_node_endpoint_block_is_reserved_collision_free_and_disjoint() {
+        use crate::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
+        assert_eq!(BUS_CHILD_ENDPOINTS.base, 0x4243_0000_0000_0000);
+        assert!(NodeEndpointBlock::ALL.contains(&BUS_CHILD_ENDPOINTS));
+        assert!(NodeEndpointBlock::ALL.contains(&DMA_CONTROLLER_ENDPOINTS));
+        for &block in NodeEndpointBlock::ALL {
+            assert_eq!(block.endpoint(0), block.base);
+            assert_eq!(
+                block.endpoint(u32::MAX),
+                block.base + NodeEndpointBlock::SPAN - 1
+            );
+            assert_ne!(block.endpoint(1), block.endpoint(2));
+            for id in [0u32, 1, 4096, u32::MAX] {
+                let endpoint = block.endpoint(id);
+                assert!(block.contains(endpoint));
+                // Squatting one would let a bystander answer that node's
+                // clients with forgeries, so the whole block is reserved.
+                assert!(crate::ipc::is_reserved_endpoint(endpoint));
+            }
+            assert!(!block.contains(block.base - 1));
+            assert!(!block.contains(block.base + NodeEndpointBlock::SPAN));
+            // No block swallows another service's rendezvous.
+            assert!(!block.contains(crate::rtc_ipc::RTC_ENDPOINT));
+            assert!(!block.contains(crate::mailbox_ipc::MAILBOX_ENDPOINT));
+            assert!(!block.contains(crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE));
         }
-        assert!(!is_bus_child_endpoint(BUS_CHILD_ENDPOINT_BASE - 1));
-        assert!(!is_bus_child_endpoint(
-            BUS_CHILD_ENDPOINT_BASE + BUS_CHILD_ENDPOINT_SPAN
-        ));
-        // The block does not swallow another service's rendezvous.
-        assert!(!is_bus_child_endpoint(crate::rtc_ipc::RTC_ENDPOINT));
-        assert!(!is_bus_child_endpoint(crate::mailbox_ipc::MAILBOX_ENDPOINT));
-        assert!(!is_bus_child_endpoint(
-            crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE
-        ));
+        for id in [0u32, u32::MAX] {
+            assert!(!DMA_CONTROLLER_ENDPOINTS.contains(BUS_CHILD_ENDPOINTS.endpoint(id)));
+            assert!(!BUS_CHILD_ENDPOINTS.contains(DMA_CONTROLLER_ENDPOINTS.endpoint(id)));
+        }
+    }
+
+    fn controller_endpoint() -> u64 {
+        crate::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS.endpoint(12)
+    }
+
+    fn request_line() -> DmaRequestLine {
+        DmaRequestLine::new(controller_endpoint(), 1, &[0x2000_000D], b"rx-tx").expect("valid line")
+    }
+
+    #[test]
+    fn a_dma_controller_duty_round_trips_with_and_without_a_stated_mask() {
+        for channels in [Some(0x7F5), Some(0), None] {
+            let duty = DmaControllerDuty::new(controller_endpoint(), channels).expect("valid");
+            let resource = HwResource::dma_controller(&duty);
+            assert_eq!(resource.kind(), Some(HwResourceKind::DmaController));
+            assert_eq!(
+                resource.required_capability(),
+                Ok(Some(CapabilityId::IPC_BIND_PRIVILEGED))
+            );
+            let back = HwResource::from_bytes(&resource.to_le_bytes()).expect("decodes");
+            assert_eq!(back.dma_controller_duty(), Ok(duty));
+        }
+        // A mask of zero is stated and distinct from no mask at all.
+        let none = HwResource::dma_controller(
+            &DmaControllerDuty::new(controller_endpoint(), None).expect("valid"),
+        );
+        let empty = HwResource::dma_controller(
+            &DmaControllerDuty::new(controller_endpoint(), Some(0)).expect("valid"),
+        );
+        assert_ne!(none, empty);
+    }
+
+    #[test]
+    fn a_dma_controller_duty_decode_refuses_every_undefined_field() {
+        let duty = DmaControllerDuty::new(controller_endpoint(), None).expect("valid");
+        let good = HwResource::dma_controller(&duty);
+        assert_eq!(
+            HwResource::endpoint(controller_endpoint()).dma_controller_duty(),
+            Err(Errno::OutOfRange)
+        );
+        let mut unstated_mask = good;
+        unstated_mask.xlate = 1;
+        let mut unknown_flag = good;
+        unknown_flag.flags = 2;
+        let mut wide = good;
+        wide.len = 2;
+        let mut foreign = good;
+        foreign.base = BUS_CHILD_ENDPOINTS.endpoint(12);
+        // The fuzz harness's first find: a duty carrying another kind's
+        // capability id decoded, then re-encoded to different bytes.
+        let mut capability = good;
+        capability.capability = CapabilityId::MMIO_MAP.as_u16();
+        for bad in [unstated_mask, unknown_flag, wide, foreign, capability] {
+            assert_eq!(bad.dma_controller_duty(), Err(Errno::BadMagic), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_dma_request_line_round_trips_through_its_resource() {
+        let line = request_line();
+        let resource = HwResource::dma_request(&line);
+        assert_eq!(resource.kind(), Some(HwResourceKind::DmaRequest));
+        assert_eq!(
+            resource.required_capability(),
+            Ok(Some(CapabilityId::IPC_ENDPOINT))
+        );
+        let back = HwResource::from_bytes(&resource.to_le_bytes()).expect("decodes");
+        let decoded = back.dma_request_line().expect("canonical");
+        assert_eq!(decoded, line);
+        assert_eq!(decoded.specifier(), &[0x2000_000D]);
+        assert_eq!(decoded.name(), b"rx-tx");
+        assert_eq!(decoded.index(), 1);
+        assert_eq!(HwResource::dma_request(&decoded), resource);
+
+        let wide = DmaRequestLine::new(controller_endpoint(), 0, &[1, 2], b"audio-rx")
+            .expect("two cells and an eight-byte name fit");
+        let back = HwResource::dma_request(&wide).dma_request_line();
+        assert_eq!(back, Ok(wide));
+        let bare = DmaRequestLine::new(controller_endpoint(), 3, &[], b"").expect("no cells");
+        assert_eq!(HwResource::dma_request(&bare).dma_request_line(), Ok(bare));
+    }
+
+    #[test]
+    fn a_dma_request_line_decode_refuses_every_non_canonical_field() {
+        let good = HwResource::dma_request(&request_line());
+        assert_eq!(
+            HwResource::endpoint(controller_endpoint()).dma_request_line(),
+            Err(Errno::OutOfRange)
+        );
+        let mut capability = good;
+        capability.capability = CapabilityId::MMIO_MAP.as_u16();
+        let mut high_flag = good;
+        high_flag.flags |= 1 << 16;
+        let mut three_cells = good;
+        three_cells.flags = 3 << 8;
+        let mut unused_cell = good;
+        unused_cell.xlate |= 1 << 32;
+        let mut ragged_name = good;
+        ragged_name.len = u64::from_le_bytes(*b"rx\0tx\0\0\0");
+        let mut foreign = good;
+        foreign.base = BUS_CHILD_ENDPOINTS.endpoint(12);
+        for bad in [
+            capability,
+            high_flag,
+            three_cells,
+            unused_cell,
+            ragged_name,
+            foreign,
+        ] {
+            assert_eq!(bad.dma_request_line(), Err(Errno::BadMagic), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_dma_request_covers_calling_its_controller_and_never_serving_it() {
+        let request = HwResource::dma_request(&request_line());
+        let duty = HwResource::dma_controller(
+            &DmaControllerDuty::new(controller_endpoint(), Some(0x7F5)).expect("valid"),
+        );
+        assert!(request.covers(&request));
+        assert!(request.covers(&HwResource::endpoint(controller_endpoint())));
+        assert!(!request.covers(&HwResource::endpoint(controller_endpoint() + 1)));
+        assert!(!request.covers(&duty));
+        assert!(!HwResource::endpoint(controller_endpoint()).covers(&request));
+        let other_line =
+            DmaRequestLine::new(controller_endpoint(), 0, &[0x2000_000D], b"rx-tx").expect("valid");
+        assert!(!request.covers(&HwResource::dma_request(&other_line)));
+
+        assert!(duty.covers(&duty));
+        assert!(!duty.covers(&HwResource::endpoint(controller_endpoint())));
+        assert!(!duty.covers(&request));
+        let narrower = HwResource::dma_controller(
+            &DmaControllerDuty::new(controller_endpoint(), Some(0x001)).expect("valid"),
+        );
+        assert!(!duty.covers(&narrower));
     }
 
     #[test]
@@ -2947,7 +3299,7 @@ mod tests {
         // The fixed node header followed by the fixed match-key and resource
         // arrays.
         assert_eq!(HW_NODE_HEADER_LEN, 17);
-        assert_eq!(HwNode::WIRE_LEN, 577);
+        assert_eq!(HwNode::WIRE_LEN, 833);
         assert_eq!(HwTreeHeader::WIRE_LEN, 16);
     }
 

@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 47 open, 121 closed, 168 total.
+**closed**, and a partial fix stays **open**. 49 open, 126 closed, 175 total.
 
-### Open (47)
+### Open (49)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -76,6 +76,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D169 | stable audit event ids collide across components: about thirty are claimed by two or three unrelated emitters | noticed while allocating the D167 ids; not absorbed — the fix is an id registry, a renumbering, and a `ci` uniqueness check. See the section |
 | D170 | direct reclaim allocates on the kernel heap, infallibly, on the path memory pressure triggers | noticed while making `LiveSpace::drop`'s walk allocation-free (D167); not absorbed, because the cold scanner's interface changes. See the section |
 | D171 | a dead address space is torn down with one TLB invalidation per page, broadcast on aarch64 | noticed while making `LiveSpace::drop`'s walk allocation-free (D167); not absorbed, because the fix is an Arch HAL contract on every port. See the section |
+| D172 | `usb_msd` reads the whole hardware tree into a fixed 8 KiB stack buffer to attribute a stall to a resetting ancestor, and no real tree fits it, so the attribution never runs | noticed while widening the node to sixteen resources (`plans/SOUND.md` SND5a), which shrank the buffer's reach from fourteen nodes to nine; not absorbed, because the fix is a kernel-side fold or a shared growing snapshot reader. See the section |
+| D175 | memory below a narrow DMA ceiling has no reserve: ordinary allocations drain it first-come, so a constrained carve late on a busy machine is refused while RAM above the ceiling is free | noticed while making constrained carves deterministic (D173); not absorbed, because the fix is address zones sized from discovery, with a reserve, on every port. See the section |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -102,7 +104,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (121)
+### Closed (126)
 
 | ID | Subject |
 |---|---|
@@ -227,6 +229,11 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D163 | `netstack` exited on every start-up failure without stating why |
 | D165 | the SVG decoder admitted a pattern tile magnified past what the renderer can size, which the renderer then refused to draw at all |
 | D167 | a dead driver's DMA memory was freed while its device could still master it |
+| D173 | a DMA carve under an addressing limit took whichever block the free lists offered first, and refused it when that block lay above the limit |
+| D174 | adjacent usable boot-map regions were populated as separate runs, so the buddies at their seam never merged |
+| D176 | the userland runtime and its C stubs were outside the UB oracle, and three findings kept them there |
+| D177 | the I²C controller driver wrote its bind records to a log it had no authority to reach, so every one was refused |
+| D178 | a DMA window whose bus side starts at address 0 read as an untranslated limit, so its carves were named by their CPU address |
 
 ## Scope
 
@@ -8373,7 +8380,8 @@ xhci, `usb_mouse` and the kernel supervisor host; 4166–4173 by `usb_mouse`,
 `usb_msd` and the kernel mount and volume services; 4180–4190 by `volmgr`,
 `raid_member`, `lib/netchan` and the kernel volume and writeback services; and
 4100/4101 and 4133–4141 by kernel emitters that also appear in the kernel
-audit catalogue (`kernel/core/src/audit.rs`). A reader filtering the audit log
+audit catalogue (`kernel/core/src/audit.rs`); and 24100/24101 by
+`drivers/bus/i2c/bcm2835` inside the range `lib/ssh` declares for itself. A reader filtering the audit log
 by id conflates them, which defeats the id.
 
 Some repeats are legitimate and the fix must keep them: one event emitted by
@@ -8422,3 +8430,141 @@ frame — per port, since x86_64's `invlpg` is local and riscv64's `sfence.vma`
 needs its own shootdown. Its regression test is a teardown that asserts the
 flush count stays one whatever the page count, beside a port conformance
 check that a dropped space leaves no reachable stale translation.
+
+## D172 — `usb_msd`'s ancestor attribution reads the tree into a buffer no real tree fits (OPEN)
+
+`drivers/storage/usb_msd/src/program.rs`'s `ancestor_status` reads the whole
+`hw_tree_read` snapshot into an 8 KiB stack array (`TREE_SNAPSHOT_BUF`) on its
+stall-recovery path and folds `ancestor_imposed_status_from_snapshot` over it.
+A snapshot holds a 16-byte header and `HwNode::WIRE_LEN` bytes per node, so the
+buffer fits nine nodes (fourteen before `plans/SOUND.md` SND5a widened the node
+to sixteen resources). QEMU's aarch64 `virt` tree alone has about forty nodes
+before any USB device is attached and the pinned Pi 4 tree several hundred, so
+the read fails with `BufferTooSmall` on every realistic machine and the leaf
+answers on its own health: a resetting hub or controller is blamed on the disk,
+which is the attribution `plans/FIX-IO.md` IO4 exists to make. It fails safe —
+no false fault is ever raised — but the feature does not operate, and the
+buffer is a fixed capacity a real machine outgrows.
+
+The right fix is a kernel-side answer rather than a bigger buffer: a query that
+folds the published health of the caller's own node's ancestor chain in the
+kernel, which holds the tree, at the cost of one walk up the chain and no copy.
+The alternative is a snapshot reader that grows to the tree once at bring-up and
+reuses its buffer on the recovery path, shared with `devmgr`'s
+`read_tree_growing` rather than copied. Its regression test is a stall under a
+tree larger than the old buffer whose resetting ancestor is attributed.
+
+## D173 — a DMA carve under an addressing limit succeeded only by the order of the free lists — FIXED
+
+A `Dma` grant's addressing limit bounds where its carve may lie, and both
+carves that honour one — `dma_alloc` (`DmaWindowMap::alloc_inner`) and
+`shm_create_dma` (`LiveSharedMem::alloc_dma_region`, `plans/SOUND.md` SND5b) —
+drew a block with `FrameAllocator::alloc_order` and refused it if it reached
+past the limit. The lists are LIFO and address-blind and are seeded in
+ascending order, so their front is the top of RAM: on a Pi with more than a
+gibibyte, a carve for the legacy DMA engines or the VideoCore mailbox, which
+reach the low gibibyte, was refused `OutOfRange` with most of that gibibyte
+free, and succeeded only when fragmentation left a low block at the front.
+
+`FrameAllocator::alloc_order_under` carves below a ceiling: it walks the
+bitmap's maximal free runs downward from the ceiling a word at a time and
+claims the highest aligned block below it out of the free block enclosing it,
+so the carve fails only when no such block is free (`OutOfMemory`) or no usable
+RAM lies below the ceiling (`OutOfRange`). Both carves use it, their post-hoc
+checks and `DmaError::AddrLimitExceeded` are gone, and `dma_errno` folds the
+allocator's refusal through `AllocError::as_errno`. The search costs a step
+per bitmap word and per free run below the ceiling, paid only by a ceiling
+inside RAM.
+
+Regression tests: `kernel/mem`'s
+`alloc_dma_carves_below_a_limit_inside_ram_whatever_the_free_lists_offer_first`
+(fails on the old carve); the frame allocator's highest-block, exhaustion,
+refusal and unconstrained-equivalence tests; and
+`proptest_ceiling_carves_take_the_highest_free_block_or_prove_none`, which
+checks every answer against a brute-force search.
+
+## D174 — adjacent boot-map regions populated buddies that never merged — FIXED
+
+`FrameAllocator::new` populated each usable region as its own run, so where two
+regions met, the buddies either side of the seam were registered apart and —
+no free ever touching them — never merged: a block spanning the seam could not
+be allocated though every frame of it was free. Adjacent regions are now one
+run. The invariant this restores, that every aligned all-free run lies inside
+one free block, is also what lets `alloc_order_under` (D173) claim a run by
+splitting its enclosing block. Regression test:
+`adjacent_boot_regions_populate_as_one_run`.
+
+## D175 — memory below a narrow DMA ceiling has no reserve against ordinary allocations (OPEN)
+
+The frame allocator has no address zones — `MemoryClass` is accounting only —
+and ordinary allocations take whichever block the LIFO lists offer, so as
+memory churns they come to occupy the low gibibyte the Pi's legacy DMA engines
+and mailbox reach as readily as the RAM above it. A constrained carve made late
+on a busy machine, such as an audio stream opened hours after boot, can then be
+refused `OutOfMemory` while gibibytes above its ceiling are free. D173 made
+such a carve succeed whenever memory below its ceiling is free; nothing yet
+keeps that memory free.
+
+The fix is Linux's: zones whose boundaries come from discovery (the lowest
+`Dma` ceiling any node carries, and 4 GiB where a device reaches only 32 bits),
+ordinary allocations served from the highest zone first and falling into a
+lower one only while it keeps a reserve, and constrained carves served from the
+zones below their ceiling. The boundaries must be known when the allocator is
+populated, or applied by a re-zoning pass after discovery, on every port —
+which is why it is not absorbed here. Its regression test drives ordinary
+allocations to exhaustion and shows a constrained carve still finds the reserve
+below its ceiling.
+
+## D176 — the userland runtime and its C stubs were outside the UB oracle — FIXED
+
+`lib/rt` — the process global allocator, the thread runtime, every syscall
+wrapper — and `lib/abi-sys` carry hand-written `unsafe` but were not in
+`tools/xtask/src/commands/miri.rs`'s `TARGETS`, so no gate interpreted them.
+Run by hand under `-Zmiri-strict-provenance`, three findings kept them out:
+
+- **The heap synthesised its pointers from bare integers.** `Heap`'s
+  `GlobalAlloc` glue cast each arena address with `as *mut u8`, which the
+  interpreter cannot follow. The page source now names the memory it made
+  (`Pager::pointer`): the syscall pager with `with_exposed_provenance_mut`,
+  because the kernel maps the arena outside the abstract machine, and the
+  test pagers with `without_provenance_mut`, because their arena is
+  addresses alone and never dereferenced.
+- **Four thread tests lost the rendezvous cells they acquired**, which miri
+  reports as leaks, and `a_refused_spawn_returns_its_cell_and_frees_its_payload`
+  passed only because they did: it expected the free list to grow, which holds
+  only when it started empty. Every test now returns its cells, and the
+  refused-spawn test seeds the cell the spawn must take and give back.
+- **Two C-stub tests built fake entry addresses by casting integers**; they
+  are `without_provenance_mut` addresses now, the stub reading only the value.
+
+Both crates are enrolled, `tairix-rt` dealt across the host's cores. The
+regression guard is the stage itself: each finding aborts it.
+
+## D177 — the I²C controller driver logged without the log capability — FIXED
+
+`drivers/bus/i2c/bcm2835` records each child endpoint it binds or fails to
+serve through `tairix_rt::LogSink`, but its signed manifest requested only its
+register window, interrupt and privileged bind, and the kernel refuses
+`log_emit` without `CAP_LOG_EMIT`: every record was dropped. The driver now
+declares one `REQUIRED_CAPABILITIES` set, which both its runtime and the image
+builder read, carrying `LOG_EMIT`. Of the other twenty-three driver bundles,
+none that logs lacked it. Regression test:
+`the_manifest_requests_the_log_its_records_go_to`.
+
+## D178 — a DMA window starting at bus address 0 read as untranslated — FIXED
+
+A `Dma` resource meant one of two things, told apart only by
+`translated_base() != 0`: a plain addressing limit (`dma(limit, max_len)`,
+the length being the largest buffer) or a translated `dma-ranges` window
+(`dma_translated(top, extent, bus)`). Discovery emits every window with
+`dma_translated`, so a window mapping bus `0` onto a non-zero CPU base read as
+a plain limit: `translate_device_addr` handed back the CPU address as the
+device address, and neither the window's floor nor its extent was enforced.
+No pinned tree has such a window, but any SoC whose devices see RAM from bus
+`0` does.
+
+A translated window now carries `HwResource::DMA_TRANSLATED` in its flags
+(`TAIRIX_HW_RES_FLAG_DMA_TRANSLATED` in the C view), `DmaConstraint` records
+it, and translation keys on it; `lspci` renders the bus side on the same test.
+Regression test:
+`translate_device_addr_rebases_a_window_whose_bus_side_starts_at_zero`.

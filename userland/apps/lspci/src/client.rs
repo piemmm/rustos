@@ -319,89 +319,137 @@ fn render_resources(
         for _ in 0..depth {
             line.push_str("  ");
         }
-        let base = resource.base();
-        let len = resource.length();
-        // `write!` to a `String` cannot fail; the results are discarded
-        // on that basis.
-        match resource.kind() {
-            Some(HwResourceKind::Mmio) => {
-                let _ = write!(line, "MMIO window at 0x{base:x} [size=0x{len:x}]");
-            }
-            Some(HwResourceKind::Irq) => {
-                if len > 1 {
-                    let _ = write!(line, "IRQ lines {base} (count {len})");
-                } else {
-                    let _ = write!(line, "IRQ line {base}");
-                }
-            }
-            Some(HwResourceKind::Port) => {
-                let _ = write!(line, "I/O ports at 0x{base:x} [count=0x{len:x}]");
-            }
-            Some(HwResourceKind::Dma) => {
-                if base == 0 && len == 0 {
-                    line.push_str("DMA (no addressing constraint declared)");
-                } else {
-                    let _ = write!(
-                        line,
-                        "DMA constraint: addresses below 0x{base:x} [size=0x{len:x}]"
-                    );
-                }
-            }
-            Some(HwResourceKind::BusWindow) => {
-                let _ = write!(
-                    line,
-                    "Bus window at 0x{base:x} [size=0x{len:x}] -> bus 0x{:x}",
-                    resource.translated_base()
-                );
-            }
-            Some(HwResourceKind::Endpoint) => {
-                let _ = write!(line, "IPC endpoint {base}");
-            }
-            Some(HwResourceKind::Shared) => {
-                let _ = write!(line, "Shared-memory region {base}");
-            }
-            Some(HwResourceKind::LinkAddress) => match resource.link_address_octets() {
-                Some(mac) => {
-                    let _ = write!(
-                        line,
-                        "Link address {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-                    );
-                }
-                // An all-zero address carries no identity; list the resource
-                // without inventing one.
-                None => line.push_str("Link address (none published)"),
-            },
-            Some(HwResourceKind::Framebuffer) => {
-                match resource.framebuffer_mode() {
-                    Ok(mode) => {
-                        let _ = write!(
-                            line,
-                            "Framebuffer at 0x{base:x} [size=0x{len:x}] {}x{} stride {}",
-                            mode.width_px, mode.height_px, mode.stride_bytes
-                        );
-                    }
-                    // A malformed geometry still lists as a window; the
-                    // mode is simply not shown (fail closed, never guess).
-                    Err(_) => {
-                        let _ = write!(line, "Framebuffer at 0x{base:x} [size=0x{len:x}]");
-                    }
-                }
-            }
-            Some(HwResourceKind::BusChild) => match resource.bus_child_pair() {
-                Some((endpoint, address)) => {
-                    let _ = write!(line, "Bus child at 0x{address:x} on endpoint {endpoint}");
-                }
-                // Unreachable for a decoded `BusChild`; listed without
-                // inventing a pairing rather than dropped.
-                None => line.push_str("Bus child (no pairing published)"),
-            },
-            None => line.push_str("resource (unknown kind)"),
-        }
+        describe_resource(resource, &mut line);
         line.push('\n');
         out.write_all(line.as_bytes()).map_err(LspciError::Output)?;
     }
     Ok(())
+}
+
+/// Append what one declared resource grants to `line`.
+fn describe_resource(resource: &HwResource, line: &mut String) {
+    let base = resource.base();
+    let len = resource.length();
+    // `write!` to a `String` cannot fail; the results are discarded
+    // on that basis.
+    match resource.kind() {
+        Some(HwResourceKind::Mmio) => {
+            let _ = write!(line, "MMIO window at 0x{base:x} [size=0x{len:x}]");
+        }
+        Some(HwResourceKind::Irq) => {
+            if len > 1 {
+                let _ = write!(line, "IRQ lines {base} (count {len})");
+            } else {
+                let _ = write!(line, "IRQ line {base}");
+            }
+        }
+        Some(HwResourceKind::Port) => {
+            let _ = write!(line, "I/O ports at 0x{base:x} [count=0x{len:x}]");
+        }
+        Some(HwResourceKind::Dma) => {
+            if base == 0 && len == 0 {
+                line.push_str("DMA (no addressing constraint declared)");
+            } else {
+                let _ = write!(
+                    line,
+                    "DMA constraint: addresses below 0x{base:x} [size=0x{len:x}]"
+                );
+                if resource.is_translated_dma_window() {
+                    let _ = write!(line, " -> bus 0x{:x}", resource.translated_base());
+                }
+            }
+        }
+        Some(HwResourceKind::BusWindow) => {
+            let _ = write!(
+                line,
+                "Bus window at 0x{base:x} [size=0x{len:x}] -> bus 0x{:x}",
+                resource.translated_base()
+            );
+        }
+        Some(HwResourceKind::Endpoint) => {
+            let _ = write!(line, "IPC endpoint {base}");
+        }
+        Some(HwResourceKind::Shared) => {
+            let _ = write!(line, "Shared-memory region {base}");
+        }
+        Some(HwResourceKind::LinkAddress) => match resource.link_address_octets() {
+            Some(mac) => {
+                let _ = write!(
+                    line,
+                    "Link address {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                );
+            }
+            // An all-zero address carries no identity; list the resource
+            // without inventing one.
+            None => line.push_str("Link address (none published)"),
+        },
+        Some(HwResourceKind::Framebuffer) => {
+            match resource.framebuffer_mode() {
+                Ok(mode) => {
+                    let _ = write!(
+                        line,
+                        "Framebuffer at 0x{base:x} [size=0x{len:x}] {}x{} stride {}",
+                        mode.width_px, mode.height_px, mode.stride_bytes
+                    );
+                }
+                // A malformed geometry still lists as a window; the
+                // mode is simply not shown (fail closed, never guess).
+                Err(_) => {
+                    let _ = write!(line, "Framebuffer at 0x{base:x} [size=0x{len:x}]");
+                }
+            }
+        }
+        Some(HwResourceKind::BusChild) => match resource.bus_child_pair() {
+            Some((endpoint, address)) => {
+                let _ = write!(line, "Bus child at 0x{address:x} on endpoint {endpoint}");
+            }
+            // Unreachable for a decoded `BusChild`; listed without
+            // inventing a pairing rather than dropped.
+            None => line.push_str("Bus child (no pairing published)"),
+        },
+        Some(HwResourceKind::DmaController) => describe_dma_controller(resource, line),
+        Some(HwResourceKind::DmaRequest) => describe_dma_request(resource, line),
+        None => line.push_str("resource (unknown kind)"),
+    }
+}
+
+/// Append a DMA controller duty: the endpoint it serves and its channels.
+fn describe_dma_controller(resource: &HwResource, line: &mut String) {
+    let Ok(duty) = resource.dma_controller_duty() else {
+        line.push_str("DMA controller (malformed duty)");
+        return;
+    };
+    let _ = write!(line, "DMA controller on endpoint {}", duty.endpoint());
+    match duty.channels() {
+        Some(mask) => {
+            let _ = write!(line, " [channels=0x{mask:x}]");
+        }
+        None => line.push_str(" [channels not stated]"),
+    }
+}
+
+/// Append a DMA request line: its position, controller, specifier and name.
+fn describe_dma_request(resource: &HwResource, line: &mut String) {
+    let Ok(request) = resource.dma_request_line() else {
+        line.push_str("DMA request (malformed)");
+        return;
+    };
+    let _ = write!(
+        line,
+        "DMA request {} on endpoint {} [specifier",
+        request.index(),
+        request.endpoint()
+    );
+    for cell in request.specifier() {
+        let _ = write!(line, " 0x{cell:x}");
+    }
+    line.push(']');
+    if let Ok(name) = core::str::from_utf8(request.name()) {
+        if !name.is_empty() {
+            let _ = write!(line, " \"{name}\"");
+        }
+    }
 }
 
 /// Emit the `pci.names_unresolved` advisory (fd 3) when identities were
@@ -678,6 +726,43 @@ C 02  Network controller
                 "#4 Class 0106: Vendor 8086 Device 2922",
                 "  MMIO window at 0xfe000000 [size=0x1000]",
                 "  IRQ line 33",
+            ]
+        );
+    }
+
+    #[test]
+    fn verbose_names_each_dma_resource_by_what_it_grants() {
+        use tairix_abi::driver::dmaengine::{
+            DmaControllerDuty, DmaRequestLine, DMA_CONTROLLER_ENDPOINTS,
+        };
+        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(9);
+        let mut function = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Dma);
+        function
+            .push_match_key(HwMatchKey::pci(0x8086, 0x3483, 0x08_01_00))
+            .expect("key fits");
+        for resource in [
+            HwResource::dma_translated(0x4000_0000, 0x4000_0000, 0xc000_0000),
+            HwResource::dma_controller(
+                &DmaControllerDuty::new(endpoint, Some(0x7f5)).expect("valid"),
+            ),
+            HwResource::dma_controller(&DmaControllerDuty::new(endpoint, None).expect("valid")),
+            HwResource::dma_request(&DmaRequestLine::new(endpoint, 1, &[3], b"rx").expect("valid")),
+        ] {
+            function.push_resource(resource).expect("resource fits");
+        }
+        let mut blob = HwTreeHeader::new(1, 1).to_le_bytes().to_vec();
+        blob.extend_from_slice(&function.to_le_bytes());
+        let (out, result) = run_case(&["-v"], Ok(blob), true);
+        result.expect("listing succeeds");
+        let lines = out.lines();
+        assert_eq!(
+            lines[1..],
+            [
+                "  DMA constraint: addresses below 0x40000000 [size=0x40000000] -> bus 0xc0000000"
+                    .to_string(),
+                std::format!("  DMA controller on endpoint {endpoint} [channels=0x7f5]"),
+                std::format!("  DMA controller on endpoint {endpoint} [channels not stated]"),
+                std::format!("  DMA request 1 on endpoint {endpoint} [specifier 0x3] \"rx\""),
             ]
         );
     }

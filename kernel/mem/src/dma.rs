@@ -119,13 +119,6 @@ pub enum DmaError {
     /// would be indistinguishable from a one-byte allocation and is
     /// almost always a bug at the call site.
     ZeroSize,
-    /// The contiguous physical block the allocator would hand out lies
-    /// (wholly or partly) at or above the device's addressing limit —
-    /// the grant's DMA constraint. The block is
-    /// returned to the allocator and the request refused fail-closed
-    /// rather than handing a device a buffer it cannot reach (or, worse,
-    /// one outside the region the kernel granted it).
-    AddrLimitExceeded,
     /// The carve named a different [`DmaCustodian`] from the one the space is
     /// already bound to. A space's DMA memory has one custodian for its life,
     /// so its teardown has exactly one place to surrender it to.
@@ -157,9 +150,6 @@ impl fmt::Display for DmaError {
             Self::InvalidPoolConfig => f.write_str("dma pool config invalid"),
             Self::SizeUnsupported => f.write_str("dma request exceeds max buddy order"),
             Self::ZeroSize => f.write_str("zero-sized dma allocation is not permitted"),
-            Self::AddrLimitExceeded => {
-                f.write_str("dma buffer exceeds the granted device addressing limit")
-            }
             Self::CustodianMismatch => {
                 f.write_str("dma carve names a custodian the space is not bound to")
             }
@@ -409,11 +399,12 @@ impl DmaWindowMap {
     /// into the borrowed `space`, drawing contiguous frames from `frames`
     /// and reaching them through `phys`.
     ///
-    /// When `addr_limit` is non-zero the contiguous block must lie wholly
-    /// below it (the granted device addressing constraint); a block that would reach at or above the limit is returned to
-    /// the allocator and the request refused with
-    /// [`DmaError::AddrLimitExceeded`]. `addr_limit == 0` means "no
-    /// constraint declared" (the in-kernel pool path).
+    /// When `addr_limit` is non-zero the contiguous block is carved wholly
+    /// below it (the granted device addressing constraint), or the request
+    /// is refused with the allocator's own error: `OutOfRange` when no RAM
+    /// lies below the limit, `OutOfMemory` when none of it is free.
+    /// `addr_limit == 0` means "no constraint declared" (the in-kernel pool
+    /// path).
     pub fn alloc_into<P: PageTable>(
         &mut self,
         space: &mut AddressSpace<P>,
@@ -661,23 +652,10 @@ impl DmaWindowMap {
         self.reserve_record()?;
 
         // Reserve frames *before* mutating the slot bitmap so a frame
-        // OOM leaves the pool's state untouched.
-        let start_frame = frames.alloc_order(MemoryClass::Dma, order)?;
-
-        // Enforce the granted device addressing limit: the whole contiguous block must lie below `addr_limit`
-        // (when one is declared), or the device could be handed a buffer
-        // it cannot reach — or one outside the region the kernel granted
-        // it. A block that exceeds the limit is returned immediately and
-        // the request refused fail-closed. The
-        // block was just minted, so the free matches and cannot fail.
-        if addr_limit != 0 {
-            let data_len = (data_pages as u64) * PAGE_SIZE as u64;
-            let block_end = start_frame.start().as_u64().checked_add(data_len);
-            if block_end.is_none_or(|end| end > addr_limit) {
-                let _ = frames.free_order(start_frame, order);
-                return Err(DmaError::AddrLimitExceeded);
-            }
-        }
+        // OOM leaves the pool's state untouched. Below the device's
+        // addressing limit, so it is never handed memory it cannot reach.
+        let ceiling = (addr_limit != 0).then_some(PhysAddr::new(addr_limit));
+        let start_frame = frames.alloc_order_under(MemoryClass::Dma, order, ceiling)?;
 
         self.map_data_pages(
             space,

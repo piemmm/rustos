@@ -1408,6 +1408,34 @@ impl AddressSpaceRegistry {
         handle
     }
 
+    /// [`Self::mint_grant`] for a delegation: mints only while `task` is still
+    /// registered, returning `None` once it has been withdrawn.
+    ///
+    /// A delegation resolves its recipient before it mints, and the recipient
+    /// can end in between. Minting then would recreate the grant table
+    /// [`Self::withdraw`] just removed, for a later task that draws the same
+    /// id to inherit. Both happen under this registry's write lock, so the
+    /// check here cannot race the withdrawal.
+    pub fn mint_grant_live(&mut self, task: ProcessId, resource: HwResource) -> Option<u64> {
+        self.tasks
+            .contains_key(&task)
+            .then(|| self.mint_grant(task, resource))
+    }
+
+    /// Whether `task` holds the [`HwResourceKind::DmaController`] duty for the
+    /// controller endpoint `endpoint`: the one authority to serve it. A
+    /// consumer's request line naming the same endpoint never counts.
+    #[must_use]
+    pub fn holds_dma_controller_duty(&self, task: ProcessId, endpoint: u64) -> bool {
+        self.grants.get(&task).is_some_and(|entry| {
+            entry.by_handle.values().any(|grant| {
+                grant
+                    .dma_controller_duty()
+                    .is_ok_and(|duty| duty.endpoint() == endpoint)
+            })
+        })
+    }
+
     /// Withdraw every task's per-endpoint grant naming any call endpoint in
     /// `endpoints`, returning how many grants were revoked.
     ///
@@ -3218,6 +3246,45 @@ mod tests {
     /// A register window resource used across the grant tests.
     fn window() -> HwResource {
         HwResource::mmio(0xFE98_0000, 0x4000)
+    }
+
+    #[test]
+    fn a_delegation_mints_only_to_a_registered_task() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.register(ProcessId(11), user_space(1, 1), sim())
+            .expect("registers");
+        let handle = reg
+            .mint_grant_live(ProcessId(11), window())
+            .expect("a live recipient is granted");
+        assert_eq!(reg.grant(ProcessId(11), handle), Some(window()));
+        // Once withdrawn the task receives nothing, so no grant table is
+        // recreated for a later task that draws the same id.
+        assert!(reg.withdraw(ProcessId(11)));
+        assert_eq!(reg.mint_grant_live(ProcessId(11), window()), None);
+        assert_eq!(reg.grant(ProcessId(11), 1), None);
+        // A task that was never registered is refused the same way.
+        assert_eq!(reg.mint_grant_live(ProcessId(12), window()), None);
+    }
+
+    #[test]
+    fn only_a_controller_duty_authorises_serving_a_dma_endpoint() {
+        use tairix_abi::driver::dmaengine::{
+            DmaControllerDuty, DmaRequestLine, DMA_CONTROLLER_ENDPOINTS,
+        };
+        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(21);
+        let mut reg = AddressSpaceRegistry::new();
+        let duty = DmaControllerDuty::new(endpoint, Some(0x7F5)).expect("valid");
+        reg.mint_grant(ProcessId(2), HwResource::dma_controller(&duty));
+        let request = DmaRequestLine::new(endpoint, 0, &[2], b"tx").expect("valid");
+        reg.mint_grant(ProcessId(3), HwResource::dma_request(&request));
+        reg.mint_grant(ProcessId(4), HwResource::endpoint(endpoint));
+        assert!(reg.holds_dma_controller_duty(ProcessId(2), endpoint));
+        assert!(!reg.holds_dma_controller_duty(ProcessId(2), endpoint + 1));
+        // A consumer's request line, and a plain endpoint grant, both name the
+        // endpoint and neither is the duty.
+        assert!(!reg.holds_dma_controller_duty(ProcessId(3), endpoint));
+        assert!(!reg.holds_dma_controller_duty(ProcessId(4), endpoint));
+        assert!(!reg.holds_dma_controller_duty(ProcessId(5), endpoint));
     }
 
     #[test]

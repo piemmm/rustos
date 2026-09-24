@@ -24,8 +24,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::{Errno, MapFlags};
 use tairix_kernel_mem::{
-    page_count_for, AllocError, AnonError, DmaCustodian, DmaError, Frame, FrameAllocator,
-    LiveSpaceError, MemoryClass, MmioError, PhysAddr, PhysMap, PAGE_SIZE,
+    page_count_for, AllocError, AnonError, DmaBlock, DmaCustodian, DmaError, Frame, FrameAllocator,
+    LiveSpaceError, MemoryClass, MmioError, PhysAddr, PhysMap, SharedMemory, MAX_ORDER, PAGE_SIZE,
 };
 use tairix_kernel_sched_api::SchedulerArch;
 
@@ -68,16 +68,18 @@ fn mmio_errno(err: MmioError) -> Errno {
     }
 }
 
-/// Fold a [`DmaError`] onto a stable [`Errno`]: a contiguous-block or
-/// page-table-frame exhaustion is [`Errno::OutOfMemory`] (deterministic OOM); a request beyond the max buddy order or the granted addressing limit
-/// is [`Errno::OutOfRange`]; a zero-length request is
+/// Fold a [`DmaError`] onto a stable [`Errno`]: the frame allocator's own
+/// refusal folds as every allocation's does ([`AllocError::as_errno`]:
+/// exhaustion is [`Errno::OutOfMemory`], an addressing limit no RAM lies
+/// below [`Errno::OutOfRange`]); a request beyond the max buddy order is
+/// [`Errno::OutOfRange`]; a zero-length request is
 /// [`Errno::LengthOutOfRange`]; and a not-reachable frame or page-table
 /// refusal is [`Errno::BadAddress`] (fail closed).
-fn dma_errno(err: DmaError) -> Errno {
+pub(crate) fn dma_errno(err: DmaError) -> Errno {
     match err {
-        DmaError::Alloc(_) => Errno::OutOfMemory,
+        DmaError::Alloc(alloc) => alloc.as_errno(),
         DmaError::ZeroSize => Errno::LengthOutOfRange,
-        DmaError::SizeUnsupported | DmaError::AddrLimitExceeded => Errno::OutOfRange,
+        DmaError::SizeUnsupported => Errno::OutOfRange,
         // No custody behind the carve is an inert quarantine, not a caller
         // error.
         DmaError::NoCustody => Errno::NotImplemented,
@@ -377,10 +379,13 @@ where
     }
 
     /// Scrub `pages` frames beginning at `phys_base` through the kernel
-    /// direct map. A frame the map cannot reach is left untouched (best
-    /// effort, never a panic) — but it cannot become user-visible
-    /// un-scrubbed, because every region is also scrubbed on allocation.
-    fn scrub(&self, phys_base: u64, pages: u64) {
+    /// direct map, cleaning a coherent region's zeros to memory so neither the
+    /// device nor a coherent mapping reads past them and no dirty line is
+    /// written back over the frames later. A frame the map cannot reach is
+    /// left untouched (best effort, never a panic) — but it cannot become
+    /// user-visible un-scrubbed, because every region is also scrubbed on
+    /// allocation.
+    fn scrub(&self, phys_base: u64, pages: u64, memory: SharedMemory) {
         let Some(len) = usize::try_from(pages)
             .ok()
             .and_then(|p| p.checked_mul(PAGE_SIZE))
@@ -398,6 +403,9 @@ where
             // dropped the last mapping), so no concurrent access aliases them.
             unsafe {
                 core::ptr::write_bytes(ptr.as_ptr(), 0, len);
+            }
+            if memory == SharedMemory::DmaCoherent {
+                self.physmap.clean_invalidate(PhysAddr::new(phys_base), len);
             }
         }
     }
@@ -433,7 +441,7 @@ where
             // Scrub each block before it can become user-visible (no
             // cross-process leak); the kernel direct map needs no user
             // mapping, so it is robust in every context.
-            self.scrub(phys_base, pages);
+            self.scrub(phys_base, pages, SharedMemory::Cacheable);
             chunks.push(SharedChunk {
                 phys_base,
                 order,
@@ -443,7 +451,29 @@ where
         Ok(chunks)
     }
 
-    fn map_region(&self, chunks: &[SharedChunk]) -> Result<u64, Errno> {
+    fn alloc_dma_region(&self, pages: u64, addr_limit: u64) -> Result<SharedChunk, Errno> {
+        let order = pages
+            .checked_next_power_of_two()
+            .filter(|_| pages != 0)
+            .map(u64::trailing_zeros)
+            .filter(|&order| order <= MAX_ORDER)
+            .ok_or(Errno::LengthOutOfRange)?;
+        let ceiling = (addr_limit != 0).then_some(PhysAddr::new(addr_limit));
+        let frame = self
+            .frames
+            .alloc_order_under(MemoryClass::Dma, order, ceiling)
+            .map_err(AllocError::as_errno)?;
+        let phys_base = frame.start().as_u64();
+        let pages = 1u64 << order;
+        self.scrub(phys_base, pages, SharedMemory::DmaCoherent);
+        Ok(SharedChunk {
+            phys_base,
+            order,
+            pages,
+        })
+    }
+
+    fn map_region(&self, chunks: &[SharedChunk], memory: SharedMemory) -> Result<u64, Errno> {
         // Project the chunk list onto the `(phys_base, pages)` list the live
         // space maps into one contiguous virtual window.
         let mut list: Vec<(u64, u64)> = Vec::new();
@@ -454,7 +484,7 @@ where
             list.push((c.phys_base, c.pages));
         }
         let cpu = self.arch.current_cpu();
-        with_current_live_space(cpu, |space| space.map_shared_chunks(&list))
+        with_current_live_space(cpu, |space| space.map_shared_chunks(&list, memory))
             .ok_or(Errno::NotImplemented)?
             .map_err(live_errno)
     }
@@ -466,15 +496,28 @@ where
             .map_err(live_errno)
     }
 
-    fn free_region(&self, chunks: &[SharedChunk]) {
+    fn free_region(&self, chunks: &[SharedChunk], memory: SharedMemory) {
         // Scrub before returning each block to the allocator (zero-on-free)
         // through the kernel direct map, then free the buddy block. Robust in
         // every context, including a kernel-thread teardown with no live
         // address space.
         for c in chunks {
-            self.scrub(c.phys_base, c.pages);
+            self.scrub(c.phys_base, c.pages, memory);
             let frame = Frame::containing(PhysAddr::new(c.phys_base));
             let _ = self.frames.free_order(frame, c.order);
+        }
+    }
+
+    fn surrender_region(&self, chunks: &[SharedChunk], custodian: &DmaCustodian) {
+        for c in chunks {
+            self.scrub(c.phys_base, c.pages, SharedMemory::DmaCoherent);
+            let block = DmaBlock {
+                frame: Frame::containing(PhysAddr::new(c.phys_base)),
+                order: c.order,
+            };
+            custodian
+                .custody
+                .hold(custodian.node, custodian.generation, block);
         }
     }
 
@@ -703,19 +746,14 @@ mod tests {
             }
         }
 
-        fn map_shared(&mut self, _phys_base: u64, _len: usize) -> Result<u64, LiveSpaceError> {
+        fn map_shared_chunks(
+            &mut self,
+            _chunks: &[(u64, u64)],
+            _memory: SharedMemory,
+        ) -> Result<u64, LiveSpaceError> {
             // The shared-memory producer's map/unmap routing is exercised at
             // the syscall-handler level and end-to-end in QEMU; this double
             // only satisfies the trait for the other producers' tests.
-            match self.next.take() {
-                Some(err) => Err(err),
-                None => Ok(0x9000_5000),
-            }
-        }
-
-        fn map_shared_chunks(&mut self, _chunks: &[(u64, u64)]) -> Result<u64, LiveSpaceError> {
-            // As `map_shared`: the chunked mapping is covered at the
-            // syscall-handler level and end-to-end in QEMU.
             match self.next.take() {
                 Some(err) => Err(err),
                 None => Ok(0x9000_5000),
@@ -1085,18 +1123,24 @@ mod tests {
     }
 
     #[test]
-    fn dma_alloc_folds_an_addressing_limit_error_to_out_of_range() {
-        let (fake, _ptr) = shared_fake_with(FakeLive {
-            next: Some(LiveSpaceError::Dma(DmaError::AddrLimitExceeded)),
-            ..FakeLive::default()
-        });
-        let _guard = publish_live_space_for_test(18, fake);
+    fn dma_alloc_folds_an_unreachable_or_exhausted_limit_as_the_allocator_does() {
+        for (refusal, errno) in [
+            (AllocError::OutOfRange, Errno::OutOfRange),
+            (AllocError::OutOfMemory, Errno::OutOfMemory),
+        ] {
+            let (fake, _ptr) = shared_fake_with(FakeLive {
+                next: Some(LiveSpaceError::Dma(DmaError::Alloc(refusal))),
+                ..FakeLive::default()
+            });
+            let _guard = publish_live_space_for_test(18, fake);
 
-        let producer = LiveDmaAlloc::new(arch_at(18));
-        assert_eq!(
-            producer.alloc(PAGE, 0x1000, test_custodian()),
-            Err(Errno::OutOfRange)
-        );
+            let producer = LiveDmaAlloc::new(arch_at(18));
+            assert_eq!(
+                producer.alloc(PAGE, 0x1000, test_custodian()),
+                Err(errno),
+                "{refusal:?}"
+            );
+        }
     }
 
     const TEST_NODE: u32 = 5;

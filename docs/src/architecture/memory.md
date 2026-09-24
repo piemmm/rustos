@@ -52,6 +52,21 @@ The allocator never panics on OOM: `alloc` / `alloc_order` return
 `AllocError::OutOfMemory`. The constructor refuses overlapping or
 malformed boot maps.
 
+**A carve for a device that reaches only part of RAM searches below its
+ceiling.** The lists are LIFO and address-blind, so their front block says
+nothing about where a free block below a device's addressing limit is —
+seeded in ascending order, it is the *top* of RAM. `alloc_order_under` walks
+the bitmap's maximal free runs downward from the ceiling a word at a time and
+takes the highest aligned block below it, so a device reaching less keeps the
+memory beneath, and the carve fails only when no such block is free
+(`OutOfMemory`), or when no usable RAM lies below the ceiling at all
+(`OutOfRange`). The search costs a step per bitmap word and per free run it
+passes below the ceiling, paid only on a carve's set-up path, and a ceiling
+above every usable frame is an ordinary `alloc_order`. The claimed block is split out of the one free block
+enclosing it: population and eager merging keep every aligned all-free run
+inside one free block, so a run none encloses is refused as an invariant
+violation.
+
 **Every frame is charged to exactly one memory class.** A draw names its
 [`MemoryClass`](../abi/sysinfo.md) — `UserAnon`, `UserFile`, `PageTable`,
 `Kernel`, `Dma`, `Compressed` — and the allocator keeps a frame count per
@@ -81,7 +96,8 @@ invariant violation with nothing mutated.
 PVH, UEFI, DTB, WASM) and hand it to `FrameAllocator::new`. Reserved
 regions are merged into the bitmap as "used" so they can never be
 handed out; usable regions are rounded *inward* to whole-frame
-boundaries.
+boundaries, and adjacent ones populate as one run, so the buddies at their
+seam merge like any others.
 
 **The zero page is never enrolled**, even when firmware reports it
 usable (the PC low-BIOS region starts at physical 0): under a direct map
@@ -90,9 +106,9 @@ based at physical zero its translation is the map's own base, and under an
 ([`FrameTableSource`], the DMA pool, an MMIO window) can represent. The
 reservation is unconditional rather than per-port, because a frame the
 allocator must never hand out is cheaper to exclude once than to reason
-about per consumer. Because the buddy lists hand out the lowest free
-index first, a frame 0 that a consumer draws, cannot use, and returns
-would be re-issued to every later request — wedging allocation
+about per consumer. Because a returned block goes to the front of its
+list, a frame 0 that a consumer draws, cannot use, and returns would be
+re-issued to every later request of its order — wedging allocation
 permanently while `free_frames` still reports plenty. It stays marked
 reserved, exactly like firmware-reserved RAM, and is excluded from
 `usable_frames`.
@@ -598,9 +614,25 @@ over a space it owns outright, exactly as `MmioMap` wraps `MmioWindowMap`
 per-task live address space (`LiveSpace`, §7e, the `dma_alloc` syscall
 path) drives the *same* `DmaWindowMap` against the
 space it owns and lends, adding an `addr_limit` bound (the granted device
-DMA constraint, §18.3): a contiguous block that would reach at or above the
-limit is returned to the allocator and the carve refused
-(`DmaError::AddrLimitExceeded`).
+DMA constraint, §18.3): the block is carved below it
+(`FrameAllocator::alloc_order_under`, §1), and a limit no free block
+satisfies refuses the carve with the allocator's own error.
+
+**A region several processes map can be DMA memory too.** `shm_create_dma`
+carves one contiguous, power-of-two block below a `Dma` grant's limit through
+the same `alloc_order_under`, zeroes it and cleans it to memory, and records
+it in the shared-region registry (`kernel/core::sharedreg`) like any other
+region — except that every mapping of it, the creator's and each grantee's,
+is `DMA_COHERENT` (`SharedMemory::DmaCoherent`), so no mapping can hold a
+line the device never sees. The region binds the creator's node quarantine
+at creation and unbinds it when freed. The creator's own unmap is its word
+that its device is done with the region, exactly as `dma_free` is for a
+carve, so a driver keeps its mapping while its device may master the
+region. Should the creator end — however it ends — still mapping it, the
+region is orphaned: the last unmap anywhere scrubs its frames and hands them
+to that quarantine rather than to the allocator, because the device the
+driver programmed may still be mastering them. The syscall contract is in
+[the syscall reference](syscalls.md); the design is `plans/SOUND.md` SND5b.
 
 **A dead driver's DMA memory is quarantined, not freed.** A driver can end
 with its device still mastering a carve — a crash, a kill, an exit that
@@ -867,7 +899,7 @@ through the one pair `publish_region_mapping` / `publish_region_teardown`:
 |---|---|
 | `mem_map` | nothing — a reservation commits no frame and writes no page-table entry, so the snapshot is already correct |
 | `mem_unmap`, `file_unmap` | the pages of the region it released |
-| `shm_create`, `shm_map`, `mmio_map`, `dma_alloc` | the pages of the region it mapped |
+| `shm_create`, `shm_create_dma`, `shm_map`, `mmio_map`, `dma_alloc` | the pages of the region it mapped |
 | `shm_unmap`, `dma_free` | the pages of the region it released, as the owning layer reports the extent |
 | anonymous / file / compressed-page fault | the one page it backed |
 | stack growth | the pages the walk backed |
@@ -1069,8 +1101,11 @@ is the consumer the `mem_map` ABI exists for (§7c).
   `tairix_rt::sync::Mutex`, which parks; the uncontended acquire is the same pair
   of atomics either way, so the common case pays nothing for it.
 
-The pure free-span bookkeeping is host-unit-tested over a fake pager; the
-aarch64 `-M virt` vertical `tests/integration/heap_qemu_aarch64` proves it end
+The pure free-span bookkeeping is host-unit-tested over a fake pager, and
+interpreted under miri: the pager names every arena pointer it hands out — the
+syscall pager with exposed provenance, since the kernel maps the arena outside
+the abstract machine, the fake with none, since its addresses are never
+dereferenced. The aarch64 `-M virt` vertical `tests/integration/heap_qemu_aarch64` proves it end
 to end — a pure-Rust EL0 fixture (`tests/integration/heap_program`)
 Box-allocates, grows a `Vec` across several pages, reallocates after freeing,
 verifies every value, and exits 0, with the program's allocator-issued
