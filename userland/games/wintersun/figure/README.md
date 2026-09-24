@@ -8,8 +8,8 @@ equipment sockets, the depth-sorted draw order, the one body frame that serves
 every heading, and over all of it a gait driven by distance travelled,
 per-foot terrain planting, look-at, recoil, sway, breathing and a contact
 shadow — plus the shipped motion set, the measurements the art is gated on,
-and the validated record a character is built from (`plans/FIGURE.md`
-FG2–FG6).
+the validated record a character is built from, and the designer that edits
+one (`plans/FIGURE.md` FG2–FG7).
 Stability tier: **experimental** — nothing has shipped, so a type changes in
 place until it does.
 
@@ -86,20 +86,23 @@ exactly, at every heading, with no approximation to get the sign of.
 | `socket` | The closed socket set equipment hangs on, and where a rig mounts each one. |
 | `mesh` | `Ring`/`Hoop`/`Stretch`: a part's cross-sections, how a figure's build scales them, how the joints carry and skin them, the near arc a silhouette is taken over, and the shading ladder a strip is filled at. |
 | `rig` | `Rig` and its validation, `Posture`, `Part`/`Fitted`, and the `Placement` a figure is skinned, projected and depth-sorted into — by each surface's mean, or by a point a layered surface shares with the one it lies over. |
-| `humanoid` | The one skeleton every species stands on: 18 joints, 21 body surfaces plus up to 12 of features, every socket, proportioned in percentages of `STANDING_HEIGHT`; the builder that turns an `Identity` into a rig, and the drive table binding the pose parameters to it. |
+| `humanoid` | The one skeleton every species stands on: 18 joints, 21 body surfaces plus up to 12 of features, every socket, proportioned in percentages of `STANDING_HEIGHT`; the builder that turns an `Identity` into a rig, the drive table binding the pose parameters to it, and `MOST_REACH`, how far the largest figure a record describes reaches. |
 | `identity` | `Identity`: the nineteen-byte record a character is — species, build settings, feature forms, palette swatches — its checks, its one-spelling encoding, and its total, fail-closed decoder. |
 | `species` | `Species` and what each may be: the interval every build setting spans, the forms each feature may take, and the swatch tables each palette slot draws from. |
 | `tint` | `Tint`, the role a surface's colour plays, and `Tints`, what each role resolves to for one figure. |
-| `motion` | The shipped motion set — idle, walk, run — whose leg curves are a stated foot path solved through the same two-bone geometry the planting layer uses. |
+| `design` | `Designer`: a record edited live and kept canonical — the player's choices projected onto the species chosen, an edit a species cannot carry refused by its field — and settled into at most one write per interaction; `Change`, what a record's change leaves a drawn figure owing. |
+| `preview` | `Preview`: the record being designed playing the shipped motions on the grid's stage, caught up by exactly what each change costs, and viewed in the harness's cell framing or at the one scale every figure shares. |
+| `plausible` | `figure`: a random record drawn from per-field distributions with the correlations a person would choose, from an injected generator, integer-only. |
+| `motion` | The shipped motion set — idle, walk, run — whose leg curves are a stated foot path solved through the same two-bone geometry the planting layer uses; `Set` holds it and `Clips` is its clip table for a machine to borrow. |
 | `paint` | The one paint order (shadow, then strips far-first) and what drawing a figure costs. |
-| `quality` | The measurements the art is gated on — joint-limit use, motion continuity, loop closure, foot skate — each with its bound beside it. |
-| `reference` | The reference grid the cross-target digest folds and the art harness draws: each species' reference figure and its least and most, in which poses, facing which way. |
+| `quality` | The measurements the art is gated on — joint-limit use, motion continuity, loop closure, foot skate, grounding — each with its bound beside it. |
+| `reference` | The reference grid the cross-target digest folds and the art harness draws — each species' reference figure, its least and most, and two plausible figures, in which poses, facing which way — and the one stage every figure stands on: ground, light, breath, and the framing that holds a whole figure in a cell. |
 | `digest` | `REFERENCE_DIGEST`: the cross-target claim, asserted by the host suite and one vertical per Tier-1 target. |
 | `pose` | `Param` — the 24 named scalars an animation is authored in — the `Pose` holding them, their `Range`, and the `Mask` a blend writes through. |
 | `rigging` | `Drive`/`Rigging`: which joint axis a parameter turns, and which way its `+1` points. |
 | `clip` | `Clip`: a keyed `Curve` per parameter with an `Easing` per segment, a duration, a `Loop` mode, and the named `Event`s at phases along it. |
 | `blend` | `Blend`: weighted accumulation of poses and clips, weighed per parameter so a mask means something. |
-| `transition` | `Transitions` — states, clips and per-edge cross-fades, validated at load — and the `Animator` that walks one. |
+| `transition` | `Transitions` — states, clips and per-edge cross-fades, validated at load — and the `Animator` that walks one, cross-fading the root height with the pose. |
 | `gait` | `Gait`: the cycle phase driven by distance travelled, and the stride *measured* from a clip and rig so the planted foot does not skate. |
 | `plant` | `Legs`/`Planted`: each foot solved onto its own terrain height, the root dropping to the lowest and leaning past the legs' reach. |
 | `spring` | The one damped spring — solved in closed form, so no frame length can make it diverge — that recoil and sway are both built from. |
@@ -227,13 +230,26 @@ Every palette is readable because the one tone every figure wears whatever it
 chose — the trousers — sits in the narrow luminance band that clears both
 desktop themes on its own; the art harness checks that tone before any cell.
 
+## A designer that cannot freeze its window
+
+`Designer::edit` changes the record in memory and nothing else, and
+`Designer::settle` answers the record to write only once the interaction that
+made the edits has finished and only if it changed anything. What a repaint
+owes is `Change::between` the record drawn and the one live — nothing, a
+re-tint, or a rebuild — so a palette drag never re-rigs and a burst of edits
+costs one catch-up. `Preview::show` performs exactly that catch-up and leaves
+the animation it is judged by alone. See the docs page for the canonical
+projection, the two framings and the plausible distributions.
+
 ## What is not here
 
-The designer that edits a record — its presets and its plausible random
-figures — is FG7. The contact-sheet harness that makes quality a measured
-property is `cargo xtask artsheet`, which lives in `tools/xtask` because it
-renders and writes files; the measurements it gates on live here, in
-`quality` and `paint`, so they run on every Tier-1 target under `cargo test`.
+The designer's surfaces — sliders, windows, the character library — are the
+game's (`plans/WINTERSUN.md` WS17), and so is the preset set: a preset is a
+record shipped as bundle content. The contact-sheet harness that makes quality
+a measured property is `cargo xtask artsheet`, which lives in `tools/xtask`
+because it renders and writes files; the measurements it gates on live here,
+in `quality` and `paint`, so they run on every Tier-1 target under
+`cargo test`.
 
 Clips and machines are *code* here, assembled from borrowed static tables and
 checked once. The one thing this crate parses is a figure record.

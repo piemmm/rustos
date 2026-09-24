@@ -3,7 +3,7 @@
 use tairix_util::mathf;
 
 use super::{Animator, ClipId, Edge, StateId, Transitions, MAX_STATES};
-use crate::clip::{Clip, Curve, Event, Key, Loop};
+use crate::clip::{Clip, Curve, Event, Key, Lift, Loop};
 use crate::error::FigureError;
 use crate::pose::Param;
 use crate::socket::Side;
@@ -339,6 +339,73 @@ fn a_cross_fade_hands_over_from_one_clip_to_the_other() {
 
     animator.advance(0.5).expect("a real step");
     assert!(close(knee(&animator), 1.0), "the fade did not finish");
+}
+
+/// Two one-second clips holding the body at the heights `first` and
+/// `second` key.
+fn heights<'a>(first: &'a [Key], second: &'a [Key]) -> [Clip<'a>; 2] {
+    let held = |keys: &'a [Key]| {
+        Clip::new(1.0, Loop::Wrap, &[], &[])
+            .and_then(|clip| clip.lifting(Lift::new(keys)?))
+            .expect("a well-formed clip")
+    };
+    [held(first), held(second)]
+}
+
+/// A clip playing on its own holds the root where it says, at the phase it
+/// has reached.
+#[test]
+fn a_settled_animator_stands_at_its_own_clips_height() {
+    let rising = [Key::new(0.0, -0.2), Key::new(0.5, 0.1), Key::new(1.0, -0.2)];
+    let level = [Key::new(0.0, 0.0), Key::new(1.0, 0.0)];
+    let clips = heights(&rising, &level);
+    let states = [ClipId::new(0), ClipId::new(1)];
+    let edges = [Edge::new(IDLE, WALK, 1.0)];
+    let machine = Transitions::new(&clips, &states, &edges, IDLE).expect("a sound machine");
+    let mut animator = Animator::new(machine);
+
+    for _ in 0..8 {
+        let phase = animator.advance(0.125).expect("a real step").current.to;
+        assert!(close(
+            animator.root().expect("live states have clips"),
+            clips[0].root_at(phase)
+        ));
+    }
+}
+
+/// The regression the root height was missing: a fade between clips standing
+/// at different heights hands the body over from one to the other, starting
+/// exactly where the outgoing clip held it and ending exactly where the
+/// incoming one does, and never jumping on the way.
+#[test]
+fn a_cross_fade_carries_the_body_from_one_height_to_the_other() {
+    let low = [Key::new(0.0, -0.3), Key::new(1.0, -0.3)];
+    let high = [Key::new(0.0, 0.2), Key::new(1.0, 0.2)];
+    let clips = heights(&low, &high);
+    let states = [ClipId::new(0), ClipId::new(1)];
+    let edges = [Edge::new(IDLE, WALK, 1.0)];
+    let machine = Transitions::new(&clips, &states, &edges, IDLE).expect("a sound machine");
+    let mut animator = Animator::new(machine);
+    let root = |animator: &Animator<'_>| animator.root().expect("live states have clips");
+
+    assert!(close(root(&animator), -0.3));
+    animator.request(WALK).expect("declared");
+    assert!(
+        close(root(&animator), -0.3),
+        "the body jumped the moment the fade began"
+    );
+
+    // An eighth of the fade per step moves the body an eighth of the way.
+    let mut was = root(&animator);
+    for _ in 0..8 {
+        animator.advance(0.125).expect("a real step");
+        let now = root(&animator);
+        assert!(now >= was, "the body sank on its way up");
+        assert!(now - was <= 0.0625 + SLACK, "the body jumped {}", now - was);
+        was = now;
+    }
+    assert!(!animator.fading());
+    assert!(close(root(&animator), 0.2), "the fade did not land");
 }
 
 #[test]

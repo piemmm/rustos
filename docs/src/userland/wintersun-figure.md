@@ -3,9 +3,10 @@
 `userland/games/wintersun/figure` (`tairix-wintersun-figure`) answers what a
 character *is* before anything animates it: a skeleton of joints, the
 parametric parts bound to them, the sockets equipment hangs on, and the one
-projection that turns all of it toward the camera — and the validated record a
-character is built from. It is `plans/FIGURE.md` FG2–FG6, and the sixth crate
-of the `userland/games/` leaf subtree. Stability tier: **experimental**.
+projection that turns all of it toward the camera — the validated record a
+character is built from, and the designer that edits one. It is
+`plans/FIGURE.md` FG2–FG7, and the sixth crate of the `userland/games/` leaf
+subtree. Stability tier: **experimental**.
 
 ## Parts on a skeleton, not a sprite sheet
 
@@ -162,12 +163,13 @@ Twenty-one body surfaces trace 688 outline points against the billboard's
 allocator. Strips are stored in the converter's own sub-pixel units, which is
 both half the memory of a pair of reals and exactly what the painter hands it;
 a figure's whole buffer set is then stack-resident, which is what the
-cross-target verticals need. The grid's deepest build measures about a
-hundred kibibytes of stack, so each QEMU image that draws it sizes its boot
-stack for it — the `virt` linker scripts on aarch64 and riscv64, and on
-x86_64 an image script that sets `BOOT_STACK_BYTES` and includes the shared
-layout — rather than relying on the allowance the boot pipeline sizes for
-itself.
+cross-target verticals need. The digest's deepest path — a designer's preview
+built while the grid's own figure is held — needs about 114 KiB of stack at
+the images' `opt-level = 1` (bisected on a bounded thread; the grid alone
+needs 81), so each QEMU image that draws it reserves a 256 KiB boot stack —
+the `virt` linker scripts on aarch64 and riscv64, and on x86_64 an image
+script that sets `BOOT_STACK_BYTES` and includes the shared layout — rather
+than relying on the allowance the boot pipeline sizes for itself.
 
 ## Equipment is parts, not paint
 
@@ -282,6 +284,11 @@ state and asks for it, and asking for a state with no edge from where the
 figure is gets refused. At most two clips are live at once; asking for a
 state mid-fade replaces the outgoing clip rather than queueing a chain of
 fades that would take longer to settle than the input that caused them.
+
+A fade carries the root height with the pose: `Animator::root` weighs each
+live clip's own height exactly as `Animator::blend` weighs its curves, so a
+figure fading from a standing idle into a crouching run passes through the
+heights between rather than dropping when the fade begins or ends.
 
 ## Costs nothing to draw
 
@@ -476,12 +483,12 @@ the figure growing.
 ## The art is measured, and the measurements are gated
 
 `cargo xtask artsheet` walks a reference grid — each species' reference figure
-in every shipped motion, and each species' least and most walking, at eight
-phases, facing four ways — renders each cell and holds every number against a
-bound. A reference figure is measured at the three pixel sides the desktop
-draws a figure at; a least or most at the smallest, the readability floor,
-since what a figure costs is counted in outline points and fill area and
-neither depends on the side. It runs in
+in every shipped motion, and each species' least, most and two plausible
+figures walking, at eight phases, facing four ways — renders each cell and
+holds every number against a bound. A reference figure is measured at the
+three pixel sides the desktop draws a figure at; a walking one at the
+smallest, the readability floor, since what a figure costs is counted in
+outline points and fill area and neither depends on the side. It runs in
 `ci`, and it does two things at once: it regenerates
 `userland/games/wintersun/figure/artsheet.ledger` and compares it byte for
 byte, *and* it checks the freshly measured numbers. Drift alone would admit a
@@ -502,8 +509,19 @@ judges current rather than as-of-last-regeneration.
 | Motion continuity, per unit of a parameter's range | `figure::quality` | 0.041 |
 | Loop closure | `figure::quality` | exact |
 | Grounding: the cycle's lowest foot against the floor | `figure::quality` | 0.057 of a figure's units, on the long-legged elf |
-| Coverage ratio, tonal regions, contrast against both themes | the harness | 0.084–0.212, ≥ 5 regions, ≥ 2.20 |
-| Outline points and fill area per cell | `figure::paint` + the harness | ≤ 1,048 points, ≤ 0.28 overdraw |
+| Coverage ratio, tonal regions, contrast against both themes | the harness | 0.061–0.155, ≥ 3 regions, ≥ 2.20 |
+| Outline points and fill area per cell | `figure::paint` + the harness | ≤ 1,096 points, ≤ 0.20 overdraw |
+
+A cell holds the whole figure. The depth axis draws what is nearer the viewer
+lower on the screen, so the near foot of a stride lands below the ground point
+the figure stands on — a fifth of its reach below it for the longest-legged
+build. A cell is framed by the figure's rest reach with two measured
+allowances, 1.02 of the reach above the ground point and 0.20 below it, between
+margins of a fiftieth of the side; every build corner of every species stays
+within them in every shipped motion at every sixteenth of a turn, and every
+cell of the grid inside its square. The worst cell for separable masses is the
+least beastkin — pale cloth on pale fur — at the floor, which resolves into
+exactly the three the bound asks for.
 
 The pose-side measurements live in the crate rather than the harness, so
 `cargo test` runs them on every Tier-1 target and a later figure preset is
@@ -600,10 +618,80 @@ legs are always a substantial share of a figure. The art harness checks that
 tone before any cell, and the grid draws every species in its palest and its
 darkest covering.
 
-## What comes next
+## The designer
 
-The designer that edits a record — its presets and its plausible random
-figures — is `plans/FIGURE.md` FG7.
+A designer is sliders over a record, which makes it the surface most likely to
+freeze its own window: wired to a store, a slider writes once per pointer
+sample; wired to a rebuild, it re-derives the whole figure per sample for a
+change of one colour. `design::Designer` is the model that makes both
+impossible to spell.
+
+**An edit is live and costs what it feeds.** `Designer::edit` changes the
+record in memory and nothing else. What the next paint owes is
+`design::Change::between` the record it last drew and the one now live:
+
+| Change | When | What the preview does |
+|---|---|---|
+| `Nothing` | the record drawn is the record live | nothing |
+| `Tints` | only the palette differs | `Rig::retint`: no point moves |
+| `Rig` | the species, the build or a feature differs | a rebuild |
+
+A figure's geometry is its species, build and features, and its colours its
+species and palette, so the diff is exact. Diffing against what was *drawn*
+rather than against each edit is what makes a burst of edits between two
+frames cost one catch-up.
+
+**The durable write happens once, where the interaction settles.**
+`Designer::settle` answers the record to store when the interaction changed it,
+and nothing otherwise: a drag of any length is at most one write, and one that
+ends where it began is none. The store is the surface's to reach, off the
+frame loop; a refused write is undone by opening the designer again on what
+the store holds.
+
+**The record is always one.** The designer keeps what the player chose, field
+by field, and the record those choices come to for the species chosen. An edit
+the species cannot carry is refused with the field the record decoder would
+name, and changes nothing. A species change or going bald re-derives what it
+reshapes: a swatch past the new species' table is clamped to its last, a form
+the species lacks becomes its first, a form it must carry is given — a
+dragonkin always has horns and the scaled tail — an eye colour it does not
+admit becomes the admitted one nearest in colour, and a bald figure's hair
+colour and volume are zeroed. The choices survive beneath the record, so going
+to an elf and back, or bald and back, gives back exactly the figure you left.
+This is not a repair of a record: a record arriving from anywhere else is still
+decoded and refused, never adjusted.
+
+**The preview plays, on the harness's own stage.** `preview::Preview` plays
+the shipped motions through the transition machine — choosing a clip
+cross-fades into it — breathes, and stands on the grid's stage: the same
+ground, light and pose-to-placement path the harness measures. A view is framed
+one of two ways, and a designer shows both at once. `Frame::Measured` fills its
+square as the harness frames a cell, so the small view beside the large one is
+the readability floor itself. `Frame::Shared` draws every figure at the one
+scale the largest figure a record describes fits (`humanoid::MOST_REACH`):
+height is a scale of the whole skeleton, so a figure filling its own square is
+the same size at every height, and a height slider needs the shared frame to
+show anything. A catch-up never touches the clock, the clips playing, the
+breath or the heading, so no edit restarts the animation it is judged by.
+
+**A preset is a record.** Picking one is `Designer::apply` and a settle. The
+preset set is `WinterSun` bundle content, not a table in this crate.
+
+**A random figure is plausible, not uniform.** `plausible::figure` draws each
+setting from a bell about the middle of its species' interval, so an end is
+reachable and rare; a heavy build leans broad-shouldered, and a tall one
+long-limbed and small-headed for its height. Hair and markings lean toward the
+lightness of the skin, fur or scale they grow from, so a pale figure has pale
+markings, and the tunic leans away from it, so the two read apart. A form a
+species may go without is carried as often as the species is described as
+carrying it. The draw is integer-only and takes an injected generator; the
+predictable `NonCryptoRng` is the one to give it, since a figure a player could
+have built by hand protects nothing by being unpredictable and a seed that
+names one figure is what the tests and the grid need. Two seeded draws per
+species are figures of the art grid, so what "surprise me" hands a player is
+held to every bound an authored figure is.
+
+## What comes next
 
 A run's mid-stance dip is FG8. Its body now holds the height its clip states
 while a foot is down and follows a parabola across each flight, which is what

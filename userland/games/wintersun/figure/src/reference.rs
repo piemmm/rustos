@@ -18,10 +18,24 @@
 //! feature, and the palest and darkest palettes any species admits, so a
 //! bound the art is held to is held across the whole of what a record can
 //! ask for rather than only the figure somebody happened to author.
+//!
+//! Last come two figures of each species drawn by [`plausible::figure`]
+//! from fixed seeds, walking too, so what a designer's "surprise me" hands a
+//! player is held to every bound an authored figure is.
+//!
+//! # One stage
+//!
+//! Every figure stands on the same stage — level ground, one light, one
+//! breath, and one framing in a square cell — and the designer's preview
+//! stands on it as well, so the figure a player is shown while designing is
+//! drawn exactly as the harness measures it.
+//!
+//! [`plausible::figure`]: crate::plausible::figure
 
 use tairix_inline::ArrayVec;
 use tairix_raster::shape::Placed;
 use tairix_raster::Color;
+use tairix_rng::NonCryptoRng;
 use tairix_wintersun_net::value::Facing;
 
 use crate::breath::Breath;
@@ -34,11 +48,14 @@ use crate::identity::{
     Palette, Setting, Spec, TailForm,
 };
 use crate::mesh::{self, Hoop, MAX_RINGS};
-use crate::motion::{Kind, Motion};
+use crate::motion::{self, Kind};
 use crate::plant::{Legs, Planted};
+use crate::plausible;
+use crate::pose::Pose;
 use crate::rig::{Frames, Part, Placement, Resolved, Rig, Stance};
 use crate::shadow::{Contact, Light};
 use crate::species::Species;
+use crate::tint::Tints;
 
 /// How many phases of each motion the grid covers.
 ///
@@ -90,6 +107,60 @@ pub const SHADOW: (f64, Color) = (7.5, Color::rgba(0x0C, 0x0E, 0x12, 0x62));
 /// An always-on layer, so the overlay summing and its clamp back into range
 /// are part of every cell rather than something a caller must remember.
 pub const BREATH: (f64, f64, f64) = (4.5, 0.06, 0.37);
+
+/// The pixel sides a figure is drawn at, smallest first.
+///
+/// The smallest is the readability floor — the size a figure is smallest on
+/// screen, which the art bounds are really about — and the largest is the
+/// biggest a figure is drawn, so the one a cost budget is taken at.
+pub const SIDES: [u32; 3] = [32, 64, 128];
+
+/// How far above its ground point a figure is drawn, in units of its rest
+/// reach: its crown, and what the depth axis lifts behind it.
+///
+/// Measured off the outline of every ring of every build corner of every
+/// species, in every shipped motion at the grid's phases, either extreme of
+/// the breath and every sixteenth of a turn, and rounded up to a hundredth;
+/// tests hold every corner inside it and every cell of the grid inside its
+/// square.
+const ABOVE: f64 = 1.02;
+
+/// How far below its ground point a figure is drawn, in units of its rest
+/// reach: the near foot of a stride, which the depth axis draws below the
+/// ground point the figure stands on.
+///
+/// Measured and held as [`ABOVE`] is.
+const BELOW: f64 = 0.20;
+
+/// The share of a cell's side left clear at its top and at its bottom.
+const MARGIN: f64 = 0.02;
+
+/// How much of a cell's side the figure's reach is drawn into: all of
+/// [`ABOVE`] and [`BELOW`] between the margins.
+const FIT: f64 = (1.0 - 2.0 * MARGIN) / (ABOVE + BELOW);
+
+/// Where the figure's ground contact sits down the cell.
+const GROUND: f64 = MARGIN + ABOVE * FIT;
+
+/// Where a figure reaching `reach` is drawn in a square cell of `side`
+/// pixels: the scale that fits the whole of what it draws, and the surface
+/// point its ground contact sits on.
+///
+/// Taken from the figure's own reach rather than a height stated here, so a
+/// taller or broader figure fits the same cell with no second number.
+///
+/// # Errors
+///
+/// [`FigureError::ScaleUnreal`] for a reach or a side no figure can be
+/// framed by.
+pub fn fit(reach: f64, side: u32) -> Result<(f64, (f64, f64)), FigureError> {
+    let extent = f64::from(side);
+    let scale = extent * FIT / reach;
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(FigureError::ScaleUnreal);
+    }
+    Ok((scale, (extent * 0.5, extent * GROUND)))
+}
 
 /// One cell of a figure's grid: a motion, a phase of it, and a heading.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -361,6 +432,68 @@ pub fn identity(species: Species) -> Result<Identity, IdentityError> {
     Identity::new(spec(species))
 }
 
+/// A figure of the grid drawn by the plausible generator rather than
+/// authored: its species and the seed its draw starts from.
+#[derive(Copy, Clone, Debug)]
+pub struct Sample {
+    /// Its stable name, for a ledger row or a sheet's file name.
+    pub name: &'static str,
+    /// The species it is drawn as.
+    pub species: Species,
+    /// The seed its generator starts from.
+    pub seed: u64,
+}
+
+impl Sample {
+    /// The figure its seed draws, walking.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`plausible::figure`] refuses, which is nothing: the crate's
+    /// tests hold every draw to a record.
+    pub fn figure(&self) -> Result<Figure, IdentityError> {
+        let drawn = plausible::figure(self.species, &mut NonCryptoRng::seed_from_u64(self.seed))?;
+        Ok(Figure {
+            name: self.name,
+            spec: drawn.spec(),
+            sampling: Sampling::Walk,
+        })
+    }
+}
+
+/// The grid's generated figures, two of each species.
+pub const SAMPLES: [Sample; 10] = [
+    sample("human-sample-1", Species::Human, 1),
+    sample("human-sample-2", Species::Human, 2),
+    sample("elf-sample-1", Species::Elf, 3),
+    sample("elf-sample-2", Species::Elf, 4),
+    sample("dwarf-sample-1", Species::Dwarf, 5),
+    sample("dwarf-sample-2", Species::Dwarf, 6),
+    sample("beastkin-sample-1", Species::Beastkin, 7),
+    sample("beastkin-sample-2", Species::Beastkin, 8),
+    sample("dragonkin-sample-1", Species::Dragonkin, 9),
+    sample("dragonkin-sample-2", Species::Dragonkin, 10),
+];
+
+const fn sample(name: &'static str, species: Species, seed: u64) -> Sample {
+    Sample {
+        name,
+        species,
+        seed,
+    }
+}
+
+/// Every figure of the grid, in the order the digest folds them and the
+/// ledger lists them: the authored figures, then the generated ones.
+pub fn grid() -> impl Iterator<Item = Result<Figure, IdentityError>> {
+    let (authored, drawn): (&'static [Figure], &'static [Sample]) = (&FIGURES, &SAMPLES);
+    authored
+        .iter()
+        .copied()
+        .map(Ok)
+        .chain(drawn.iter().map(Sample::figure))
+}
+
 /// Every setting at the middle of its species' range.
 const MIDDLE: Build = uniform(Setting(128));
 
@@ -486,12 +619,72 @@ const DRAGONKIN: Spec = Spec {
     palette: palette(3, 9, 8, 0, 7),
 };
 
+/// A figure built and stood on the stage: its rig, and the legs the planting
+/// solve runs along.
+///
+/// The one path from a pose to a placement, which the grid and the
+/// designer's preview both take.
+#[derive(Clone, Debug)]
+pub(crate) struct Staged {
+    rig: Rig,
+    legs: Legs,
+}
+
+impl Staged {
+    /// Build `identity`'s rig and its legs.
+    pub(crate) fn new(identity: &Identity) -> Result<Self, FigureError> {
+        let rig = humanoid::rig(identity)?;
+        let legs = Legs::new(&humanoid::rigging(&rig)?, humanoid::legs())?;
+        Ok(Self { rig, legs })
+    }
+
+    pub(crate) const fn rig(&self) -> &Rig {
+        &self.rig
+    }
+
+    pub(crate) fn retint(&mut self, tints: Tints) {
+        self.rig.retint(tints);
+    }
+
+    /// `pose` with `breath` laid over it, solved onto the level ground with
+    /// the root at `lift`.
+    pub(crate) fn plant(
+        &self,
+        pose: &Pose,
+        breath: Breath,
+        lift: f64,
+    ) -> Result<Planted, FigureError> {
+        let rigging = humanoid::rigging(&self.rig)?;
+        let posed = breath.overlay()?.applied(pose)?;
+        let mut frames = Frames::new();
+        rigging
+            .posture(&posed)?
+            .resolve(Resolved::REST, &mut frames);
+        self.legs.plant(&rigging, &posed, &frames, LEVEL, lift)
+    }
+
+    /// Place `planted` facing `facing` under the stage's light, drawn at
+    /// `scale` with its ground contact at the surface point `at`.
+    pub(crate) fn place(
+        &self,
+        planted: &Planted,
+        facing: Facing,
+        scale: f64,
+        at: (f64, f64),
+        out: &mut Placement,
+    ) -> Result<(), FigureError> {
+        let stance = Stance::new(facing, scale, at, Reference::light()?)?.rooted(planted.root());
+        humanoid::rigging(&self.rig)?
+            .posture(&planted.pose())?
+            .place(&stance, &[], out)
+    }
+}
+
 /// One figure of the grid, built once and posed per cell.
 #[derive(Clone, Debug)]
 pub struct Reference {
-    rig: Rig,
-    legs: Legs,
-    motions: [Motion; Kind::ALL.len()],
+    staged: Staged,
+    motions: motion::Set,
 }
 
 impl Reference {
@@ -503,23 +696,16 @@ impl Reference {
     /// which is reachable for a checked identity, which is what the crate's
     /// own tests say.
     pub fn new(identity: &Identity) -> Result<Self, FigureError> {
-        let rig = humanoid::rig(identity)?;
-        let legs = Legs::new(&humanoid::rigging(&rig)?, humanoid::legs())?;
         Ok(Self {
-            rig,
-            legs,
-            motions: [
-                Motion::new(Kind::Idle)?,
-                Motion::new(Kind::Walk)?,
-                Motion::new(Kind::Run)?,
-            ],
+            staged: Staged::new(identity)?,
+            motions: motion::Set::new()?,
         })
     }
 
     /// The rig it poses.
     #[must_use]
     pub const fn rig(&self) -> &Rig {
-        &self.rig
+        self.staged.rig()
     }
 
     /// `kind`'s shipped clip.
@@ -529,7 +715,7 @@ impl Reference {
     /// Whatever [`Clip::new`] refuses, which for the shipped tables is
     /// nothing.
     pub fn clip(&self, kind: Kind) -> Result<Clip<'_>, FigureError> {
-        self.motions[kind.index()].clip()
+        self.motions.clip(kind)
     }
 
     /// Pose the figure for `cell` and place it, drawn at `scale` with its
@@ -551,10 +737,7 @@ impl Reference {
         out: &mut Placement,
     ) -> Result<Planted, FigureError> {
         let planted = self.posed(cell)?;
-        let stance = Stance::new(cell.facing, scale, at, Self::light()?)?.rooted(planted.root());
-        humanoid::rigging(&self.rig)?
-            .posture(&planted.pose())?
-            .place(&stance, &[], out)?;
+        self.staged.place(&planted, cell.facing, scale, at, out)?;
         Ok(planted)
     }
 
@@ -565,18 +748,14 @@ impl Reference {
     ///
     /// Whatever the clip, the breath or the planting solve refuse.
     pub fn posed(&self, cell: Cell) -> Result<Planted, FigureError> {
-        let rigging = humanoid::rigging(&self.rig)?;
         let clip = self.clip(cell.kind)?;
         let mut breath = Breath::new(BREATH.0, BREATH.1)?;
         breath.advance(cell.breathed())?;
-        let posed = breath.overlay()?.applied(&clip.sample(cell.phase())?)?;
-
-        let mut frames = Frames::new();
-        rigging
-            .posture(&posed)?
-            .resolve(Resolved::REST, &mut frames);
-        self.legs
-            .plant(&rigging, &posed, &frames, LEVEL, clip.root_at(cell.phase()))
+        self.staged.plant(
+            &clip.sample(cell.phase())?,
+            breath,
+            clip.root_at(cell.phase()),
+        )
     }
 
     /// Where `part`'s rings end up for `cell`, given the resolve `frames`
@@ -601,7 +780,7 @@ impl Reference {
             None => None,
         };
         let rest = part.end().map(|joint| {
-            let held = self.rig.joints()[joint.index()];
+            let held = self.rig().joints()[joint.index()];
             (held.at, Basis::of(held.orientation))
         });
         mesh::carry(
@@ -636,7 +815,7 @@ impl Reference {
     /// The legs the planting solve runs along.
     #[must_use]
     pub const fn legs(&self) -> Legs {
-        self.legs
+        self.staged.legs
     }
 }
 

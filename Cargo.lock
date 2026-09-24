@@ -6926,6 +6926,7 @@ dependencies = [
  "tairix-hash",
  "tairix-inline",
  "tairix-raster",
+ "tairix-rng",
  "tairix-util",
  "tairix-wintersun-net",
 ]

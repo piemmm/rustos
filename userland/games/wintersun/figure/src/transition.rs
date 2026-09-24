@@ -11,6 +11,8 @@
 //! a state and asks for it. The engine knows the graph and the timing, and
 //! nothing about what a stagger is.
 
+use tairix_util::mathf;
+
 use crate::blend::Blend;
 use crate::clip::Clip;
 use crate::error::FigureError;
@@ -370,9 +372,7 @@ impl<'a> Animator<'a> {
 
     /// How far `play` moves over `seconds`, without committing it.
     fn step(&self, play: Play, seconds: f64) -> Result<Advance, FigureError> {
-        let Some(clip) = self.machine.clip(play.state) else {
-            return Err(FigureError::NoSuchState);
-        };
+        let clip = self.clip(play)?;
         let after = play.elapsed + seconds;
         let from = clip.phase_at(play.elapsed)?;
         let to = clip.phase_at(after)?;
@@ -394,10 +394,7 @@ impl<'a> Animator<'a> {
     /// [`Blend::add_clip`].
     pub fn blend(&self) -> Result<Blend, FigureError> {
         let mut blend = Blend::EMPTY;
-        let share = match self.outgoing {
-            None => 1.0,
-            Some(fade) => 1.0 - fade.remaining / fade.seconds,
-        };
+        let share = self.share();
         self.mix(&mut blend, self.current, share)?;
         if let Some(fade) = self.outgoing {
             self.mix(&mut blend, fade.play, 1.0 - share)?;
@@ -405,11 +402,48 @@ impl<'a> Animator<'a> {
         Ok(blend)
     }
 
+    /// The height the live clips hold the figure's root at, as a fraction of
+    /// a straight leg: each clip's own [`Clip::root_at`], weighed as
+    /// [`Self::blend`] weighs its pose.
+    ///
+    /// A fade between clips that stand at different heights passes through
+    /// the heights between, so the body neither drops nor jumps when one
+    /// clip gives way to another.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::blend`].
+    pub fn root(&self) -> Result<f64, FigureError> {
+        let share = self.share();
+        let mut root = share * self.height(self.current)?;
+        if let Some(fade) = self.outgoing {
+            root += (1.0 - share) * self.height(fade.play)?;
+        }
+        // The heights are each within a leg and the weights sum to one, so
+        // the clamp absorbs only rounding.
+        Ok(mathf::clamp(root, -1.0, 1.0))
+    }
+
+    /// How much of the figure the current clip carries.
+    fn share(&self) -> f64 {
+        self.outgoing
+            .map_or(1.0, |fade| 1.0 - fade.remaining / fade.seconds)
+    }
+
     fn mix(&self, blend: &mut Blend, play: Play, weight: f64) -> Result<(), FigureError> {
-        let Some(clip) = self.machine.clip(play.state) else {
-            return Err(FigureError::NoSuchState);
-        };
+        let clip = self.clip(play)?;
         blend.add_clip(clip, clip.phase_at(play.elapsed)?, weight)
+    }
+
+    fn height(&self, play: Play) -> Result<f64, FigureError> {
+        let clip = self.clip(play)?;
+        Ok(clip.root_at(clip.phase_at(play.elapsed)?))
+    }
+
+    fn clip(&self, play: Play) -> Result<Clip<'a>, FigureError> {
+        self.machine
+            .clip(play.state)
+            .ok_or(FigureError::NoSuchState)
     }
 }
 

@@ -65,6 +65,15 @@
 //! never re-rigs anything. Its decoder is total and fails closed, because in
 //! the game it arrives from a client assumed hostile.
 //!
+//! **A designer edits a record without stalling the surface it sits on.** A
+//! [`Designer`] makes each edit in memory and keeps the record canonical as
+//! it goes; what a repaint owes is [`Change::between`] the record drawn and
+//! the one now live, so a palette edit costs a re-tint and a burst of edits
+//! costs one rebuild; and the durable write is answered once, where the
+//! interaction settles. The [`Preview`] it is watched in plays the shipped
+//! motions on the art grid's own stage, and [`plausible::figure`] draws a
+//! random figure that looks chosen rather than rolled.
+//!
 //! # The order it runs in
 //!
 //! 1. [`Animator`] picks the clips, [`Blend`] resolves a [`Pose`].
@@ -76,11 +85,16 @@
 //!
 //! # What is not here
 //!
-//! The designer that edits a record — its presets and its plausible random
-//! figures — is a later item. The contact-sheet harness that makes art
-//! quality a measured property is `cargo xtask artsheet`; the measurements
-//! it gates on live here.
+//! The designer's surfaces — its sliders, its windows, the character library
+//! — are the game's, and so is its preset set: a preset is a record, shipped
+//! as `WinterSun` bundle content and applied with [`Designer::apply`]. The
+//! contact-sheet harness that makes art quality a measured property is
+//! `cargo xtask artsheet`; the measurements it gates on live here.
 //!
+//! [`Designer`]: design::Designer
+//! [`Designer::apply`]: design::Designer::apply
+//! [`Change::between`]: design::Change::between
+//! [`Preview`]: preview::Preview
 //! [`Identity`]: identity::Identity
 //! [`humanoid::rig`]: humanoid::rig
 //! [`Pose`]: pose::Pose
@@ -111,6 +125,7 @@ extern crate alloc;
 pub mod blend;
 pub mod breath;
 pub mod clip;
+pub mod design;
 pub mod digest;
 pub mod error;
 pub mod frame;
@@ -123,7 +138,9 @@ pub mod mesh;
 pub mod motion;
 pub mod paint;
 pub mod plant;
+pub mod plausible;
 pub mod pose;
+pub mod preview;
 pub mod quality;
 pub mod recoil;
 pub mod reference;

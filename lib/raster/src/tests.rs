@@ -150,6 +150,32 @@ fn unpremultiply_partial_alpha_still_recovers_the_colour() {
 }
 
 #[test]
+fn luma_weighs_the_primaries_and_leaves_a_grey_alone() {
+    assert_eq!(RED.luma(), 77);
+    assert_eq!(Color::rgb(0, 255, 0).luma(), 149);
+    assert_eq!(BLUE.luma(), 29);
+    for level in [0, 1, 90, 128, 254, 255] {
+        assert_eq!(Color::rgb(level, level, level).luma(), level);
+    }
+    assert_eq!(
+        Color::rgba(90, 90, 90, 0).luma(),
+        90,
+        "alpha is not lightness"
+    );
+}
+
+#[test]
+fn a_colour_desaturated_to_grey_is_its_own_luma() {
+    for colour in [RED, BLUE, Color::rgb(200, 40, 10), Color::rgb(13, 200, 90)] {
+        let grey = colour.premultiply().desaturate(0);
+        assert_eq!(
+            (grey.r, grey.g, grey.b),
+            (colour.luma(), colour.luma(), colour.luma())
+        );
+    }
+}
+
+#[test]
 fn desaturate_full_saturation_is_identity() {
     let p = Color::rgba(200, 40, 10, 255).premultiply();
     assert_eq!(p.desaturate(255), p);

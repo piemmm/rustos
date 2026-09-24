@@ -182,6 +182,65 @@ impl Motion {
     }
 }
 
+/// Every shipped motion, held so the clips can borrow their curves.
+#[derive(Clone, Debug)]
+pub struct Set {
+    motions: [Motion; Kind::ALL.len()],
+}
+
+impl Set {
+    /// Assemble every shipped motion.
+    ///
+    /// # Errors
+    ///
+    /// As [`Motion::new`].
+    pub fn new() -> Result<Self, FigureError> {
+        Ok(Self {
+            motions: [
+                Motion::new(Kind::Idle)?,
+                Motion::new(Kind::Walk)?,
+                Motion::new(Kind::Run)?,
+            ],
+        })
+    }
+
+    /// `kind`'s clip.
+    ///
+    /// # Errors
+    ///
+    /// As [`Motion::clip`].
+    pub(crate) fn clip(&self, kind: Kind) -> Result<Clip<'_>, FigureError> {
+        self.motions[kind.index()].clip()
+    }
+
+    /// Every clip, where [`Kind::index`] puts it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Motion::clip`].
+    pub fn clips(&self) -> Result<Clips<'_>, FigureError> {
+        Ok(Clips([
+            self.clip(Kind::Idle)?,
+            self.clip(Kind::Walk)?,
+            self.clip(Kind::Run)?,
+        ]))
+    }
+}
+
+/// Every shipped clip, indexed by [`Kind::index`].
+///
+/// Only [`Set::clips`] makes one, so a machine borrowing the table cannot be
+/// handed the clips in an order that plays a walk when a run was asked for.
+#[derive(Copy, Clone, Debug)]
+pub struct Clips<'a>([Clip<'a>; Kind::ALL.len()]);
+
+impl<'a> Clips<'a> {
+    /// The table, for a machine to borrow.
+    pub(crate) const fn table(&self) -> &[Clip<'a>] {
+        &self.0
+    }
+}
+
 /// One parameter's shipped curve.
 type Keyed = (Param, &'static [Key]);
 

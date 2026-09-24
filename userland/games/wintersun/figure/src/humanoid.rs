@@ -77,6 +77,15 @@ pub const MOST_PARTS: usize = BODY_PARTS + 12;
 const _: () = assert!(JOINT_COUNT <= MAX_JOINTS);
 const _: () = assert!(MOST_PARTS == MAX_PARTS);
 
+/// How far from its ground point the largest figure any record describes
+/// reaches at rest, rounded up to a whole unit.
+///
+/// What a view drawing every figure at one scale sizes that scale by, so the
+/// largest fits and every other reads at its own size against it. A test
+/// holds every admissible figure inside it, and the largest within a unit of
+/// it.
+pub const MOST_REACH: f64 = 120.0;
+
 /// The humanoid's named joints.
 ///
 /// Named so a caller poses a knee without counting the table, and so a clip

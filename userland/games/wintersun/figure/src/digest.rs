@@ -20,10 +20,14 @@
 //!
 //! # What is folded, and what is not
 //!
-//! Every figure of the grid: its record's bytes, the complete placed-strip
-//! stream in the depth order the painter walks, the carried rings at full
-//! precision, the planting root and miss, the height each clip holds the
-//! body at across its cycle, and the quality numbers the art is gated on.
+//! Every figure of the grid, the generated ones included: its record's
+//! bytes, the complete placed-strip stream in the depth order the painter
+//! walks, the carried rings at full precision, the planting root and miss,
+//! the height each clip holds the body at across its cycle, and the quality
+//! numbers the art is gated on. Then a designer's preview played through
+//! every change of clip, which is where the transition machine's cross-fade
+//! of pose and root height enters the claim: the grid samples one clip at a
+//! time.
 //!
 //! Not the pixels. Those are `lib/raster`'s shared scan converter, which is
 //! separately tested and is the client frame digest's subject
@@ -43,24 +47,28 @@ use crate::frame::project;
 use crate::gait::Gait;
 use crate::humanoid::{self, Bone};
 use crate::mesh::Hoop;
-use crate::motion::Kind;
+use crate::motion::{self, Kind};
 use crate::plant::{Legs, Planted};
+use crate::pose::Param;
+use crate::preview::{Frame, Preview};
 use crate::quality;
-use crate::reference::{Reference, FIGURES};
+use crate::reference::{self, Reference, SIDES};
 use crate::rig::{Frames, Placement, Resolved, Strip};
 use crate::rigging::Rigging;
 use crate::socket::Side;
+use crate::species::Species;
 
 /// The digest of the reference grid, on every Tier-1 target.
 ///
 /// Changing the rig, a species' ranges, a feature's template, the record
 /// format, a clip, a clip's root height, a joint limit, the projection, the
-/// planting solve or the shadow changes this. That is the
-/// point: it is not a number to be re-derived when a test fails, it is the
-/// record of what a figure does. A change that moves it changes every figure
-/// anybody will ever see, and the new value is written down deliberately
-/// rather than pasted out of a failure.
-pub const REFERENCE_DIGEST: u64 = 0xFF20_4266_818E_E6E0;
+/// planting solve, the shadow, the transition machine or the plausible
+/// generator changes this. That is the point: it is not a number to be
+/// re-derived when a test fails, it is the record of what a figure does. A
+/// change that moves it changes every figure anybody will ever see, and the
+/// new value is written down deliberately rather than pasted out of a
+/// failure.
+pub const REFERENCE_DIGEST: u64 = 0x43A3_E2C9_EDF4_79A4;
 
 /// The stream the reference grid is folded into.
 pub const REFERENCE_SEED: u64 = 0x5749_4E54_4552_4647;
@@ -102,6 +110,22 @@ const ROOT_PROBES: u32 = 16;
 /// case.
 const GAIT_STEPS: [f64; 4] = [7.5, 23.25, 140.0, -11.75];
 
+/// The clips the preview probe plays in turn, and how many frames it holds
+/// each for.
+///
+/// Every clip gives way to another, and each is held past the fade into it,
+/// so frames inside a fade and after one are both folded.
+const PREVIEW_SCRIPT: [(Kind, u32); 4] = [
+    (Kind::Walk, 5),
+    (Kind::Run, 5),
+    (Kind::Idle, 4),
+    (Kind::Run, 3),
+];
+
+/// The preview probe's frame length, in seconds: no fraction of a fade or of
+/// any clip's cycle, so no frame lands on a boundary by luck.
+const PREVIEW_FRAME: f64 = 0.071;
+
 /// Draw the reference grid and return its digest.
 ///
 /// # Errors
@@ -116,7 +140,8 @@ pub fn reference() -> Result<u64, FigureError> {
 
     // One figure at a time, so only one rig is ever held: the grid's whole
     // buffer set has to fit the boot stack the verticals run on.
-    for entry in &FIGURES {
+    for entry in reference::grid() {
+        let entry = entry?;
         let identity = entry.identity()?;
         hasher.write(&identity.encode());
         let figure = Reference::new(&identity)?;
@@ -154,7 +179,43 @@ pub fn reference() -> Result<u64, FigureError> {
         }
     }
     fold_shadow(&mut hasher)?;
+    fold_preview(&mut hasher, &mut placement)?;
     Ok(hasher.finish())
+}
+
+/// A designer's preview of the richest reference figure, played through
+/// [`PREVIEW_SCRIPT`] and turned a little every frame: the blended pose and
+/// root at full precision, and every view the preview draws, in both of its
+/// framings.
+fn fold_preview(hasher: &mut FastHash, placement: &mut Placement) -> Result<(), FigureError> {
+    let motions = motion::Set::new()?;
+    let clips = motions.clips()?;
+    let mut preview = Preview::new(&reference::identity(Species::Dragonkin)?, &clips)?;
+    let mut facing = Facing(0x0C00);
+    for (kind, frames) in PREVIEW_SCRIPT {
+        preview.select(kind)?;
+        for _ in 0..frames {
+            preview.advance(PREVIEW_FRAME)?;
+            facing = Facing(facing.0.wrapping_add(0x0B00));
+            preview.face(facing);
+            let planted = preview.planted()?;
+            fold_planted(hasher, &planted);
+            for param in Param::ALL {
+                fold_real(hasher, planted.pose().get(param));
+            }
+            for frame in [Frame::Shared, Frame::Measured] {
+                for side in SIDES {
+                    let shadow = preview.view(frame, side, placement)?;
+                    fold_usize(hasher, placement.len());
+                    for strip in placement.strips() {
+                        fold_strip(hasher, &strip);
+                    }
+                    fold_placed(hasher, shadow);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A gait driven by the ground it covers, which is how a figure is animated

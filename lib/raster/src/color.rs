@@ -54,6 +54,14 @@ pub fn div255(value: u32) -> u8 {
     div255_biased(value, ROUND_NEAREST)
 }
 
+/// The BT.601 luma of three channels, in `0..=255`.
+///
+/// The 8-bit weights sum to exactly 256, so a grey is its own luma.
+#[inline]
+fn luma(r: u8, g: u8, b: u8) -> u32 {
+    (77 * u32::from(r) + 150 * u32::from(g) + 29 * u32::from(b) + 128) >> 8
+}
+
 /// A straight-alpha colour as authored by a client (not premultiplied).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Color {
@@ -86,6 +94,14 @@ impl Color {
     #[must_use]
     pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
+    }
+
+    /// How light the colour reads, ignoring alpha: its BT.601 luma, the
+    /// weighting the eye gives the primaries (0.299 R, 0.587 G, 0.114 B).
+    #[must_use]
+    #[inline]
+    pub fn luma(self) -> u8 {
+        u8::try_from(luma(self.r, self.g, self.b)).unwrap_or(u8::MAX)
     }
 
     /// Composite this straight-alpha colour *over* premultiplied `dst`,
@@ -247,8 +263,7 @@ impl Pixel {
         if saturation == 255 {
             return self;
         }
-        let luma =
-            (77 * u32::from(self.r) + 150 * u32::from(self.g) + 29 * u32::from(self.b) + 128) >> 8;
+        let luma = luma(self.r, self.g, self.b);
         let keep = u32::from(saturation);
         let grey = 255 - keep;
         let toward = |c: u8| div255(luma * grey + u32::from(c) * keep);

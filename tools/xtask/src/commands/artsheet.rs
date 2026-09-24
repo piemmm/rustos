@@ -2,12 +2,13 @@
 //!
 //! The figure engine's art gate. It walks the shared reference grid
 //! (`tairix_wintersun_figure::reference`) — each species' reference figure
-//! in every shipped motion, and each species' least and most walking, at
-//! eight phases, facing four ways — renders each cell, measures it, and holds
-//! every number against a bound. A reference figure is measured at the three
-//! pixel sides the desktop draws a figure at; a least or most at the
-//! smallest, which is the readability floor, since what a figure costs is
-//! counted in outline points and fill area and neither depends on the side.
+//! in every shipped motion, and each species' least, most and two plausible
+//! figures walking, at eight phases, facing four ways — renders each cell,
+//! measures it, and holds every number against a bound. A reference figure
+//! is measured at the three pixel sides the desktop draws a figure at; a
+//! walking one at the smallest, which is the readability floor, since what a
+//! figure costs is counted in outline points and fill area and neither
+//! depends on the side.
 //!
 //! # Why the golden is a ledger and not a picture
 //!
@@ -41,7 +42,7 @@ use tairix_wintersun_figure::motion::Kind;
 use tairix_wintersun_figure::paint::{self, Brush, MAX_FIGURE_POINTS};
 use tairix_wintersun_figure::quality;
 use tairix_wintersun_figure::reference::{
-    Cell, Figure, Reference, Sampling, FACINGS, FIGURES, PHASES,
+    self, Cell, Figure, Reference, Sampling, FACINGS, PHASES, SIDES,
 };
 use tairix_wintersun_figure::rig::{Placement, Rig};
 use tairix_wintersun_figure::rigging::Rigging;
@@ -59,25 +60,11 @@ pub const LEDGER_PATH: &str = "userland/games/wintersun/figure/artsheet.ledger";
 /// Gitignored output, like every other image this build produces.
 const SHEETS_DIR: &str = "images/artsheet";
 
-/// The pixel sides a figure is drawn at.
-///
-/// The smallest is the icon-size readability floor the bounds below are
-/// really about; the largest is the biggest a figure is drawn on screen and
-/// so the one the cost budget is taken at.
-const SIDES: [u32; 3] = [32, 64, 128];
-
-/// How much of a cell's side the figure's own reach is drawn into.
-const FIT: f64 = 0.92;
-
-/// Where the figure's ground contact sits down the cell.
-const GROUND: f64 = 0.95;
-
 /// The band the alpha-weighted coverage ratio must fall inside.
 ///
 /// A figure that fills its box reads as a blob and one that barely marks it
-/// reads as nothing. The shipped set runs from about an eighth to about a
-/// seventh at every size, so the band is wide either way rather than fitted
-/// to it.
+/// reads as nothing. The grid runs from about a sixteenth to about a sixth,
+/// so the band is wide either way rather than fitted to it.
 const COVERAGE: (f64, f64) = (0.05, 0.30);
 
 /// The fewest distinct tonal regions a cell must resolve into.
@@ -91,8 +78,8 @@ const COVERAGE: (f64, f64) = (0.05, 0.30);
 ///
 /// Three is the requirement rather than the measurement: at the smallest
 /// size a figure is drawn, the head, the trunk and the legs must each still
-/// be a mass of their own. The grid's worst cell resolves into five, and a
-/// taller bound would be fitted to it rather than stated of it.
+/// be a mass of their own. The grid's worst cell — its least beastkin, pale
+/// cloth on pale fur, at the floor — meets it exactly.
 const MIN_REGIONS: u32 = 3;
 
 /// The fewest pixels a run must hold to count as a region.
@@ -142,8 +129,8 @@ const MIN_TONE_SHARE: f64 = 0.10;
 ///
 /// The overdraw the scan converter actually pays: a figure whose parts
 /// overlapped many times over would be the frame's cost centre at the size
-/// it is largest. The grid's heaviest figure fills a little over a quarter
-/// of its cell.
+/// it is largest. The grid's heaviest figure fills about a fifth of its
+/// cell.
 const MAX_OVERDRAW: f64 = 0.5;
 
 /// The furthest a foot may end up from the ground it was asked for.
@@ -201,8 +188,9 @@ pub fn sheets(root: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&out)
         .map_err(|e| format!("artsheet: cannot create {SHEETS_DIR}: {e}"))?;
     let mut written = Vec::new();
-    for entry in &FIGURES {
-        let figure = build(entry)?;
+    for entry in reference::grid() {
+        let entry = drawn(entry)?;
+        let figure = build(&entry)?;
         for kind in entry.kinds() {
             for side in SIDES {
                 let path = out.join(format!("{}-{}-{side}.png", entry.name, kind.name()));
@@ -232,8 +220,9 @@ fn measure() -> Result<String, String> {
     );
     let _ = writeln!(ledger, "sides {SIDES:?}");
 
-    for entry in &FIGURES {
-        let figure = build(entry)?;
+    for entry in reference::grid() {
+        let entry = drawn(entry)?;
+        let figure = build(&entry)?;
         let rig = figure.rig();
         let rigging = humanoid::rigging(rig).map_err(refused)?;
         let tones = declared(rig);
@@ -243,18 +232,18 @@ fn measure() -> Result<String, String> {
             ledger,
             "figure {} record {} parts {} tones {} reach {:.6}",
             entry.name,
-            record(entry)?,
+            record(&entry)?,
             rig.parts().len(),
             tones.len(),
             rig.reach()
         );
         for kind in entry.kinds() {
-            motion_row(&mut ledger, entry, &figure, &rigging, *kind)?;
+            motion_row(&mut ledger, &entry, &figure, &rigging, *kind)?;
         }
         for cell in entry.cells() {
-            for side in sides(entry) {
+            for side in sides(&entry) {
                 let measured = cell_row(
-                    entry,
+                    &entry,
                     &figure,
                     (&tones, &shaded),
                     cell,
@@ -278,6 +267,13 @@ fn undyed_cloth_is_readable() -> Result<(), String> {
     let light = contrast(lit, desktop(&Theme::light()));
     bound("trousers", "contrast-dark", dark, dark >= MIN_CONTRAST)?;
     bound("trousers", "contrast-light", light, light >= MIN_CONTRAST)
+}
+
+/// A grid entry, or the generator's refusal to draw one.
+fn drawn(
+    entry: Result<Figure, tairix_wintersun_figure::identity::IdentityError>,
+) -> Result<Figure, String> {
+    entry.map_err(|e| format!("artsheet: a generated figure is refused: {e}"))
 }
 
 /// `entry`'s figure, built from its checked record.
@@ -426,17 +422,10 @@ fn cell_row(
     ))
 }
 
-/// Where a figure is drawn in a square cell of `side` pixels.
-///
-/// Read off the rig's own reach rather than a figure height stated here, so
-/// a taller or wider figure fits the same cell with no second number.
+/// Where a figure is drawn in a square cell of `side` pixels: the stage's
+/// own framing, which the designer's preview shares.
 fn fit(figure: &Reference, side: u32) -> Result<(f64, (f64, f64)), String> {
-    let reach = figure.rig().reach();
-    if reach.is_nan() || reach <= 0.0 {
-        return Err("artsheet: the rig reaches nowhere".to_owned());
-    }
-    let extent = f64::from(side);
-    Ok((extent * FIT / reach, (extent * 0.5, extent * GROUND)))
+    reference::fit(figure.rig().reach(), side).map_err(refused)
 }
 
 /// One contact sheet: a motion at one size, phases across and headings down.

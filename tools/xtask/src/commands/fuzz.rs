@@ -539,6 +539,12 @@ pub const TARGETS: &[Target] = &[
             "WinterSun figure record decoder (hostile character records: total, one spelling, every admitted figure builds and places)",
     },
     Target {
+        package: "tairix-wintersun-figure",
+        test: "fuzz_design",
+        description:
+            "WinterSun figure designer (any edits keep a record, show or change nothing, settle into one write; plausible draws build)",
+    },
+    Target {
         package: "tairix-supervisor",
         test: "fuzz_repl",
         description:

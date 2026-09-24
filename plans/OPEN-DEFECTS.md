@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 49 open, 126 closed, 175 total.
+**closed**, and a partial fix stays **open**. 50 open, 126 closed, 176 total.
 
-### Open (49)
+### Open (50)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -78,6 +78,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D171 | a dead address space is torn down with one TLB invalidation per page, broadcast on aarch64 | noticed while making `LiveSpace::drop`'s walk allocation-free (D167); not absorbed, because the fix is an Arch HAL contract on every port. See the section |
 | D172 | `usb_msd` reads the whole hardware tree into a fixed 8 KiB stack buffer to attribute a stall to a resetting ancestor, and no real tree fits it, so the attribution never runs | noticed while widening the node to sixteen resources (`plans/SOUND.md` SND5a), which shrank the buffer's reach from fourteen nodes to nine; not absorbed, because the fix is a kernel-side fold or a shared growing snapshot reader. See the section |
 | D175 | memory below a narrow DMA ceiling has no reserve: ordinary allocations drain it first-come, so a constrained carve late on a busy machine is refused while RAM above the ceiling is free | noticed while making constrained carves deterministic (D173); not absorbed, because the fix is address zones sized from discovery, with a reserve, on every port. See the section |
+| D179 | a store answer adopted mid-drag snaps the terminal's settings sheet back under the pointer | noticed while building the figure designer (`plans/FIGURE.md` FG7); not absorbed. `Publication::adopt` makes a write's answer the live profile unconditionally, and `adopt_published` then re-seeds every open sheet's sliders (`Sheet::adopt`). A write one settle asked for whose answer lands while the next drag is under way therefore resets that slider mid-drag, and released before the pointer moves again it settles on the reset value, losing the drag. `JobDesk` drops only answers a newer *submission* superseded, and a drag in progress has submitted nothing. The fix adopts an answer into the live profile and the sheets only while the live profile is still the one submitted, and otherwise records it as adopted alone; its regression test settles, starts a second drag, and lands the answer between two samples |
 
 ### D140 — the loaded notification-icon set is never installed
 

@@ -7,7 +7,9 @@ use tairix_wintersun_net::value::Facing;
 use alloc::vec::Vec;
 use tairix_raster::surface::SUBPIXEL;
 
-use super::{feature, rig, Bone, BODY_PARTS, FOOT, JOINT_COUNT, MOST_PARTS, STANDING_HEIGHT};
+use super::{
+    feature, rig, Bone, BODY_PARTS, FOOT, JOINT_COUNT, MOST_PARTS, MOST_REACH, STANDING_HEIGHT,
+};
 use crate::error::FigureError;
 use crate::frame::{Rotation, FORESHORTEN};
 use crate::identity::{Build, Features, Identity, Palette, Setting, Spec};
@@ -612,6 +614,62 @@ fn every_admissible_figure_builds_within_the_part_bound() {
         }
     }
     assert_eq!(richest, MOST_PARTS, "the part bound is the richest figure");
+}
+
+/// No figure a record describes reaches past [`MOST_REACH`], at any build
+/// corner with any feature it may carry, at either end of its hair's
+/// volume — and the one that reaches furthest is within a unit of it, so the
+/// shared frame spends none of its square on a figure nobody can make.
+#[test]
+fn no_figure_reaches_past_the_most_reach() {
+    let mut furthest: f64 = 0.0;
+    for species in Species::ALL {
+        for (features, markings) in admissible(species) {
+            let volumes: &[Setting] = if features.hair.is_some() {
+                &[Setting::LOW, Setting::HIGH]
+            } else {
+                &[Setting::LOW]
+            };
+            for volume in volumes {
+                for mask in 0u8..32 {
+                    let end = |bit: u8| {
+                        if mask & (1 << bit) == 0 {
+                            Setting::LOW
+                        } else {
+                            Setting::HIGH
+                        }
+                    };
+                    let spec = Spec {
+                        species,
+                        build: Build {
+                            height: end(0),
+                            girth: end(1),
+                            taper: end(2),
+                            limbs: end(3),
+                            head: end(4),
+                        },
+                        features: Features {
+                            volume: *volume,
+                            ..features
+                        },
+                        palette: Palette {
+                            markings,
+                            eyes: species.eyes()[0],
+                            ..Palette::default()
+                        },
+                    };
+                    let identity = Identity::new(spec).expect("an admissible figure");
+                    let reach = rig(&identity).expect("it builds").reach();
+                    assert!(reach <= MOST_REACH, "{spec:?} reaches {reach}");
+                    furthest = mathf::fmax(furthest, reach);
+                }
+            }
+        }
+    }
+    assert!(
+        furthest > MOST_REACH - 1.0,
+        "the furthest reach is {furthest}"
+    );
 }
 
 /// Every feature combination `species` admits, bald figures with no volume.

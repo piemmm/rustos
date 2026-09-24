@@ -242,6 +242,8 @@ This crate owns:
   identity, `0` pure grey). One definition of saturation reduction, applied on
   the way in, so a caller that draws the same sprite hot and greyed — a window
   title bar's identity icon, focused and not — keeps one cached copy of it.
+- `Color::luma` — how light a colour reads, as that same BT.601 luma: the one
+  definition a pixel is greyed toward and a caller weighs colours by.
 - `Surface::blit_tinted` — the same walk taking the source's *alpha* as
   coverage and drawing a caller's colour through it, arithmetically identical
   to filling the shape that mask was rasterised from in that colour. That

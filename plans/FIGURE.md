@@ -47,7 +47,7 @@ controls), `lib/raster` and `lib/util::mathf` rustdoc.
 | FG4 | Procedural layers over a clip: gait phase from distance travelled, look-at, recoil, cloth and hair sway, breathing, per-foot terrain planting, the clip-authored root height, root motion and the figure's root placement, contact shadow | done |
 | FG5 | `cargo xtask artsheet`: the shipped motion set, the painter, the contact-sheet renderer, the committed ledger, and the automated quality checks | done |
 | FG6 | The parameter space: species and build parameters, the palette model, validated bounds, and the compact serialised form a character record stores | done |
-| FG7 | The designer engine: the parameter model, live preview, presets, and randomised-but-plausible generation | planned |
+| FG7 | The designer engine: the parameter model, live preview, presets, and randomised-but-plausible generation | done |
 | FG8 | The run's mid-stance dip: a foot path that compresses at midstance and extends at toe-off, the run's leg keys re-solved through it, and its root height dipping to match | planned |
 
 Items are built in ledger order; each is complete — tests, docs, green gate —
@@ -303,7 +303,10 @@ weight reached zero.
 A `Transitions` state machine selects clips from the simulation's state
 (grounded, speed, action, stagger) with per-edge blend durations. The machine
 is data and is validated at load: every state reachable, every clip referenced
-present, every blend duration positive.
+present, every blend duration positive. A cross-fade carries the root height
+as well as the pose — `Animator::root` weighs each live clip's own height as
+`Animator::blend` weighs its curves — so the body neither drops nor jumps when
+one clip gives way to another.
 
 **A clip also carries named events at phases** — `footstep`, `hit_frame`,
 `loose`, `cast_release` — which is the seam the game's combat timing is built
@@ -424,6 +427,17 @@ The bare form does **both** halves: it regenerates the ledger and compares it
 byte for byte, *and* it checks the freshly measured numbers against their
 bounds. Drift alone would admit a regression somebody had regenerated; bounds
 alone would admit a change nobody noticed.
+
+**A cell holds the whole figure.** The depth axis draws what is nearer the
+viewer lower on the screen, so the near foot of a stride lands below the
+ground point the figure stands on — a fifth of its reach below it for the
+longest-legged build. A cell is framed by the figure's rest reach with two
+measured allowances, `ABOVE` (1.02 of the reach) and `BELOW` (0.20), between
+margins of a fiftieth of the side: every ring of every build corner of every
+species, in every shipped motion at every sixteenth of a turn, stays inside
+them, and every cell of the grid inside its square. A frame that left room
+only for the figure's height cut the feet off over half the cells, and the
+checks below measured what was left.
 
 ### Automated quality checks, per cell
 
@@ -585,32 +599,65 @@ What the finished part guarantees:
 - **Gear fits every build.** A `Mount` carries the scale of the body at its
   socket, and fitted gear is scaled by it.
 - **The grid covers the space.** The reference grid is each species'
-  reference figure in every motion, plus each species' least and most walking;
-  between them they wear every form and each species' palest and darkest
-  covering, and every cell clears every §4 bound. The digest folds all of it,
-  each record's bytes included.
+  reference figure in every motion, plus each species' least, most and two
+  plausible figures walking; between them they wear every form and each
+  species' palest and darkest covering, and every cell clears every §4 bound.
+  The digest folds all of it, each record's bytes included.
 
-**FG7 remains.** The designer engine is the parameter model plus the preview;
-the surfaces are the game's (`plans/WINTERSUN.md` WS17). Two obligations bind
-it:
+**FG7 is done.** The designer engine is the parameter model, the preview it is
+watched in, presets and plausible generation; the surfaces — sliders, windows,
+the character library — are the game's (`plans/WINTERSUN.md` WS17). What the
+finished part guarantees:
 
-- **§28, which a designer is the surface most likely to violate.** A slider
-  changes the parameter in memory and repaints — it does not write a store, and
-  it does not re-derive anything the parameter does not feed. The durable write
-  happens once, when the drag settles. The known real-world defect this cites
-  is the settings slider that wrote to the configuration service on every
-  pointer-motion sample and froze its window for the whole drag, and then, with
-  the write removed, still re-derived the entire surface per sample. FG6 leaves
-  it the seams: a palette edit is `Rig::retint`; a build or feature edit
-  rebuilds the rig, which is what those parameters feed.
-- **Randomised means plausible, not uniform.** "Surprise me" draws from
-  per-parameter distributions with correlations (a heavy build gets broader
-  shoulders; a pale palette gets pale markings), from an injected
-  `lib/rng` generator so it is deterministic and host-testable. Uniform
-  sampling over a parameter box produces monsters, which is how a designer
-  earns a reputation for ugly output. The designer also owns keeping a record
-  canonical as it edits one — zeroing a bald figure's hair colour, clamping a
-  swatch index when the species changes to a shorter table.
+- **An edit costs what it feeds, and nothing is written until it settles.**
+  `design::Designer::edit` changes the record in memory and nothing else. What
+  a repaint owes is `design::Change::between` the record last drawn and the one
+  now live — `Nothing`, `Tints` (species or palette changed; `Rig::retint`, no
+  point moves) or `Rig` (species, build or features changed; a rebuild) — so
+  any burst of edits between two paints costs one catch-up, and the preview
+  catching up by that diff is what makes it so. `Designer::settle` answers the
+  record to write only when the interaction changed it: a drag of any length is
+  at most one write. Persisting it is the surface's, through `lib/util`'s
+  `JobDesk`; a refused write is undone by opening the designer again on what
+  the store holds.
+- **The record is always one.** The designer holds the player's choices field
+  by field and the canonical record they come to for the species chosen. An
+  edit the species cannot carry is refused with the field `Identity::new`
+  names, and changes nothing. A species change or going bald re-derives the
+  other fields instead: a swatch past the new table is clamped, a form the
+  species lacks becomes its first, a form it must carry is given (a dragonkin
+  always has horns and the scaled tail), an eye colour it does not admit
+  becomes the admitted one nearest in colour, and a bald figure's hair colour
+  and volume are zeroed. The choices survive beneath, so a round trip through
+  any species, or through going bald, gives back exactly the figure it left.
+  This projects the player's own choices; a record from anywhere else is still
+  decoded and refused, never repaired.
+- **The preview plays, on the grid's own stage.** `preview::Preview` plays the
+  shipped motions through the FG3 animator — choosing a clip cross-fades into
+  it, root height included — over a caller-held `motion::Clips` table, breathes,
+  and stands on `reference`'s one stage: the same ground, light, breath and
+  pose-to-placement path the harness measures. It views the figure framed two
+  ways at once: `Frame::Measured` fills the square as the harness frames a cell,
+  so the view at the smallest side is the readability floor, and
+  `Frame::Shared` draws every figure at the one scale `humanoid::MOST_REACH`
+  gives the largest figure a record describes — height is a scale of the whole
+  skeleton, so a figure filling its own square is the same size at every
+  height. Every view of one moment draws one pose. No edit reaches the clock,
+  the clips playing, the breath or the heading.
+- **A preset is a record.** Picking one is `Designer::apply` and a settle. The
+  preset set is `WinterSun` bundle content in `Resources/` (WS6), not a table in
+  this crate.
+- **Randomised means plausible, not uniform.** `plausible::figure` draws from a
+  bell about each setting's middle, with a heavy build leaning broad-shouldered
+  and a tall one long-limbed and small-headed; hair and markings lean toward
+  the lightness of the covering, the tunic away from it; optional forms are
+  carried as often as the species is described as carrying them. It is
+  integer-only and takes an injected `RandU64`: the predictable
+  `NonCryptoRng` is the tier to use, because a figure a player could have built
+  by hand protects nothing by being unpredictable, and a seed that names a
+  figure is what the grid and the tests need. Two seeded draws per species are
+  figures of the grid, so every generated figure is held to the bounds an
+  authored one is.
 
 ## 6. Refused by name
 
@@ -627,7 +674,15 @@ it:
 - **Free colours in a record.** A palette is swatch indices into first-party
   tables, so no record can paint a figure the desktop cannot draw legibly.
 - **Repairing a record.** A field outside what its species admits is refused
-  with its name, never clamped or defaulted into something drawable.
+  with its name, never clamped or defaulted into something drawable. The
+  designer's projection is of the player's own choices, not of a record.
+- **A designer that writes per sample, or rebuilds for a colour.** An edit is
+  live and in memory; the write waits for the settle, and a palette edit is a
+  re-tint.
+- **A random figure drawn uniformly**, or from an unpredictable generator: the
+  first produces monsters and the second protects nothing.
+- **Presets as engine tables.** A preset is a record and the set is bundle
+  content (WS6).
 - **Screenshot-diff tests as the only animation check.** They catch that
   something changed, never that it is wrong. The measurements in §4 are what
   state correctness; the sheets are for the human judgement that remains.
@@ -672,7 +727,9 @@ it:
   out-of-order edge, a state naming an absent clip, and a state nothing leads
   to. Events fire exactly once as the phase passes them, report a lap's tail
   before the next head in the order they happen, and survive a blended
-  transition without duplicating or being dropped.
+  transition without duplicating or being dropped. A cross-fade carries the
+  root height from the outgoing clip's to the incoming one's, starting where
+  the one held it, landing where the other does, and never jumping between.
 - Rigging: two drives on one joint axis are refused, so every parameter at
   either extreme — singly and all at once — leaves every joint of the shipped
   humanoid inside its limits; an elbow cannot be driven past straight at any
@@ -779,9 +836,32 @@ it:
   surface. Gear on a mount twice the size is drawn twice the size. A sway
   turns a tail joint by exactly its lean, through the tail's parameters, and
   nothing else.
-- Designer: a simulated drag produces exactly one durable write and one repaint
-  per drained input burst, and touches no state the changed parameter does not
-  feed (§28.10, §28.11).
+- Designer: a simulated drag produces exactly one durable write and one
+  catch-up per drained input burst — a rebuild for a build drag, a re-tint and
+  never a rebuild for a palette drag — and no edit reaches the clock, the clips
+  playing, the breath or the heading (§28.10, §28.11). A drag ending where it
+  began writes nothing; a palette edit moves no joint or surface; every edit
+  from every grid record either shows exactly the value it set or is refused by
+  the field `Identity::new` names and changes nothing; a round trip through any
+  species gives back the figure; a required form is given, a swatch clamped and
+  given back, an eye colour replaced by the nearest admitted one; and the
+  projection turns any choices at all into a record and a record into itself.
+  The fuzz harness (`tests/fuzz_design`) holds the same over any edit sequence
+  from any corpus record.
+- Preview: unmoved and framed as a cell, it is the harness's first idle cell
+  strip for strip at every heading and side; in the shared frame height and
+  species read, in the measured one they do not, and the largest figure fits;
+  a clip choice cross-fades and then plays the clip alone; every view of one
+  moment is one figure at its own size.
+- Plausible figures: every draw is a record that builds and places; a seed
+  draws one figure; everything a species admits is drawn; a setting is
+  likeliest at its middle and seldom at an end; girth leans taper, height
+  leans limbs and head, and height and girth do not move together; hair and
+  markings follow the covering's lightness and the tunic leans away from it;
+  optional forms are carried at their stated odds. All from fixed seeds, so
+  every statistic is one number.
+- Framing: every cell of the grid lies inside its square at every side, and
+  every build corner stays within the allowances, to within a hundredth.
 - `miri`: the figure crate forbids `unsafe` outright and the harness carries
   none, so the UB oracle has nothing to interpret in either; re-test if either
   ever gains any. `loom` is not applicable to either half — neither holds

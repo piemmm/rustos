@@ -1,6 +1,6 @@
 [package]
 name = "tairix-wintersun-figure"
-description = "WinterSun's figure engine (plans/FIGURE.md FG2-FG6): the rig and its skinned meshes, the one body frame that serves every heading, clips and the motion layers over them, the measurements the art is gated on, and the validated record a character is built from - species, build, features and palette. no_std, no allocator, forbids unsafe."
+description = "WinterSun's figure engine (plans/FIGURE.md FG2-FG7): the rig and its skinned meshes, the one body frame that serves every heading, clips and the motion layers over them, the measurements the art is gated on, the validated record a character is built from - species, build, features and palette - and the designer that edits one. no_std, no allocator, forbids unsafe."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -30,6 +30,11 @@ tairix-inline = { path = "../../../../lib/inline", version = "=0.0.0" }
 # the figure's claim is made the same way the world's and the simulation's
 # are rather than through a second mixer.
 tairix-hash = { path = "../../../../lib/hash", version = "=0.0.0" }
+# The generator a plausible figure is drawn from is injected through
+# `RandU64`, and the grid's seeded samples use its deterministic tier — the
+# same one the world generator draws from — so a seed names one figure on
+# every target.
+tairix-rng = { path = "../../../../lib/rng", version = "=0.0.0" }
 
 [dev-dependencies]
 # The record decoder's fuzz harness draws its inputs through the shared

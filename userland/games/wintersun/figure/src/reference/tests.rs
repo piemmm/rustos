@@ -5,23 +5,41 @@ use tairix_util::mathf;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{spec, Cell, Reference, Sampling, FACINGS, FIGURES, PHASES};
+use tairix_raster::surface::SUBPIXEL;
+use tairix_wintersun_net::value::Facing;
+
+use super::{
+    fit, grid, spec, Cell, Figure, Reference, Sampling, ABOVE, BELOW, BREATH, FACINGS, FIGURES,
+    MARGIN, PHASES, SAMPLES, SIDES,
+};
+use crate::breath::Breath;
+use crate::frame::project;
+use crate::humanoid;
 use crate::identity::{
     EarForm, EyeShape, FaceShape, Features, HairStyle, HornForm, Identity, Setting, TailForm,
 };
-use crate::motion::Kind;
+use crate::motion::{self, Kind};
+use crate::rig::Frames;
 use crate::rig::Placement;
 use crate::species::Species;
+use crate::testing::corners;
 
 const SCALE: f64 = 1.25;
 const AT: (f64, f64) = (37.5, 92.25);
+
+/// Every figure of the grid, the generated ones included.
+fn whole() -> Vec<Figure> {
+    grid()
+        .map(|figure| figure.expect("every sample draws a record"))
+        .collect()
+}
 
 /// A figure's cells walk its motions, the phases and the headings exactly
 /// once each: every motion for a species' reference, the walk alone for a
 /// least or a most.
 #[test]
 fn every_figure_walks_its_own_cells_once_each() {
-    for figure in &FIGURES {
+    for figure in &whole() {
         let kinds = figure.kinds();
         match figure.sampling {
             Sampling::Every => assert_eq!(kinds, &Kind::ALL[..]),
@@ -49,7 +67,7 @@ fn every_figure_walks_its_own_cells_once_each() {
 /// grid is never exercising a figure the decoder would refuse.
 #[test]
 fn every_figure_of_the_grid_is_a_real_record() {
-    for figure in &FIGURES {
+    for figure in &whole() {
         let identity = figure.identity().expect("a grid figure is a real record");
         assert_eq!(
             Identity::decode(&identity.encode()),
@@ -165,7 +183,7 @@ fn every_species_is_drawn_at_both_ends_of_its_build_and_its_skin() {
 /// otherwise a contact sheet's four columns would be four animations.
 #[test]
 fn the_pose_does_not_depend_on_the_heading() {
-    for figure in &FIGURES {
+    for figure in &whole() {
         let reference =
             Reference::new(&figure.identity().expect("a real record")).expect("it builds");
         let mut placement = Placement::new();
@@ -203,7 +221,7 @@ fn the_pose_does_not_depend_on_the_heading() {
 #[test]
 fn every_cell_stands_on_the_ground_it_was_given() {
     let mut placement = Placement::new();
-    for figure in &FIGURES {
+    for figure in &whole() {
         let reference =
             Reference::new(&figure.identity().expect("a real record")).expect("it builds");
         for cell in figure.cells() {
@@ -224,6 +242,192 @@ fn every_cell_stands_on_the_ground_it_was_given() {
             );
             assert!(!placement.is_empty());
         }
+    }
+}
+
+/// The grid is the authored figures in their order and then the samples in
+/// theirs, every name its own across the whole of it.
+#[test]
+fn the_grid_is_the_authored_figures_then_the_samples() {
+    let whole = whole();
+    assert_eq!(whole.len(), FIGURES.len() + SAMPLES.len());
+    for (listed, authored) in whole.iter().zip(&FIGURES) {
+        assert_eq!(listed.name, authored.name);
+        assert_eq!(listed.spec, authored.spec);
+    }
+    for (listed, sample) in whole[FIGURES.len()..].iter().zip(&SAMPLES) {
+        assert_eq!(listed.name, sample.name);
+        assert_eq!(listed.spec.species, sample.species);
+    }
+    for (index, figure) in whole.iter().enumerate() {
+        assert!(
+            whole[index + 1..]
+                .iter()
+                .all(|other| other.name != figure.name),
+            "{} is named twice",
+            figure.name
+        );
+    }
+}
+
+/// A sample is exactly what the generator draws from its seed, walking, and
+/// every species is sampled twice with seeds of its own.
+#[test]
+fn every_sample_is_the_generators_own_draw() {
+    for sample in &SAMPLES {
+        let drawn = crate::plausible::figure(
+            sample.species,
+            &mut tairix_rng::NonCryptoRng::seed_from_u64(sample.seed),
+        )
+        .expect("every draw is a record");
+        let figure = sample.figure().expect("every draw is a record");
+        assert_eq!(figure.spec, drawn.spec(), "{}", sample.name);
+        assert_eq!(figure.sampling, Sampling::Walk);
+    }
+    for species in Species::ALL {
+        assert_eq!(
+            SAMPLES.iter().filter(|s| s.species == species).count(),
+            2,
+            "{species:?}"
+        );
+    }
+    for (index, sample) in SAMPLES.iter().enumerate() {
+        assert!(SAMPLES[index + 1..]
+            .iter()
+            .all(|other| other.seed != sample.seed));
+    }
+}
+
+/// The regression the framing was missing: every cell of the grid, at every
+/// side it is drawn at, lies inside its square. A near foot striding toward
+/// the viewer is drawn below the ground point it stands on, and a frame that
+/// left room only for the figure's height cut it off in over half the cells.
+#[test]
+fn every_cell_of_the_grid_lies_inside_its_square() {
+    let mut placement = Placement::new();
+    for figure in &whole() {
+        let reference =
+            Reference::new(&figure.identity().expect("a real record")).expect("it builds");
+        for side in SIDES {
+            let (scale, at) = fit(reference.rig().reach(), side).expect("a real cell");
+            let edge = i32::try_from(side).expect("a small side") * SUBPIXEL;
+            for cell in figure.cells() {
+                reference
+                    .place(cell, scale, at, &mut placement)
+                    .expect("it places");
+                for strip in placement.strips() {
+                    for (x, y) in strip.near.iter().chain(strip.far) {
+                        assert!(
+                            (0..=edge).contains(x) && (0..=edge).contains(y),
+                            "{} {cell:?} at {side} draws ({x}, {y}) outside its square",
+                            figure.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Every build corner of every species, in every shipped motion at each of
+/// the grid's phases, at either extreme of the breath and every sixteenth of
+/// a turn, stays within [`ABOVE`] and [`BELOW`] of its ground point —
+/// measured off the whole outline of every ring, of which a strip draws the
+/// near half — and the furthest any reaches is within a hundredth of each,
+/// so the frame spends none of its square on a figure nobody can make.
+///
+/// A pose does not depend on the heading, so each is carried once and its
+/// rings projected at every heading.
+#[test]
+fn every_build_stays_within_the_allowances() {
+    let motions = motion::Set::new().expect("the shipped set");
+    let breaths = [0.25, 0.75].map(|share| {
+        let mut breath = Breath::new(BREATH.0, BREATH.1).expect("the stage's breath");
+        breath.advance(share * BREATH.0).expect("a real step");
+        breath
+    });
+    let mut frames = Frames::new();
+    let (mut above, mut below): (f64, f64) = (0.0, 0.0);
+    for species in Species::ALL {
+        for identity in corners(species) {
+            let reference = Reference::new(&identity).expect("it builds");
+            let rigging = humanoid::rigging(reference.rig()).expect("it binds");
+            let reach = reference.rig().reach();
+            for (kind, step, breath) in Kind::ALL.into_iter().flat_map(|kind| {
+                (0..PHASES).flat_map(move |step| breaths.map(|breath| (kind, step, breath)))
+            }) {
+                let clip = motions.clip(kind).expect("a shipped clip");
+                let phase = Cell {
+                    kind,
+                    step,
+                    facing: FACINGS[0],
+                }
+                .phase();
+                let planted = reference
+                    .staged
+                    .plant(
+                        &clip.sample(phase).expect("in the clip"),
+                        breath,
+                        clip.root_at(phase),
+                    )
+                    .expect("it plants");
+                rigging
+                    .posture(&planted.pose())
+                    .expect("in its limits")
+                    .resolve(planted.root(), &mut frames);
+                for part in reference.rig().parts() {
+                    for hoop in reference.surfaces(part, &frames).expect("it carries") {
+                        for turn in 0u16..16 {
+                            let facing = Facing(turn * 0x1000);
+                            let centre = project(facing, hoop.at).dy;
+                            let spread = mathf::hypot(
+                                project(facing, hoop.wide).dy,
+                                project(facing, hoop.deep).dy,
+                            );
+                            above = mathf::fmax(above, (spread - centre) / reach);
+                            below = mathf::fmax(below, (centre + spread) / reach);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        above <= ABOVE && ABOVE - above <= 0.01,
+        "drawn {above} above"
+    );
+    assert!(
+        below <= BELOW && BELOW - below <= 0.01,
+        "drawn {below} below"
+    );
+}
+
+/// A figure fills the same share of every cell side and stands at the same
+/// place down it, the whole of what it may draw between the margins, and a
+/// reach or a side no figure fits is refused.
+#[test]
+fn a_cell_frames_a_figure_by_its_own_reach() {
+    for side in SIDES {
+        let (scale, at) = fit(50.0, side).expect("a real cell");
+        let extent = f64::from(side);
+        let top = at.1 - ABOVE * 50.0 * scale;
+        let bottom = at.1 + BELOW * 50.0 * scale;
+        assert!(mathf::fabs(top - MARGIN * extent) < 1e-9);
+        assert!(mathf::fabs(bottom - (1.0 - MARGIN) * extent) < 1e-9);
+        assert!(mathf::fabs(at.0 - extent * 0.5) < 1e-12);
+    }
+    for (reach, side) in [
+        (0.0, 32),
+        (-3.0, 32),
+        (f64::NAN, 32),
+        (f64::INFINITY, 32),
+        (50.0, 0),
+    ] {
+        assert_eq!(
+            fit(reach, side).err(),
+            Some(crate::error::FigureError::ScaleUnreal),
+            "{reach} at {side}"
+        );
     }
 }
 

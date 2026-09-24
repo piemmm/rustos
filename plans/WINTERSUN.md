@@ -93,6 +93,7 @@ discovered late.
 | P4 | `lib/crypto` gains X25519 key agreement (`lib/crypto::agree`, over the audited `x25519-dalek`, which shares the `curve25519-dalek` arithmetic already beneath `ed25519-dalek`) | `lib/crypto` | WS1 — **done** |
 | P5 | Durable storage: `lib/recdb` through its transactional and recovery items | `plans/RECDB.md` RD1–RD6 | WS7 |
 | P6 | The figure engine: shapes, rig, clips, blending, the art harness, and the character record a preset is | `plans/FIGURE.md` FG1–FG6 | WS6 — **done** |
+| P8 | The designer engine: the parameter model, the live preview, presets and plausible generation | `plans/FIGURE.md` FG7 | WS17 — **done** |
 | P7 | The GPU seam with a live backend | `plans/GPU.md` GP1–GP6 | WS19 |
 
 P3 was the only prerequisite that changes a shipped desktop contract, and it
@@ -662,9 +663,10 @@ coarsest fraction whose attack telegraphs and figure silhouettes still clear
 the checks. The floor is therefore measured off the art rather than chosen
 here, and it moves when the art does.
 
-It is measured **once, at build time**, by the FG5 contact-sheet harness that
-already renders every preset at every drawn size, and compiled in as the
-ladder's floor. Nothing measures readability on a frame: that would put the
+It is measured **once, at build time**, by the FG5 contact-sheet harness, which
+renders the figure grid — authored and generated figures alike — at every drawn
+size, and compiled in as the ladder's floor. The presets are bundle content
+(WS6), and the harness renders every one of them too once WS6 ships them. Nothing measures readability on a frame: that would put the
 most expensive check in the project on the hot path to decide whether the
 frame is too expensive.
 
@@ -1260,6 +1262,16 @@ whose walk nobody checked — and a simultaneous small-size preview, so the
 silhouette readability `plans/FIGURE.md` §4 measures is visible while authoring
 rather than discovered by a failing test. Presets, a randomise-plausible
 button, and the character library, stored through the store process.
+
+What the surface composes, and what it adds: a `SliderAction::SetValue` is a
+`Designer::edit` and a `Settled` is a `Designer::settle`, whose answer — the
+record to write, or none — goes to the store through a `lib/util` `JobDesk`;
+each frame drains its input, then catches the `Preview` up once with
+`Preview::show` and draws `Frame::Shared` large and `Frame::Measured` at the
+readability floor. A preset or a "surprise me" draw
+(`plausible::figure`, over a `NonCryptoRng` seeded once from the platform) is a
+`Designer::apply` and a settle. A refused write reopens the designer on the
+record the store holds.
 
 Two obligations bind it, and it is the surface most likely to breach both
 (§28): a slider changes the parameter in memory and repaints — it opens no
