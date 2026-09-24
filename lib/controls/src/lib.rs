@@ -257,14 +257,18 @@
 //! The [`form`] module is the form-field family — [`FieldRow`] and
 //! [`FieldGroup`]. A row is one setting: a label, an optional description
 //! line, and a trailing slot holding one real [`Toggle`], [`ComboBox`],
-//! [`Slider`], [`TextField`], [`Button`], read-only reading, or stated
-//! absence of one; a group is the captioned plate those rows sit on,
-//! resolving the one slot column their controls line up in. The row shares
-//! its authority with the control in its slot, so a denied setting cannot
-//! hold an actionable control, and room is given out control, label,
-//! description — a narrowing row loses its words, never the control the
-//! reader came for. It composes the row chrome [`ListRow`] and [`TableRow`]
-//! already draw and restates neither that nor any control.
+//! [`Slider`], [`TextField`], [`Button`], [`FlagSet`] of [`Checkbox`]es,
+//! read-only reading, or stated absence of one; a group is the captioned
+//! plate those rows sit on, resolving the one slot column their controls line
+//! up in. The row shares its authority with the control in its slot, so a
+//! denied setting cannot hold an actionable control, and room is given out
+//! control, label, description — a narrowing row loses its words, never the
+//! control the reader came for. It composes the row chrome [`ListRow`] and
+//! [`TableRow`] already draw and restates neither that nor any control.
+//!
+//! The [`stack`] module is the plate column those groups are stacked down: the
+//! one placement, measurement and reveal every surface that stacks plates
+//! reads, so none carries its own copy of the gaps between them.
 //!
 //! The [`damage`] module is the repaint seam every family reports through. An
 //! input or update call takes a sink, a control pushes its own bounds when a
@@ -295,6 +299,7 @@ pub mod scroll;
 pub mod scrollbar;
 pub mod selector;
 pub mod shell;
+pub mod stack;
 pub mod state;
 pub mod tabs;
 #[cfg(any(test, feature = "test-support"))]
@@ -316,7 +321,9 @@ pub use credential::{
     CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
 };
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
-pub use form::{FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow};
+pub use form::{
+    FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet,
+};
 pub use menu::{
     plate_rect, ChainChild, ChainModel, ChainRow, Menu, MenuAction, MenuItem, MenuMark,
     PlatePlacement, PlateSide, INFO_ROW_LABEL,
@@ -390,6 +397,8 @@ mod scrollbar_tests;
 mod selector_tests;
 #[cfg(test)]
 mod shell_tests;
+#[cfg(test)]
+mod stack_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]

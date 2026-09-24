@@ -16,7 +16,9 @@
 //! at the screen's centre, accumulates each displacement with saturating
 //! arithmetic, and clamps the result to the screen rectangle, so the pointer
 //! can never leave the screen no matter what a (compromised) injector sends.
-//! Construction refuses an empty screen outright (fail closed).
+//! Construction refuses an empty screen outright (fail closed). It is also
+//! where the user's pointer policy is applied — the button order and the
+//! speed — so no surface above it ever sees the unmapped form.
 //!
 //! The raw bytes arrive through an injected [`PointerInputChannel`] seam — a
 //! capability-checked kernel input channel on a running system, an in-memory
@@ -32,6 +34,7 @@
 
 use tairix_abi::input::{PointerButtonCode, PointerInput};
 use tairix_abi::Errno;
+use tairix_wallpaper::{PointerSpeed, PrimaryButton};
 use tairix_wm::{InputEvent, Point, PointerButton, Rect};
 
 use crate::shell::InputSource;
@@ -71,6 +74,19 @@ pub struct DeviceInputSource<C> {
     screen: Rect,
     /// The current absolute pointer position; motion records advance it.
     pointer: Point,
+    /// Which physical button is primary.
+    primary: PrimaryButton,
+    /// A button order chosen while a button was held, applied once none is:
+    /// a press and its release must map through the same order, or the
+    /// release would name a button that was never pressed.
+    pending_primary: Option<PrimaryButton>,
+    /// The physical buttons held down, one bit per [`PointerButtonCode`].
+    held: u8,
+    /// How far the pointer moves for a reported displacement.
+    speed: PointerSpeed,
+    /// The part of a scaled displacement too small to move a whole count
+    /// yet, per axis, in hundredths of a count, so slow motion is not lost.
+    carry: (i64, i64),
 }
 
 impl<C> DeviceInputSource<C> {
@@ -95,7 +111,29 @@ impl<C> DeviceInputSource<C> {
             channel,
             screen,
             pointer: centre,
+            primary: PrimaryButton::Left,
+            pending_primary: None,
+            held: 0,
+            speed: PointerSpeed::NORMAL,
+            carry: (0, 0),
         })
+    }
+
+    /// Apply the user's pointer policy: which button is primary, and how far
+    /// the pointer moves for a reported displacement.
+    ///
+    /// A new button order waits until no button is held.
+    pub fn set_policy(&mut self, primary: PrimaryButton, speed: PointerSpeed) {
+        if speed != self.speed {
+            self.speed = speed;
+            self.carry = (0, 0);
+        }
+        if self.held == 0 {
+            self.primary = primary;
+            self.pending_primary = None;
+        } else {
+            self.pending_primary = Some(primary);
+        }
     }
 
     /// The underlying channel.
@@ -139,17 +177,37 @@ impl<C> DeviceInputSource<C> {
     }
 }
 
-/// Map a decoded [`PointerButtonCode`] to the desktop's [`PointerButton`].
+/// Map a physical [`PointerButtonCode`] to the desktop's [`PointerButton`]
+/// under the button order `primary`.
 ///
 /// The two enumerations are deliberately separate — the first is the frozen
 /// ABI wire code, the second the `lib/input` routing vocabulary — and this is
 /// the single place the desktop crosses between them.
-const fn pointer_button(code: PointerButtonCode) -> PointerButton {
-    match code {
-        PointerButtonCode::Primary => PointerButton::Primary,
-        PointerButtonCode::Secondary => PointerButton::Secondary,
-        PointerButtonCode::Middle => PointerButton::Middle,
+const fn pointer_button(code: PointerButtonCode, primary: PrimaryButton) -> PointerButton {
+    match (code, primary) {
+        (PointerButtonCode::Primary, PrimaryButton::Left)
+        | (PointerButtonCode::Secondary, PrimaryButton::Right) => PointerButton::Primary,
+        (PointerButtonCode::Secondary, PrimaryButton::Left)
+        | (PointerButtonCode::Primary, PrimaryButton::Right) => PointerButton::Secondary,
+        (PointerButtonCode::Middle, _) => PointerButton::Middle,
     }
+}
+
+/// `delta` counts scaled to `percent`, carrying the remainder in `carry`.
+///
+/// Truncating toward zero keeps the two directions symmetric, and the carry
+/// stays below one count, so however slowly the mouse moves the pointer
+/// eventually follows.
+fn scaled(delta: i32, carry: &mut i64, percent: u16) -> i32 {
+    let total = carry.saturating_add(i64::from(delta) * i64::from(percent));
+    let moved = total / 100;
+    *carry = total - moved * 100;
+    i32::try_from(moved).unwrap_or(if moved < 0 { i32::MIN } else { i32::MAX })
+}
+
+/// The bit a held physical button takes in the held set.
+const fn held_bit(code: PointerButtonCode) -> u8 {
+    1 << (code.code() - 1)
 }
 
 impl<C: PointerInputChannel> InputSource for DeviceInputSource<C> {
@@ -157,15 +215,30 @@ impl<C: PointerInputChannel> InputSource for DeviceInputSource<C> {
         match self.channel.next_record()? {
             None => Ok(None),
             Some(bytes) => Ok(Some(match PointerInput::from_bytes(&bytes)? {
-                PointerInput::MovedBy { dx, dy } => InputEvent::PointerMoved {
-                    to: self.displace(dx, dy),
-                },
-                PointerInput::Pressed(button) => InputEvent::PointerPressed {
-                    button: pointer_button(button),
-                },
-                PointerInput::Released(button) => InputEvent::PointerReleased {
-                    button: pointer_button(button),
-                },
+                PointerInput::MovedBy { dx, dy } => {
+                    let percent = self.speed.percent();
+                    let dx = scaled(dx, &mut self.carry.0, percent);
+                    let dy = scaled(dy, &mut self.carry.1, percent);
+                    InputEvent::PointerMoved {
+                        to: self.displace(dx, dy),
+                    }
+                }
+                PointerInput::Pressed(button) => {
+                    self.held |= held_bit(button);
+                    InputEvent::PointerPressed {
+                        button: pointer_button(button, self.primary),
+                    }
+                }
+                PointerInput::Released(button) => {
+                    let mapped = pointer_button(button, self.primary);
+                    self.held &= !held_bit(button);
+                    if self.held == 0 {
+                        if let Some(primary) = self.pending_primary.take() {
+                            self.primary = primary;
+                        }
+                    }
+                    InputEvent::PointerReleased { button: mapped }
+                }
                 // A scroll is a delta at the current pointer position, not a
                 // move: the pointer stays put and the router routes the ticks
                 // to the viewport under it.
@@ -182,6 +255,7 @@ mod tests {
     use alloc::collections::VecDeque;
     use tairix_abi::input::{PointerButtonCode, PointerInput};
     use tairix_abi::Errno;
+    use tairix_wallpaper::{PointerSpeed, PrimaryButton};
     use tairix_wm::{InputEvent, Point, PointerButton, Rect};
 
     /// The screen the tests resolve motion against: 640×480 at the origin,
@@ -368,5 +442,89 @@ mod tests {
         let source = source(&[PointerInput::MovedBy { dx: 0, dy: 0 }]);
         let channel = source.into_channel();
         assert_eq!(channel.records.len(), 1);
+    }
+
+    const fn pressed(button: PointerButton) -> InputEvent {
+        InputEvent::PointerPressed { button }
+    }
+
+    const fn released(button: PointerButton) -> InputEvent {
+        InputEvent::PointerReleased { button }
+    }
+
+    #[test]
+    fn a_left_handed_order_swaps_the_two_main_buttons() {
+        let mut source = source(&[
+            PointerInput::Pressed(PointerButtonCode::Primary),
+            PointerInput::Released(PointerButtonCode::Primary),
+            PointerInput::Pressed(PointerButtonCode::Secondary),
+            PointerInput::Released(PointerButtonCode::Secondary),
+            PointerInput::Pressed(PointerButtonCode::Middle),
+        ]);
+        source.set_policy(PrimaryButton::Right, PointerSpeed::NORMAL);
+        assert_eq!(source.poll(), Ok(Some(pressed(PointerButton::Secondary))));
+        assert_eq!(source.poll(), Ok(Some(released(PointerButton::Secondary))));
+        assert_eq!(source.poll(), Ok(Some(pressed(PointerButton::Primary))));
+        assert_eq!(source.poll(), Ok(Some(released(PointerButton::Primary))));
+        assert_eq!(source.poll(), Ok(Some(pressed(PointerButton::Middle))));
+    }
+
+    /// A button order chosen mid-press waits for the release, so the release
+    /// names the button that was pressed.
+    #[test]
+    fn a_new_button_order_waits_until_no_button_is_held() {
+        let mut source = source(&[
+            PointerInput::Pressed(PointerButtonCode::Primary),
+            PointerInput::Released(PointerButtonCode::Primary),
+            PointerInput::Pressed(PointerButtonCode::Primary),
+        ]);
+        assert_eq!(source.poll(), Ok(Some(pressed(PointerButton::Primary))));
+        source.set_policy(PrimaryButton::Right, PointerSpeed::NORMAL);
+        assert_eq!(source.poll(), Ok(Some(released(PointerButton::Primary))));
+        assert_eq!(source.poll(), Ok(Some(pressed(PointerButton::Secondary))));
+    }
+
+    #[test]
+    fn a_speed_scales_motion_and_carries_what_is_too_small_to_move() {
+        let moves = [PointerInput::MovedBy { dx: 1, dy: -1 }; 4];
+        let mut slow = source(&moves);
+        slow.set_policy(
+            PrimaryButton::Left,
+            PointerSpeed::from_percent(50).expect("a speed"),
+        );
+        let mut at = Point::new(320, 240);
+        for _ in 0..4 {
+            if let Ok(Some(InputEvent::PointerMoved { to })) = slow.poll() {
+                at = to;
+            }
+        }
+        assert_eq!(at, Point::new(322, 238), "four half-counts move two whole");
+
+        let mut fast = source(&[PointerInput::MovedBy { dx: 10, dy: 0 }]);
+        fast.set_policy(
+            PrimaryButton::Left,
+            PointerSpeed::from_percent(300).expect("a speed"),
+        );
+        assert_eq!(
+            fast.poll(),
+            Ok(Some(InputEvent::PointerMoved {
+                to: Point::new(350, 240)
+            }))
+        );
+    }
+
+    #[test]
+    fn a_huge_scaled_displacement_saturates_rather_than_wrapping() {
+        let mut source = source(&[PointerInput::MovedBy {
+            dx: i32::MAX,
+            dy: i32::MIN,
+        }]);
+        source.set_policy(PrimaryButton::Left, PointerSpeed::MAX);
+        assert_eq!(
+            source.poll(),
+            Ok(Some(InputEvent::PointerMoved {
+                to: Point::new(639, 0)
+            }))
+        );
     }
 }

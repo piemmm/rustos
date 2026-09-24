@@ -61,21 +61,15 @@ pub const PINBOARD_VERSION_V1: u16 = 1;
 /// one fixed-width [`PinboardRequest`].
 pub const PINBOARD_MAX_REQUEST: usize = PinboardRequest::WIRE_LEN;
 
-/// Maximum encoded length, in bytes, of a rendered pinboard settings
-/// document.
+/// Maximum encoded length, in bytes, of a rendered desktop settings document.
 ///
-/// A validation bound, not a capacity ([`crate::rlimit`] governs
-/// capacities): the document holds five short `key = value` lines —
-/// `wallpaper`, `fit`, `backdrop`, `icons`, and `sort`
-/// (`plans/PINBOARD.md` §2). Four of those lines are a key name plus one
-/// closed-set word or a bare `rrggbb` colour, a handful of bytes each; the
-/// fifth, `wallpaper`, carries a path, and in practice that path never
-/// approaches the filesystem's own path bound — a shipped master under
-/// `/System/Graphics/Wallpapers/` or a user's own file a few path segments
-/// deep is well under a hundred bytes. 512 bytes leaves generous headroom
-/// for every real document while keeping the wire frame small; a document
-/// that genuinely needs more is refused rather than silently truncated.
-pub const PINBOARD_DOCUMENT_MAX: usize = 512;
+/// A validation bound, not a capacity: an apply carries one group of the
+/// desktop's keys, and the widest group is the notification policy, whose
+/// source list alone may fill one whole settings value
+/// ([`crate::appdata_ipc::APPDATA_VALUE_MAX`]). Twice that leaves room for the
+/// group's other lines; a document that needs more is refused, never
+/// truncated.
+pub const PINBOARD_DOCUMENT_MAX: usize = 2 * crate::appdata_ipc::APPDATA_VALUE_MAX;
 
 /// A rendered pinboard settings document: at least one and at most
 /// [`PINBOARD_DOCUMENT_MAX`] bytes of well-formed UTF-8.
@@ -313,7 +307,7 @@ mod tests {
         super::put_u16(
             &mut frame,
             super::DOCUMENT_LEN_OFFSET,
-            u16::try_from(PINBOARD_DOCUMENT_MAX + 1).expect("512 + 1 fits a u16"),
+            u16::try_from(PINBOARD_DOCUMENT_MAX + 1).expect("the bound plus one fits a u16"),
         );
         assert_eq!(
             PinboardRequest::from_bytes(&frame),

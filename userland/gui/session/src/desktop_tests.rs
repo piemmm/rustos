@@ -836,14 +836,26 @@ fn two_slow_clicks_are_two_clicks_not_an_activation() {
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
     desktop.press(at, &layout, 0, &[], &mut Region::new());
-    let late = desktop.press(
-        at,
-        &layout,
-        tairix_wm::DOUBLE_CLICK_INTERVAL_NS + 1,
-        &[],
-        &mut Region::new(),
-    );
+    let past = desktop.settings().double_click.saturating_total_nanos() + 1;
+    let late = desktop.press(at, &layout, past, &[], &mut Region::new());
     assert_eq!(late.action, None);
+}
+
+/// The icons pair presses under the interval the user chose, not a fixed one.
+#[test]
+fn the_icons_pair_clicks_under_the_chosen_interval() {
+    let mut desktop = desktop_of(vec![folder("Work")]);
+    let mut settings = desktop.settings().clone();
+    settings.double_click = tairix_abi::time::Duration64::from_millis(1_500);
+    let _ = desktop.apply_settings(settings);
+    let layout = layout_of(&desktop);
+    let at = centre_of(&layout, 0);
+    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    let slow = desktop.press(at, &layout, 1_000_000_000, &[], &mut Region::new());
+    assert!(
+        slow.action.is_some(),
+        "a second press a second later is within a 1.5 s interval"
+    );
 }
 
 // --- Painting -------------------------------------------------------------

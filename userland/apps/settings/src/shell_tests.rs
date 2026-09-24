@@ -18,9 +18,9 @@ use tairix_raster::Surface;
 use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{DesktopSettings, SettingsKey};
 
-use crate::form::{Composition, Setting};
+use crate::form::{Composition, FormPlace, Setting};
 use crate::frame::{resolve_frame, Actions, Overflow, CONTENT_FLOOR, SIDEBAR_WIDTH};
-use crate::registry::{Category, Location, Pane, StripRow, CATEGORIES};
+use crate::registry::{Category, Location, Pane, PaneContent, StripRow, CATEGORIES};
 use crate::shell::{Shell, ShellOutcome};
 use crate::test_support::{damage, theme, WIDE};
 use crate::volumes::VolumeReading;
@@ -638,6 +638,282 @@ fn the_composed_panes_draw_a_form_rather_than_a_statement() {
     }
 }
 
+/// Every composed row is reserved exactly the height it draws. The groups of
+/// a pane line up in one column, the widest any of them resolves, and a
+/// description wraps into what that column leaves; a height measured in a
+/// group's own narrower column would cut the description's last line.
+#[test]
+fn every_composed_row_is_reserved_what_it_draws_in_the_shared_column() {
+    let theme = theme();
+    let mut narrower = 0;
+    for pane in CATEGORIES.iter().flat_map(|category| category.panes) {
+        if !matches!(
+            pane.content(),
+            Some(PaneContent::Form(_) | PaneContent::Pictures(_))
+        ) {
+            continue;
+        }
+        let category = pane.pane.locate().expect("a located pane").0;
+        let shell = shell_at(Location {
+            category,
+            pane: pane.pane,
+        });
+        let form = shell.form_for_test().expect("a composed form");
+        for width in [360, 520, 900] {
+            let bounds = Rect::new(0, 0, width, 20_000);
+            let place = FormPlace {
+                bounds,
+                viewport: bounds,
+                scale: Scale::ONE,
+                theme: &theme,
+            };
+            for (index, layout) in form.layouts_for_test(place) {
+                let group = &form.groups()[index];
+                let across = layout.bounds.width;
+                if layout.column > group.slot_column(across, Scale::ONE, &theme) {
+                    narrower += 1;
+                }
+                assert_eq!(
+                    layout.bounds.height,
+                    group.measured_height(across, layout.column, Scale::ONE, &theme),
+                    "{}: group {index} at {width}px is not measured in its column",
+                    pane.name
+                );
+                let span = group.row_text_span(across, layout.column, Scale::ONE, &theme);
+                for (row, field) in group.rows().iter().enumerate() {
+                    let rect = group
+                        .row_rect(row, layout, Scale::ONE, &theme)
+                        .expect("a tall column seats every row");
+                    assert_eq!(
+                        rect.height,
+                        field.measured_height(span, Scale::ONE, &theme),
+                        "{}: {:?} at {width}px",
+                        pane.name,
+                        field.label()
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        narrower > 0,
+        "no pane lays a group out in a column wider than its own, so this proves nothing"
+    );
+}
+
+/// The Notifications pane opens asking which programs have notified, and
+/// lists each once the desktop answers.
+#[test]
+fn the_notifications_pane_lists_the_sources_the_desktop_answers() {
+    let mut shell = shell_at(Location {
+        category: Category::Notifications,
+        pane: Pane::Notifications,
+    });
+    assert!(shell.notify_sources_wanted(), "coming on show asks");
+    let form = shell.form_for_test().expect("a composed form");
+    assert_eq!(form.groups().len(), 2);
+
+    let chat = tairix_abi::BundleId::new("com.example.chat").expect("a bounded identity");
+    shell.adopt_notify_sources(Some(alloc::vec![chat]));
+    assert!(!shell.notify_sources_wanted(), "the answer landed");
+    let form = shell.form_for_test().expect("a composed form");
+    let sources = &form.groups()[1];
+    assert_eq!(sources.rows()[0].label(), "com.example.chat");
+}
+
+/// Choosing a source's level posts the notification keys alone, carrying
+/// that source's new level.
+#[test]
+fn choosing_a_sources_level_posts_the_notification_keys_alone() {
+    let mut shell = shell_at(Location {
+        category: Category::Notifications,
+        pane: Pane::Notifications,
+    });
+    let chat = tairix_abi::BundleId::new("com.example.chat").expect("a bounded identity");
+    shell.adopt_notify_sources(Some(alloc::vec![chat]));
+    let outcome = shell
+        .form_mut_for_test()
+        .expect("a composed form")
+        .choose_for_test(1, 0, 2);
+    let crate::FormOutcome::Apply(document) = outcome else {
+        panic!("choosing a level posts a document, not {outcome:?}");
+    };
+    assert!(
+        document.contains("notify.sources = com.example.chat:critical"),
+        "{document}"
+    );
+    assert!(document.contains("notify.enabled = true"), "{document}");
+    for key in SettingsKey::PINBOARD
+        .into_iter()
+        .chain(SettingsKey::APPEARANCE)
+    {
+        assert!(
+            !document.contains(key.name()),
+            "{} posted: {document}",
+            key.name()
+        );
+    }
+}
+
+/// The desktop-wide switch is a row of its own, and turning it off says so.
+#[test]
+fn the_desktop_switch_posts_its_own_key() {
+    let mut shell = shell_at(Location {
+        category: Category::Notifications,
+        pane: Pane::Notifications,
+    });
+    let outcome = shell
+        .form_mut_for_test()
+        .expect("a composed form")
+        .choose_for_test(0, 0, 1);
+    let crate::FormOutcome::Apply(document) = outcome else {
+        panic!("the switch posts a document, not {outcome:?}");
+    };
+    assert!(document.contains("notify.enabled = false"), "{document}");
+}
+
+/// Each input pane posts its own keys alone, so the Keyboard pane cannot
+/// reimpose a pointer value, nor the Mouse pane a repeat.
+#[test]
+fn the_input_panes_post_only_their_own_keys() {
+    for (pane, row, posted, withheld) in [
+        (
+            Pane::Mouse,
+            0,
+            "pointer.primary = right",
+            &SettingsKey::KEYBOARD[..],
+        ),
+        (
+            Pane::Keyboard,
+            1,
+            "key.repeat_rate = off",
+            &SettingsKey::POINTER[..],
+        ),
+    ] {
+        let category = pane.locate().expect("a located pane").0;
+        let mut shell = shell_at(Location { category, pane });
+        let form = shell.form_mut_for_test().expect("a composed form");
+        let chosen = usize::from(pane == Pane::Mouse);
+        let crate::FormOutcome::Apply(document) = form.choose_for_test(0, row, chosen) else {
+            panic!("{pane:?} posts a document");
+        };
+        assert!(document.contains(posted), "{pane:?}: {document}");
+        for key in withheld {
+            assert!(
+                !document.contains(key.name()),
+                "{pane:?} posted {key}: {document}"
+            );
+        }
+    }
+}
+
+/// A double-click interval set off the ladder is offered under its own
+/// value, so opening the pane changes nothing.
+#[test]
+fn an_off_ladder_interval_is_offered_as_itself() {
+    let settings = tairix_wallpaper::DesktopSettings {
+        double_click: tairix_abi::time::Duration64::from_millis(450),
+        ..tairix_wallpaper::DesktopSettings::default()
+    };
+    let mut shell = Shell::new(settings).expect("a shell");
+    let theme = theme();
+    let mut sink = damage();
+    shell.go_to_for_test(
+        Location {
+            category: Category::Mouse,
+            pane: Pane::Mouse,
+        },
+        WIDE,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    let form = shell.form_for_test().expect("a composed form");
+    let row = &form.groups()[0].rows()[2];
+    let tairix_controls::FieldControl::Combo(combo) = row.control() else {
+        panic!("the interval row is a choice");
+    };
+    assert_eq!(combo.selected_text(), Some("450 ms"));
+}
+
+/// The Keyboard pane states what it cannot offer rather than drawing
+/// controls that would change nothing.
+#[test]
+fn the_keyboard_pane_states_its_absent_layouts_and_shortcuts() {
+    let shell = shell_at(Location {
+        category: Category::Keyboard,
+        pane: Pane::Keyboard,
+    });
+    let form = shell.form_for_test().expect("a composed form");
+    assert!(form.groups()[0]
+        .footnote()
+        .is_some_and(|note| note.contains("layout") && note.contains("shortcut")));
+}
+
+/// *Lock Now* is a command, not a setting: activating it asks for the
+/// desktop's own lock and posts no document.
+#[test]
+fn lock_now_asks_for_the_lock_and_posts_nothing() {
+    let mut shell = shell_at(Location {
+        category: Category::LockScreen,
+        pane: Pane::LockScreen,
+    });
+    let form = shell.form_mut_for_test().expect("a composed form");
+    let outcome = form.activate_for_test(0, 1);
+    assert_eq!(outcome, crate::FormOutcome::LockScreen);
+}
+
+/// A refused lock is stated on the row that asked, and a later success
+/// takes the statement down again.
+#[test]
+fn a_refused_lock_is_stated_on_its_row() {
+    let mut shell = shell_at(Location {
+        category: Category::LockScreen,
+        pane: Pane::LockScreen,
+    });
+    shell.adopt_lock_answer(Err(tairix_abi::Errno::NotSupported));
+    let row = &shell.form_for_test().expect("a form").groups()[0].rows()[1];
+    assert!(row
+        .description()
+        .is_some_and(|text| text.starts_with("The desktop would not lock the screen")));
+    shell.adopt_lock_answer(Ok(()));
+    let row = &shell.form_for_test().expect("a form").groups()[0].rows()[1];
+    assert!(row
+        .description()
+        .is_some_and(|text| !text.contains("would not")));
+}
+
+/// The two idle panes post their own keys alone.
+#[test]
+fn the_idle_panes_post_only_their_own_keys() {
+    for (pane, posted, withheld) in [
+        (
+            Pane::Screensaver,
+            "screensaver.after_min = never",
+            &SettingsKey::LOCK[..],
+        ),
+        (
+            Pane::LockScreen,
+            "lock.after_min = never",
+            &SettingsKey::SCREENSAVER[..],
+        ),
+    ] {
+        let category = pane.locate().expect("a located pane").0;
+        let mut shell = shell_at(Location { category, pane });
+        let form = shell.form_mut_for_test().expect("a composed form");
+        let crate::FormOutcome::Apply(document) = form.choose_for_test(0, 0, 0) else {
+            panic!("{pane:?} posts a document");
+        };
+        assert!(document.contains(posted), "{pane:?}: {document}");
+        for key in withheld {
+            assert!(
+                !document.contains(key.name()),
+                "{pane:?} posted {key}: {document}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_pane_that_states_an_absence_composes_no_form() {
     let shell = shell_at(Location {
@@ -951,6 +1227,11 @@ fn a_composed_panes_settings_are_the_labels_its_rows_actually_draw() {
         // exist until someone asks.
         (Pane::Ethernet, Composition::Ethernet),
         (Pane::Dns, Composition::Dns),
+        (Pane::Notifications, Composition::Notifications),
+        (Pane::Mouse, Composition::Mouse),
+        (Pane::Keyboard, Composition::Keyboard),
+        (Pane::Screensaver, Composition::Screensaver),
+        (Pane::LockScreen, Composition::LockScreen),
     ] {
         let row = pane.locate().expect("a located pane").1;
         assert_eq!(row.settings, composition.labels().as_slice(), "{pane:?}");

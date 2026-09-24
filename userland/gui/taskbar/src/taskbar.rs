@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_abi::window_ipc::AppMenuItemId;
+use tairix_abi::{Errno, ProcId};
 use tairix_controls::damage::{self, Repaint};
 use tairix_controls::{
     ControlRole, IconButton, PlatePlacement, PlateSeating, PointerState, TaskbarItem,
@@ -379,39 +380,54 @@ impl Taskbar {
     /// when it changed the shown set — how the session relays a producer's
     /// raise over the notification IPC. A raise changes both the popover that
     /// shows the card and the bar's notification-area icon (the count it
-    /// implies), so both latch together. Returns whether anything changed.
-    pub fn raise_notification(&mut self, note: TransientNotification) -> bool {
-        let changed = self.notifications.raise(note);
-        if changed {
-            self.repaint |= TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR;
-        }
-        changed
+    /// implies), so both latch together. Answers whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// The area's refusal of a notification past its bounds; nothing changes.
+    pub fn raise_notification(&mut self, note: TransientNotification) -> Result<bool, Errno> {
+        let changed = self.notifications.raise(note)?;
+        self.note_notifications_changed(changed);
+        Ok(changed)
     }
 
     /// Clear the transient notification identified by `(producer, key)`,
     /// latching a repaint when one was removed — how the session relays a
-    /// producer's clear and resolves a user dismiss. A clear changes both the
-    /// popover and the bar's notification-area icon, so both latch together.
-    /// Returns whether one was removed.
-    pub fn clear_notification(&mut self, producer: u64, key: u32) -> bool {
+    /// producer's clear and resolves a user dismiss. Returns whether one was
+    /// removed.
+    pub fn clear_notification(&mut self, producer: ProcId, key: u32) -> bool {
         let changed = self.notifications.clear(producer, key);
-        if changed {
-            self.repaint |= TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR;
-        }
+        self.note_notifications_changed(changed);
         changed
     }
 
-    /// Clear every transient notification raised by `producer`, latching a
-    /// repaint when any were removed — how the session drops a dead
-    /// producer's notifications when it exits. A clear changes both the
-    /// popover and the bar's notification-area icon, so both latch together.
-    /// Returns whether any were removed.
-    pub fn clear_producer_notifications(&mut self, producer: u64) -> bool {
-        let changed = self.notifications.clear_producer(producer);
+    /// Clear every transient notification raised as `pid`, latching a repaint
+    /// when any were removed — how the session drops a reaped child's
+    /// notifications. Returns whether any were removed.
+    pub fn clear_pid_notifications(&mut self, pid: u64) -> bool {
+        let changed = self.notifications.clear_pid(pid);
+        self.note_notifications_changed(changed);
+        changed
+    }
+
+    /// Keep only the notifications `keep` admits, latching a repaint when any
+    /// were withdrawn — how the session applies a changed notification
+    /// policy to what is already showing. Returns whether any were withdrawn.
+    pub fn retain_notifications(
+        &mut self,
+        keep: impl FnMut(&TransientNotification) -> bool,
+    ) -> bool {
+        let changed = self.notifications.retain(keep);
+        self.note_notifications_changed(changed);
+        changed
+    }
+
+    /// A change to the notification set moves both the popover and the bar's
+    /// notification-area icon, so both latch together.
+    fn note_notifications_changed(&mut self, changed: bool) {
         if changed {
             self.repaint |= TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR;
         }
-        changed
     }
 
     /// The clock.

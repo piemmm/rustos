@@ -7,7 +7,10 @@
 //! and the sort order the `Desktop` folder is listed in. The *appearance*
 //! keys are how every surface of the desktop is drawn: light or dark,
 //! contrast, density, motion, the interface scale, and the cursor set and
-//! pointer size the compositor draws with. Every field is a
+//! pointer size the compositor draws with. The *notification* keys are
+//! which notices reach the desktop at all, the *input* keys how the pointer
+//! and keyboard behave, and the *idle* keys when the screensaver starts and
+//! the screen locks. Every field is a
 //! closed value set, and the document itself is a plain `lib/appconf`
 //! `key = value` document — the one format engine the app-data store speaks,
 //! so this crate defines the *registry* over it and no grammar of its own.
@@ -52,12 +55,21 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use tairix_abi::desktop::{Appearance, Contrast, Density, Motion};
+use tairix_abi::desktop::{
+    Appearance, Contrast, Density, Motion, DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN,
+};
+use tairix_abi::time::Duration64;
 use tairix_appconf::{ConfError, Document, Lookup};
 use tairix_geometry::Scale;
 use tairix_theme::CursorSetId;
 
 use crate::catalog;
+use crate::idle::{IdleAfter, ScreensaverKind};
+use crate::input::{
+    parse_decimal, parse_millis, render_millis, PointerSpeed, PrimaryButton, RepeatRate,
+    REPEAT_DELAY_DEFAULT, REPEAT_DELAY_MAX, REPEAT_DELAY_MIN,
+};
+use crate::notify::NotifyPolicy;
 
 /// Maximum length, in bytes, of a wallpaper path named by the `wallpaper`
 /// key.
@@ -514,11 +526,36 @@ pub enum SettingsKey {
     CursorSet,
     /// `cursor.size` — how large the pointer is drawn.
     CursorSize,
+    /// `notify.enabled` — whether the desktop shows notifications at all.
+    NotifyEnabled,
+    /// `notify.sources` — the level of each source that does not show
+    /// everything.
+    NotifySources,
+    /// `pointer.primary` — which physical button is primary.
+    PointerPrimary,
+    /// `pointer.double_click_ms` — how far apart a double-click's presses
+    /// may be.
+    DoubleClick,
+    /// `pointer.speed` — how far the pointer moves for a movement of the
+    /// mouse.
+    PointerSpeed,
+    /// `key.repeat_delay_ms` — how long a key is held before it repeats.
+    RepeatDelay,
+    /// `key.repeat_rate` — how often a held key repeats.
+    RepeatRate,
+    /// `screensaver.after_min` — how long the desktop sits idle before the
+    /// screensaver starts.
+    ScreensaverAfter,
+    /// `screensaver.kind` — what the screensaver shows.
+    ScreensaverKind,
+    /// `lock.after_min` — how long the desktop sits idle before the screen
+    /// locks.
+    LockAfter,
 }
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 22] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -531,6 +568,16 @@ impl SettingsKey {
         Self::Scale,
         Self::CursorSet,
         Self::CursorSize,
+        Self::NotifyEnabled,
+        Self::NotifySources,
+        Self::PointerPrimary,
+        Self::DoubleClick,
+        Self::PointerSpeed,
+        Self::RepeatDelay,
+        Self::RepeatRate,
+        Self::ScreensaverAfter,
+        Self::ScreensaverKind,
+        Self::LockAfter,
     ];
 
     /// The keys describing the backdrop and the icons standing on it: what
@@ -556,6 +603,26 @@ impl SettingsKey {
         Self::CursorSize,
     ];
 
+    /// The keys deciding which notices reach the desktop: what the Settings
+    /// application's Notifications pane edits.
+    pub const NOTIFICATIONS: [Self; 2] = [Self::NotifyEnabled, Self::NotifySources];
+
+    /// The keys deciding how the pointer behaves: what the Settings
+    /// application's Mouse pane edits.
+    pub const POINTER: [Self; 3] = [Self::PointerPrimary, Self::DoubleClick, Self::PointerSpeed];
+
+    /// The keys deciding how a held key repeats: what the Settings
+    /// application's Keyboard pane edits.
+    pub const KEYBOARD: [Self; 2] = [Self::RepeatDelay, Self::RepeatRate];
+
+    /// The keys deciding what the screen does once the desktop is idle: what
+    /// the Settings application's Screensaver pane edits.
+    pub const SCREENSAVER: [Self; 2] = [Self::ScreensaverAfter, Self::ScreensaverKind];
+
+    /// The key deciding when an idle desktop locks: what the Settings
+    /// application's Lock Screen pane edits.
+    pub const LOCK: [Self; 1] = [Self::LockAfter];
+
     /// The canonical key spelling.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -572,6 +639,16 @@ impl SettingsKey {
             Self::Scale => "scale",
             Self::CursorSet => "cursor.set",
             Self::CursorSize => "cursor.size",
+            Self::NotifyEnabled => "notify.enabled",
+            Self::NotifySources => "notify.sources",
+            Self::PointerPrimary => "pointer.primary",
+            Self::DoubleClick => "pointer.double_click_ms",
+            Self::PointerSpeed => "pointer.speed",
+            Self::RepeatDelay => "key.repeat_delay_ms",
+            Self::RepeatRate => "key.repeat_rate",
+            Self::ScreensaverAfter => "screensaver.after_min",
+            Self::ScreensaverKind => "screensaver.kind",
+            Self::LockAfter => "lock.after_min",
         }
     }
 
@@ -660,6 +737,24 @@ pub struct DesktopSettings {
     pub cursor_set: CursorSetId,
     /// How large the pointer is drawn.
     pub cursor_size: CursorSize,
+    /// Which notices reach the desktop.
+    pub notifications: NotifyPolicy,
+    /// Which physical button is primary.
+    pub primary_button: PrimaryButton,
+    /// How far apart a double-click's presses may be.
+    pub double_click: Duration64,
+    /// How far the pointer moves for a movement of the mouse.
+    pub pointer_speed: PointerSpeed,
+    /// How long a key is held before it repeats.
+    pub repeat_delay: Duration64,
+    /// How often a held key repeats.
+    pub repeat_rate: RepeatRate,
+    /// How long the desktop sits idle before the screensaver starts.
+    pub screensaver_after: IdleAfter,
+    /// What the screensaver shows.
+    pub screensaver: ScreensaverKind,
+    /// How long the desktop sits idle before the screen locks.
+    pub lock_after: IdleAfter,
 }
 
 impl Default for DesktopSettings {
@@ -677,6 +772,15 @@ impl Default for DesktopSettings {
             scale: Scale::ONE,
             cursor_set: CursorSetId::builtin(),
             cursor_size: CursorSize::default(),
+            notifications: NotifyPolicy::default(),
+            primary_button: PrimaryButton::default(),
+            double_click: DOUBLE_CLICK_DEFAULT,
+            pointer_speed: PointerSpeed::default(),
+            repeat_delay: REPEAT_DELAY_DEFAULT,
+            repeat_rate: RepeatRate::default(),
+            screensaver_after: IdleAfter::Minutes(10),
+            screensaver: ScreensaverKind::default(),
+            lock_after: IdleAfter::Minutes(15),
         }
     }
 }
@@ -755,86 +859,69 @@ impl DesktopSettings {
 #[must_use]
 fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> bool {
     match key {
-        SettingsKey::Wallpaper => {
-            let Some(wallpaper) = WallpaperChoice::from_value(value) else {
-                return false;
-            };
-            settings.wallpaper = wallpaper;
-        }
-        SettingsKey::Fit => {
-            let Some(fit) = WallpaperFit::from_value(value) else {
-                return false;
-            };
-            settings.fit = fit;
-        }
-        SettingsKey::Backdrop => {
-            let Some(backdrop) = Backdrop::from_value(value) else {
-                return false;
-            };
-            settings.backdrop = backdrop;
-        }
-        SettingsKey::Icons => {
-            let Some(icons) = IconFlow::from_value(value) else {
-                return false;
-            };
-            settings.icons = icons;
-        }
-        SettingsKey::Sort => {
-            let Some(sort) = IconSort::from_value(value) else {
-                return false;
-            };
-            settings.sort = sort;
-        }
-        SettingsKey::Appearance => {
-            let Some(appearance) = Appearance::from_value(value) else {
-                return false;
-            };
-            settings.appearance = appearance;
-        }
-        SettingsKey::Contrast => {
-            let Some(contrast) = Contrast::from_value(value) else {
-                return false;
-            };
-            settings.contrast = contrast;
-        }
-        SettingsKey::Density => {
-            let Some(density) = Density::from_value(value) else {
-                return false;
-            };
-            settings.density = density;
-        }
-        SettingsKey::Motion => {
-            let Some(motion) = Motion::from_value(value) else {
-                return false;
-            };
-            settings.motion = motion;
-        }
-        SettingsKey::Scale => {
-            let Some(scale) = parse_scale(value) else {
-                return false;
-            };
-            settings.scale = scale;
-        }
-        SettingsKey::CursorSet => {
-            // A name no set could carry is refused here rather than
-            // spliced into a store path later. Whether a *registered* set
-            // answers to it is the desktop's question, not the document's:
-            // a stored choice outlives the image that shipped it, and a set
-            // an update removed falls back to the built-in at activation
-            // rather than costing the reader the rest of their document.
-            let Some(set) = CursorSetId::new(value) else {
-                return false;
-            };
-            settings.cursor_set = set;
-        }
-        SettingsKey::CursorSize => {
-            let Some(size) = CursorSize::from_value(value) else {
-                return false;
-            };
-            settings.cursor_size = size;
-        }
+        SettingsKey::Wallpaper => put(&mut settings.wallpaper, WallpaperChoice::from_value(value)),
+        SettingsKey::Fit => put(&mut settings.fit, WallpaperFit::from_value(value)),
+        SettingsKey::Backdrop => put(&mut settings.backdrop, Backdrop::from_value(value)),
+        SettingsKey::Icons => put(&mut settings.icons, IconFlow::from_value(value)),
+        SettingsKey::Sort => put(&mut settings.sort, IconSort::from_value(value)),
+        SettingsKey::Appearance => put(&mut settings.appearance, Appearance::from_value(value)),
+        SettingsKey::Contrast => put(&mut settings.contrast, Contrast::from_value(value)),
+        SettingsKey::Density => put(&mut settings.density, Density::from_value(value)),
+        SettingsKey::Motion => put(&mut settings.motion, Motion::from_value(value)),
+        SettingsKey::Scale => put(&mut settings.scale, parse_scale(value)),
+        // Refused here rather than spliced into a store path; whether a set
+        // answers to it is the desktop's question, since a choice outlives its image.
+        SettingsKey::CursorSet => put(&mut settings.cursor_set, CursorSetId::new(value)),
+        SettingsKey::CursorSize => put(&mut settings.cursor_size, CursorSize::from_value(value)),
+        SettingsKey::NotifyEnabled => match tairix_appconf::as_bool(value) {
+            Ok(enabled) => {
+                settings.notifications.set_enabled(enabled);
+                true
+            }
+            Err(_) => false,
+        },
+        SettingsKey::NotifySources => settings.notifications.set_sources(value),
+        SettingsKey::PointerPrimary => put(
+            &mut settings.primary_button,
+            PrimaryButton::from_value(value),
+        ),
+        SettingsKey::DoubleClick => put(
+            &mut settings.double_click,
+            parse_millis(value, DOUBLE_CLICK_MIN, DOUBLE_CLICK_MAX),
+        ),
+        SettingsKey::PointerSpeed => put(
+            &mut settings.pointer_speed,
+            parse_decimal(value)
+                .and_then(|percent| u16::try_from(percent).ok())
+                .and_then(PointerSpeed::from_percent),
+        ),
+        SettingsKey::RepeatDelay => put(
+            &mut settings.repeat_delay,
+            parse_millis(value, REPEAT_DELAY_MIN, REPEAT_DELAY_MAX),
+        ),
+        SettingsKey::RepeatRate => put(&mut settings.repeat_rate, RepeatRate::from_value(value)),
+        SettingsKey::ScreensaverAfter => put(
+            &mut settings.screensaver_after,
+            IdleAfter::from_value(value),
+        ),
+        SettingsKey::ScreensaverKind => put(
+            &mut settings.screensaver,
+            ScreensaverKind::from_value(value),
+        ),
+        SettingsKey::LockAfter => put(&mut settings.lock_after, IdleAfter::from_value(value)),
     }
-    true
+}
+
+/// Store `parsed` in `field`, answering whether there was a value to store;
+/// `field` is left unchanged when there was not.
+fn put<T>(field: &mut T, parsed: Option<T>) -> bool {
+    match parsed {
+        Some(value) => {
+            *field = value;
+            true
+        }
+        None => false,
+    }
 }
 
 /// Decode the canonical bare decimal percentage the `scale` key carries.
@@ -845,16 +932,7 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
 /// different spelling of the same value, and two spellings of one setting
 /// are two ways for consumers to disagree.
 fn parse_scale(value: &str) -> Option<Scale> {
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let mut percent: u32 = 0;
-    for byte in value.bytes() {
-        percent = percent
-            .checked_mul(10)?
-            .checked_add(u32::from(byte - b'0'))?;
-    }
-    Scale::from_percent(percent)
+    Scale::from_percent(parse_decimal(value)?)
 }
 
 /// The current value of `key` on `settings`, in its canonical spelling.
@@ -872,6 +950,18 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::Scale => format!("{}", settings.scale.percent()),
         SettingsKey::CursorSet => settings.cursor_set.name().to_string(),
         SettingsKey::CursorSize => settings.cursor_size.as_str().to_string(),
+        SettingsKey::NotifyEnabled => {
+            tairix_appconf::bool_text(settings.notifications.enabled()).to_string()
+        }
+        SettingsKey::NotifySources => settings.notifications.render_sources(),
+        SettingsKey::PointerPrimary => settings.primary_button.as_str().to_string(),
+        SettingsKey::DoubleClick => render_millis(settings.double_click),
+        SettingsKey::PointerSpeed => format!("{}", settings.pointer_speed.percent()),
+        SettingsKey::RepeatDelay => render_millis(settings.repeat_delay),
+        SettingsKey::RepeatRate => settings.repeat_rate.render_value(),
+        SettingsKey::ScreensaverAfter => settings.screensaver_after.render_value(),
+        SettingsKey::ScreensaverKind => settings.screensaver.as_str().to_string(),
+        SettingsKey::LockAfter => settings.lock_after.render_value(),
     }
 }
 

@@ -31,6 +31,7 @@
 //! ([`DoubleClickTracker`]) — keyed on the button as well as the item, so a
 //! left press and a right press are never mistaken for one gesture.
 
+use tairix_abi::time::Duration64;
 use tairix_browse::BundleIntent;
 use tairix_input::{ClickKind, DoubleClickTracker, PointerButton};
 
@@ -95,13 +96,14 @@ pub fn primary_press(
     tracker: &mut DoubleClickTracker,
     now_ns: u64,
     index: Option<usize>,
+    interval: Duration64,
 ) -> PrimaryPress {
     let Some(index) = index else {
         tracker.reset();
         return PrimaryPress::Chrome;
     };
     let subject = u64::try_from(index).unwrap_or(u64::MAX);
-    match tracker.register(now_ns, subject, PointerButton::Primary) {
+    match tracker.register(now_ns, subject, PointerButton::Primary, interval) {
         ClickKind::Double => PrimaryPress::Activate { index },
         ClickKind::Single => PrimaryPress::Select { index },
     }
@@ -110,6 +112,7 @@ pub fn primary_press(
 #[cfg(test)]
 mod tests {
     use super::{bundle_intent, primary_press, PrimaryPress};
+    use tairix_abi::desktop::DOUBLE_CLICK_DEFAULT;
     use tairix_browse::BundleIntent;
     use tairix_input::DoubleClickTracker;
 
@@ -117,11 +120,11 @@ mod tests {
     fn a_lone_left_click_selects_and_a_quick_second_activates() {
         let mut tracker = DoubleClickTracker::new();
         assert_eq!(
-            primary_press(&mut tracker, 0, Some(2)),
+            primary_press(&mut tracker, 0, Some(2), DOUBLE_CLICK_DEFAULT),
             PrimaryPress::Select { index: 2 }
         );
         assert_eq!(
-            primary_press(&mut tracker, 1_000, Some(2)),
+            primary_press(&mut tracker, 1_000, Some(2), DOUBLE_CLICK_DEFAULT),
             PrimaryPress::Activate { index: 2 }
         );
     }
@@ -130,13 +133,16 @@ mod tests {
     fn a_left_click_on_the_chrome_breaks_the_run() {
         let mut tracker = DoubleClickTracker::new();
         assert_eq!(
-            primary_press(&mut tracker, 0, Some(2)),
+            primary_press(&mut tracker, 0, Some(2), DOUBLE_CLICK_DEFAULT),
             PrimaryPress::Select { index: 2 }
         );
-        assert_eq!(primary_press(&mut tracker, 1, None), PrimaryPress::Chrome);
+        assert_eq!(
+            primary_press(&mut tracker, 1, None, DOUBLE_CLICK_DEFAULT),
+            PrimaryPress::Chrome
+        );
         // Back on the same item, the run has been broken: a fresh single.
         assert_eq!(
-            primary_press(&mut tracker, 2, Some(2)),
+            primary_press(&mut tracker, 2, Some(2), DOUBLE_CLICK_DEFAULT),
             PrimaryPress::Select { index: 2 }
         );
     }
@@ -145,7 +151,7 @@ mod tests {
     fn a_right_click_breaks_a_half_finished_left_pair() {
         let mut tracker = DoubleClickTracker::new();
         assert_eq!(
-            primary_press(&mut tracker, 0, Some(2)),
+            primary_press(&mut tracker, 0, Some(2), DOUBLE_CLICK_DEFAULT),
             PrimaryPress::Select { index: 2 }
         );
         // A right press asks the desktop for the menu and resets the tracker,
@@ -153,8 +159,25 @@ mod tests {
         // is a fresh single rather than the second half of the left pair.
         tracker.reset();
         assert_eq!(
-            primary_press(&mut tracker, 1, Some(2)),
+            primary_press(&mut tracker, 1, Some(2), DOUBLE_CLICK_DEFAULT),
             PrimaryPress::Select { index: 2 }
+        );
+    }
+
+    /// A second press is paired under the interval it is handed, so the one
+    /// the desktop publishes is the one the listing honours.
+    #[test]
+    fn a_press_pairs_under_the_interval_the_desktop_publishes() {
+        let mut tracker = DoubleClickTracker::new();
+        let short = tairix_abi::time::Duration64::from_millis(200);
+        assert_eq!(
+            primary_press(&mut tracker, 0, Some(2), short),
+            PrimaryPress::Select { index: 2 }
+        );
+        assert_eq!(
+            primary_press(&mut tracker, 300_000_000, Some(2), short),
+            PrimaryPress::Select { index: 2 },
+            "300 ms is past a 200 ms interval"
         );
     }
 

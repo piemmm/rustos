@@ -16,9 +16,10 @@ use alloc::vec::Vec;
 
 use tairix_abi::elevate::ElevateArgv;
 use tairix_abi::net_ipc::NetServerAddr;
+use tairix_abi::BundleId;
 use tairix_controls::{
-    plate_rect, Breadcrumb, BreadcrumbAction, CredentialAction, CredentialSheet, Crumb, Menu,
-    MenuAction, MenuItem, PlatePlacement, PlateSide, ScrollAction, ScrollBar, ScrollModel,
+    plate_rect, stack, Breadcrumb, BreadcrumbAction, CredentialAction, CredentialSheet, Crumb,
+    Menu, MenuAction, MenuItem, PlatePlacement, PlateSide, ScrollAction, ScrollBar, ScrollModel,
     ScrollOrientation, ScrollPart, ScrollRange, SearchField, Tab, Tabs, TabsAction,
     TabsOrientation, TextAction, CREDENTIAL_REFUSED_REASON,
 };
@@ -42,7 +43,6 @@ use crate::network::{Addressing, NetworkFacts};
 use crate::registry::{
     strip_rows, CategoryRow, Location, Pane, PaneContent, PaneRow, StripRow, CATEGORIES,
 };
-use crate::stack;
 use crate::volumes::VolumeReading;
 
 /// The trail's leading crumb: the surface itself, and — once the strip is
@@ -71,6 +71,8 @@ enum Reading {
     Resolvers,
     /// The caller's own account, the two public directories, and a salt.
     Accounts,
+    /// The sources the desktop says have notified.
+    NotifySources,
 }
 
 impl Reading {
@@ -280,6 +282,9 @@ pub enum ShellOutcome {
     /// The shell authenticates nobody and spawns nothing. It carries the
     /// offer and renders the verdict it is told.
     Elevate(Elevation),
+    /// The reader asked for the screen to be locked now: the request the
+    /// caller makes of the desktop session, whose lock it is.
+    LockScreen,
 }
 
 impl ShellOutcome {
@@ -303,7 +308,7 @@ impl ShellOutcome {
     pub fn document(&self) -> Option<&str> {
         match self {
             Self::Apply(document) => Some(document),
-            Self::Idle | Self::Changed | Self::Elevate(_) => None,
+            Self::Idle | Self::Changed | Self::Elevate(_) | Self::LockScreen => None,
         }
     }
 }
@@ -350,6 +355,9 @@ pub struct Shell {
     network: NetworkFacts,
     /// The account readings the Users pane states.
     accounts: AccountFacts,
+    /// The sources the desktop said have notified, or `None` while it has not
+    /// said — or would not.
+    notify_sources: Option<Vec<BundleId>>,
     /// A fresh salt the caller drew, held so a password can be hashed
     /// without the event loop waiting on a read.
     ///
@@ -399,6 +407,7 @@ impl Shell {
             machine: MachineFacts::default(),
             network: NetworkFacts::default(),
             accounts: AccountFacts::default(),
+            notify_sources: None,
             salt: None,
             footer: None,
             asking: None,
@@ -645,6 +654,45 @@ impl Shell {
             .is_some_and(Composition::reads_resolvers)
     }
 
+    /// Whether the pane on show lists the sources that have notified.
+    fn lists_notify_sources(&self) -> bool {
+        self.body
+            .composition()
+            .is_some_and(Composition::reads_notify_sources)
+    }
+
+    /// Whether the caller should ask the desktop which sources have
+    /// notified.
+    ///
+    /// Set when the pane that lists them comes on show, so a program that
+    /// notified since the reader last looked is listed.
+    #[must_use]
+    pub const fn notify_sources_wanted(&self) -> bool {
+        self.wanted.holds(Reading::NotifySources)
+    }
+
+    /// Adopt what the desktop answered when asked to lock the screen: `None`
+    /// once it has, or its refusal, which the pane states.
+    pub fn adopt_lock_answer(&mut self, answer: Result<(), tairix_abi::Errno>) {
+        if let Some(form) = self.body.form_mut() {
+            form.adopt_lock_refusal(answer.err());
+        }
+    }
+
+    /// Adopt the sources the desktop said have notified, or `None` when it
+    /// did not say.
+    pub fn adopt_notify_sources(&mut self, sources: Option<Vec<BundleId>>) {
+        self.notify_sources = sources;
+        self.wanted.landed(Reading::NotifySources);
+        if !self.lists_notify_sources() {
+            return;
+        }
+        let sources = self.notify_sources.as_deref();
+        if let Some(form) = self.body.form_mut() {
+            form.adopt_notify_sources(sources);
+        }
+    }
+
     /// Whether the pane the shell is *on* is discovered from the
     /// addressing capture.
     ///
@@ -785,6 +833,7 @@ impl Shell {
             self.accounts.roster = Roster::Unasked;
         }
         let rostered = self.states_accounts();
+        let listed_sources = self.lists_notify_sources();
         let staged = self.body.staged().to_vec();
         let staged_accounts = self.body.staged_accounts().to_vec();
         let answered = body::Answered {
@@ -798,6 +847,7 @@ impl Shell {
             staged: &staged,
             accounts: &self.accounts,
             staged_accounts: &staged_accounts,
+            notify_sources: self.notify_sources.as_deref(),
         };
         self.body = match self.location.rows() {
             Some((_, pane)) => Body::of(pane, &answered),
@@ -823,6 +873,11 @@ impl Shell {
         // just handed over.
         if !rostered && self.states_accounts() {
             self.wanted.arm(Reading::Accounts);
+        }
+        // A program may notify at any moment, so the list is asked for each
+        // time its pane comes on show.
+        if !listed_sources && self.lists_notify_sources() {
+            self.wanted.arm(Reading::NotifySources);
         }
         // Rebuilt rather than kept: a band belongs to the pane that offers
         // it, and one carried across a navigation would state the last
@@ -2360,6 +2415,12 @@ impl Shell {
         self.body.form()
     }
 
+    /// The form the pane on show composes, for a test that drives it.
+    #[cfg(test)]
+    pub(crate) fn form_mut_for_test(&mut self) -> Option<&mut crate::form::Form> {
+        self.body.form_mut()
+    }
+
     /// The volume cards the pane on show draws, for a test that asks what
     /// the machine reported.
     #[cfg(test)]
@@ -2563,6 +2624,7 @@ fn outcome_of(acted: FormOutcome) -> ShellOutcome {
         // action band included, which the caller redraws with it.
         FormOutcome::Changed | FormOutcome::Staged => ShellOutcome::Changed,
         FormOutcome::Apply(document) => ShellOutcome::Apply(document),
+        FormOutcome::LockScreen => ShellOutcome::LockScreen,
     }
 }
 

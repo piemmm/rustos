@@ -124,8 +124,7 @@ pub const APP_BAR_SETTLED: tairix_log::EventId = tairix_log::EventId(20_014);
 /// on this constant rather than on a copy of its text.
 pub const APP_BAR_SETTLED_MESSAGE: &str = "icon-bar slots drawn on the revealed desktop";
 
-/// One-shot: a presented frame has carried the program-library popup. Id
-/// `20_016` is the next free slot.
+/// One-shot: a presented frame has carried the program-library popup.
 ///
 /// The sibling of [`MENU_SHOWN`](crate::MENU_SHOWN) for the one surface it
 /// cannot speak for. The launcher is the bar's own popup — not a menu chain

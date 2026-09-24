@@ -39,13 +39,14 @@ use tairix_controls::state::{
 use tairix_controls::text::TextField;
 use tairix_controls::value::Progress;
 use tairix_controls::{
-    paint_icon_slot, Checkbox, Fact, FactList, IconButton, IconTile, ListRow, Panel, ScrollAction,
-    ScrollBar, ScrollPart, Tab, TableCell, TableRow, Tabs, Toolbar, FULL_COLOUR,
+    paint_icon_slot, stack, Checkbox, Fact, FactList, FieldAction, FieldControl, FieldGroup,
+    FieldGroupAction, FieldLayout, FieldRow, FlagSet, IconButton, IconTile, ListRow, Panel,
+    ScrollAction, ScrollBar, ScrollPart, Tab, TableCell, TableRow, Tabs, Toolbar, FULL_COLOUR,
 };
 use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
-use tairix_input::{InputEvent, PointerButton};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::{TextRole, Theme};
 
@@ -1586,11 +1587,12 @@ pub const fn permission_cells(mode: u32) -> [bool; 9] {
     cells
 }
 
-/// The permissions grid's column headers, over the read/write/execute columns.
-const PERMISSION_COLUMN_LABELS: [&str; 3] = ["Read", "Write", "Exec"];
-
-/// The permissions grid's row labels, naming each `rwx` triad.
+/// The permission classes, one access row each, in the triad order of
+/// [`PERMISSION_BITS`].
 const PERMISSION_ROW_LABELS: [&str; 3] = ["Owner", "Group", "Other"];
+
+/// A class's three flags, in the order [`PERMISSION_BITS`] lays a triad out.
+const PERMISSION_FLAG_LABELS: [&str; 3] = ["Read", "Write", "Execute"];
 
 /// What the attributes section says in place of a list it has no rows for.
 const ATTR_UNSUPPORTED: &str = "not stored by this volume";
@@ -1741,75 +1743,6 @@ fn draw_identity(
     );
 }
 
-/// The shared geometry of a Properties surface's labelled permissions grid: a
-/// column-header row (Read / Write / Exec) above three owner/group/other triad
-/// rows, each triad a leading row label followed by its three `rwx`
-/// checkboxes.
-///
-/// One definition so the painted grid, its headers and row labels, and the
-/// click hit-test all agree on where every cell sits. Each cell is exactly the
-/// box [`Checkbox`] draws, on a control-height row pitch, so a toggle is the
-/// same object here as anywhere else on the desktop.
-struct PermGrid {
-    /// Left x of the row-label column (Owner / Group / Other).
-    label_x: i32,
-    /// Left x of the first (Read) checkbox column.
-    cols_x: i32,
-    /// Horizontal pitch between successive `rwx` columns.
-    col_pitch: u32,
-    /// The square side of each checkbox box.
-    box_side: u32,
-    /// Top y of the column-header row.
-    header_y: i32,
-    /// Top y of the first (Owner) triad row.
-    first_row_y: i32,
-    /// Vertical pitch between successive triad rows.
-    row_line: u32,
-}
-
-impl PermGrid {
-    /// The checkbox cell for grid index `i` (`i = triad * 3 + bit`, matching
-    /// [`PERMISSION_BITS`]): triad selects the owner/group/other row, bit the
-    /// read/write/execute column.
-    fn cell(&self, index: usize) -> Rect {
-        let triad = u32::try_from(index / 3).unwrap_or(0);
-        let bit = u32::try_from(index % 3).unwrap_or(0);
-        // Centred under its column header, which is what makes the matrix
-        // read as a matrix rather than as three ragged rows of boxes.
-        let x = self
-            .cols_x
-            .saturating_add(to_i32(self.col_pitch.saturating_mul(bit)))
-            .saturating_add(to_i32(self.col_pitch.saturating_sub(self.box_side) / 2));
-        let y = self
-            .first_row_y
-            .saturating_add(to_i32(self.row_line.saturating_mul(triad)))
-            .saturating_add(to_i32(self.row_line.saturating_sub(self.box_side) / 2));
-        Rect::new(x, y, self.box_side, self.box_side)
-    }
-
-    /// All nine checkbox cells, in [`PERMISSION_BITS`] order.
-    fn cells(&self) -> [Rect; 9] {
-        core::array::from_fn(|i| self.cell(i))
-    }
-
-    /// The y the triad row at `triad` draws its label at, given a `glyph`-tall
-    /// face — centred against the row's own pitch like the boxes beside it.
-    fn label_y(&self, triad: usize, glyph: u32) -> i32 {
-        self.first_row_y
-            .saturating_add(to_i32(
-                self.row_line
-                    .saturating_mul(u32::try_from(triad).unwrap_or(0)),
-            ))
-            .saturating_add(to_i32(self.row_line.saturating_sub(glyph) / 2))
-    }
-
-    /// The bottom edge of the last triad row.
-    fn bottom(&self) -> i32 {
-        self.first_row_y
-            .saturating_add(to_i32(self.row_line.saturating_mul(3)))
-    }
-}
-
 /// Which of the two owning ids the inline ownership control edits.
 ///
 /// The owning user (`uid`) and group (`gid`) are the two independently
@@ -1842,30 +1775,10 @@ impl OwnerField {
             Self::Gid => props.gid(),
         }
     }
-}
 
-/// The ownership rows' geometry: a labelled row per owning id, each with the
-/// value cell a click starts editing.
-///
-/// The cells are full control plates on the control-height pitch rather than
-/// glyph-tall spans measured out of a formatted string, so a click lands on an
-/// obvious target and the active editor fills exactly the cell it replaces.
-struct OwnerRows {
-    /// The uid row's value cell, then the gid row's.
-    cells: [Rect; 2],
-    /// Left x of the row labels.
-    label_x: i32,
-    /// The row pitch, which is also each cell's height.
-    line: u32,
-}
-
-impl OwnerRows {
-    /// The y the row at `slot` draws its label at for a `glyph`-tall face.
-    fn label_y(&self, slot: usize, glyph: u32) -> i32 {
-        self.cells.get(slot).map_or(0, |cell| {
-            cell.top()
-                .saturating_add(to_i32(self.line.saturating_sub(glyph) / 2))
-        })
+    /// The ownership row this field's cell is drawn on.
+    fn row(self) -> Option<usize> {
+        Self::BOTH.iter().position(|field| *field == self)
     }
 }
 
@@ -2008,105 +1921,292 @@ impl PropertiesLayout {
     }
 }
 
-/// The permissions section's geometry within its body.
-struct PermsLayout {
-    /// The symbolic + octal mode line above the grid.
-    mode: Rect,
-    /// The nine-cell `rwx` matrix, or `None` when the body is too short.
-    grid: Option<PermGrid>,
-    /// The ownership rows beneath it, or `None` when they do not fit.
-    owner: Option<OwnerRows>,
+/// The Permissions section's groups, in the order they stack down the body.
+const ACCESS: usize = 0;
+/// See [`ACCESS`].
+const OWNERSHIP: usize = 1;
+
+/// The access group's first class row: the mode reading sits above the three.
+const FIRST_CLASS_ROW: usize = 1;
+
+/// The access group's caption.
+const ACCESS_CAPTION: &str = "ACCESS";
+
+/// The ownership group's caption.
+const OWNERSHIP_CAPTION: &str = "OWNERSHIP";
+
+/// The label of the symbolic and octal mode reading.
+const MODE_LABEL: &str = "Mode";
+
+/// What the ownership group says to a session that may not reassign an owner,
+/// so the Authority Mark on its rows is explained on the surface.
+const OWNERSHIP_REFUSED: &str = "Changing ownership here needs the capability to reassign it.";
+
+/// The Permissions section, composed of the shared form family: an access
+/// group — the mode reading over one row of `rwx` flags per class — and an
+/// ownership group holding the two owning ids.
+///
+/// Built from what the window shows and placed down the body through the one
+/// shared plate column; the paint, the hit-test and the keyboard all read that
+/// one placement, so a press or a key only ever reaches a control that was
+/// drawn.
+struct PermsSection {
+    groups: [FieldGroup; 2],
 }
 
-impl PermsLayout {
-    /// Resolve the section from `body`.
-    fn resolve(body: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Self {
-        let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
-        let line = control_height(scale, theme);
-        let left = body.left().saturating_add(to_i32(pad));
-        let bottom = body.top().saturating_add(to_i32(body.height));
-        let mode = Rect::new(
-            left,
-            body.top().saturating_add(to_i32(pad)),
-            body.width,
-            line,
+/// Whether the session may reassign an owner, and the id editor it has open.
+type OwnerGate<'a> = (bool, Option<(OwnerField, &'a TextField)>);
+
+impl PermsSection {
+    /// The section showing `props` under `gate`, the keyboard resting where
+    /// `cursor` says.
+    fn new(props: &Properties, gate: OwnerGate<'_>, cursor: PermsCursor) -> Self {
+        let mut section = Self::compose(
+            Field::Permissions.value(props),
+            permission_cells(props.mode()),
+            OwnerField::BOTH.map(|field| field.id(props)),
+            gate,
+            cursor.flag,
         );
+        // An open id editor holds the keyboard, so its row is the focused one.
+        let focus = gate
+            .1
+            .and_then(|(field, _)| field.row().map(|row| (OWNERSHIP, row)))
+            .or(cursor.row);
+        for (index, group) in section.groups.iter_mut().enumerate() {
+            group.adopt_focus(focus.and_then(|(at, row)| (at == index).then_some(row)));
+        }
+        section
+    }
 
-        let box_side = Checkbox::glyph_side(scale, theme);
-        let header_y = mode.top().saturating_add(to_i32(line));
-        let first_row_y = header_y.saturating_add(to_i32(line));
-        let gap = scale
-            .scale_length(theme.metrics().control_gap)
-            .max(font.text_width(" "));
-        // Wide enough for the triad labels *and* the ownership labels below
-        // them, so the value columns of the two groups line up.
-        let row_label_w = PERMISSION_ROW_LABELS
-            .iter()
-            .copied()
-            .chain(OwnerField::BOTH.into_iter().map(OwnerField::label))
-            .map(|label| font.text_width(label))
-            .max()
-            .unwrap_or(0);
-        let col_label_w = PERMISSION_COLUMN_LABELS
-            .iter()
-            .map(|label| font.text_width(label))
-            .max()
-            .unwrap_or(0);
-        let cols_x = left.saturating_add(to_i32(row_label_w.saturating_add(gap)));
-        let col_pitch = col_label_w.max(box_side).saturating_add(gap);
-        let grid = PermGrid {
-            label_x: left,
-            cols_x,
-            col_pitch,
-            box_side,
-            header_y,
-            first_row_y,
-            row_line: line,
-        };
-        let grid = (grid.bottom() <= bottom).then_some(grid);
+    /// The section's shape, measured before any node has been read: its
+    /// height depends on its rows, never on the values they show, and a
+    /// session refused ownership is the taller of the two.
+    fn shape() -> Self {
+        Self::compose(String::new(), [false; 9], [0; 2], (false, None), 0)
+    }
 
-        // The ownership rows sit below the grid, past a blank separator row.
-        let owner_top = grid.as_ref().map_or(first_row_y, |grid| {
-            grid.bottom().saturating_add(to_i32(line))
-        });
-        let value_x = cols_x;
-        let value_w = u32::try_from(
-            body.left()
-                .saturating_add(to_i32(body.width.saturating_sub(pad)))
-                .saturating_sub(value_x),
-        )
-        .unwrap_or(0)
-        .min(owner_cell_width(scale, font));
-        let rows = OwnerRows {
-            cells: core::array::from_fn(|slot| {
-                Rect::new(
-                    value_x,
-                    owner_top.saturating_add(to_i32(
-                        line.saturating_mul(u32::try_from(slot).unwrap_or(0)),
-                    )),
-                    value_w,
-                    line,
-                )
-            }),
-            label_x: left,
-            line,
+    /// The groups for a mode `reading`, its `cells`, the owning `ids`, and
+    /// the ownership gate with any id editor open, the keyboard resting on
+    /// `flag` of whichever access row it reaches.
+    fn compose(
+        reading: String,
+        cells: [bool; 9],
+        ids: [u32; 2],
+        (can_chown, editor): OwnerGate<'_>,
+        flag: usize,
+    ) -> Self {
+        let mut access = Vec::with_capacity(PERMISSION_ROW_LABELS.len() + FIRST_CLASS_ROW);
+        access.push(FieldRow::new(MODE_LABEL, FieldControl::Reading(reading)));
+        for (triad, label) in PERMISSION_ROW_LABELS.iter().enumerate() {
+            let flags = PERMISSION_FLAG_LABELS
+                .iter()
+                .enumerate()
+                .map(|(bit, name)| {
+                    let on = cells.get(triad * PERMISSION_FLAG_LABELS.len() + bit);
+                    let selection = if on.copied().unwrap_or(false) {
+                        SelectionState::Selected
+                    } else {
+                        SelectionState::Unselected
+                    };
+                    Checkbox::new(*name, selection)
+                })
+                .collect();
+            access.push(FieldRow::new(
+                *label,
+                FieldControl::Flags(FlagSet::new(flags).with_focus(flag)),
+            ));
+        }
+
+        // Reassigning an owner is privileged, unlike a mode change: without
+        // `CAP_FS_CHOWN` the same cells are shown refused.
+        let refused = ControlState::idle().with_authority(AuthorityState::NeedsCapability);
+        let owners = OwnerField::BOTH
+            .into_iter()
+            .zip(ids)
+            .map(|(field, id)| {
+                let control = match editor {
+                    Some((open, editor)) if open == field => FieldControl::Text(editor.clone()),
+                    // A plate, not an idle text field, which would draw like
+                    // the live one and hide whether keys are landing.
+                    _ => FieldControl::Button(
+                        Button::new(
+                            ButtonContent::Label(alloc::format!("{id}")),
+                            ControlRole::Neutral,
+                        )
+                        .aligned(ContentAlign::Leading),
+                    ),
+                };
+                let row = FieldRow::new(field.label(), control);
+                if can_chown {
+                    row
+                } else {
+                    row.with_state(refused)
+                }
+            })
+            .collect();
+        let ownership = FieldGroup::new(OWNERSHIP_CAPTION, owners);
+        let ownership = if can_chown {
+            ownership
+        } else {
+            ownership.with_footnote(OWNERSHIP_REFUSED)
         };
-        let fits =
-            value_w > 0 && owner_top.saturating_add(to_i32(line.saturating_mul(2))) <= bottom;
         Self {
-            mode,
-            grid,
-            owner: fits.then_some(rows),
+            groups: [FieldGroup::new(ACCESS_CAPTION, access), ownership],
+        }
+    }
+
+    /// The one column the whole section lines up in: the width a class's
+    /// flags need. The mode reading, the ids and an open id editor all begin
+    /// where the flags do, and neither a node's reading nor an editor — which
+    /// takes whatever column it is given — can move it.
+    fn column(&self, scale: Scale, theme: &Theme) -> u32 {
+        self.groups[ACCESS]
+            .rows()
+            .get(FIRST_CLASS_ROW)
+            .and_then(|row| row.slot_width(scale, theme))
+            .unwrap_or(0)
+    }
+
+    /// Where each group sits in `body`, in stacking order, with the section's
+    /// one column.
+    fn placed(&self, body: Rect, scale: Scale, theme: &Theme) -> Vec<(usize, FieldLayout)> {
+        let across = stack::plate_width(body.width, scale, theme);
+        let column = self.column(scale, theme);
+        stack::place(body, 0, self.groups.len(), scale, theme, |index| {
+            self.groups.get(index).map_or(0, |group| {
+                group.measured_height(across, column, scale, theme)
+            })
+        })
+        .into_iter()
+        .map(|(index, rect)| (index, FieldLayout::new(rect, column)))
+        .collect()
+    }
+
+    /// The height the section needs stacked in a body `width` pixels wide.
+    fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let across = stack::plate_width(width, scale, theme);
+        let column = self.column(scale, theme);
+        stack::height(
+            self.groups
+                .iter()
+                .map(|group| group.measured_height(across, column, scale, theme)),
+            scale,
+            theme,
+        )
+    }
+
+    /// The narrowest body that seats a class's flags whole.
+    fn natural_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        stack::column_width(
+            self.groups[ACCESS].natural_width(scale, theme),
+            scale,
+            theme,
+        )
+    }
+
+    /// Paint both groups down `body`.
+    fn render(&self, surface: &mut Surface, body: Rect, scale: Scale, theme: &Theme) {
+        for (index, layout) in self.placed(body, scale, theme) {
+            if let Some(group) = self.groups.get(index) {
+                group.render(surface, layout, scale, theme);
+            }
+        }
+    }
+
+    /// Where `(group, row)` is drawn among `placed`, or [`None`] for a row
+    /// the body had no room to draw.
+    fn row_rect(
+        &self,
+        placed: &[(usize, FieldLayout)],
+        (group, row): (usize, usize),
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let layout = placed.iter().find(|(index, _)| *index == group)?.1;
+        self.groups.get(group)?.row_rect(row, layout, scale, theme)
+    }
+
+    /// What a press at `point` in `body` lands on.
+    ///
+    /// The access group is resolved first, so the capability-free toggles
+    /// come before the privileged ownership control. A refused ownership cell
+    /// resolves to nothing rather than opening an editor whose commit the
+    /// kernel could only refuse, and so does the editor already open: pressing
+    /// the field being typed into must not reopen it and discard the typing.
+    fn target_at(
+        &self,
+        body: Rect,
+        scale: Scale,
+        theme: &Theme,
+        point: Point,
+    ) -> Option<PropertiesTarget> {
+        self.placed(body, scale, theme)
+            .into_iter()
+            .find_map(|(index, layout)| {
+                let group = self.groups.get(index)?;
+                let row = group.row_at(layout, scale, theme, point)?;
+                let bounds = group.row_rect(row, layout, scale, theme)?;
+                let field_row = group.rows().get(row)?;
+                let control = field_row.control_rect(
+                    FieldLayout::new(bounds, layout.column),
+                    scale,
+                    theme,
+                )?;
+                match field_row.control() {
+                    FieldControl::Flags(flags) => {
+                        permission_target(row, flags.flag_at(control, scale, theme, point)?)
+                    }
+                    FieldControl::Button(_)
+                        if index == OWNERSHIP
+                            && control.contains(point)
+                            && field_row.state().is_actionable() =>
+                    {
+                        OwnerField::BOTH
+                            .get(row)
+                            .copied()
+                            .map(PropertiesTarget::Owner)
+                    }
+                    _ => None,
+                }
+            })
+    }
+
+    /// The target a row's reported action names, exactly as a press on the
+    /// same control would.
+    fn target_of(&self, group: usize, action: FieldGroupAction) -> Option<PropertiesTarget> {
+        match (group, action.action) {
+            (ACCESS, FieldAction::SetFlag { index, .. }) => permission_target(action.row, index),
+            (OWNERSHIP, FieldAction::Activated) => self.groups[OWNERSHIP]
+                .rows()
+                .get(action.row)
+                .filter(|row| row.state().is_actionable())
+                .and_then(|_| OwnerField::BOTH.get(action.row).copied())
+                .map(PropertiesTarget::Owner),
+            _ => None,
+        }
+    }
+
+    /// The flag the focused row of `group` rests on, when it is an access row.
+    fn focused_flag(&self, group: usize) -> Option<usize> {
+        let group = self.groups.get(group)?;
+        match group.rows().get(group.focus()?)?.control() {
+            FieldControl::Flags(flags) => Some(flags.focus()),
+            _ => None,
         }
     }
 }
 
-/// The width an ownership value cell is drawn at: room for the widest id a
-/// `u32` can hold, so the cell does not resize as the value it shows changes.
-fn owner_cell_width(scale: Scale, font: BitmapFont) -> u32 {
-    font.text_width("0000000000")
-        .saturating_add(scale.scale_length(LABEL_PADDING).saturating_mul(4))
-        .max(1)
+/// The toggle for flag `flag` of the access row `row`.
+fn permission_target(row: usize, flag: usize) -> Option<PropertiesTarget> {
+    let triad = row.checked_sub(FIRST_CLASS_ROW)?;
+    if flag >= PERMISSION_FLAG_LABELS.len() {
+        return None;
+    }
+    PERMISSION_BITS
+        .get(triad * PERMISSION_FLAG_LABELS.len() + flag)
+        .copied()
+        .map(PropertiesTarget::Permission)
 }
 
 /// The attributes section's geometry within its body: the list band, the
@@ -2263,9 +2363,32 @@ pub struct AttrView {
     pub cursor: usize,
 }
 
+/// Where the keyboard cursor stands in the Permissions section.
+///
+/// The section holds the keyboard only once the reader takes it there from
+/// the section strip, so until then the strip's own Left and Right keep
+/// walking sections.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct PermsCursor {
+    /// The group and row the cursor is on, or `None` while the strip holds
+    /// the keyboard.
+    pub row: Option<(usize, usize)>,
+    /// Which flag of an access row the cursor is on, kept as it moves between
+    /// rows so walking down a column stays in it.
+    pub flag: usize,
+}
+
+impl PermsCursor {
+    /// Whether the section holds the keyboard.
+    #[must_use]
+    pub const fn holds(self) -> bool {
+        self.row.is_some()
+    }
+}
+
 /// Everything a Properties window is currently *showing*, as opposed to what
-/// it is showing it *about*: which section is selected and where the attribute
-/// list stands.
+/// it is showing it *about*: which section is selected, where the attribute
+/// list stands, and where the Permissions section's keyboard cursor rests.
 ///
 /// One value threaded through the draw and every hit-test, so the section a
 /// press is resolved against is always the section that was painted.
@@ -2275,36 +2398,42 @@ pub struct PropertiesView {
     pub tab: PropertiesTab,
     /// The attribute list's own scroll and cursor.
     pub attrs: AttrView,
+    /// The Permissions section's keyboard cursor.
+    pub perms: PermsCursor,
 }
 
 /// The Properties window's default extent in physical pixels at `scale`: wide
-/// enough for the label and value columns, and tall enough to show the
-/// identity band, the tab strip, and the tallest section's whole content.
+/// enough for the label and value columns and for every access flag whole,
+/// and tall enough to show the identity band, the tab strip, and the tallest
+/// section's whole content.
 ///
 /// A window, so the user may resize it; this is only what it opens at. The
-/// height is taken from the section that needs the most, so no section opens
-/// already clipped.
+/// Permissions section's share is measured from its own composition, so a
+/// wider type ladder is seated rather than cut, and no section opens already
+/// clipped.
 #[must_use]
 pub fn properties_window_extent(scale: Scale, theme: &Theme) -> (u32, u32) {
     let line = control_height(scale, theme).max(1);
     let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+    let perms = PermsSection::shape();
+    let width = scale
+        .scale_length(PROPERTIES_WINDOW_WIDTH)
+        .max(perms.natural_width(scale, theme))
+        .max(1);
     // General: every metadata field the section can show, as fact rows.
     let general = FactList::row_height(scale, theme)
-        .saturating_mul(u32::try_from(PROPERTY_ROW_COUNT).unwrap_or(u32::MAX));
-    // Permissions: the mode line, the grid's header and three triads, a
-    // separator, and the two ownership rows.
-    let permissions = line.saturating_mul(8);
+        .saturating_mul(u32::try_from(PROPERTY_ROW_COUNT).unwrap_or(u32::MAX))
+        .saturating_add(pad.saturating_mul(2));
     // Attributes: a few rows of list plus the editor band.
     let attributes = row_height(scale, theme)
         .saturating_mul(PROPERTIES_OPEN_ATTR_ROWS)
         .saturating_add(line)
-        .saturating_add(pad.saturating_mul(2));
+        .saturating_add(pad.saturating_mul(4));
     let body = general
-        .max(permissions)
-        .max(attributes)
-        .saturating_add(pad.saturating_mul(2));
+        .max(perms.measured_height(width, scale, theme))
+        .max(attributes);
     (
-        scale.scale_length(PROPERTIES_WINDOW_WIDTH).max(1),
+        width,
         identity_height(scale, theme)
             .saturating_add(tab_strip_height(scale, theme))
             .saturating_add(body)
@@ -2312,7 +2441,7 @@ pub fn properties_window_extent(scale: Scale, theme: &Theme) -> (u32, u32) {
     )
 }
 
-/// The Properties window's width when it opens, in logical pixels at the
+/// The Properties window's narrowest opening width, in logical pixels at the
 /// reference density: room for the label column, a value as long as a
 /// timestamp or a path, and the identity band's name beside its artwork.
 const PROPERTIES_WINDOW_WIDTH: u32 = 460;
@@ -2385,7 +2514,8 @@ pub fn draw_properties_window(
     match view.tab {
         PropertiesTab::General => draw_general_section(surface, props, body, scale, theme),
         PropertiesTab::Permissions => {
-            draw_permissions_section(surface, props, body, controls, scale, theme, font);
+            PermsSection::new(props, controls.owner_gate(), view.perms)
+                .render(surface, body, scale, theme);
         }
         PropertiesTab::Attributes => {
             draw_attributes_section(
@@ -2438,6 +2568,13 @@ pub struct PropertiesControls<'a> {
     pub scrollbar: &'a ScrollBar,
 }
 
+impl<'a> PropertiesControls<'a> {
+    /// The two of these the Permissions section is composed from.
+    const fn owner_gate(self) -> OwnerGate<'a> {
+        (self.can_chown, self.owner)
+    }
+}
+
 /// Draw the General section: the node's metadata as a [`FactList`].
 ///
 /// Every value comes straight from the [`Properties`] model, so a timestamp
@@ -2457,140 +2594,6 @@ fn draw_general_section(
         scale,
         theme,
     );
-}
-
-/// Draw the Permissions section: the symbolic mode line, the labelled `rwx`
-/// matrix, and the two ownership rows.
-fn draw_permissions_section(
-    surface: &mut Surface,
-    props: &Properties,
-    body: Rect,
-    controls: PropertiesControls<'_>,
-    scale: Scale,
-    theme: &Theme,
-    font: BitmapFont,
-) {
-    let layout = PermsLayout::resolve(body, scale, theme, font);
-    let palette = theme.palette();
-    let glyph = font.glyph_height();
-    let mode_y = layout
-        .mode
-        .top()
-        .saturating_add(to_i32(layout.mode.height.saturating_sub(glyph) / 2));
-    font.draw_text(
-        surface,
-        layout.mode.left(),
-        mode_y,
-        &alloc::format!("{} ({})", props.permissions(), props.mode_octal()),
-        palette.on_surface.into(),
-    );
-
-    if let Some(grid) = layout.grid.as_ref() {
-        for (bit, label) in PERMISSION_COLUMN_LABELS.iter().enumerate() {
-            let cell = grid.cell(bit);
-            let width = font.text_width(label);
-            // Centred over its own column of boxes.
-            let x = cell
-                .left()
-                .saturating_add(to_i32(grid.box_side) / 2)
-                .saturating_sub(to_i32(width) / 2);
-            font.draw_text(
-                surface,
-                x,
-                grid.header_y
-                    .saturating_add(to_i32(grid.row_line.saturating_sub(glyph) / 2)),
-                label,
-                palette.on_surface_muted.into(),
-            );
-        }
-        let states = permission_cells(props.mode());
-        for (triad, row_label) in PERMISSION_ROW_LABELS.iter().enumerate() {
-            font.draw_text(
-                surface,
-                grid.label_x,
-                grid.label_y(triad, glyph),
-                row_label,
-                palette.on_surface.into(),
-            );
-            for bit in 0..3 {
-                let index = triad * 3 + bit;
-                let selection = if states[index] {
-                    SelectionState::Selected
-                } else {
-                    SelectionState::Unselected
-                };
-                Checkbox::new(String::new(), selection).render(
-                    surface,
-                    grid.cell(index),
-                    scale,
-                    theme,
-                );
-            }
-        }
-    }
-
-    if let Some(rows) = layout.owner.as_ref() {
-        draw_owner_rows(surface, props, rows, controls, scale, theme, font);
-    }
-}
-
-/// Draw the two ownership rows: each labelled, its id in a cell, and — where
-/// the launching user may reassign it — that cell drawn as an editable field
-/// with the active editor over whichever one is being typed into.
-///
-/// Reassigning an owner is privileged (unlike renaming or a mode change), so a
-/// session without `CAP_FS_CHOWN` reads its ids as plain values rather than
-/// being shown a control it may not use. It holds no authority itself: the
-/// commit is the caller's own capability-checked `fs_set_owner`.
-fn draw_owner_rows(
-    surface: &mut Surface,
-    props: &Properties,
-    rows: &OwnerRows,
-    controls: PropertiesControls<'_>,
-    scale: Scale,
-    theme: &Theme,
-    font: BitmapFont,
-) {
-    let palette = theme.palette();
-    let glyph = font.glyph_height();
-    for (slot, field) in OwnerField::BOTH.into_iter().enumerate() {
-        let Some(cell) = rows.cells.get(slot).copied() else {
-            continue;
-        };
-        font.draw_text(
-            surface,
-            rows.label_x,
-            rows.label_y(slot, glyph),
-            field.label(),
-            palette.on_surface.into(),
-        );
-        let editing = controls
-            .owner
-            .filter(|(open, _)| *open == field)
-            .map(|(_, editor)| editor);
-        let value = alloc::format!("{}", field.id(props));
-        match editing {
-            Some(editor) => editor.render(surface, cell, scale, theme),
-            // A plate rather than an idle text field: a field nobody is
-            // typing into draws like the live one over it, so the reader
-            // cannot tell whether their keys are landing. A button says
-            // "press to change this" and cannot be mistaken for the caret.
-            None if controls.can_chown => {
-                Button::new(ButtonContent::Label(value), ControlRole::Neutral)
-                    .aligned(ContentAlign::Leading)
-                    .render(surface, cell, scale, theme);
-            }
-            None => {
-                font.draw_text(
-                    surface,
-                    cell.left(),
-                    rows.label_y(slot, glyph),
-                    &value,
-                    palette.on_surface.into(),
-                );
-            }
-        }
-    }
 }
 
 /// Draw the extended-attribute section: the node's attributes as selectable
@@ -2694,13 +2697,13 @@ fn draw_attributes_section(
 /// control, so a session that may not reassign an owner can still toggle a
 /// mode bit on the same surface; a press on nothing changes nothing.
 ///
-/// `can_chown` is the same gate the draw took, so the hit-test resolves
-/// exactly the controls that were painted.
+/// `controls` are the ones the draw took — the ownership gate and any open id
+/// editor among them — so the hit-test resolves exactly what was painted.
 #[must_use]
 pub fn properties_hit(
     props: &Properties,
     view: PropertiesView,
-    can_chown: bool,
+    controls: PropertiesControls<'_>,
     window: Rect,
     scale: Scale,
     theme: &Theme,
@@ -2711,31 +2714,11 @@ pub fn properties_hit(
     if let Some(index) = properties_tabs(view.tab).tab_at(layout.tabs, scale, theme, point) {
         return PropertiesTab::at(index).map(PropertiesTarget::Tab);
     }
-    let body = layout.body?;
+    let body = layout.body.filter(|body| body.contains(point))?;
     match view.tab {
         PropertiesTab::General => None,
-        PropertiesTab::Permissions => {
-            let perms = PermsLayout::resolve(body, scale, theme, font);
-            if let Some(grid) = perms.grid.as_ref() {
-                for (index, rect) in grid.cells().iter().enumerate() {
-                    if contains(*rect, point) {
-                        return PERMISSION_BITS
-                            .get(index)
-                            .copied()
-                            .map(PropertiesTarget::Permission);
-                    }
-                }
-            }
-            // A session that may not reassign an owner was drawn plain
-            // values, so a press on one resolves to nothing rather than
-            // opening an editor whose commit could only be refused.
-            let rows = perms.owner.as_ref().filter(|_| can_chown)?;
-            rows.cells
-                .iter()
-                .zip(OwnerField::BOTH)
-                .find(|(rect, _)| contains(**rect, point))
-                .map(|(_, field)| PropertiesTarget::Owner(field))
-        }
+        PropertiesTab::Permissions => PermsSection::new(props, controls.owner_gate(), view.perms)
+            .target_at(body, scale, theme, point),
         PropertiesTab::Attributes => {
             let attrs = AttrsLayout::resolve(body, scale, theme, font)?;
             for ((action, _), rect) in ATTR_ACTIONS.iter().zip(attrs.actions.iter()) {
@@ -2787,24 +2770,151 @@ pub fn properties_attr_visible_rows(window: Rect, scale: Scale, theme: &Theme) -
     })
 }
 
-/// Where the active owner editor for `field` is drawn, or `None` when the
-/// ownership rows do not fit.
+/// Where the active owner editor for `field` is drawn on a window showing
+/// `props`, or `None` when the body has no room for its row.
 ///
-/// The one placement [`draw_properties_window`] draws it at, published so the
-/// host feeding that editor keys reports the rectangle it repaints instead of
-/// re-deriving this layout.
+/// An editor takes the whole slot of its ownership row, so this is that
+/// slot — the one placement [`draw_properties_window`] draws it at, published
+/// so the host feeding that editor keys reports the rectangle it repaints
+/// instead of re-deriving this layout.
 #[must_use]
 pub fn properties_owner_editor_rect(
+    props: &Properties,
     window: Rect,
     scale: Scale,
     theme: &Theme,
     field: OwnerField,
 ) -> Option<Rect> {
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     let body = PropertiesLayout::resolve(window, scale, theme).body?;
-    let rows = PermsLayout::resolve(body, scale, theme, font).owner?;
-    let slot = OwnerField::BOTH.iter().position(|f| *f == field)?;
-    rows.cells.get(slot).copied()
+    let section = PermsSection::new(props, (true, None), PermsCursor::default());
+    let layout = section
+        .placed(body, scale, theme)
+        .into_iter()
+        .find_map(|(index, layout)| (index == OWNERSHIP).then_some(layout))?;
+    let group = &section.groups[OWNERSHIP];
+    let row = field.row()?;
+    let bounds = group.row_rect(row, layout, scale, theme)?;
+    group
+        .rows()
+        .get(row)?
+        .slot_rect(FieldLayout::new(bounds, layout.column), scale, theme)
+}
+
+/// What a key did to the Permissions section.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PermsKeyed {
+    /// Where the section's keyboard cursor now stands.
+    pub cursor: PermsCursor,
+    /// The control the key activated, named exactly as a press on it would
+    /// be, so the host acts on it through the one path both take.
+    pub target: Option<PropertiesTarget>,
+}
+
+/// Feed `key` to the Permissions section of a window showing `props`,
+/// reporting the rows and flags it repainted into `damage`.
+///
+/// From the strip, Down or Tab takes the keyboard onto the section's first
+/// row. There Up and Down walk the rows and carry on into the next group,
+/// Home and End jump within one, Left and Right walk an access row's flags,
+/// and Space or Enter toggles the flag or opens the ownership cell the cursor
+/// rests on; Tab or Escape hands the keyboard back to the strip. A refused
+/// ownership cell is reached and read but resolves to nothing, and while an
+/// id editor is open the keyboard is the editor's and nothing here moves.
+#[allow(clippy::too_many_arguments)] // The node, what it shows, the frame, and the key.
+#[must_use]
+pub fn properties_permissions_key(
+    props: &Properties,
+    view: PropertiesView,
+    controls: PropertiesControls<'_>,
+    window: Rect,
+    scale: Scale,
+    theme: &Theme,
+    (key, modifiers): (Key, Modifiers),
+    damage: &mut Region,
+) -> PermsKeyed {
+    let cursor = view.perms;
+    let unchanged = PermsKeyed {
+        cursor,
+        target: None,
+    };
+    // An open id editor holds the keyboard; the section answers no key while
+    // it does.
+    if controls.owner.is_some() {
+        return unchanged;
+    }
+    let Some(body) = PropertiesLayout::resolve(window, scale, theme).body else {
+        return unchanged;
+    };
+    let mut section = PermsSection::new(props, controls.owner_gate(), cursor);
+    let placed = section.placed(body, scale, theme);
+    let drawn = |section: &PermsSection, at| section.row_rect(&placed, at, scale, theme);
+    let moved = |section: &PermsSection, row: Option<(usize, usize)>, flag, damage: &mut Region| {
+        for at in [cursor.row, row].into_iter().flatten() {
+            if let Some(rect) = drawn(section, at) {
+                damage.add(rect);
+            }
+        }
+        PermsKeyed {
+            cursor: PermsCursor { row, flag },
+            target: None,
+        }
+    };
+
+    let Some((group, row)) = cursor.row else {
+        let first = (ACCESS, 0);
+        let enters = matches!(key, Key::Named(NamedKey::Down | NamedKey::Tab))
+            && drawn(&section, first).is_some();
+        return if enters {
+            moved(&section, Some(first), cursor.flag, damage)
+        } else {
+            unchanged
+        };
+    };
+    if matches!(key, Key::Named(NamedKey::Tab | NamedKey::Escape)) {
+        return moved(&section, None, cursor.flag, damage);
+    }
+    let Some(layout) = placed
+        .iter()
+        .find(|(index, _)| *index == group)
+        .map(|(_, layout)| *layout)
+    else {
+        return unchanged;
+    };
+    let Some(focused) = section.groups.get_mut(group) else {
+        return unchanged;
+    };
+    let acted = focused.on_key(key, modifiers, layout, scale, theme, damage);
+    let now = focused.focus();
+    let flag = section.focused_flag(group).unwrap_or(cursor.flag);
+    let Some(action) = acted else {
+        // The group clamps at its own ends; carrying the cursor into the
+        // next group is the section's, and only into a row it drew.
+        let carried = match key {
+            Key::Named(NamedKey::Down) if now == Some(row) => Some((group.saturating_add(1), 0)),
+            Key::Named(NamedKey::Up) if now == Some(row) && group > 0 => section
+                .groups
+                .get(group - 1)
+                .map(|above| (group - 1, above.len().saturating_sub(1))),
+            _ => None,
+        };
+        if let Some(next) = carried.filter(|next| drawn(&section, *next).is_some()) {
+            return moved(&section, Some(next), flag, damage);
+        }
+        return PermsKeyed {
+            cursor: PermsCursor {
+                row: now.map(|row| (group, row)),
+                flag,
+            },
+            target: None,
+        };
+    };
+    PermsKeyed {
+        cursor: PermsCursor {
+            row: now.map(|row| (group, row)),
+            flag,
+        },
+        target: section.target_of(group, action),
+    }
 }
 
 /// Where the `key = value` attribute editor's field is drawn, or `None` when

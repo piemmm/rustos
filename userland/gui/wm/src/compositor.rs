@@ -18,10 +18,12 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use tairix_abi::desktop::DOUBLE_CLICK_DEFAULT;
 use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayMode, MAX_DAMAGE_RECTS,
 };
 use tairix_abi::sysinfo::DesktopFrameTotals;
+use tairix_abi::time::Duration64;
 use tairix_abi::DriverError;
 use tairix_display::{damage_list, scanout_len, ChannelOrder};
 
@@ -256,6 +258,10 @@ pub struct Compositor {
     #[cfg(test)]
     fast_paths: FastPaths,
     next_id: u64,
+    /// How far apart two presses on one thing may be and still be one
+    /// double-click: the seat's one interval, which the title bars pair under
+    /// and the session publishes to every application.
+    double_click: Duration64,
 }
 
 /// The composite specialisations a test may withhold, so one scene can be
@@ -369,6 +375,7 @@ impl Compositor {
             #[cfg(test)]
             fast_paths: FastPaths::ALL,
             next_id: 1,
+            double_click: DOUBLE_CLICK_DEFAULT,
         };
         let screen = compositor.screen_rect();
         compositor.mark(screen);
@@ -585,6 +592,18 @@ impl Compositor {
         self.refresh_frame_bands();
         self.mark(self.screen_rect());
         true
+    }
+
+    /// The seat's double-click interval.
+    #[must_use]
+    pub const fn double_click(&self) -> Duration64 {
+        self.double_click
+    }
+
+    /// Set the seat's double-click interval. Nothing on screen moves, so
+    /// nothing is marked.
+    pub fn set_double_click(&mut self, interval: Duration64) {
+        self.double_click = interval;
     }
 
     /// The active desktop theme this output decorates windows with.

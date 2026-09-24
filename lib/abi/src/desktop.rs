@@ -1,6 +1,7 @@
 //! The desktop a window is displayed on, as its session reports it: the
-//! screen extent, the UI scale, and the four axes of how its theme is
-//! drawn — light or dark, contrast, density, and motion.
+//! screen extent, the UI scale, the four axes of how its theme is drawn —
+//! light or dark, contrast, density, and motion — and the one double-click
+//! interval every surface pairs presses under.
 //!
 //! These are the facts an application needs before it can lay itself out
 //! honestly — how large the screen it will be shown on is, how many
@@ -31,6 +32,7 @@
 //! guessed at.
 
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
+use crate::time::Duration64;
 use crate::Errno;
 
 /// Which way round a theme's colours run.
@@ -345,6 +347,19 @@ pub const CURSOR_SET_NAME_MAX: usize = 32;
 /// than this offers the first this many in name order.
 pub const CURSOR_SETS_MAX: usize = 16;
 
+/// The shortest double-click interval a desktop publishes: faster than a
+/// hand can press twice deliberately, so a shorter one would make a
+/// double-click impossible rather than quick.
+pub const DOUBLE_CLICK_MIN: Duration64 = Duration64::from_millis(100);
+
+/// The longest double-click interval a desktop publishes: past it, two
+/// separate clicks on one thing would read as one gesture.
+pub const DOUBLE_CLICK_MAX: Duration64 = Duration64::from_millis(2_000);
+
+/// The double-click interval a desktop publishes until its user chooses
+/// another.
+pub const DOUBLE_CLICK_DEFAULT: Duration64 = Duration64::from_millis(500);
+
 /// The desktop a window is displayed on.
 ///
 /// Opaque and validated on the way in: a desktop with a zero-sized screen
@@ -363,18 +378,23 @@ pub struct DesktopInfo {
     contrast: Contrast,
     density: Density,
     motion: Motion,
+    double_click: Duration64,
 }
+
+/// Byte offset of the double-click interval in an encoded [`DesktopInfo`].
+const DOUBLE_CLICK_OFFSET: usize = 16;
 
 impl DesktopInfo {
     /// Encoded size on the wire: screen width (4), screen height (4),
     /// scale percentage (2), appearance (1), one reserved byte that must be
-    /// zero, contrast (1), density (1), motion (1), and a second reserved
-    /// byte that must be zero.
-    pub const WIRE_LEN: usize = 16;
+    /// zero, contrast (1), density (1), motion (1), a second reserved byte
+    /// that must be zero, and the double-click interval (12).
+    pub const WIRE_LEN: usize = DOUBLE_CLICK_OFFSET + Duration64::WIRE_LEN;
 
     /// The desktop with a `screen_width_px` × `screen_height_px` screen,
     /// drawn at `scale_percent` of the reference density in `appearance`,
-    /// on the theme's own contrast, density and motion.
+    /// on the theme's own contrast, density and motion, pairing presses under
+    /// [`DOUBLE_CLICK_DEFAULT`].
     ///
     /// [`with_axes`](Self::with_axes) derives the same desktop on other
     /// axes, so a caller that only knows the extent and the appearance —
@@ -402,6 +422,23 @@ impl DesktopInfo {
             contrast: Contrast::Normal,
             density: Density::Normal,
             motion: Motion::Full,
+            double_click: DOUBLE_CLICK_DEFAULT,
+        })
+    }
+
+    /// The same desktop pairing presses under `interval`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an interval outside
+    /// [`DOUBLE_CLICK_MIN`]`..=`[`DOUBLE_CLICK_MAX`].
+    pub fn with_double_click(self, interval: Duration64) -> Result<Self, Errno> {
+        if interval < DOUBLE_CLICK_MIN || interval > DOUBLE_CLICK_MAX {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            double_click: interval,
+            ..self
         })
     }
 
@@ -459,6 +496,13 @@ impl DesktopInfo {
         self.motion
     }
 
+    /// The longest two presses on one thing may be apart and still be one
+    /// double-click; within [`DOUBLE_CLICK_MIN`]`..=`[`DOUBLE_CLICK_MAX`].
+    #[must_use]
+    pub const fn double_click(&self) -> Duration64 {
+        self.double_click
+    }
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -491,6 +535,7 @@ impl DesktopInfo {
         out[12] = self.contrast.code();
         out[13] = self.density.code();
         out[14] = self.motion.code();
+        out[DOUBLE_CLICK_OFFSET..].copy_from_slice(&self.double_click.to_le_bytes());
     }
 
     /// Decode the record occupying the `WIRE_LEN` bytes of `bytes` from
@@ -500,8 +545,11 @@ impl DesktopInfo {
     ///
     /// * [`Errno::BufferTooSmall`] — `bytes` does not hold a whole record
     ///   at `at`.
-    /// * [`Errno::OutOfRange`] — a zero extent, a zero scale, or an
-    ///   appearance code this version does not define.
+    /// * [`Errno::OutOfRange`] — a zero extent, a zero scale, an
+    ///   appearance code this version does not define, or a double-click
+    ///   interval outside its bounds.
+    /// * [`Errno::TimestampOutOfRange`] — a double-click interval whose
+    ///   nanosecond field is not canonical.
     /// * [`Errno::BadMagic`] — either reserved byte is not zero (wire
     ///   corruption or a smuggled field, never silently ignored).
     pub fn from_bytes_at(bytes: &[u8], at: usize) -> Result<Self, Errno> {
@@ -511,7 +559,7 @@ impl DesktopInfo {
         if record[11] != 0 || record[15] != 0 {
             return Err(Errno::BadMagic);
         }
-        Ok(Self::new(
+        Self::new(
             read_u32(record, 0),
             read_u32(record, 4),
             read_u16(record, 8),
@@ -521,7 +569,8 @@ impl DesktopInfo {
             Contrast::from_code(record[12])?,
             Density::from_code(record[13])?,
             Motion::from_code(record[14])?,
-        ))
+        )
+        .with_double_click(Duration64::from_bytes(&record[DOUBLE_CLICK_OFFSET..])?)
     }
 
     /// Decode a record that occupies the whole of `bytes`.
@@ -536,7 +585,11 @@ impl DesktopInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{Appearance, Contrast, Density, DesktopInfo, Motion};
+    use super::{
+        Appearance, Contrast, Density, DesktopInfo, Motion, DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX,
+        DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET,
+    };
+    use crate::time::Duration64;
     use crate::Errno;
 
     /// A desktop for the tests to round-trip.
@@ -558,6 +611,40 @@ mod tests {
         assert_eq!(info.contrast(), Contrast::Normal);
         assert_eq!(info.density(), Density::Normal);
         assert_eq!(info.motion(), Motion::Full);
+        assert_eq!(info.double_click(), DOUBLE_CLICK_DEFAULT);
+    }
+
+    #[test]
+    fn the_double_click_interval_round_trips_within_its_bounds() {
+        for interval in [
+            DOUBLE_CLICK_MIN,
+            Duration64::from_millis(750),
+            DOUBLE_CLICK_MAX,
+        ] {
+            let info = desktop().with_double_click(interval).expect("in bounds");
+            assert_eq!(info.double_click(), interval);
+            assert_eq!(DesktopInfo::from_bytes(&info.to_le_bytes()), Ok(info));
+        }
+        for outside in [
+            Duration64::ZERO,
+            Duration64::from_millis(99),
+            Duration64::from_millis(2_001),
+        ] {
+            assert_eq!(desktop().with_double_click(outside), Err(Errno::OutOfRange));
+        }
+    }
+
+    #[test]
+    fn a_double_click_interval_outside_its_bounds_is_refused_on_decode() {
+        let mut bytes = desktop().to_le_bytes();
+        bytes[DOUBLE_CLICK_OFFSET..].copy_from_slice(&Duration64::ZERO.to_le_bytes());
+        assert_eq!(DesktopInfo::from_bytes(&bytes), Err(Errno::OutOfRange));
+        let mut uncanonical = desktop().to_le_bytes();
+        uncanonical[DOUBLE_CLICK_OFFSET + 8..].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            DesktopInfo::from_bytes(&uncanonical),
+            Err(Errno::TimestampOutOfRange)
+        );
     }
 
     #[test]

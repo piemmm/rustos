@@ -40,21 +40,22 @@ use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-use tairix_abi::origin::ProcId;
+use tairix_abi::origin::{AppIdentity, ProcId};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::window_ipc::{
     encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply, encode_hand_over_reply,
-    encode_menu_text_reply, encode_minted_id_reply, encode_open_target_reply, encode_terrain_reply,
-    encode_wallpapers_reply, AppBar, AppMenu, HandOverDocument, HandOverOutcome, LayerDepth,
-    OpenTarget, TerrainPlate, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest,
-    WindowTitle, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT,
-    DESKTOP_LAYER_MAX_PLATES, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
-    WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS,
-    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
+    encode_menu_text_reply, encode_minted_id_reply, encode_notify_sources_reply,
+    encode_open_target_reply, encode_terrain_reply, encode_wallpapers_reply, AppBar, AppMenu,
+    HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget, TerrainPlate, WallpaperEntry,
+    WindowEvent, WindowRegion, WindowRequest, WindowTitle, APP_MENU_ENTRY_MAX,
+    DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES,
+    WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN,
+    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX,
+    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
     WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
 };
 pub use tairix_abi::window_ipc::{WindowSizeState, WindowSizing};
-use tairix_abi::{CapabilityId, Errno};
+use tairix_abi::{BundleId, CapabilityId, Errno};
 use tairix_display::{FrameRegion, ShmMapper};
 
 /// Upper bound, in bytes, of any reply [`WindowServer::serve`] writes,
@@ -86,7 +87,13 @@ pub const WINDOW_REPLY_MAX: usize = {
                 wider(WINDOW_MINTED_ID_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX),
                 wider(
                     WINDOW_TERRAIN_REPLY_MAX,
-                    wider(WINDOW_WALLPAPERS_REPLY_MAX, WINDOW_CURSOR_SETS_REPLY_MAX),
+                    wider(
+                        WINDOW_WALLPAPERS_REPLY_MAX,
+                        wider(
+                            WINDOW_CURSOR_SETS_REPLY_MAX,
+                            WINDOW_NOTIFY_SOURCES_REPLY_MAX,
+                        ),
+                    ),
                 ),
             ),
         ),
@@ -184,6 +191,22 @@ pub trait CallerIdentity {
     fn caller_holds(&mut self, ticket: u64, cap: CapabilityId) -> Result<bool, Errno> {
         let _ = (ticket, cap);
         Ok(false)
+    }
+
+    /// The application the kernel attests the in-flight caller behind
+    /// `ticket` is running, or `None` when it runs no verified bundle.
+    ///
+    /// The default answers `None`: an identity source that cannot attest an
+    /// application must not be taken to name one, so a request reserved for
+    /// one application is refused rather than opened.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the attestation surfaces; the engine refuses the
+    /// request in that case.
+    fn caller_app(&mut self, ticket: u64) -> Result<Option<AppIdentity>, Errno> {
+        let _ = ticket;
+        Ok(None)
     }
 }
 
@@ -656,6 +679,36 @@ pub trait WindowHost {
         let _ = (window_id, shm_handle, index, side);
         Err(Errno::NotSupported)
     }
+
+    /// The sources that have posted a notification since the desktop started,
+    /// answered to `caller`, the application the kernel attests is asking.
+    ///
+    /// The host decides who may learn this; the default refuses, because a
+    /// host that keeps no such record has nothing honest to answer.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for a caller the host does not answer, or
+    /// [`Errno::NotSupported`] from a host that keeps no record.
+    fn notify_sources(&mut self, caller: Option<&AppIdentity>) -> Result<&[BundleId], Errno> {
+        let _ = caller;
+        Err(Errno::NotSupported)
+    }
+
+    /// Lock the screen now, at the request of `caller`, the application the
+    /// kernel attests is asking.
+    ///
+    /// The host decides who may ask; the default refuses, because a host with
+    /// no lock cannot honour one.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for a caller the host does not honour, or
+    /// the host's own refusal to lock.
+    fn lock_screen(&mut self, caller: Option<&AppIdentity>) -> Result<(), Errno> {
+        let _ = caller;
+        Err(Errno::NotSupported)
+    }
 }
 
 /// The event-delivery seam — the session's app-ward send (`ipc_send` to
@@ -1088,6 +1141,23 @@ impl<M: ShmMapper> WindowServer<M> {
                 return layer_refusal(&decoded, reply, err, self.server);
             }
         }
+        // Reserved for one application: the host decides against the
+        // kernel-attested caller, a second attestation only these pay.
+        match decoded {
+            WindowRequest::QueryNotifySources => {
+                let answered = identity
+                    .caller_app(ticket)
+                    .and_then(|app| host.notify_sources(app.as_ref()));
+                return notify_sources_reply(reply, answered);
+            }
+            WindowRequest::LockScreen => {
+                let locked = identity
+                    .caller_app(ticket)
+                    .and_then(|app| host.lock_screen(app.as_ref()));
+                return status(reply, locked);
+            }
+            _ => {}
+        }
         self.dispatch(host, sink, caller, &decoded, reply)
     }
 
@@ -1300,6 +1370,12 @@ impl<M: ShmMapper> WindowServer<M> {
             // ...and a catalog page, likewise.
             WindowRequest::QueryWallpapers { .. } => wallpapers_refusal(reply, Errno::NotSupported),
             WindowRequest::QueryCursorSets => cursor_sets_refusal(reply, Errno::NotSupported),
+            // ...and the two requests `serve` decides against the attested
+            // application before dispatch is reached.
+            WindowRequest::QueryNotifySources => {
+                notify_sources_reply(reply, Err(Errno::NotSupported))
+            }
+            WindowRequest::LockScreen => status(reply, Err(Errno::NotSupported)),
             // ...and a committed-text pull, likewise.
             WindowRequest::TakeMenuText { .. } => menu_text_reply(reply, Err(Errno::NotSupported)),
             // ...and a hand-over, likewise.
@@ -2411,6 +2487,21 @@ fn cursor_sets_reply(reply: &mut [u8; WINDOW_REPLY_MAX], host: &mut dyn WindowHo
 fn cursor_sets_refusal(reply: &mut [u8; WINDOW_REPLY_MAX], err: Errno) -> usize {
     let mut frame = [0u8; WINDOW_CURSOR_SETS_REPLY_MAX];
     let len = encode_cursor_sets_reply(&mut frame, Err::<core::iter::Empty<&[u8]>, Errno>(err));
+    reply[..len].copy_from_slice(&frame[..len]);
+    len
+}
+
+/// Write the sources the host answered, or its refusal, into `reply`,
+/// answering its length.
+fn notify_sources_reply(
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    answered: Result<&[BundleId], Errno>,
+) -> usize {
+    let mut frame = [0u8; WINDOW_NOTIFY_SOURCES_REPLY_MAX];
+    let len = encode_notify_sources_reply(
+        &mut frame,
+        answered.map(|sources| sources.iter().map(|source| source.as_str().as_bytes())),
+    );
     reply[..len].copy_from_slice(&frame[..len]);
     len
 }

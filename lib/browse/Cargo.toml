@@ -63,6 +63,9 @@ tairix-input = { path = "../input", version = "=0.0.0" }
 # transport via the `test-util` feature (never a running `fontd`).
 [dev-dependencies]
 tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
+# The shared type-ladder fixture, so the Properties window's opening size is
+# proven against a wider ladder than the shipped themes carry.
+tairix-controls = { path = "../controls", version = "=0.0.0", features = ["test-support"] }
 # The grid-artwork tests build the shared reclaim-governed artwork cache the
 # file manager builds, so they need the pressure gauge it is budgeted against
 # and the discarding audit sink a test wires it to.

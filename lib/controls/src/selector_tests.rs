@@ -484,14 +484,15 @@ fn hover_and_value_each_change_a_selector_render() {
 }
 
 #[test]
-fn the_published_checkbox_glyph_side_is_the_box_the_render_draws() {
+fn an_unlabelled_checkbox_measures_exactly_the_box_it_draws() {
     let theme = Theme::dark();
-    let side = Checkbox::glyph_side(Scale::ONE, &theme);
+    let checkbox = Checkbox::new("", SelectionState::Selected);
+    let side = checkbox.measured_width(Scale::ONE, &theme);
     let clear = Color::TRANSPARENT.premultiply();
-    // A cell sized to the published side is filled by the box: its leading
+    // A cell sized to the measured width is filled by the box: its leading
     // column inks, and the column just past it does not.
     let mut surface = Surface::new(side + 4, side).expect("surface");
-    Checkbox::new("", SelectionState::Selected).render(
+    checkbox.render(
         &mut surface,
         Rect::new(0, 0, side, side),
         Scale::ONE,
@@ -500,7 +501,43 @@ fn the_published_checkbox_glyph_side_is_the_box_the_render_draws() {
     let inked = |x: u32| (0..side).any(|y| surface.get(x, y) != Some(clear));
     assert!(inked(0), "the box starts at the cell's leading edge");
     assert!(inked(side - 1), "and reaches its trailing edge");
-    assert!(!inked(side), "nothing is drawn past the published side");
+    assert!(!inked(side), "nothing is drawn past the measured width");
+}
+
+/// A labelled checkbox given exactly its measured width draws what it draws
+/// with room to spare, so a container sizing flags from the figure never cuts
+/// one.
+#[test]
+fn a_labelled_checkbox_given_its_measured_width_draws_whole() {
+    for scale in [Scale::ONE, Scale::from_percent(200).expect("scale")] {
+        let theme = Theme::dark();
+        let checkbox = Checkbox::new("Execute", SelectionState::Selected);
+        let measured = checkbox.measured_width(scale, &theme);
+        let height = scale.scale_length(H);
+        let roomy_w = measured * 2;
+        let render = |width: u32| {
+            let mut surface = Surface::new(roomy_w, height).expect("surface");
+            checkbox.render(&mut surface, Rect::new(0, 0, width, height), scale, &theme);
+            surface
+        };
+        let tight = render(measured);
+        let roomy = render(roomy_w);
+        let clear = Color::TRANSPARENT.premultiply();
+        let last_ink = (0..roomy_w)
+            .rev()
+            .find(|x| (0..height).any(|y| roomy.get(*x, y) != Some(clear)))
+            .expect("the checkbox draws");
+        assert!(
+            last_ink < measured,
+            "ink at column {last_ink} lies past the measured {measured}"
+        );
+        assert_eq!(
+            tight.pixels(),
+            roomy.pixels(),
+            "its measured width cut the label at {}%",
+            scale.percent()
+        );
+    }
 }
 
 /// A selector's label too long for its row is elided with the shared mark

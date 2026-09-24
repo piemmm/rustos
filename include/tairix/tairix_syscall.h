@@ -360,9 +360,9 @@ typedef struct tairix_lock_conflict {
 * TAIRIX_E_OUT_OF_RANGE / TAIRIX_E_LENGTH_OUT_OF_RANGE. Publishing is
 * authorised per topic: the desktop topic admits only the holder of a seat's
 * live display lease, and every kernel-owned topic admits nobody. */
-#define TAIRIX_NOTICE_PAYLOAD_MAX 16u
+#define TAIRIX_NOTICE_PAYLOAD_MAX 28u
 #define TAIRIX_NOTICE_TOPIC_DESKTOP 0u
-#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 16u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 28u
 #define TAIRIX_NOTICE_TOPIC_MOUNTS 1u
 #define TAIRIX_NOTICE_PAYLOAD_LEN_MOUNTS 0u
 #define TAIRIX_NOTICE_TOPIC_MEMORY_PRESSURE 2u

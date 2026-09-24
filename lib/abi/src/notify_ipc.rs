@@ -73,6 +73,13 @@ pub const NOTIFY_TITLE_MAX: usize = 64;
 /// ([`crate::log_ingress`]), not the desktop.
 pub const NOTIFY_BODY_MAX: usize = 192;
 
+/// Most sources the desktop remembers as having notified since it started.
+///
+/// A containment bound on a list the session answers in one reply: a source
+/// is a signed bundle, so a real desktop has far fewer. A source past the
+/// bound is still governed by the policy; it is only not offered for choosing.
+pub const NOTIFY_SOURCES_MAX: usize = 48;
+
 /// A notification title: one non-empty line, at most [`NOTIFY_TITLE_MAX`]
 /// bytes.
 ///

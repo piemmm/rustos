@@ -105,7 +105,8 @@ pub use library::{
 };
 pub use menu::{EntryRow, MenuRequest, MenuSubject};
 pub use notifications::{
-    IconId, NotificationArea, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
+    IconId, NotificationArea, NotifySeverity, Producer, StatusKind, StatusSignal,
+    TransientNotification, NOTIFICATIONS_MAX, SOURCE_NOTIFICATIONS_MAX,
 };
 pub use picker::{
     entries_have_picker, has_picker, slot_has_picker, PickerEntry, PickerLayout, WindowPicker,

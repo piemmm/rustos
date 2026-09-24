@@ -39,9 +39,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::pinboard_ipc::PinboardRequest;
+use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_appdata::{AppDataHost, Settings as SettingsStore};
-use tairix_wallpaper::{merge, DesktopSettings, DocumentRefusal};
+use tairix_wallpaper::{merge, DesktopSettings, DocumentRefusal, PointerSpeed, PrimaryButton};
+
+use crate::keyboard::KeyRepeat;
 
 /// What loading the user's pinboard settings produced: the settings the
 /// desktop starts on, and the ready-to-print warning lines for anything that
@@ -94,6 +97,38 @@ impl PinboardApplyRefusal {
             Self::Undecodable(refusal) => {
                 format!("pinboard apply carries an unusable settings document: {refusal}")
             }
+        }
+    }
+}
+
+/// What the pointer and keyboard are driven by, as the settings name it.
+///
+/// The one reading of the input keys, so the seat's sources, the window
+/// manager and every application are handed the same policy.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct InputPolicy {
+    /// Which physical button is primary.
+    pub primary: PrimaryButton,
+    /// How far the pointer moves for a reported displacement.
+    pub speed: PointerSpeed,
+    /// How far apart a double-click's presses may be.
+    pub double_click: Duration64,
+    /// How a held key repeats.
+    pub repeat: KeyRepeat,
+}
+
+impl InputPolicy {
+    /// The policy `settings` name.
+    #[must_use]
+    pub fn of(settings: &DesktopSettings) -> Self {
+        Self {
+            primary: settings.primary_button,
+            speed: settings.pointer_speed,
+            double_click: settings.double_click,
+            repeat: KeyRepeat {
+                delay: settings.repeat_delay,
+                interval: settings.repeat_rate.interval(),
+            },
         }
     }
 }
@@ -419,6 +454,28 @@ mod tests {
         );
         assert_eq!(refusal.errno(), Errno::OutOfRange);
         assert!(refusal.reason().contains("sort"));
+    }
+
+    #[test]
+    fn the_input_policy_is_read_from_the_input_keys() {
+        let settings = DesktopSettings {
+            primary_button: tairix_wallpaper::PrimaryButton::Right,
+            repeat_rate: tairix_wallpaper::RepeatRate::PerSecond(20),
+            ..DesktopSettings::default()
+        };
+        let policy = super::InputPolicy::of(&settings);
+        assert_eq!(policy.primary, tairix_wallpaper::PrimaryButton::Right);
+        assert_eq!(policy.double_click, settings.double_click);
+        assert_eq!(policy.repeat.delay, settings.repeat_delay);
+        assert_eq!(
+            policy.repeat.interval,
+            Some(tairix_abi::time::Duration64::from_millis(50))
+        );
+        let off = DesktopSettings {
+            repeat_rate: tairix_wallpaper::RepeatRate::Off,
+            ..DesktopSettings::default()
+        };
+        assert_eq!(super::InputPolicy::of(&off).repeat.interval, None);
     }
 
     #[test]

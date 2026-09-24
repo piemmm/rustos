@@ -432,6 +432,47 @@ run, so re-reading would cost a second password for an answer already known,
 and the reader is left in place for the next change. The public directories
 are free, so they are read again at once.
 
+## Notifications, Mouse, Keyboard, Lock Screen and Screensaver
+
+Five more panes over the desktop's own document, each **immediate** and each
+posting only its own keys, so no pane can reimpose a value another pane set.
+
+- **Notifications** is a desktop-wide switch (`notify.enabled`) and one row
+  per source — the bundle the kernel attests posted a notice, never a name the
+  program gave itself — offering *All notifications*, *Warnings and critical*,
+  *Critical only* or *None* (`notify.sources`, one `<bundle>:<level>` entry
+  per source that does not show everything). A source is listed once it has
+  notified since the desktop started, which Settings asks the session through
+  the `QueryNotifySources` window request that the session answers to its own
+  Settings application alone, or once the policy holds a level for it, so a
+  source quietened in an earlier session stays reachable. With neither the
+  plate says *None*, which is the truth. The policy's spelling must fit one
+  settings value; a change that would outgrow it is refused, and the row goes
+  back to saying what is in force.
+- **Mouse** sets which button is primary, the pointer speed, and the
+  double-click interval. The interval is the one the whole desktop uses: the
+  session publishes it in `DesktopInfo`, and the window manager's title bars,
+  the desktop's icons and every application pair presses under it.
+- **Keyboard** sets how long a key is held before it repeats and how often it
+  then repeats, or that it does not. The session repeats the held key itself
+  and drops a device's own repeats, so every keyboard behaves alike. It states
+  what it cannot offer: this system has one built-in layout and no list of the
+  desktop's shortcuts.
+- **Screensaver** sets how long the desktop sits idle before the screensaver
+  covers it, and what it shows: black, the desktop's own backdrop dimmed, or
+  the shipped pictures one after another.
+- **Lock Screen** sets how long the desktop sits idle before the screen locks,
+  and offers **Lock Now**, which asks the session for its own lock through the
+  `LockScreen` window request — answered for this application alone, because a
+  lock any program could raise would keep the user out of their own desktop.
+  It states that unlocking always asks for this account's password; that is not
+  a setting. A refused request is stated on the row that asked.
+
+The document spells every span a person edits in whole units — milliseconds
+for the pointer and keyboard, minutes for the idle waits — and every in-memory
+and wire form of one is a `Duration64`. A value set off the offered ladder is
+offered under its own value, so opening a pane never changes it.
+
 ## Absence is stated, never mimed
 
 A control that would change nothing is never drawn. Each pane declares what
@@ -464,7 +505,8 @@ have to land.
 ## On a running machine
 
 The `settings_qemu_aarch64` vertical opens Settings from the capsule's system
-menu and photographs it on General, on a stated absence, and on Storage —
+menu and photographs it on General, on Lock Screen, on a stated absence, and
+on Storage —
 reached past the fold of the strip by the strip's own scrollbar — each dump
 gated on the desktop session's witness that the frame carrying that pane's
 title is on screen. It then chooses Light on Appearance and photographs the

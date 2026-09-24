@@ -67,8 +67,9 @@ cannot — and must not — reach into (`AGENTS.md` §17.3).
 
 The window channel carries it. `tairix_abi::desktop::DesktopInfo` is the seat's
 desktop as one record — the screen extent in physical pixels, the UI scale as a
-percentage of the reference density, and the active appearance — and it reaches
-an application two ways:
+percentage of the reference density, the active appearance and its theme axes,
+and the double-click interval every surface pairs presses under — and it
+reaches an application two ways:
 
 - `WindowRequest::QueryDesktop`, wrapped as `WindowClient::desktop`, is a
   read-only request an app issues **before** it creates its first window, so

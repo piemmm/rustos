@@ -111,6 +111,7 @@ mod program {
     use core::cell::{Cell, RefCell};
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
+    use tairix_abi::time::Duration64;
 
     use crate::route;
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
@@ -133,7 +134,7 @@ mod program {
         build_delete_dialog, delete_dialog_action_at, draw_delete_dialog, draw_open_with_chooser,
         draw_progress_dialog, draw_properties_window, manager_tool_at, open_with_action_at,
         open_with_row_at, open_with_scroll_pointer, open_with_visible_rows, render_into,
-        scroll_pointer, AttrAction, AttrView, Identity, OpenWithAction, OwnerField,
+        scroll_pointer, AttrAction, AttrView, Identity, OpenWithAction, OwnerField, PermsCursor,
         PropertiesControls, PropertiesFrame, PropertiesTab, PropertiesTarget, PropertiesView,
         DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
@@ -435,6 +436,9 @@ mod program {
         owner: Option<OwnerEditor>,
         /// Which section is on show.
         tab: PropertiesTab,
+        /// Where the Permissions section's keyboard cursor rests, if the
+        /// section has taken the keyboard from the strip.
+        perms: PermsCursor,
         /// What the identity band says beneath the name. Held rather than
         /// formatted per frame, and refreshed when a read lands.
         detail: String,
@@ -472,7 +476,8 @@ mod program {
             }
         }
 
-        /// Which section is on show, and where its attribute list stands.
+        /// Which section is on show, where its attribute list stands, and
+        /// where the Permissions section's keyboard cursor rests.
         fn view(&self) -> PropertiesView {
             PropertiesView {
                 tab: self.tab,
@@ -480,6 +485,20 @@ mod program {
                     offset: self.rows.offset(),
                     cursor: self.rows.cursor(),
                 },
+                perms: self.perms,
+            }
+        }
+
+        /// The live controls the window draws — and so the ones its
+        /// hit-test and keyboard resolve against, so both act on exactly
+        /// what was painted.
+        fn controls(&self) -> PropertiesControls<'_> {
+            PropertiesControls {
+                identity: self.identity(),
+                can_chown: self.can_chown,
+                owner: self.owner.as_ref().map(|ed| (ed.field, &ed.editor)),
+                attribute: &self.editor,
+                scrollbar: self.rows.scrollbar(),
             }
         }
 
@@ -629,13 +648,7 @@ mod program {
     ) -> Result<(), Errno> {
         let mode = *target.pane.mode();
         let window = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let controls = PropertiesControls {
-            identity: win.identity(),
-            can_chown: win.can_chown,
-            owner: win.owner.as_ref().map(|ed| (ed.field, &ed.editor)),
-            attribute: &win.editor,
-            scrollbar: win.rows.scrollbar(),
-        };
+        let controls = win.controls();
         let view = win.view();
         let frame = win.frame();
         let damage = target.damage;
@@ -1036,6 +1049,7 @@ mod program {
             launcher,
             client,
             canvas,
+            desktop.info().double_click(),
             event,
             &mut damage,
         );
@@ -1141,6 +1155,7 @@ mod program {
                 popup,
                 icons,
                 properties: &mut properties,
+                double_click: desktop.info().double_click(),
             },
             canvas,
             event,
@@ -2663,6 +2678,9 @@ mod program {
         /// that named it is still in hand — and the window is opened once the
         /// round's borrow has ended.
         properties: &'a mut Option<PropertiesRequest>,
+        /// The desktop's double-click interval, which a press on an entry is
+        /// paired under.
+        double_click: Duration64,
     }
 
     /// A Properties window a gesture asked for: the node it describes,
@@ -3405,6 +3423,7 @@ mod program {
                 acts.launcher,
                 acts.menu.client,
                 canvas,
+                acts.double_click,
                 viewport,
                 point,
                 *modifiers,
@@ -4686,6 +4705,7 @@ mod program {
         launcher: &RefCell<Launcher>,
         client: &mut WindowClient<app::RtWindowTransport>,
         canvas: Canvas<'_>,
+        double_click: Duration64,
         viewport: Rect,
         point: Point,
         modifiers: AbiModifiers,
@@ -4711,7 +4731,12 @@ mod program {
         }
         let hit =
             tairix_browse::render::entry_index_at(browser, scale, theme, viewport, toolbar, point);
-        match gesture::primary_press(&mut overlays.double_click, tairix_rt::clock_get(), hit) {
+        match gesture::primary_press(
+            &mut overlays.double_click,
+            tairix_rt::clock_get(),
+            hit,
+            double_click,
+        ) {
             PrimaryPress::Activate { index } => {
                 let _ = browser.select(index);
                 whole(activate(
@@ -5293,6 +5318,7 @@ mod program {
         launcher: &RefCell<Launcher>,
         client: &mut WindowClient<app::RtWindowTransport>,
         canvas: Canvas<'_>,
+        double_click: Duration64,
         event: &WindowEvent,
         damage: &mut Region,
     ) -> bool {
@@ -5350,6 +5376,7 @@ mod program {
                 launcher,
                 client,
                 canvas,
+                double_click,
                 (*x, *y, *action),
                 damage,
             ),
@@ -5368,6 +5395,7 @@ mod program {
         launcher: &RefCell<Launcher>,
         client: &mut WindowClient<app::RtWindowTransport>,
         canvas: Canvas<'_>,
+        double_click: Duration64,
         pointer: (u32, u32, PointerAction),
         damage: &mut Region,
     ) -> bool {
@@ -5423,10 +5451,12 @@ mod program {
         // The pairing is the same shared tracker the listing behind it uses,
         // so a double-click means one thing.
         let subject = u64::try_from(index).unwrap_or(u64::MAX);
-        if overlay
-            .clicks
-            .register(tairix_rt::clock_get(), subject, PointerButton::Primary)
-            == ClickKind::Double
+        if overlay.clicks.register(
+            tairix_rt::clock_get(),
+            subject,
+            PointerButton::Primary,
+            double_click,
+        ) == ClickKind::Double
         {
             launch_open_with(overlays, launcher, client);
             return false;
@@ -5768,6 +5798,7 @@ mod program {
                 editor: attribute_editor(),
                 owner: None,
                 tab: PropertiesTab::default(),
+                perms: PermsCursor::default(),
                 detail: PropertiesWindow::detail_for(kind, None),
                 can_chown,
             })),
@@ -5833,13 +5864,16 @@ mod program {
 
     /// Handle one event delivered to a Properties window.
     ///
-    /// `Left`/`Right` walk the section strip. `Escape` steps back out of
-    /// whatever is open — the owning-id editor, then a typed attribute line —
-    /// and closes the window when neither is. The rest of the keyboard belongs
-    /// to the attributes section: its arrow keys walk the list and every other
-    /// key reaches its editor, so no key reaches a control the selected
-    /// section does not draw. A press resolves through the one shared
-    /// hit-test, so it acts on exactly the control the user saw.
+    /// `Left`/`Right` walk the section strip until the permissions section
+    /// takes the keyboard (Down or Tab), after which they walk its flags and
+    /// Tab or `Escape` hands the keyboard back. `Escape` steps back out of
+    /// whatever is open — the owning-id editor, the permissions cursor, then a
+    /// typed attribute line — and closes the window when none is. The rest of
+    /// the keyboard belongs to the section that draws a control for it: the
+    /// permissions cursor, or the attributes list and its editor, so no key
+    /// reaches a control the selected section does not draw. A press resolves
+    /// through the one shared hit-test, so it acts on exactly the control the
+    /// user saw.
     #[allow(clippy::too_many_arguments)] // The window, its geometry, and the event.
     fn apply_properties_event(
         win: &mut PropertiesWindow,
@@ -5888,9 +5922,14 @@ mod program {
         // commit or cancel the ownership change and none of them reaches the
         // attribute line beneath it.
         if let Some(field) = win.owner.as_ref().map(|ed| ed.field) {
-            let bounds =
-                tairix_browse::render::properties_owner_editor_rect(window, scale, theme, field)
-                    .unwrap_or(Rect::EMPTY);
+            let bounds = win
+                .props()
+                .and_then(|props| {
+                    tairix_browse::render::properties_owner_editor_rect(
+                        props, window, scale, theme, field,
+                    )
+                })
+                .unwrap_or(Rect::EMPTY);
             let (editor_key, mods) = to_editor_key(key, modifiers);
             let action = win
                 .owner
@@ -5912,12 +5951,17 @@ mod program {
                 None => (Repaint::Nothing, false),
             };
         }
-        match route::properties_key(win.tab, key) {
+        match route::properties_key(win.tab, win.perms.holds(), key) {
             route::PropertiesKey::Section(steps) => {
                 return (whole_if(show_section(win, win.tab.stepped(steps))), false)
             }
             route::PropertiesKey::Close => return (Repaint::Nothing, true),
             route::PropertiesKey::Ignored => return (Repaint::Nothing, false),
+            route::PropertiesKey::Permissions => {
+                return apply_permissions_key(
+                    win, window_id, reads, theme, scale, window, key, modifiers, damage,
+                )
+            }
             route::PropertiesKey::Attributes => {}
         }
         let visible = tairix_browse::render::properties_attr_visible_rows(window, scale, theme);
@@ -5958,6 +6002,48 @@ mod program {
                 }
             }
         }
+    }
+
+    /// Feed one key press to the Permissions section's cursor, acting on the
+    /// control it activates exactly as a press on that control would.
+    ///
+    /// A cursor that only moved reports the rows and flags it repainted; a
+    /// read that has not landed has nothing for the cursor to rest on.
+    #[allow(clippy::too_many_arguments)] // The window, its geometry, and the key.
+    fn apply_permissions_key(
+        win: &mut PropertiesWindow,
+        window_id: u64,
+        reads: &Reads,
+        theme: &Theme,
+        scale: Scale,
+        window: Rect,
+        key: KeyValue,
+        modifiers: AbiModifiers,
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
+        let Some(props) = win.props() else {
+            return (Repaint::Nothing, false);
+        };
+        let keyed = tairix_browse::render::properties_permissions_key(
+            props,
+            win.view(),
+            win.controls(),
+            window,
+            scale,
+            theme,
+            to_editor_key(key, modifiers),
+            damage,
+        );
+        let moved = keyed.cursor != win.perms;
+        win.perms = keyed.cursor;
+        let acted = match keyed.target {
+            Some(PropertiesTarget::Permission(bit)) => {
+                toggle_permission(win, window_id, reads, bit)
+            }
+            Some(PropertiesTarget::Owner(field)) => begin_owner_edit(win, field),
+            _ => (Repaint::Nothing, false),
+        };
+        (merge(acted.0, reported_if(moved)), acted.1)
     }
 
     /// Feed one pointer event to a Properties window.
@@ -6007,11 +6093,15 @@ mod program {
         let Some(point) = press_point(action, x, y) else {
             return (Repaint::Nothing, false);
         };
-        let view = win.view();
-        let can_chown = win.can_chown;
         let Some(target) = win.props().and_then(|props| {
             tairix_browse::render::properties_hit(
-                props, view, can_chown, window, scale, theme, point,
+                props,
+                win.view(),
+                win.controls(),
+                window,
+                scale,
+                theme,
+                point,
             )
         }) else {
             return (Repaint::Nothing, false);
@@ -6029,15 +6119,17 @@ mod program {
 
     /// Show `tab`, reporting whether the window changed section.
     ///
-    /// Switching away from a half-typed ownership id abandons it: the editor
-    /// belongs to the section it is drawn in, and one left open behind a tab
-    /// the user cannot see would take their next keystroke.
+    /// Switching away from a half-typed ownership id abandons it, and hands
+    /// the keyboard back to the strip: both belong to the section they are
+    /// drawn in, and either left live behind a tab the user cannot see would
+    /// take their next keystroke.
     fn show_section(win: &mut PropertiesWindow, tab: PropertiesTab) -> bool {
         if win.tab == tab {
             return false;
         }
         win.tab = tab;
         win.owner = None;
+        win.perms = PermsCursor::default();
         true
     }
 

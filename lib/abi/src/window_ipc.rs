@@ -2013,6 +2013,22 @@ pub enum WindowRequest {
     ///
     /// [`CURSOR_SETS_MAX`]: crate::desktop::CURSOR_SETS_MAX
     QueryCursorSets,
+    /// Ask which programs have posted a notification since the desktop
+    /// started, so a policy can be set for each.
+    ///
+    /// Answered only to the desktop's own Settings application: which
+    /// programs a user runs is theirs to see, not any application's to learn.
+    /// The reply is a name list of at most
+    /// [`NOTIFY_SOURCES_MAX`](crate::notify_ipc::NOTIFY_SOURCES_MAX) bundle
+    /// identities ([`decode_notify_sources_reply`]).
+    QueryNotifySources,
+    /// Ask the session to lock the screen now.
+    ///
+    /// Answered only for the desktop's own Settings application, whose *Lock
+    /// Now* row it is: a lock any program could raise at will would be a way
+    /// to keep the user out of their own desktop. The reply is the shared
+    /// status frame.
+    LockScreen,
     /// Ask the session to render catalog entry `index` of the shipped
     /// wallpaper store as a `side`×`side` straight-alpha RGBA8 picture in
     /// the region granted as `shm_handle`.
@@ -2332,6 +2348,10 @@ const OP_RENDER_WALLPAPER: u16 = 24;
 const OP_QUERY_CURSOR_SETS: u16 = 25;
 /// Ask for a window's size state (`WindowRequest::SetSizeState`).
 const OP_SET_SIZE_STATE: u16 = 26;
+/// Wire operation discriminant of [`WindowRequest::QueryNotifySources`].
+const OP_QUERY_NOTIFY_SOURCES: u16 = 27;
+/// Wire operation discriminant of [`WindowRequest::LockScreen`].
+const OP_LOCK_SCREEN: u16 = 28;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -2383,6 +2403,12 @@ const QUERY_WALLPAPERS_WIRE_LEN: usize = REQUEST_HEADER_LEN + 2;
 /// Encoded size of a [`WindowRequest::QueryCursorSets`]: the header alone.
 /// It names no window and no page — the whole choice space fits one reply.
 const QUERY_CURSOR_SETS_WIRE_LEN: usize = REQUEST_HEADER_LEN;
+
+/// Encoded size of a [`WindowRequest::QueryNotifySources`]: the header alone.
+const QUERY_NOTIFY_SOURCES_WIRE_LEN: usize = REQUEST_HEADER_LEN;
+
+/// Encoded size of a [`WindowRequest::LockScreen`]: the header alone.
+const LOCK_SCREEN_WIRE_LEN: usize = REQUEST_HEADER_LEN;
 
 /// Byte offset of a [`WindowRequest::RenderWallpaper`]'s granted region.
 const RENDER_WALLPAPER_SHM_OFFSET: usize = REQUEST_HEADER_LEN + 8;
@@ -2701,6 +2727,8 @@ impl WindowRequest {
             Self::QueryDesktop => QUERY_DESKTOP_WIRE_LEN,
             Self::QueryWallpapers { .. } => QUERY_WALLPAPERS_WIRE_LEN,
             Self::QueryCursorSets => QUERY_CURSOR_SETS_WIRE_LEN,
+            Self::QueryNotifySources => QUERY_NOTIFY_SOURCES_WIRE_LEN,
+            Self::LockScreen => LOCK_SCREEN_WIRE_LEN,
             Self::RenderWallpaper { .. } => RENDER_WALLPAPER_WIRE_LEN,
             Self::SetAppBar(ref bar) => {
                 app_bar_wire_len(bar.menu.len(), bar.menu.text_len as usize)
@@ -2786,6 +2814,8 @@ impl WindowRequest {
             Self::QueryDesktop => OP_QUERY_DESKTOP,
             Self::QueryWallpapers { .. } => OP_QUERY_WALLPAPERS,
             Self::QueryCursorSets => OP_QUERY_CURSOR_SETS,
+            Self::QueryNotifySources => OP_QUERY_NOTIFY_SOURCES,
+            Self::LockScreen => OP_LOCK_SCREEN,
             Self::RenderWallpaper { .. } => OP_RENDER_WALLPAPER,
             Self::SetAppBar(_) => OP_SET_APP_BAR,
             Self::OpenMenu { .. } => OP_OPEN_MENU,
@@ -2805,18 +2835,7 @@ impl WindowRequest {
         match *self {
             Self::Create { .. } => self.write_create_operands(out),
             Self::CreatePopup { .. } => self.write_popup_operands(out),
-            Self::Present {
-                window_id,
-                frame_index,
-                damage,
-            } => {
-                put_u64(out, 8, window_id);
-                put_u32(out, 16, frame_index);
-                put_u32(out, 20, damage.x);
-                put_u32(out, 24, damage.y);
-                put_u32(out, 28, damage.width_px);
-                put_u32(out, 32, damage.height_px);
-            }
+            Self::Present { .. } => self.write_present_operands(out),
             Self::Close { window_id }
             | Self::PickFile { window_id }
             | Self::TakeTerrain { window_id } => {
@@ -2892,7 +2911,11 @@ impl WindowRequest {
             // The header-only operations: each names the caller, whose
             // identity the kernel attests, or the seat's own read-only
             // store, so none carries an operand.
-            Self::TakeOpenTarget | Self::QueryDesktop | Self::QueryCursorSets => {}
+            Self::TakeOpenTarget
+            | Self::QueryDesktop
+            | Self::QueryCursorSets
+            | Self::QueryNotifySources
+            | Self::LockScreen => {}
             Self::QueryWallpapers { .. } | Self::RenderWallpaper { .. } => {
                 self.write_wallpaper_operands(out);
             }
@@ -2902,6 +2925,24 @@ impl WindowRequest {
                 anchor,
                 ref menu,
             } => write_open_menu(out, window_id, anchor, menu),
+        }
+    }
+
+    /// Write a present's operand block: the window, the frame index, and the
+    /// damage rectangle. A no-op for any other request.
+    fn write_present_operands(&self, out: &mut [u8]) {
+        if let Self::Present {
+            window_id,
+            frame_index,
+            damage,
+        } = *self
+        {
+            put_u64(out, 8, window_id);
+            put_u32(out, 16, frame_index);
+            put_u32(out, 20, damage.x);
+            put_u32(out, 24, damage.y);
+            put_u32(out, 28, damage.width_px);
+            put_u32(out, 32, damage.height_px);
         }
     }
 
@@ -3125,8 +3166,7 @@ impl WindowRequest {
             OP_SET_SIZING => read_set_sizing(bytes),
             OP_SET_SIZE_STATE => read_set_size_state(bytes),
             OP_TAKE_OPEN_TARGET => {
-                exact_len(bytes, TAKE_OPEN_TARGET_WIRE_LEN)?;
-                Ok(Self::TakeOpenTarget)
+                exact_len(bytes, TAKE_OPEN_TARGET_WIRE_LEN).map(|()| Self::TakeOpenTarget)
             }
             OP_TAKE_MENU_TEXT => {
                 exact_len(bytes, TAKE_MENU_TEXT_WIRE_LEN)?;
@@ -3151,21 +3191,20 @@ impl WindowRequest {
                 })
             }
             OP_QUERY_DESKTOP => {
-                exact_len(bytes, QUERY_DESKTOP_WIRE_LEN)?;
-                Ok(Self::QueryDesktop)
+                exact_len(bytes, QUERY_DESKTOP_WIRE_LEN).map(|()| Self::QueryDesktop)
             }
             OP_QUERY_WALLPAPERS => read_query_wallpapers(bytes),
             OP_RENDER_WALLPAPER => read_render_wallpaper(bytes),
-            OP_QUERY_CURSOR_SETS => read_query_cursor_sets(bytes),
+            OP_QUERY_CURSOR_SETS => {
+                exact_len(bytes, QUERY_CURSOR_SETS_WIRE_LEN).map(|()| Self::QueryCursorSets)
+            }
+            OP_QUERY_NOTIFY_SOURCES => {
+                exact_len(bytes, QUERY_NOTIFY_SOURCES_WIRE_LEN).map(|()| Self::QueryNotifySources)
+            }
+            OP_LOCK_SCREEN => exact_len(bytes, LOCK_SCREEN_WIRE_LEN).map(|()| Self::LockScreen),
             _ => Err(Errno::OutOfRange),
         }
     }
-}
-
-/// Decode a [`WindowRequest::QueryCursorSets`] frame.
-fn read_query_cursor_sets(bytes: &[u8]) -> Result<WindowRequest, Errno> {
-    exact_len(bytes, QUERY_CURSOR_SETS_WIRE_LEN)?;
-    Ok(WindowRequest::QueryCursorSets)
 }
 
 /// Decode a [`WindowRequest::QueryWallpapers`] frame.
@@ -4390,99 +4429,134 @@ pub fn decode_wallpapers_reply(bytes: &[u8]) -> Result<WallpaperPage<'_>, Errno>
     Ok(WallpaperPage { total, body, count })
 }
 
-/// Encoded length of a [`WindowRequest::QueryCursorSets`] reply: a status
-/// word, the number of sets, then one length byte and its name per set.
-///
-/// Not a page bound like the wallpaper catalog's: the whole choice space
-/// fits here by construction, because a store offers at most
-/// [`CURSOR_SETS_MAX`](crate::desktop::CURSOR_SETS_MAX) sets and a set's
-/// name is at most
-/// [`CURSOR_SET_NAME_MAX`](crate::desktop::CURSOR_SET_NAME_MAX) bytes. A
-/// chooser therefore learns every set it may offer in one call.
-pub const WINDOW_CURSOR_SETS_REPLY_MAX: usize = CURSOR_SETS_REPLY_NAMES_OFFSET
-    + crate::desktop::CURSOR_SETS_MAX * (1 + crate::desktop::CURSOR_SET_NAME_MAX);
+/// Byte offset of the name count in a name-list reply.
+const NAME_LIST_COUNT_OFFSET: usize = 4;
+/// Byte offset of a name-list reply's first packed name.
+const NAME_LIST_NAMES_OFFSET: usize = NAME_LIST_COUNT_OFFSET + 2;
 
-/// Byte offset of the set count in a [`WindowRequest::QueryCursorSets`]
-/// reply.
-const CURSOR_SETS_REPLY_COUNT_OFFSET: usize = 4;
-/// Byte offset of the first packed name.
-const CURSOR_SETS_REPLY_NAMES_OFFSET: usize = CURSOR_SETS_REPLY_COUNT_OFFSET + 2;
+/// Encoded length of a name-list reply of at most `names` names, each at most
+/// `name_max` bytes: a status word, the count, then a length byte and the
+/// bytes of each name.
+const fn name_list_reply_max(names: usize, name_max: usize) -> usize {
+    NAME_LIST_NAMES_OFFSET + names * (1 + name_max)
+}
 
-/// Encode a [`WindowRequest::QueryCursorSets`] outcome into `out`,
-/// answering the number of bytes written.
+/// Encoded length of a [`WindowRequest::QueryCursorSets`] reply.
 ///
-/// `sets` is every set the desktop offers, in the order a chooser lists
-/// them. A name that is empty or longer than the wire admits is the session
-/// contradicting its own store model, so the whole reply is refused rather
-/// than a partial choice space offered — a chooser that silently lost a set
-/// would show a control missing one of its answers. More sets than the
-/// frame holds is the same contradiction, and refused the same way.
+/// Not a page bound like the wallpaper catalog's: a store offers at most
+/// [`CURSOR_SETS_MAX`](crate::desktop::CURSOR_SETS_MAX) sets of at most
+/// [`CURSOR_SET_NAME_MAX`](crate::desktop::CURSOR_SET_NAME_MAX) bytes, so a
+/// chooser learns every set it may offer in one call.
+pub const WINDOW_CURSOR_SETS_REPLY_MAX: usize = name_list_reply_max(
+    crate::desktop::CURSOR_SETS_MAX,
+    crate::desktop::CURSOR_SET_NAME_MAX,
+);
+
+/// Encoded length of a [`WindowRequest::QueryNotifySources`] reply: every
+/// source the session remembers, in one call.
+pub const WINDOW_NOTIFY_SOURCES_REPLY_MAX: usize = name_list_reply_max(
+    crate::notify_ipc::NOTIFY_SOURCES_MAX,
+    crate::appinfo::BUNDLE_ID_MAX,
+);
+
+/// Write `result` into `out` as a name-list reply, answering the bytes written.
 ///
-/// A refusal is the shared status frame, so a client issues one receive
-/// whatever the answer.
-#[must_use]
-pub fn encode_cursor_sets_reply<'a, I>(
-    out: &mut [u8; WINDOW_CURSOR_SETS_REPLY_MAX],
-    result: Result<I, Errno>,
-) -> usize
+/// A name that is empty or longer than `name_max`, or more names than `out`
+/// holds, is the session contradicting its own model, so the whole reply is
+/// refused rather than a partial list offered: a chooser silently missing one
+/// of its answers is worse than an error. A refusal is the shared status
+/// frame, so a client issues one receive whatever the answer.
+fn encode_name_list<'a, I>(out: &mut [u8], name_max: usize, result: Result<I, Errno>) -> usize
 where
     I: IntoIterator<Item = &'a [u8]>,
 {
-    *out = [0u8; WINDOW_CURSOR_SETS_REPLY_MAX];
-    let refuse = |out: &mut [u8; WINDOW_CURSOR_SETS_REPLY_MAX], err: Errno| {
+    out.fill(0);
+    let refuse = |out: &mut [u8], err: Errno| {
         out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
         4
     };
-    let sets = match result {
-        Ok(sets) => sets,
+    let names = match result {
+        Ok(names) => names,
         Err(err) => return refuse(out, err),
     };
-    let mut at = CURSOR_SETS_REPLY_NAMES_OFFSET;
+    let mut at = NAME_LIST_NAMES_OFFSET;
     let mut written: u16 = 0;
-    for name in sets {
-        if name.is_empty() || name.len() > crate::desktop::CURSOR_SET_NAME_MAX {
+    for name in names {
+        let Ok(len) = u8::try_from(name.len()) else {
+            return refuse(out, Errno::LengthOutOfRange);
+        };
+        if name.is_empty() || name.len() > name_max || at + 1 + name.len() > out.len() {
             return refuse(out, Errno::LengthOutOfRange);
         }
-        if at + 1 + name.len() > WINDOW_CURSOR_SETS_REPLY_MAX {
-            return refuse(out, Errno::LengthOutOfRange);
-        }
-        // Checked against `CURSOR_SET_NAME_MAX` above, so the length fits a
-        // byte.
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            out[at] = name.len() as u8;
-        }
+        out[at] = len;
         out[at + 1..at + 1 + name.len()].copy_from_slice(name);
         at += 1 + name.len();
         written = written.saturating_add(1);
     }
-    put_u16(out, CURSOR_SETS_REPLY_COUNT_OFFSET, written);
+    put_u16(out, NAME_LIST_COUNT_OFFSET, written);
     at
 }
 
-/// The decoded choice space of a [`WindowRequest::QueryCursorSets`] reply.
+/// Decode a name-list reply of at most `count_max` names of at most
+/// `len_max` bytes each.
+///
+/// Every declared length is checked against the frame before any of it is
+/// read, so a reply claiming more names or longer ones than it carries is
+/// refused rather than read past.
+fn decode_name_list(bytes: &[u8], count_max: usize, len_max: usize) -> Result<NameList<'_>, Errno> {
+    if bytes.len() >= 4 {
+        crate::reply::decode_status_reply(&bytes[..4])?;
+    }
+    if bytes.len() < NAME_LIST_NAMES_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let count = read_u16(bytes, NAME_LIST_COUNT_OFFSET);
+    if usize::from(count) > count_max {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let body = &bytes[NAME_LIST_NAMES_OFFSET..];
+    // Walk the declared names once, here, so `names()` can never read past
+    // the frame and needs no error path of its own.
+    let mut at = 0usize;
+    for _ in 0..count {
+        let Some(&len) = body.get(at) else {
+            return Err(Errno::LengthOutOfRange);
+        };
+        if len == 0 {
+            return Err(Errno::OutOfRange);
+        }
+        if usize::from(len) > len_max || at + 1 + usize::from(len) > body.len() {
+            return Err(Errno::LengthOutOfRange);
+        }
+        at += 1 + usize::from(len);
+    }
+    Ok(NameList { body, count })
+}
+
+/// A decoded name-list reply: the cursor sets a desktop offers, or the
+/// sources that have notified it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct CursorSetList<'a> {
+pub struct NameList<'a> {
     /// The packed names, still in their frame.
     body: &'a [u8],
     /// How many names `body` holds.
     count: u16,
 }
 
-impl<'a> CursorSetList<'a> {
-    /// How many sets the desktop offers.
+impl<'a> NameList<'a> {
+    /// How many names the reply carries.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.count as usize
     }
 
-    /// Whether the desktop named no set at all.
+    /// Whether the reply carries no name at all.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.count == 0
     }
 
-    /// The set names, in the order a chooser lists them.
+    /// The names, in the order the session listed them.
     pub fn names(&self) -> impl Iterator<Item = &'a [u8]> + '_ {
         let mut at = 0usize;
         (0..self.count).filter_map(move |_| {
@@ -4494,47 +4568,63 @@ impl<'a> CursorSetList<'a> {
     }
 }
 
+/// Encode a [`WindowRequest::QueryCursorSets`] outcome: every set the desktop
+/// offers, in the order a chooser lists them, or the refusal.
+#[must_use]
+pub fn encode_cursor_sets_reply<'a, I>(
+    out: &mut [u8; WINDOW_CURSOR_SETS_REPLY_MAX],
+    result: Result<I, Errno>,
+) -> usize
+where
+    I: IntoIterator<Item = &'a [u8]>,
+{
+    encode_name_list(out, crate::desktop::CURSOR_SET_NAME_MAX, result)
+}
+
 /// Decode a [`WindowRequest::QueryCursorSets`] reply.
-///
-/// Every declared length is checked against the frame it arrived in before
-/// any of it is read, so a reply claiming more sets or longer names than it
-/// carries is refused rather than read past.
 ///
 /// # Errors
 ///
 /// * The refusal the session stated, for a status-frame reply.
 /// * [`Errno::BufferTooSmall`] for a frame too short to hold its own header.
-/// * [`Errno::LengthOutOfRange`] for a count the body cannot hold, or more
-///   sets than the wire admits.
+/// * [`Errno::LengthOutOfRange`] for a count or a name length the wire does
+///   not admit, or one the body cannot hold.
 /// * [`Errno::OutOfRange`] for an empty name.
-pub fn decode_cursor_sets_reply(bytes: &[u8]) -> Result<CursorSetList<'_>, Errno> {
-    if bytes.len() >= 4 {
-        crate::reply::decode_status_reply(&bytes[..4])?;
-    }
-    if bytes.len() < CURSOR_SETS_REPLY_NAMES_OFFSET {
-        return Err(Errno::BufferTooSmall);
-    }
-    let count = read_u16(bytes, CURSOR_SETS_REPLY_COUNT_OFFSET);
-    if usize::from(count) > crate::desktop::CURSOR_SETS_MAX {
-        return Err(Errno::LengthOutOfRange);
-    }
-    let body = &bytes[CURSOR_SETS_REPLY_NAMES_OFFSET..];
-    // Walk the declared names once, here, so `names()` can never read past
-    // the frame and needs no error path of its own.
-    let mut at = 0usize;
-    for _ in 0..count {
-        let Some(&len) = body.get(at) else {
-            return Err(Errno::LengthOutOfRange);
-        };
-        if len == 0 {
-            return Err(Errno::OutOfRange);
-        }
-        if at + 1 + usize::from(len) > body.len() {
-            return Err(Errno::LengthOutOfRange);
-        }
-        at += 1 + usize::from(len);
-    }
-    Ok(CursorSetList { body, count })
+pub fn decode_cursor_sets_reply(bytes: &[u8]) -> Result<NameList<'_>, Errno> {
+    decode_name_list(
+        bytes,
+        crate::desktop::CURSOR_SETS_MAX,
+        crate::desktop::CURSOR_SET_NAME_MAX,
+    )
+}
+
+/// Encode a [`WindowRequest::QueryNotifySources`] outcome: the bundle
+/// identities of every source the session remembers, or the refusal.
+#[must_use]
+pub fn encode_notify_sources_reply<'a, I>(
+    out: &mut [u8; WINDOW_NOTIFY_SOURCES_REPLY_MAX],
+    result: Result<I, Errno>,
+) -> usize
+where
+    I: IntoIterator<Item = &'a [u8]>,
+{
+    encode_name_list(out, crate::appinfo::BUNDLE_ID_MAX, result)
+}
+
+/// Decode a [`WindowRequest::QueryNotifySources`] reply.
+///
+/// The names are only bounded here; a reader validates each as a bundle
+/// identity before it trusts one.
+///
+/// # Errors
+///
+/// As [`decode_cursor_sets_reply`].
+pub fn decode_notify_sources_reply(bytes: &[u8]) -> Result<NameList<'_>, Errno> {
+    decode_name_list(
+        bytes,
+        crate::notify_ipc::NOTIFY_SOURCES_MAX,
+        crate::appinfo::BUNDLE_ID_MAX,
+    )
 }
 
 /// Encoded length of the longest [`WindowRequest::TakeMenuText`] reply: a
@@ -5579,46 +5669,47 @@ mod tests {
     use super::{
         app_bar_wire_len, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
         decode_hand_over_reply, decode_menu_text_reply, decode_minted_id_reply,
-        decode_open_target_reply, decode_terrain_reply, decode_wallpapers_reply,
-        encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply,
-        encode_hand_over_reply, encode_menu_text_reply, encode_minted_id_reply,
-        encode_open_target_reply, encode_terrain_reply, encode_wallpapers_reply,
-        hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64, read_u16, AppBar,
-        AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem,
-        AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
-        AppMenuRowView, AppMenuShortcut, BundleRunPath, DocumentName, HandOverDocument,
-        HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, OpenTarget, PointerAction,
-        TerrainPlate, TooltipText, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest,
-        WindowSizeState, WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN,
-        APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX,
-        APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
-        APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
-        APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED,
-        APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
+        decode_notify_sources_reply, decode_open_target_reply, decode_terrain_reply,
+        decode_wallpapers_reply, encode_create_reply, encode_cursor_sets_reply,
+        encode_desktop_reply, encode_hand_over_reply, encode_menu_text_reply,
+        encode_minted_id_reply, encode_notify_sources_reply, encode_open_target_reply,
+        encode_terrain_reply, encode_wallpapers_reply, hand_over_wire_len, open_menu_wire_len,
+        put_i32, put_u16, put_u64, read_u16, AppBar, AppBarClick, AppMenu, AppMenuBundle,
+        AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
+        AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, BundleRunPath,
+        DocumentName, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal,
+        OpenTarget, PointerAction, TerrainPlate, TooltipText, WallpaperEntry, WindowEvent,
+        WindowRegion, WindowRequest, WindowSizeState, WindowSizing, WindowTitle,
+        APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
+        APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX, APP_MENU_KIND_SEPARATOR,
+        APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS,
+        APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX, APP_MENU_ROW_ENTRY_LEN_OFFSET,
+        APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET,
+        APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
         APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
         APP_MENU_TEXT_BYTES, CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN,
-        CURSOR_SETS_REPLY_COUNT_OFFSET, CURSOR_SETS_REPLY_NAMES_OFFSET, DESKTOP_LAYER_MAX_PLATES,
-        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DESKTOP_REPLY_SERVER_OFFSET, HAND_OVER_GRANT_OFFSET,
+        DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_LOGICAL, HAND_OVER_GRANT_OFFSET,
         HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET,
         HAND_OVER_RUN_PATH_MAX, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET,
         MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END,
         MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_REPLY_LEN_OFFSET,
-        MENU_TEXT_REPLY_TEXT_OFFSET, OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET,
-        OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET,
-        OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET, PLACE_LAYER_WIRE_LEN,
-        PRESENT_WIRE_LEN, QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
-        RENDER_WALLPAPER_SIDE_OFFSET, RENDER_WALLPAPER_WIRE_LEN, REQUEST_HEADER_LEN,
-        SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET,
-        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
-        SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
-        SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
-        TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
+        MENU_TEXT_REPLY_TEXT_OFFSET, NAME_LIST_COUNT_OFFSET, NAME_LIST_NAMES_OFFSET,
+        OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN,
+        OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
+        OPEN_MENU_TITLE_LEN_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN,
+        QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN, RENDER_WALLPAPER_SIDE_OFFSET,
+        RENDER_WALLPAPER_WIRE_LEN, REQUEST_HEADER_LEN, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET,
+        SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN,
+        SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET,
+        SET_TOOLTIP_WIRE_LEN, SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT,
+        SIZING_MIN_WIDTH, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
         WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN,
         WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT,
         WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
-        WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
-        WINDOW_PANE_NAME_MAX, WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX,
-        WINDOW_WALLPAPERS_REPLY_MAX, WINDOW_WALLPAPER_PREVIEW_MAX_SIDE,
+        WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
+        WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX, WINDOW_REQUEST_MAGIC,
+        WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
+        WINDOW_WALLPAPER_PREVIEW_MAX_SIDE,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -6062,6 +6153,8 @@ mod tests {
             text: TooltipText::new(&"t".repeat(TOOLTIP_TEXT_MAX)).expect("the widest tip"),
         });
         visit(WindowRequest::QueryDesktop);
+        visit(WindowRequest::QueryNotifySources);
+        visit(WindowRequest::LockScreen);
     }
 
     /// A menu whose rows carry no text at all: the narrowest each kind gets,
@@ -7829,10 +7922,10 @@ mod tests {
         // A refusal reply carries no record, and a success reply whose
         // record is blank is not a desktop: neither can be read as one.
         assert!(decode_desktop_reply(&[0u8; WINDOW_DESKTOP_REPLY_LEN]).is_err());
-        // The record's own reserved bytes still fail closed; the identity
-        // now sits after it, so the dirty byte is taken inside the record.
+        // The record's own reserved bytes still fail closed: its second
+        // reserved byte sits at offset 15 of the record, after the status.
         let mut dirty = good;
-        dirty[DESKTOP_REPLY_SERVER_OFFSET - 1] = 1;
+        dirty[4 + 15] = 1;
         assert_eq!(decode_desktop_reply(&dirty), Err(Errno::BadMagic));
     }
 
@@ -8360,7 +8453,7 @@ mod tests {
         let len = encode_cursor_sets_reply(&mut frame, Ok([b"Standard".as_slice()]));
         put_u16(
             &mut frame,
-            CURSOR_SETS_REPLY_COUNT_OFFSET,
+            NAME_LIST_COUNT_OFFSET,
             u16::try_from(crate::desktop::CURSOR_SETS_MAX + 1).expect("a small count"),
         );
         assert_eq!(
@@ -8394,8 +8487,76 @@ mod tests {
             Err(Errno::LengthOutOfRange)
         );
         assert_eq!(
-            decode_cursor_sets_reply(&frame[..CURSOR_SETS_REPLY_NAMES_OFFSET - 1]),
+            decode_cursor_sets_reply(&frame[..NAME_LIST_NAMES_OFFSET - 1]),
             Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn the_notify_source_query_and_the_lock_request_are_bare_headers() {
+        for request in [WindowRequest::QueryNotifySources, WindowRequest::LockScreen] {
+            assert_eq!(request.wire_len(), REQUEST_HEADER_LEN);
+            assert_eq!(WindowRequest::from_bytes(&request.frame()), Ok(request));
+            let mut wide = [0u8; REQUEST_HEADER_LEN + 1];
+            let len = request.encode(&mut wide).expect("the header fits");
+            assert_eq!(
+                WindowRequest::from_bytes(&wide[..=len]),
+                Err(Errno::BadMagic)
+            );
+        }
+    }
+
+    #[test]
+    fn a_notify_source_reply_round_trips_every_remembered_source() {
+        let mut frame = [0u8; WINDOW_NOTIFY_SOURCES_REPLY_MAX];
+        let widest = [b'a'; crate::appinfo::BUNDLE_ID_MAX];
+        let all = [widest.as_slice(); crate::notify_ipc::NOTIFY_SOURCES_MAX];
+        let len = encode_notify_sources_reply(&mut frame, Ok(all));
+        let answered = decode_notify_sources_reply(&frame[..len]).expect("the widest reply fits");
+        assert_eq!(answered.len(), crate::notify_ipc::NOTIFY_SOURCES_MAX);
+        assert!(answered.names().all(|name| name == widest.as_slice()));
+
+        let one = encode_notify_sources_reply(&mut frame, Ok([b"os.tairix.netstack".as_slice()]));
+        let answered = decode_notify_sources_reply(&frame[..one]).expect("one source");
+        assert!(answered.names().eq([b"os.tairix.netstack".as_slice()]));
+    }
+
+    #[test]
+    fn a_notify_source_reply_refuses_what_the_wire_could_not_carry() {
+        let mut frame = [0u8; WINDOW_NOTIFY_SOURCES_REPLY_MAX];
+        let over_long = [b'a'; crate::appinfo::BUNDLE_ID_MAX + 1];
+        let len = encode_notify_sources_reply(&mut frame, Ok([over_long.as_slice()]));
+        assert_eq!(
+            decode_notify_sources_reply(&frame[..len]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let too_many = [b"a.b".as_slice(); crate::notify_ipc::NOTIFY_SOURCES_MAX + 1];
+        let len = encode_notify_sources_reply(&mut frame, Ok(too_many));
+        assert_eq!(
+            decode_notify_sources_reply(&frame[..len]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let refused = encode_notify_sources_reply(
+            &mut frame,
+            Err::<core::iter::Empty<&[u8]>, Errno>(Errno::PermissionDenied),
+        );
+        assert_eq!(
+            decode_notify_sources_reply(&frame[..refused]),
+            Err(Errno::PermissionDenied)
+        );
+    }
+
+    /// A name longer than the list admits is refused on the way in even
+    /// when the frame could hold it, so a cursor-set reply cannot smuggle a
+    /// name no set could carry.
+    #[test]
+    fn a_name_past_its_own_bound_is_refused_on_decode() {
+        let mut frame = [0u8; WINDOW_NOTIFY_SOURCES_REPLY_MAX];
+        let long = [b'a'; crate::desktop::CURSOR_SET_NAME_MAX + 1];
+        let len = encode_notify_sources_reply(&mut frame, Ok([long.as_slice()]));
+        assert_eq!(
+            decode_cursor_sets_reply(&frame[..len]),
+            Err(Errno::LengthOutOfRange)
         );
     }
 

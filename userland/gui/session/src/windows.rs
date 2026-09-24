@@ -26,7 +26,7 @@ use tairix_abi::window_ipc::{
     AppBar, AppMenu, HandOverDocument, HandOverOutcome, LayerDepth, MenuRefusal, TerrainPlate,
     WindowEvent, WindowRegion,
 };
-use tairix_abi::{AppIdentity as AttestedApp, Errno, ProcId};
+use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
 use tairix_controls::{ChainModel, PlatePlacement, WindowSizeState};
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
@@ -1366,6 +1366,14 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         self.cursor_sets
     }
 
+    fn notify_sources(&mut self, caller: Option<&AttestedApp>) -> Result<&[BundleId], Errno> {
+        self.shell.notify_sources(caller)
+    }
+
+    fn lock_screen(&mut self, caller: Option<&AttestedApp>) -> Result<(), Errno> {
+        self.shell.request_lock(caller)
+    }
+
     fn wallpaper_render_requested(
         &mut self,
         window_id: u64,
@@ -1402,13 +1410,13 @@ pub fn desktop_info(compositor: &Compositor) -> Result<DesktopInfo, Errno> {
     let screen = compositor.screen_rect();
     let scale = u16::try_from(compositor.scale().percent()).map_err(|_| Errno::OutOfRange)?;
     let theme = compositor.theme();
-    Ok(
-        DesktopInfo::new(screen.width, screen.height, scale, theme.appearance())?.with_axes(
+    DesktopInfo::new(screen.width, screen.height, scale, theme.appearance())?
+        .with_axes(
             theme.contrast(),
             theme.density(),
             Motion::from_reduced(theme.motion().reduced_motion()),
-        ),
-    )
+        )
+        .with_double_click(compositor.double_click())
 }
 
 #[cfg(test)]

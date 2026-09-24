@@ -41,8 +41,14 @@ item is, its size, its timestamps, where an alias points, its permissions and
 owner, and the extended attributes the volume stores for it. Permissions,
 owner, and attributes can be changed there, each as an ordinary
 permission-checked write under your own identity — a refusal says why and
-changes nothing. Reassigning an owner needs the `CAP_FS_CHOWN` capability, so
-the control appears only for a session that holds it.
+changes nothing. Reassigning an owner needs the `CAP_FS_CHOWN` capability; a
+session without it sees the owner and group marked with a lock, and a line
+saying why.
+
+`Left` and `Right` move between the window's sections. On *Permissions*,
+`Down` or `Tab` moves into its controls: the arrow keys move between them,
+`Space` toggles a permission or opens the owner or group for editing, and
+`Tab` or `Escape` returns to the sections.
 
 The `directory` operand is treated as untrusted input: it must be an
 absolute path within the system's path length limit, and each of its

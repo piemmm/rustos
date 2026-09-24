@@ -125,7 +125,9 @@ fn content_height(editor: &Editor, scale: Scale, theme: &Theme) -> u32 {
     let band = band_width(scale, theme);
     groups
         .iter()
-        .map(|group| group.measured_height(band, scale, theme))
+        .map(|group| {
+            group.measured_height(band, group.slot_column(band, scale, theme), scale, theme)
+        })
         .fold(gaps, u32::saturating_add)
 }
 
@@ -155,29 +157,33 @@ pub fn window_bounds(editor: &Editor, scale: Scale, theme: &Theme) -> Rect {
     )
 }
 
-/// The rectangle each group is drawn in within the dialog's content band, in
+/// The layout each group is drawn with within the dialog's content band, in
 /// layout order, and only for the groups that fit whole.
 ///
 /// The one layout the paint and the hit test both read, so a press can never
 /// land on a group that was not drawn.
 #[must_use]
-fn group_rects(editor: &Editor, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
+fn group_layouts(editor: &Editor, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<FieldLayout> {
     let Some(band) = dialog(editor).content_rect(bounds, scale, theme) else {
         return Vec::new();
     };
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
     let mut top = band.top();
-    let mut rects = Vec::new();
+    let mut layouts = Vec::new();
     for group in groups(editor) {
-        let height = group.measured_height(band.width, scale, theme);
+        let column = group.slot_column(band.width, scale, theme);
+        let height = group.measured_height(band.width, column, scale, theme);
         let bottom = top.saturating_add(i32::try_from(height).unwrap_or(i32::MAX));
         if bottom > band.bottom() {
             break;
         }
-        rects.push(Rect::new(band.left(), top, band.width, height));
+        layouts.push(FieldLayout::new(
+            Rect::new(band.left(), top, band.width, height),
+            column,
+        ));
         top = bottom.saturating_add(i32::try_from(gap).unwrap_or(0));
     }
-    rects
+    layouts
 }
 
 /// The field the window-local `point` is over, if any.
@@ -189,13 +195,13 @@ fn group_rects(editor: &Editor, bounds: Rect, scale: Scale, theme: &Theme) -> Ve
 #[must_use]
 pub fn field_at(editor: &Editor, scale: Scale, theme: &Theme, point: Point) -> Option<Field> {
     let bounds = window_bounds(editor, scale, theme);
-    let rects = group_rects(editor, bounds, scale, theme);
+    let layouts = group_layouts(editor, bounds, scale, theme);
     groups(editor)
         .iter()
-        .zip(rects)
+        .zip(layouts)
         .enumerate()
-        .find_map(|(index, (group, rect))| {
-            let row = group.row_at(rect, scale, theme, point)?;
+        .find_map(|(index, (group, layout))| {
+            let row = group.row_at(layout, scale, theme, point)?;
             Field::at(index * PER_GROUP + row)
         })
 }
@@ -205,11 +211,10 @@ pub fn field_at(editor: &Editor, scale: Scale, theme: &Theme, point: Point) -> O
 pub fn render_into(surface: &mut Surface, editor: &Editor, scale: Scale, theme: &Theme) {
     let bounds = window_bounds(editor, scale, theme);
     dialog(editor).render(surface, bounds, scale, theme);
-    for (group, rect) in groups(editor)
+    for (group, layout) in groups(editor)
         .iter()
-        .zip(group_rects(editor, bounds, scale, theme))
+        .zip(group_layouts(editor, bounds, scale, theme))
     {
-        let column = group.slot_column(rect, scale, theme);
-        group.render(surface, FieldLayout::new(rect, column), scale, theme);
+        group.render(surface, layout, scale, theme);
     }
 }

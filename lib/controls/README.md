@@ -488,7 +488,9 @@ engine), the window-manager furniture (`window` — `WindowFrame`/`TitleBar`/
 `Notification`/`TaskbarItem`/`TraySignal`), the decision surfaces
 (`decision` — `Dialog`/`Tooltip`/`HelpTip`), and the form fields
 (`form` — `FieldRow`/`FieldGroup`, the one settings-form shape, composing
-the `collection` row chrome and a real control in each row's slot), and the
+the `collection` row chrome and a real control in each row's slot, a
+`FlagSet` of labelled checkboxes among them; `stack` is the one plate column
+its groups are stacked down), and the
 credential question (`credential` — `CredentialSheet`, the one surface that
 asks for an account and its password so a more-privileged program can be
 started as that account: the desktop session's prompt window and the settings

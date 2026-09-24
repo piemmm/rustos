@@ -6707,12 +6707,14 @@ use crate::properties::{Attribute, Attributes};
 use crate::render::{
     draw_properties_window, permission_cells, properties_attr_editor_rect,
     properties_attr_visible_rows, properties_hit, properties_owner_editor_rect,
-    properties_window_extent, AttrAction, AttrView, Identity, OwnerField, PropertiesControls,
-    PropertiesFrame, PropertiesTab, PropertiesTarget, PropertiesView, PERMISSION_BITS,
+    properties_permissions_key, properties_window_extent, AttrAction, AttrView, Identity,
+    OwnerField, PermsCursor, PermsKeyed, PropertiesControls, PropertiesFrame, PropertiesTab,
+    PropertiesTarget, PropertiesView, PERMISSION_BITS,
 };
 use crate::RowList;
 use tairix_controls::text::TextField;
 use tairix_geometry::Point;
+use tairix_input::{Key, Modifiers, NamedKey};
 
 /// The window the Properties surface is laid out in for these tests: the
 /// extent it actually opens at, so what is asserted is what a user sees.
@@ -6795,6 +6797,7 @@ fn scan_every_section(props: &Properties, window: Rect, editor: Rect) -> Scanned
         let view = PropertiesView {
             tab,
             attrs: AttrView::default(),
+            perms: PermsCursor::default(),
         };
         for (at, target) in scan(props, view, window) {
             match target {
@@ -6839,11 +6842,15 @@ fn scan_every_section(props: &Properties, window: Rect, editor: Rect) -> Scanned
 /// Every target the window resolves over its whole surface, in scan order.
 fn scan(props: &Properties, view: PropertiesView, window: Rect) -> Vec<(Point, PropertiesTarget)> {
     let theme = Theme::dark();
+    let bar = RowList::new(0);
+    let editor = TextField::new();
+    let controls = resting(&bar, &editor);
     let mut found = Vec::new();
     for y in 0..i32::try_from(window.height).unwrap() {
         for x in 0..i32::try_from(window.width).unwrap() {
             let at = Point::new(x, y);
-            if let Some(target) = properties_hit(props, view, true, window, Scale::ONE, &theme, at)
+            if let Some(target) =
+                properties_hit(props, view, controls, window, Scale::ONE, &theme, at)
             {
                 found.push((at, target));
             }
@@ -6919,11 +6926,13 @@ fn each_section_resolves_every_control_it_draws_and_nothing_else() {
     assert!(editor_points > 0, "the field must be clickable to focus");
 
     // A press outside the client resolves nothing.
+    let bar = RowList::new(0);
+    let empty = TextField::new();
     assert_eq!(
         properties_hit(
             &props,
             PropertiesView::default(),
-            true,
+            resting(&bar, &empty),
             window,
             Scale::ONE,
             &theme,
@@ -6933,53 +6942,138 @@ fn each_section_resolves_every_control_it_draws_and_nothing_else() {
     );
 }
 
-/// A session that may not reassign an owner is drawn plain values, so a press
-/// on one resolves to nothing rather than opening an editor whose commit could
-/// only be refused.
+/// The controls a session without `CAP_FS_CHOWN` draws, with nothing being
+/// typed into.
+fn refused<'a>(bar: &'a RowList, editor: &'a TextField) -> PropertiesControls<'a> {
+    PropertiesControls {
+        can_chown: false,
+        ..resting(bar, editor)
+    }
+}
+
+/// A session that may not reassign an owner is shown the cell refused, so a
+/// press on it resolves to nothing rather than opening an editor whose commit
+/// could only be refused.
 #[test]
 fn an_ownership_value_resolves_only_for_a_session_that_may_reassign_it() {
     let props = props_with(Attributes::Unsupported);
     let window = props_window();
     let theme = Theme::dark();
+    let bar = RowList::new(0);
+    let empty = TextField::new();
     let view = PropertiesView {
         tab: PropertiesTab::Permissions,
         attrs: AttrView::default(),
+        perms: PermsCursor::default(),
     };
-    let cell = properties_owner_editor_rect(window, Scale::ONE, &theme, OwnerField::Uid)
+    let cell = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Uid)
         .expect("the row fits the window it opens at");
     let at = Point::new(cell.left() + 2, cell.top() + 2);
     assert_eq!(
-        properties_hit(&props, view, true, window, Scale::ONE, &theme, at),
+        properties_hit(
+            &props,
+            view,
+            resting(&bar, &empty),
+            window,
+            Scale::ONE,
+            &theme,
+            at
+        ),
         Some(PropertiesTarget::Owner(OwnerField::Uid))
     );
     assert_eq!(
-        properties_hit(&props, view, false, window, Scale::ONE, &theme, at),
+        properties_hit(
+            &props,
+            view,
+            refused(&bar, &empty),
+            window,
+            Scale::ONE,
+            &theme,
+            at
+        ),
         None,
-        "without CAP_FS_CHOWN the cell is a value, not a control"
+        "without CAP_FS_CHOWN the cell is refused, not a control"
     );
     // The capability-free toggles stay reachable either way.
     let perm = scan_first_permission(&props, view, window);
     assert!(
-        properties_hit(&props, view, false, window, Scale::ONE, &theme, perm).is_some(),
+        properties_hit(
+            &props,
+            view,
+            refused(&bar, &empty),
+            window,
+            Scale::ONE,
+            &theme,
+            perm
+        )
+        .is_some(),
         "a mode bit is editable without the chown capability"
     );
 }
 
-/// The first point on the permissions grid, found by walking the one row the
-/// owner triad occupies rather than scanning the whole client.
+/// Regression: a press on the id editor being typed into resolved to its
+/// ownership cell, and opening that cell again reset the editor to the stored
+/// id — so clicking into the field threw the typing away.
+#[test]
+fn a_press_on_the_open_id_editor_leaves_the_typing_alone() {
+    let props = props_with(Attributes::Unsupported);
+    let window = props_window();
+    let theme = Theme::dark();
+    let bar = RowList::new(0);
+    let empty = TextField::new();
+    let typing = TextField::new().with_text("10");
+    let editing = PropertiesControls {
+        owner: Some((OwnerField::Uid, &typing)),
+        ..resting(&bar, &empty)
+    };
+    let hit = |controls: PropertiesControls<'_>, at: Point| {
+        properties_hit(
+            &props,
+            perms_view(),
+            controls,
+            window,
+            Scale::ONE,
+            &theme,
+            at,
+        )
+    };
+    let uid = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Uid)
+        .expect("the row fits");
+    let gid = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Gid)
+        .expect("the row fits");
+    let into = |rect: Rect| Point::new(rect.left() + 2, rect.top() + 2);
+    assert_eq!(hit(editing, into(uid)), None, "the field keeps its typing");
+    assert_eq!(
+        hit(editing, into(gid)),
+        Some(PropertiesTarget::Owner(OwnerField::Gid)),
+        "the other id still opens"
+    );
+    assert_eq!(
+        hit(resting(&bar, &empty), into(uid)),
+        Some(PropertiesTarget::Owner(OwnerField::Uid))
+    );
+}
+
+/// The first point on the permissions toggles, found down the column every
+/// control in the section begins at — the ownership cells share it — rather
+/// than by scanning the whole client.
 fn scan_first_permission(props: &Properties, view: PropertiesView, window: Rect) -> Point {
     let theme = Theme::dark();
-    for y in 0..i32::try_from(window.height).unwrap() {
-        for x in 0..i32::try_from(window.width).unwrap() {
-            let at = Point::new(x, y);
-            if let Some(PropertiesTarget::Permission(_)) =
-                properties_hit(props, view, true, window, Scale::ONE, &theme, at)
-            {
-                return at;
-            }
-        }
-    }
-    panic!("the grid must be reachable at the window's own open size");
+    let bar = RowList::new(0);
+    let empty = TextField::new();
+    let controls = resting(&bar, &empty);
+    let column = properties_owner_editor_rect(props, window, Scale::ONE, &theme, OwnerField::Uid)
+        .expect("the section is seated at the window's own open size")
+        .left();
+    (0..i32::try_from(window.height).unwrap())
+        .map(|y| Point::new(column, y))
+        .find(|at| {
+            matches!(
+                properties_hit(props, view, controls, window, Scale::ONE, &theme, *at),
+                Some(PropertiesTarget::Permission(_))
+            )
+        })
+        .expect("the toggles must be reachable at the window's own open size")
 }
 
 /// The sections walk without wrapping, and a strip index round-trips to the
@@ -7029,17 +7123,20 @@ fn a_scrolled_row_slot_names_the_attribute_under_it() {
 
     // Probe down the rows' own column rather than scanning the client: the
     // mapping under test is slot → index, not where the band sits.
+    let bar = RowList::new(0);
+    let empty = TextField::new();
     let seen = |attrs: AttrView| -> Vec<usize> {
         let view = PropertiesView {
             tab: PropertiesTab::Attributes,
             attrs,
+            perms: PermsCursor::default(),
         };
         let mut found = Vec::new();
         for y in 0..i32::try_from(window.height).unwrap() {
             if let Some(PropertiesTarget::Attribute(index)) = properties_hit(
                 &props,
                 view,
-                true,
+                resting(&bar, &empty),
                 window,
                 Scale::ONE,
                 &theme,
@@ -7106,10 +7203,13 @@ fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
     // A window dragged smaller than any of its bands places no control off
     // its own surface and offers no editor to type into.
     let tiny = Rect::new(0, 0, 20, 16);
+    let bar = RowList::new(0);
+    let empty = TextField::new();
     for tab in PropertiesTab::ALL {
         let view = PropertiesView {
             tab,
             attrs: AttrView::default(),
+            perms: PermsCursor::default(),
         };
         for y in 0..i32::try_from(tiny.height).unwrap() {
             for x in 0..i32::try_from(tiny.width).unwrap() {
@@ -7117,7 +7217,7 @@ fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
                     properties_hit(
                         &props,
                         view,
-                        true,
+                        resting(&bar, &empty),
                         tiny,
                         Scale::ONE,
                         &theme,
@@ -7131,7 +7231,7 @@ fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
     assert_eq!(properties_attr_visible_rows(tiny, Scale::ONE, &theme), 0);
     assert_eq!(properties_attr_editor_rect(tiny, Scale::ONE, &theme), None);
     assert_eq!(
-        properties_owner_editor_rect(tiny, Scale::ONE, &theme, OwnerField::Uid),
+        properties_owner_editor_rect(&props, tiny, Scale::ONE, &theme, OwnerField::Uid),
         None
     );
 }
@@ -7140,8 +7240,9 @@ fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
 fn each_owning_id_carries_the_editor_it_opens_inside_the_client() {
     let window = props_window();
     let theme = Theme::dark();
+    let props = props_with(Attributes::Unsupported);
     for field in [OwnerField::Uid, OwnerField::Gid] {
-        let rect = properties_owner_editor_rect(window, Scale::ONE, &theme, field)
+        let rect = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, field)
             .expect("the row fits the window it opens at");
         assert!(rect.width > 0 && rect.height > 0);
         assert!(rect.left() >= window.left());
@@ -7157,10 +7258,10 @@ fn each_owning_id_carries_the_editor_it_opens_inside_the_client() {
         );
     }
     // Each owning id gets its own labelled row, one below the other.
-    let uid =
-        properties_owner_editor_rect(window, Scale::ONE, &theme, OwnerField::Uid).expect("uid");
-    let gid =
-        properties_owner_editor_rect(window, Scale::ONE, &theme, OwnerField::Gid).expect("gid");
+    let uid = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Uid)
+        .expect("uid");
+    let gid = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Gid)
+        .expect("gid");
     assert_eq!(uid.left(), gid.left());
     assert!(gid.top() > uid.top());
 }
@@ -7191,6 +7292,7 @@ fn the_frame_does_not_move_with_the_node_it_describes() {
     let perms_view = PropertiesView {
         tab: PropertiesTab::Permissions,
         attrs: AttrView::default(),
+        perms: PermsCursor::default(),
     };
     assert_eq!(
         scan_first_permission(&link, perms_view, window),
@@ -7233,10 +7335,12 @@ fn a_window_paints_each_state_it_can_be_in_without_panicking() {
     let perms = PropertiesView {
         tab: PropertiesTab::Permissions,
         attrs: AttrView::default(),
+        perms: PermsCursor::default(),
     };
     let attrs = PropertiesView {
         tab: PropertiesTab::Attributes,
         attrs: AttrView::default(),
+        perms: PermsCursor::default(),
     };
 
     let reading = paint(PropertiesFrame::Reading, general, resting(&bar, &empty));
@@ -7287,9 +7391,9 @@ fn a_window_paints_each_state_it_can_be_in_without_panicking() {
     );
 }
 
-/// The live editors draw over the cells they belong to, an ownership cell the
-/// user may not change is not drawn as a control at all, and the identity band
-/// is drawn from what the caller named.
+/// The live editors draw in the cells they belong to, an ownership cell the
+/// user may not change is drawn refused, and the identity band is drawn from
+/// what the caller named.
 #[test]
 fn a_window_draws_its_live_controls_and_its_named_subject() {
     let theme = Theme::dark();
@@ -7300,10 +7404,12 @@ fn a_window_draws_its_live_controls_and_its_named_subject() {
     let perms = PropertiesView {
         tab: PropertiesTab::Permissions,
         attrs: AttrView::default(),
+        perms: PermsCursor::default(),
     };
     let attrs = PropertiesView {
         tab: PropertiesTab::Attributes,
         attrs: AttrView::default(),
+        perms: PermsCursor::default(),
     };
     let paint = |view: PropertiesView, controls: PropertiesControls<'_>| {
         let mut surface = Surface::new(window.width, window.height).expect("surface");
@@ -7325,17 +7431,34 @@ fn a_window_draws_its_live_controls_and_its_named_subject() {
     // Regression: an *idle* text field drew identically to the live one over
     // it, so a reader could not tell whether their keys were landing.
     let editor = TextField::new().with_text("1000");
+    let editing = paint(
+        perms,
+        PropertiesControls {
+            owner: Some((OwnerField::Uid, &editor)),
+            ..resting(&bar, &empty)
+        },
+    );
     assert_ne!(
-        paint(
-            perms,
-            PropertiesControls {
-                owner: Some((OwnerField::Uid, &editor)),
-                ..resting(&bar, &empty)
-            },
-        ),
-        on_perms,
+        editing, on_perms,
         "a cell being typed into must not draw like the plate that opens it"
     );
+    // And it is drawn exactly where the rectangle the host feeds it keys
+    // against says, so a key's repaint covers the editor it changed.
+    let cell = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Uid)
+        .expect("the row fits the window it opens at");
+    let width = usize::try_from(window.width).unwrap();
+    for (index, (now, before)) in editing.iter().zip(&on_perms).enumerate() {
+        if now != before {
+            let at = Point::new(
+                i32::try_from(index % width).unwrap(),
+                i32::try_from(index / width).unwrap(),
+            );
+            assert!(
+                cell.contains(at),
+                "the editor drew at {at:?}, outside {cell:?}"
+            );
+        }
+    }
 
     let typed = TextField::new().with_text("user.note = hi");
     assert_ne!(
@@ -7349,8 +7472,8 @@ fn a_window_draws_its_live_controls_and_its_named_subject() {
         on_attrs
     );
 
-    // A session without `CAP_FS_CHOWN` is never shown a control it could not
-    // use: its ids read as plain values.
+    // A session without `CAP_FS_CHOWN` is shown the cells refused, wearing the
+    // Authority Mark and the sentence saying why.
     assert_ne!(
         paint(
             perms,
@@ -7439,7 +7562,9 @@ fn the_window_opens_sized_to_its_tallest_section_and_scrolls_its_list() {
     let full = props_with(some_attributes(20));
 
     // Every section's own controls fit at the open size.
-    assert!(properties_owner_editor_rect(window, Scale::ONE, &theme, OwnerField::Gid).is_some());
+    assert!(
+        properties_owner_editor_rect(&full, window, Scale::ONE, &theme, OwnerField::Gid).is_some()
+    );
     let visible = properties_attr_visible_rows(window, Scale::ONE, &theme);
     assert!(
         visible > 0 && visible < 20,
@@ -7455,6 +7580,7 @@ fn the_window_opens_sized_to_its_tallest_section_and_scrolls_its_list() {
     let perms_view = PropertiesView {
         tab: PropertiesTab::Permissions,
         attrs: AttrView::default(),
+        perms: PermsCursor::default(),
     };
     assert!(
         scan_first_permission(&full, perms_view, window).y > i32::try_from(head).unwrap(),
@@ -7465,6 +7591,357 @@ fn the_window_opens_sized_to_its_tallest_section_and_scrolls_its_list() {
     let hidpi = Scale::from_dpi(192).expect("a valid scale");
     let (hw, hh) = properties_window_extent(hidpi, &theme);
     assert!(hw > w && hh > h, "the window is authored in logical pixels");
+}
+
+/// The Permissions section on show, with the keyboard still on the strip.
+fn perms_view() -> PropertiesView {
+    PropertiesView {
+        tab: PropertiesTab::Permissions,
+        ..PropertiesView::default()
+    }
+}
+
+/// Each permission toggle's horizontal extent `(left, right)`, measured
+/// through the hit-test along one line through each class row — found down
+/// the column the section's controls begin at, so the probe costs a few
+/// lines rather than a whole-client scan.
+fn toggle_extents(
+    props: &Properties,
+    window: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> BTreeMap<u32, (i32, i32)> {
+    let bar = RowList::new(0);
+    let empty = TextField::new();
+    let controls = resting(&bar, &empty);
+    let hit = |at: Point| properties_hit(props, perms_view(), controls, window, scale, theme, at);
+    let column = properties_owner_editor_rect(props, window, scale, theme, OwnerField::Uid)
+        .expect("the section is seated")
+        .left();
+    let mut lines: Vec<i32> = Vec::new();
+    let mut last = None;
+    for y in 0..i32::try_from(window.height).unwrap() {
+        let bit = match hit(Point::new(column + 1, y)) {
+            Some(PropertiesTarget::Permission(bit)) => Some(bit),
+            _ => None,
+        };
+        if bit.is_some() && bit != last {
+            // A few pixels into the row, clear of its edge.
+            lines.push(y + 3);
+        }
+        last = bit;
+    }
+    let mut extents = BTreeMap::new();
+    for y in lines {
+        for x in 0..i32::try_from(window.width).unwrap() {
+            if let Some(PropertiesTarget::Permission(bit)) = hit(Point::new(x, y)) {
+                let extent = extents.entry(bit).or_insert((x, x));
+                extent.0 = extent.0.min(x);
+                extent.1 = extent.1.max(x);
+            }
+        }
+    }
+    extents
+}
+
+/// The flags of one class, as the section builds them, measured.
+fn class_flags_width(scale: Scale, theme: &Theme) -> u32 {
+    use tairix_controls::{Checkbox, FlagSet, SelectionState};
+    FlagSet::new(
+        ["Read", "Write", "Execute"]
+            .into_iter()
+            .map(|label| Checkbox::new(label, SelectionState::Unselected))
+            .collect(),
+    )
+    .measured_width(scale, theme)
+}
+
+/// At the size the window opens at, every class's three flags are seated
+/// whole — no label the reader needs is cut — under the shipped themes, at
+/// double density, and under a wider type ladder than either carries.
+///
+/// Regression: the section's column is capped at half a row, and the window's
+/// hand-picked width left too little of a row for three labelled flags.
+#[test]
+fn every_flag_is_seated_whole_at_the_size_the_window_opens_at() {
+    use tairix_controls::testkit::text_ladder;
+
+    let props = props_with(Attributes::Unsupported);
+    let cases = [
+        (Theme::dark(), Scale::ONE),
+        (Theme::light(), Scale::ONE),
+        (Theme::dark(), Scale::from_percent(200).expect("scale")),
+        (text_ladder(22), Scale::ONE),
+    ];
+    for (theme, scale) in cases {
+        let (w, h) = properties_window_extent(scale, &theme);
+        let window = Rect::new(0, 0, w, h);
+        let extents = toggle_extents(&props, window, scale, &theme);
+        assert_eq!(extents.len(), PERMISSION_BITS.len(), "{}", theme.name());
+        for class in PERMISSION_BITS.chunks(3) {
+            let left = extents[&class[0]].0;
+            let right = extents[&class[2]].1;
+            assert_eq!(
+                u32::try_from(right - left + 1).unwrap(),
+                class_flags_width(scale, &theme),
+                "a class's flags were narrowed under {} at {}%",
+                theme.name(),
+                scale.percent()
+            );
+        }
+    }
+}
+
+/// The smallest window the manager declares still seats every toggle: the
+/// labels give way, and never a box.
+#[test]
+fn the_narrowest_window_still_seats_every_toggle_apart() {
+    let theme = Theme::dark();
+    let props = props_with(Attributes::Unsupported);
+    let crate::WindowSizing::Resizable { min_width_px, .. } = crate::win_sizing(Scale::ONE, &theme)
+    else {
+        panic!("the manager's windows are resizable");
+    };
+    let (_, h) = properties_window_extent(Scale::ONE, &theme);
+    let window = Rect::new(0, 0, min_width_px, h);
+    let extents = toggle_extents(&props, window, Scale::ONE, &theme);
+    assert_eq!(extents.len(), PERMISSION_BITS.len());
+    let side = Scale::ONE.scale_length(theme.metrics().selector_extent);
+    let mut spans: Vec<(i32, i32)> = extents.values().copied().collect();
+    spans.sort_unstable();
+    for (left, right) in &spans {
+        assert!(
+            u32::try_from(right - left + 1).unwrap() >= side,
+            "a box was cut"
+        );
+    }
+    // Three to a class row, and the three apart.
+    for class in PERMISSION_BITS.chunks(3) {
+        for pair in class.windows(2) {
+            assert!(extents[&pair[0]].1 < extents[&pair[1]].0, "toggles overlap");
+        }
+    }
+}
+
+/// Feed `key` to the Permissions section, keeping the cursor it answers.
+fn perms_press(
+    props: &Properties,
+    view: &mut PropertiesView,
+    controls: PropertiesControls<'_>,
+    key: Key,
+) -> PermsKeyed {
+    let keyed = properties_permissions_key(
+        props,
+        *view,
+        controls,
+        props_window(),
+        Scale::ONE,
+        &Theme::dark(),
+        (key, Modifiers::default()),
+        &mut tairix_controls::damage::sink(),
+    );
+    view.perms = keyed.cursor;
+    keyed
+}
+
+/// Everything a press can reach on the section — every toggle and both owning
+/// ids, as the whole-client scan above establishes — the keyboard reaches
+/// too, and names it the same way, so a toggle flipped from the keyboard is
+/// the one the pointer would have flipped.
+#[test]
+fn the_keyboard_reaches_every_control_the_pointer_does() {
+    let props = props_with(Attributes::Unsupported);
+    let bar = RowList::new(0);
+    let empty = TextField::new();
+    let controls = resting(&bar, &empty);
+    let mut view = perms_view();
+    let named = Key::Named;
+
+    assert!(!view.perms.holds());
+    perms_press(&props, &mut view, controls, named(NamedKey::Down));
+    assert_eq!(view.perms.row, Some((0, 0)), "Down takes the keyboard in");
+
+    let mut reached = Vec::new();
+    for _ in 0..6 {
+        for _ in 0..3 {
+            perms_press(&props, &mut view, controls, named(NamedKey::Left));
+        }
+        for _ in 0..3 {
+            if let Some(target) = perms_press(&props, &mut view, controls, Key::Char(' ')).target {
+                if !reached.contains(&target) {
+                    reached.push(target);
+                }
+            }
+            perms_press(&props, &mut view, controls, named(NamedKey::Right));
+        }
+        perms_press(&props, &mut view, controls, named(NamedKey::Down));
+    }
+    let pressable = PERMISSION_BITS
+        .iter()
+        .copied()
+        .map(PropertiesTarget::Permission)
+        .chain([OwnerField::Uid, OwnerField::Gid].map(PropertiesTarget::Owner));
+    for target in pressable {
+        assert!(reached.contains(&target), "{target:?} is pointer-only");
+    }
+    assert_eq!(reached.len(), PERMISSION_BITS.len() + 2, "{reached:?}");
+}
+
+/// The cursor walks a column of flags, carries between the two groups, and
+/// hands the keyboard back to the strip; a refused ownership cell is reached
+/// and read but opens nothing.
+#[test]
+fn the_permissions_cursor_walks_carries_and_steps_back_out() {
+    let props = props_with(Attributes::Unsupported);
+    let bar = RowList::new(0);
+    let empty = TextField::new();
+    let controls = resting(&bar, &empty);
+    let mut view = perms_view();
+    let press = |view: &mut PropertiesView, key| perms_press(&props, view, controls, key);
+    let named = Key::Named;
+
+    // Nothing but Down or Tab takes the keyboard in from the strip.
+    assert_eq!(
+        press(&mut view, Key::Char(' ')).cursor,
+        PermsCursor::default()
+    );
+    press(&mut view, named(NamedKey::Tab));
+    assert_eq!(view.perms.row, Some((0, 0)));
+    assert_eq!(
+        press(&mut view, named(NamedKey::Up)).cursor.row,
+        Some((0, 0)),
+        "the top of the section clamps"
+    );
+
+    // Down into the owner class, across to Write, and down the Write column.
+    press(&mut view, named(NamedKey::Down));
+    press(&mut view, named(NamedKey::Right));
+    assert_eq!(
+        press(&mut view, Key::Char(' ')).target,
+        Some(PropertiesTarget::Permission(0o200)),
+        "the owner's write bit"
+    );
+    press(&mut view, named(NamedKey::Down));
+    assert_eq!(view.perms.flag, 1, "walking down a column stays in it");
+    assert_eq!(
+        press(&mut view, named(NamedKey::Enter)).target,
+        Some(PropertiesTarget::Permission(0o020)),
+        "the group's write bit"
+    );
+
+    // Off the last class and into the ownership group, then back.
+    press(&mut view, named(NamedKey::Down));
+    press(&mut view, named(NamedKey::Down));
+    assert_eq!(
+        view.perms.row,
+        Some((1, 0)),
+        "Down carries into the next group"
+    );
+    assert_eq!(
+        press(&mut view, Key::Char(' ')).target,
+        Some(PropertiesTarget::Owner(OwnerField::Uid))
+    );
+    press(&mut view, named(NamedKey::Down));
+    assert_eq!(
+        press(&mut view, named(NamedKey::Down)).cursor.row,
+        Some((1, 1)),
+        "the bottom of the section clamps"
+    );
+    press(&mut view, named(NamedKey::Up));
+    press(&mut view, named(NamedKey::Up));
+    assert_eq!(
+        view.perms.row,
+        Some((0, 3)),
+        "Up carries back to the last class"
+    );
+
+    // Escape and Tab both hand the keyboard back.
+    press(&mut view, named(NamedKey::Escape));
+    assert!(!view.perms.holds());
+    press(&mut view, named(NamedKey::Down));
+    press(&mut view, named(NamedKey::Tab));
+    assert!(!view.perms.holds());
+
+    // A refused session reaches its ownership rows, and opens nothing there.
+    let locked = refused(&bar, &empty);
+    let mut view = PropertiesView {
+        perms: PermsCursor {
+            row: Some((1, 0)),
+            flag: 0,
+        },
+        ..perms_view()
+    };
+    assert_eq!(
+        perms_press(&props, &mut view, locked, Key::Char(' ')).target,
+        None
+    );
+
+    // While an id editor is open the keyboard is the editor's: the cursor
+    // neither moves nor acts.
+    let typing = TextField::new().with_text("10");
+    let editing = PropertiesControls {
+        owner: Some((OwnerField::Uid, &typing)),
+        ..resting(&bar, &empty)
+    };
+    for key in [
+        named(NamedKey::Down),
+        named(NamedKey::Escape),
+        Key::Char(' '),
+    ] {
+        let keyed = perms_press(&props, &mut view, editing, key);
+        assert_eq!(keyed.cursor.row, Some((1, 0)), "{key:?} moved the cursor");
+        assert_eq!(keyed.target, None);
+    }
+}
+
+/// Taking the keyboard in and moving it reports the rows it changed, so the
+/// host repaints them rather than the window.
+#[test]
+fn the_permissions_cursor_reports_what_it_repaints() {
+    let props = props_with(Attributes::Unsupported);
+    let bar = RowList::new(0);
+    let empty = TextField::new();
+    let controls = resting(&bar, &empty);
+    let theme = Theme::dark();
+    let window = props_window();
+    let key = |view: PropertiesView, key: Key| {
+        let mut damage = tairix_controls::damage::sink();
+        let keyed = properties_permissions_key(
+            &props,
+            view,
+            controls,
+            window,
+            Scale::ONE,
+            &theme,
+            (key, Modifiers::default()),
+            &mut damage,
+        );
+        (keyed, damage)
+    };
+    let (entered, damage) = key(perms_view(), Key::Named(NamedKey::Down));
+    assert!(!damage.is_empty(), "the first row gains its ring");
+    let area = |region: &tairix_geometry::Region| {
+        region
+            .rects()
+            .iter()
+            .map(|rect| u64::from(rect.width) * u64::from(rect.height))
+            .sum::<u64>()
+    };
+    assert!(
+        area(&damage) < u64::from(window.width) * u64::from(window.height) / 4,
+        "a ring move is not a whole-window repaint"
+    );
+    let (_, idle) = key(
+        PropertiesView {
+            perms: entered.cursor,
+            ..perms_view()
+        },
+        Key::Char('x'),
+    );
+    assert!(
+        idle.is_empty(),
+        "a key that changes nothing repaints nothing"
+    );
 }
 
 /// The gutter bar moves the same list the wheel and the rows do, through the

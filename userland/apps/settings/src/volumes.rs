@@ -21,8 +21,8 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_controls::{
-    FieldControl, FieldGroup, FieldLayout, FieldRow, MeterValue, MetricInstrument, MetricTile,
-    PressureKind, ProgressValue, StatusPill,
+    stack, FieldControl, FieldGroup, FieldLayout, FieldRow, MeterValue, MetricInstrument,
+    MetricTile, PressureKind, ProgressValue, StatusPill,
 };
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_icon::{disk_icon, IconArtwork, IconRequest};
@@ -32,8 +32,6 @@ use tairix_procinfo::{
 use tairix_raster::Surface;
 use tairix_theme::{SignalRole, Theme};
 use tairix_util::size::{format_binary, SIZE_TEXT_MAX};
-
-use crate::stack;
 
 /// The label of the capacity reading: the tile's own, and the row that
 /// states its absence.
@@ -182,7 +180,8 @@ impl VolumeCard {
     /// The height the whole card needs at `width`, which its facts' wrapped
     /// descriptions depend on.
     fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
-        let facts = self.facts.measured_height(width, scale, theme);
+        let column = self.facts.slot_column(width, scale, theme);
+        let facts = self.facts.measured_height(width, column, scale, theme);
         match &self.capacity {
             Some(tile) => facts
                 .saturating_add(stack::gap(scale, theme))
@@ -200,14 +199,13 @@ impl VolumeCard {
         theme: &Theme,
         artwork: &mut dyn IconArtwork,
     ) {
-        let facts_h = self.facts.measured_height(bounds.width, scale, theme);
+        let column = self.facts.slot_column(bounds.width, scale, theme);
+        let facts_h = self
+            .facts
+            .measured_height(bounds.width, column, scale, theme);
         let plate = Rect::new(bounds.left(), bounds.top(), bounds.width, facts_h);
-        self.facts.render(
-            surface,
-            FieldLayout::new(plate, self.facts.slot_column(plate, scale, theme)),
-            scale,
-            theme,
-        );
+        self.facts
+            .render(surface, FieldLayout::new(plate, column), scale, theme);
         let Some(tile) = &self.capacity else {
             return;
         };
@@ -304,16 +302,14 @@ impl Readings {
     /// pixels wide.
     #[must_use]
     pub fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
-        let gap = stack::gap(scale, theme);
         let plate = stack::plate_width(width, scale, theme);
-        let plates: u32 = self
-            .cards
-            .iter()
-            .map(|card| card.measured_height(plate, scale, theme))
-            .fold(0, u32::saturating_add);
-        let gaps =
-            gap.saturating_mul(u32::try_from(self.cards.len().saturating_add(1)).unwrap_or(1));
-        plates.saturating_add(gaps)
+        stack::height(
+            self.cards
+                .iter()
+                .map(|card| card.measured_height(plate, scale, theme)),
+            scale,
+            theme,
+        )
     }
 
     /// How many cards the column seats from the one it draws from.

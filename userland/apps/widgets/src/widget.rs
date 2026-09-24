@@ -93,6 +93,7 @@ fn commit_field(group: &mut FieldGroup, action: FieldGroupAction, rect: Rect, da
     };
     match (row.control_mut(), action.action) {
         (FieldControl::Toggle(c), FieldAction::Set { on }) => c.set_on(on),
+        (FieldControl::Flags(c), FieldAction::SetFlag { index, on }) => c.set_on(index, on),
         (FieldControl::Combo(c), FieldAction::Selected { index }) => c.set_selected(index),
         (
             FieldControl::Slider(c),

@@ -43,7 +43,7 @@ blocking I/O an interactive surface may not perform.
 
 | Topic | Payload | Published by | Read by |
 |---|---|---|---|
-| `Desktop` | `DesktopInfo` (16 bytes) | the holder of a seat's live display lease | every windowed application |
+| `Desktop` | `DesktopInfo` (28 bytes) | the holder of a seat's live display lease | every windowed application |
 | `Mounts` | none — the generation *is* the news | the kernel, on every mount-table mutation | the file manager's places rail |
 | `MemoryPressure` | the band depth (1 byte) | the kernel, from the pressure gauge | any process holding a reclaimable cache |
 
@@ -60,7 +60,9 @@ never reads a shape the publisher could not have meant. `Notice::encode` /
 
 `NOTICE_PAYLOAD_MAX` sizes a subscriber's buffer and the kernel's per-topic
 retention. It is a containment bound, not a capacity: it is what stops a
-topic's payload growing into a channel, so it stays fixed.
+topic's payload growing into a channel. It is the widest topic's own record,
+the desktop's, which carries the screen, the scale, the four theme axes and the
+double-click interval.
 
 ## Authority
 
@@ -114,9 +116,9 @@ The generated header carries the topic values, each topic's exact payload
 length, the ceiling, and both prototypes:
 
 ```c
-#define TAIRIX_NOTICE_PAYLOAD_MAX 16u
+#define TAIRIX_NOTICE_PAYLOAD_MAX 28u
 #define TAIRIX_NOTICE_TOPIC_DESKTOP 0u
-#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 16u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 28u
 /* ... */
 
 uint64_t tairix_sys_notice_read(uint32_t topic, void *buf, uintptr_t len);

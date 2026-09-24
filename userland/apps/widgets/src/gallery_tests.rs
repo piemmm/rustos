@@ -350,6 +350,43 @@ fn a_field_rows_choice_list_reports_the_pixels_it_covers() {
     assert!(!field_group_popup_open(&prover.gallery));
 }
 
+/// The Forms tab's group is given room for every row it demonstrates: a row
+/// the plate had to omit is a control the catalogue silently stops showing.
+#[test]
+fn the_forms_group_seats_every_row_it_demonstrates() {
+    let themes = ThemeRegistry::with_builtins();
+    let theme = themes.active();
+    let gallery = select_tab(Gallery::new(), GalleryTab::Forms);
+    let rect = gallery
+        .widget_rect_for_test(0, window(), Scale::ONE, theme)
+        .expect("the group is laid out");
+    let DemoWidget::FieldGroup(group) = &gallery.current_panel()[0].widget else {
+        panic!("the Forms tab shows a field group");
+    };
+    assert!(
+        group
+            .rows()
+            .iter()
+            .any(|row| matches!(row.control(), tairix_controls::FieldControl::Flags(_))),
+        "the flag-set slot is demonstrated"
+    );
+    let column = group.slot_column(rect.width, Scale::ONE, theme);
+    let needed = group.measured_height(rect.width, column, Scale::ONE, theme);
+    assert!(
+        needed <= rect.height,
+        "the group needs {needed} of the {} it is given",
+        rect.height
+    );
+    assert!(group
+        .row_rect(
+            group.len() - 1,
+            tairix_controls::FieldLayout::new(rect, column),
+            Scale::ONE,
+            theme
+        )
+        .is_some());
+}
+
 /// Whether the Forms panel's field group is showing a choice list.
 fn field_group_popup_open(gallery: &Gallery) -> bool {
     gallery

@@ -52,7 +52,7 @@ under the floor and are unchanged.
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
-| `form` | `FieldRow`, `FieldGroup` |
+| `form`, `stack` | `FieldRow`, `FieldGroup`, `FlagSet`, and the plate column groups stack down |
 | `credential` | `CredentialSheet` |
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
@@ -118,7 +118,7 @@ command (`plans/NEW-MENUS.md` §1.6).
 A settings surface is a column of captioned groups of label/description/control
 rows, and that shape is the `form` family's, not each application's. A
 `FieldRow` is one setting: a leading label, an optional secondary description,
-and a trailing slot holding one real `Toggle`, `ComboBox`, `Slider`,
+and a trailing slot holding one real `Toggle`, `FlagSet`, `ComboBox`, `Slider`,
 `TextField`, `Button`, a read-only `Reading`, or a stated `Unmeasured` absence
 of one. A `FieldGroup` is the captioned plate those rows sit on, with an
 optional footnote beneath. Both compose the row chrome `ListRow` and `TableRow`
@@ -172,15 +172,52 @@ A group resolves the one slot column its controls line up in
 half-span ceiling when a row's control takes whatever column it is given (a
 cramped slider cannot be aimed and a cramped entry cannot be read). Each
 control answers that width itself — `Button::measured_width`,
-`ComboBox::measured_width`, `Toggle::measured_width` — so the column comes from
-the controls' own layout rather than a second copy of it. A combo box measures
-its *widest* choice, not the selected one, so choosing a different value never
-resizes the field or moves the column.
+`ComboBox::measured_width`, `Toggle::measured_width`,
+`Checkbox::measured_width`, `FlagSet::measured_width` — so the column comes
+from the controls' own layout rather than a second copy of it. A combo box
+measures its *widest* choice, not the selected one, so choosing a different
+value never resizes the field or moves the column. The group turns that back
+into a size: `FieldGroup::natural_width` is the narrowest plate that seats
+every measured control whole under the half-span ceiling, so an owner sizing a
+window from its content opens it with every control readable.
+
+An owner stacking several groups may lay them all out in one column — the
+widest any of them resolves (`FieldGroup::shared_column`) — so controls line
+up down the whole surface. The column is then an input to every question a
+group answers about its rows (`measured_height`, `row_text_span`, `row_rect`,
+`row_at`, `set_focus`), because it decides how much room a row's description
+wraps into: a height measured in a group's own narrower column would reserve
+too little and cut the description's last line.
+
+A `FlagSet` is the slot for a small set of independent flags — the read,
+write and execute bits of one permission class — on one line. Each flag *is* a
+labelled `Checkbox`, so the set restates no box, press, focus ring, disabled
+look or Authority Mark; it owns only the layout that seats the flags side by
+side, which flag the pointer is over and which holds a press, and which the
+keyboard rests on. Each flag keeps room after its label no smaller than the
+Signal Bead band, so a flag marked denied does not stamp the bead over its own
+label. In a slot too narrow for every flag whole, the boxes keep their size and
+the labels share what is left, eliding through the checkbox's own mark.
+`Left`/`Right` walk the flags and clamp at either end; `Space`/`Enter` toggle
+the one the keyboard rests on. The row's refusal is every flag's, like any
+other slot's.
 
 A row reports what the control in its slot asked for and commits nothing
 itself. `FieldAction::SetValue` is a slider's live value and
 `FieldAction::Settled` its settle point; a durable change — a document posted,
-a store written — is made on the settle alone.
+a store written — is made on the settle alone. `FieldAction::SetFlag { index,
+on }` names the one flag of a `FlagSet` that changed, so the owner commits that
+flag and leaves its siblings alone. The motion that takes the pointer off a
+slot's control still reaches it, so the control's hover look leaves with the
+pointer.
+
+Groups stacked down a surface are one **plate column** (`stack`): a gap above
+and beside each plate, whole plates only after the first (a blank surface
+would be worse than a cut plate), `stack::height` for what seats them all,
+`stack::column_width` for the column a plate needs, and `stack::reveal_from`
+for scrolling one into view by whole plates. It is the one placement the
+Settings panes, the storage cards and the file manager's Permissions section
+read, so none carries its own copy of the gaps.
 
 ### Where a drop-down's list goes
 
@@ -193,9 +230,10 @@ by — over the control's own `popup_size`, rather than a copy per owner. A
 field in a footer therefore opens upward without its owner knowing it is
 special: there is simply no room beneath it.
 
-Present-day consumers: the widget gallery's Forms tab and the Date & Time
-window, whose two groups of three civil fields replaced a hand-rolled
-three-column grid.
+Present-day consumers: the widget gallery's Forms tab, the Settings panes, the
+Date & Time window's two groups of three civil fields, and the file manager's
+Permissions section — an access group of one `FlagSet` row per permission
+class over an ownership group.
 
 ### Reporting a reading, and standing beside a list
 
@@ -829,7 +867,7 @@ it in the same mark rather than cutting it where its room ran out.
 carry prose ask for one: `Dialog::height_for_content(content, width, ..)`,
 `Card::measured_height(width, ..)`, `Notification::measured_height(width, ..)`,
 `FieldRow::measured_height(span, ..)` and `FieldGroup::measured_height(width,
-..)`. Each measures through the very block its paint draws, and the paint is
+column, ..)`. Each measures through the very block its paint draws, and the paint is
 bounded by the room it was actually given, so a surface sized by the
 measurement draws exactly what it reserved and a surface given less elides
 rather than spilling. A tooltip and a help tip have no owner to ask, so they

@@ -497,9 +497,9 @@ can never diverge in navigation semantics, listing policy, or look.
   drawn over a window. The file manager's is a **window** of its own
   (`render::draw_properties_window`, sized by `properties_window_extent`), so
   several nodes are inspected at once and the listing stays usable while they
-  are: the client is the fields, the labelled permissions grid, the ownership
-  control and the extended-attribute list, with no second panel header inside
-  a window that already has a title bar. `render::PropertiesFrame` is what it
+  are: the client is the fields, the permission and ownership controls, and
+  the extended-attribute list, with no second panel header inside a window
+  that already has a title bar. `render::PropertiesFrame` is what it
   draws — `Reading` while the read is in flight, `Refused` with the reason, or
   `Ready` — because the read leaves the loop (one `fs_stat` plus one call per
   attribute key) and an empty summary would be a claim the reader cannot
@@ -517,14 +517,17 @@ can never diverge in navigation semantics, listing policy, or look.
   seam; a VFS refusal leaves the node's mode unchanged and is surfaced as
   `ModeError::Refused`. The change is the caller's own permission-checked
   `fs_set_mode` (no new capability), so the read-only picker never calls it.
-  The drawn control is a labelled permissions grid below the metadata fields:
-  `render::PERMISSION_BITS` / `permission_cells` are the one definition of the
-  nine owner/group/other `rwx` bits, and the window draws `Read`/`Write`/`Exec`
-  column headers over three `Owner`/`Group`/`Other` triad rows of clickable
-  `lib/controls` `Checkbox`es placed from the shared `PermGrid` geometry the
-  hit-test inverts. The setuid/setgid/sticky bits stay in the octal/symbolic
-  display and are edited via `chmod` — a deliberate scope boundary, and a
-  toggle preserves them.
+  The drawn control is the Permissions section, composed of the shared
+  `lib/controls` form family with no layout arithmetic of its own: an
+  **ACCESS** group — the mode as a `Reading` row over one `Owner`/`Group`/
+  `Other` row per class, each slot a `FlagSet` of labelled `Read`/`Write`/
+  `Execute` `Checkbox`es — over an **OWNERSHIP** group, stacked by the shared
+  plate column (`tairix_controls::stack`). `render::PERMISSION_BITS` /
+  `permission_cells` are the one definition of the nine owner/group/other
+  `rwx` bits; the paint, `properties_hit` and `properties_permissions_key` all
+  read one placement, so a press and a key reach the same toggle. The
+  setuid/setgid/sticky bits stay in the octal/symbolic display and are edited
+  via `chmod` — a deliberate scope boundary, and a toggle preserves them.
 - **Ownership edit** (`owner_edit::set_owner`, `plans/NEW-FILEMANAGER.md`
   FM8b): the model of committing a new owning user and/or group to a named
   node (the `chown(2)` / `chgrp(2)` shape), host-proven ahead of the drawn
@@ -539,14 +542,15 @@ can never diverge in navigation semantics, listing policy, or look.
   validates before any syscall, maps `None` onto the sentinel, and applies
   through an injected `fs_set_owner` seam; a VFS refusal (including the
   missing-`CAP_FS_CHOWN` denial) leaves the ownership unchanged and surfaces
-  as `OwnerError::Refused`. The drawn control is inline on the Properties
-  owner row: `render::OwnerField` and the `Owner` arm of
-  `render::properties_hit` resolve a click to the uid or gid value it edits,
-  `render::properties_owner_editor_rect` is where the active `lib/controls`
-  `TextField` is drawn, and each value is underlined as editable. The control
-  is offered only where the launching user holds `CAP_FS_CHOWN` (read from the
-  kernel-attested `self_origin`), so a session that cannot use it is never
-  shown it.
+  as `OwnerError::Refused`. The drawn control is the Permissions section's
+  ownership group: `render::OwnerField` and the `Owner` arm of
+  `render::properties_hit` resolve a click to the uid or gid plate it edits,
+  and `render::properties_owner_editor_rect` is the row slot the active
+  `lib/controls` `TextField` takes. The plates are editable only where the
+  launching user holds `CAP_FS_CHOWN` (read from the kernel-attested
+  `self_origin`); a session without it is shown them refused, wearing the
+  Authority Mark with the reason in the group's footnote, and resolves nothing
+  on them.
 - **Extended attributes** (`properties::Attribute`, `render::AttrAction`,
   `plans/ARXFS-METADATA.md`): the Properties window lists a node's visible
   extended attributes as selectable rows and applies a typed
@@ -650,11 +654,11 @@ can never diverge in navigation semantics, listing policy, or look.
   overlay — a centered `lib/controls` `Panel` painting `properties_rows` for
   the selected node's `Properties`, clipped so a too-small window shows what
   fits rather than panicking. `draw_properties_window` is the file manager's
-  surface, laid out from its own window's client: the metadata fields, a
-  labelled `Owner`/`Group`/`Other` × `Read`/`Write`/`Exec` permissions grid of
-  clickable toggles, the uid/gid values editable for a `CAP_FS_CHOWN` holder,
-  and the extended-attribute list with its `key = value` editor — every one of
-  them placed and hit-tested through the one shared layout.
+  surface, laid out from its own window's client: the metadata fields, the
+  Permissions section's labelled `Read`/`Write`/`Execute` flags for each of
+  `Owner`/`Group`/`Other`, the uid/gid values editable for a `CAP_FS_CHOWN`
+  holder, and the extended-attribute list with its `key = value` editor —
+  every one of them placed and hit-tested through the one shared layout.
   When the chrome carries a places rail, `render` paints the rail down the
   leading edge first and lays everything else out inside `content_area`: the
   toolbar, the list or grid, and the scrollbar gutter are all

@@ -91,7 +91,7 @@ pub use frost::{frost_cache, FrostEpoch, FrostedBackdrop};
 pub use geometry::{Point, Rect, Region, Scale};
 pub use input::{
     ClickKind, DoubleClickTracker, InputEvent, InputResponse, InputRouter, Key, Modifiers,
-    NamedKey, PointerButton, PointerFocus, DOUBLE_CLICK_INTERVAL_NS,
+    NamedKey, PointerButton, PointerFocus,
 };
 pub use select::{cursor_cache, desired_cursor, CursorController, CursorEpoch};
 pub use stats::FrameStats;

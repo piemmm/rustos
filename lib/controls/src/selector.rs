@@ -99,8 +99,28 @@ pub(crate) fn square_glyph_rect(
     Some((x, y + (h - side) / 2, side, side))
 }
 
+/// The side of the square box a checkbox or radio draws at the leading edge
+/// of bounds tall and wide enough for it.
+#[must_use]
+pub(crate) fn box_side(scale: Scale, theme: &Theme) -> u32 {
+    scale.scale_length(theme.metrics().selector_extent).max(1)
+}
+
+/// The width a selector whose glyph is `glyph` pixels wide needs at `scale`:
+/// the glyph, plus the gap and `label` where it carries one — the room
+/// [`paint_label`] draws them in.
+fn selector_width(glyph: u32, label: &str, scale: Scale, theme: &Theme) -> u32 {
+    if label.is_empty() {
+        return glyph;
+    }
+    let font = role_font(theme, scale, TextRole::Body);
+    glyph
+        .saturating_add(scale.scale_length(theme.metrics().control_gap).max(1))
+        .saturating_add(font.text_width(label))
+}
+
 /// Paint the label after the leading box, vertically centred, in `color`,
-/// truncated to the remaining width.
+/// elided into the remaining width.
 fn paint_label(
     surface: &mut Surface,
     bounds: Rect,
@@ -397,15 +417,10 @@ impl Toggle {
     /// the toggle's own layout uses.
     #[must_use]
     pub fn measured_width(&self, scale: Scale, theme: &Theme) -> u32 {
-        let metrics = theme.metrics();
-        let track = scale.scale_length(metrics.toggle_track_length).max(1);
-        if self.core.label.is_empty() {
-            return track;
-        }
-        let font = role_font(theme, scale, TextRole::Body);
-        track
-            .saturating_add(scale.scale_length(metrics.control_gap).max(1))
-            .saturating_add(font.text_width(&self.core.label))
+        let track = scale
+            .scale_length(theme.metrics().toggle_track_length)
+            .max(1);
+        selector_width(track, &self.core.label, scale, theme)
     }
 
     /// Paint the toggle into `surface` at `bounds` for the active theme.
@@ -568,16 +583,16 @@ impl Checkbox {
         self.core.state.focus.focused = focused;
     }
 
-    /// The pixel side of the square box a checkbox draws at the leading edge
-    /// of its bounds.
+    /// The width this checkbox needs at `scale`: its box, plus the gap and
+    /// the label where it carries one.
     ///
-    /// This is the render geometry itself, exposed so an owner laying bare
-    /// checkboxes out on a grid — a permissions matrix, say — sizes each cell
-    /// to exactly the box [`Self::render`] will place in it, rather than
-    /// guessing from a font metric and leaving the box adrift in its cell.
+    /// Exposed for a container that lays checkboxes out beside one another
+    /// rather than across a row — a [`FlagSet`](crate::form::FlagSet) —
+    /// which cannot size a flag without the figure the checkbox's own layout
+    /// uses.
     #[must_use]
-    pub fn glyph_side(scale: Scale, theme: &Theme) -> u32 {
-        scale.scale_length(theme.metrics().selector_extent).max(1)
+    pub fn measured_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        selector_width(box_side(scale, theme), &self.core.label, scale, theme)
     }
 
     /// The value a checkbox activation requests: checked, unless it is already

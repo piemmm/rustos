@@ -40,7 +40,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::notify_ipc::NotifyRequest;
 use tairix_abi::switchboard_ipc::TraySummary;
-use tairix_abi::Errno;
+use tairix_abi::{AppIdentity, BundleId, Errno, Origin};
 use tairix_browse::{DirectorySource, GridView};
 use tairix_controls::damage::{self, Repaint};
 use tairix_cursor::{CursorRegistry, CursorTheme, CURSOR_BASE_SIDE_PX};
@@ -57,7 +57,7 @@ use tairix_taskbar::{
     TransientNotification,
 };
 use tairix_theme::{Appearance, CursorSetId, MotionInteraction};
-use tairix_wallpaper::{Backdrop, CursorSize};
+use tairix_wallpaper::{Backdrop, CursorSize, NotifyPolicy};
 use tairix_wm::{
     cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse,
     Modifiers, Point, PointerCatch, Rect, Scale, Surface, WindowActivationState, WindowFrame,
@@ -69,6 +69,7 @@ use crate::desktop::Desktop;
 use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
 use crate::menu::{resolve_chain_icons, MenuChain, SurfaceKind};
+use crate::notify::{is_settings_surface, producer_of, NotifySources};
 use crate::presenter::{chrome_blur, TaskbarPresenter};
 use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
@@ -203,6 +204,17 @@ pub struct DesktopShell {
     style: u64,
     /// The look [`DESKTOP_RESTYLED`] last spoke for.
     announced_style: u64,
+    /// The sources that have posted a notice since the desktop started.
+    notify_sources: NotifySources,
+    /// The application this session runs as, which is what tells its own
+    /// Settings application apart from a bundle merely claiming the name.
+    own_app: Option<AppIdentity>,
+    /// Whether a password can be verified on this session's console, and so
+    /// whether the screen may be locked at all.
+    can_lock: bool,
+    /// A lock the desktop's Settings application asked for, which the
+    /// embedder puts up once the request that asked is answered.
+    lock_requested: bool,
     /// The per-frame shell work counted so far, so a test can prove a
     /// drained batch settles once rather than once per sample. Test-only:
     /// the product carries no counter.
@@ -316,6 +328,10 @@ impl DesktopShell {
             thumbs: WindowThumbnails::new(),
             style: 0,
             announced_style: 0,
+            notify_sources: NotifySources::new(),
+            own_app: None,
+            can_lock: false,
+            lock_requested: false,
             #[cfg(test)]
             settled: SettleWork::default(),
         }
@@ -1599,29 +1615,34 @@ impl DesktopShell {
         self.present(compositor);
     }
 
-    /// Relay a decoded notification request from an attested `producer` to the
-    /// taskbar model, re-presenting when it changed the shown set.
+    /// Serve one notification request from the producer the kernel attests
+    /// in `origin`, held to `policy`, re-presenting when the shown set changed.
     ///
-    /// A [`Raise`](NotifyRequest::Raise) adds or updates the producer's
-    /// notification in place; a [`Clear`](NotifyRequest::Clear) removes it.
-    /// `producer` is the kernel-attested identity of the calling service — the
-    /// embedder resolves it from the endpoint, never from the wire — so one
-    /// producer can neither replace nor clear another's notification, and the
-    /// title/body were validated by the notification-IPC decoder before this
-    /// call. This holds no authority: the model only renders the message.
-    pub fn apply_notify(
+    /// A raise the policy refuses is never shown, and withdraws whatever the
+    /// same key showed before: the producer asked for that notice to be
+    /// replaced. It is answered as accepted, because the producer did nothing
+    /// wrong and a refusal would only invite a retry. A clear always applies.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for a producer running no verified bundle,
+    /// or the notification area's refusal of a raise past its bounds.
+    pub fn serve_notify(
         &mut self,
         compositor: &mut Compositor,
-        producer: u64,
+        origin: &Origin,
         request: NotifyRequest,
-    ) {
+        policy: &NotifyPolicy,
+    ) -> Result<(), Errno> {
+        let producer = producer_of(origin)?;
+        self.notify_sources.note(producer.source);
         let changed = match request {
             NotifyRequest::Raise {
                 key,
                 severity,
                 title,
                 body,
-            } => self
+            } if policy.admits(producer.source.as_str(), severity) => self
                 .session
                 .taskbar_mut()
                 .raise_notification(TransientNotification::new(
@@ -1630,27 +1651,54 @@ impl DesktopShell {
                     severity,
                     title.as_str(),
                     body.as_str(),
-                )),
-            NotifyRequest::Clear { key } => {
-                self.session.taskbar_mut().clear_notification(producer, key)
-            }
+                ))?,
+            NotifyRequest::Raise { key, .. } | NotifyRequest::Clear { key } => self
+                .session
+                .taskbar_mut()
+                .clear_notification(producer.instance, key),
         };
         if changed {
             self.present(compositor);
         }
+        Ok(())
     }
 
-    /// Clear every notification a `producer` raised, re-presenting when any
-    /// were removed — how the embedder drops a launched application's
-    /// notifications when that child exits and can no longer clear them
-    /// itself (the notification counterpart of a window client teardown).
-    pub fn clear_producer_notifications(&mut self, compositor: &mut Compositor, producer: u64) {
-        if self
-            .session
-            .taskbar_mut()
-            .clear_producer_notifications(producer)
-        {
+    /// Withdraw every shown notification `policy` no longer admits,
+    /// re-presenting when any went.
+    pub fn withdraw_unadmitted(&mut self, compositor: &mut Compositor, policy: &NotifyPolicy) {
+        if self.session.taskbar_mut().retain_notifications(|note| {
+            policy.admits(note.producer.source.as_str(), note.severity)
+        }) {
             self.present(compositor);
+        }
+    }
+
+    /// Clear every notification raised as `pid`, re-presenting when any were
+    /// removed — how the embedder drops a reaped child's notifications, which
+    /// it can no longer clear itself.
+    pub fn clear_pid_notifications(&mut self, compositor: &mut Compositor, pid: u64) {
+        if self.session.taskbar_mut().clear_pid_notifications(pid) {
+            self.present(compositor);
+        }
+    }
+
+    /// Record the application this session runs as.
+    pub fn set_own_app(&mut self, app: Option<AppIdentity>) {
+        self.own_app = app;
+    }
+
+    /// The sources that have posted a notice since the desktop started, for
+    /// `caller`, the application the kernel attests is asking.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for any caller but the desktop's own
+    /// Settings application: which programs a user runs is theirs to see.
+    pub fn notify_sources(&self, caller: Option<&AppIdentity>) -> Result<&[BundleId], Errno> {
+        if is_settings_surface(caller, self.own_app.as_ref()) {
+            Ok(self.notify_sources.as_slice())
+        } else {
+            Err(Errno::PermissionDenied)
         }
     }
 
@@ -1704,10 +1752,60 @@ impl DesktopShell {
     /// neither a lock with no way back nor a clock command that could only
     /// fail.
     pub fn set_elevation_available(&mut self, compositor: &mut Compositor, available: bool) {
+        self.can_lock = available;
         self.session
             .taskbar_mut()
             .set_elevation_available(available);
         self.present(compositor);
+    }
+
+    /// Whether the screen may be locked: a lock nothing could open would
+    /// strand the user.
+    #[must_use]
+    pub const fn can_lock(&self) -> bool {
+        self.can_lock
+    }
+
+    /// Ask for the screen to be locked on behalf of `caller`, the application
+    /// the kernel attests is asking.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for any caller but the desktop's own
+    /// Settings application, and [`Errno::NotSupported`] where the screen
+    /// cannot be locked at all.
+    pub fn request_lock(&mut self, caller: Option<&AppIdentity>) -> Result<(), Errno> {
+        if !is_settings_surface(caller, self.own_app.as_ref()) {
+            return Err(Errno::PermissionDenied);
+        }
+        if !self.can_lock {
+            return Err(Errno::NotSupported);
+        }
+        self.lock_requested = true;
+        Ok(())
+    }
+
+    /// Take a lock request, answering whether one was made.
+    pub fn take_lock_request(&mut self) -> bool {
+        core::mem::take(&mut self.lock_requested)
+    }
+
+    /// The desktop's own backdrop at `width` by `height` — the colour and the
+    /// picture over it, and nothing standing on it — or `None` when the heap
+    /// will not give one.
+    #[must_use]
+    pub fn backdrop_ground(&self, backdrop: Backdrop, width: u32, height: u32) -> Option<Surface> {
+        let colour = self.backdrop_colour(backdrop);
+        match self.wallpaper.as_ref() {
+            Some(picture) if picture.width() == width && picture.height() == height => {
+                flatten_ground(picture, colour)
+            }
+            _ => {
+                let mut ground = Surface::new(width, height)?;
+                ground.fill(colour);
+                Some(ground)
+            }
+        }
     }
 
     /// Put `label` on the taskbar clock and re-present the bar.

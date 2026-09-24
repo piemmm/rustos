@@ -36,9 +36,10 @@ use crate::Errno;
 /// kernel retains per topic.
 ///
 /// A containment bound, not a capacity: it is what stops a topic's payload
-/// growing into a channel, so it stays fixed. A topic needing more than this
-/// is carrying a document, not a state edge, and belongs on an IPC endpoint.
-pub const NOTICE_PAYLOAD_MAX: usize = 16;
+/// growing into a channel. It is the widest topic's own record, the desktop's;
+/// a topic needing more than a small fixed record is carrying a document, not
+/// a state edge, and belongs on an IPC endpoint.
+pub const NOTICE_PAYLOAD_MAX: usize = DesktopInfo::WIRE_LEN;
 
 /// One machine-wide value a process may converge on.
 ///

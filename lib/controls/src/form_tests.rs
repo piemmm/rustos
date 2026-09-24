@@ -6,8 +6,12 @@
 //! every group's controls line up in, the settle point a durable change is
 //! made on, the distinct rendering of a stated absence, the fail-closed
 //! refusals, the damage a pointer crossing one row reports, and both built-in
-//! themes with the heavier-contrast path.
+//! themes with the heavier-contrast path. The flag-set slot is covered for the
+//! same contract: its measured width and the shrink below it, the one flag a
+//! press or a key names, the row's authority reaching every flag, and every
+//! contrast policy.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -22,11 +26,15 @@ use tairix_theme::{SignalRole, Theme};
 use crate::button::{Button, ButtonContent};
 use crate::combo::ComboBox;
 use crate::damage::sink;
-use crate::form::{FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow};
+use crate::form::{
+    FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet,
+};
 use crate::metric::StatusPill;
-use crate::selector::Toggle;
-use crate::state::{AuthorityState, ControlState, SelectionState, ValidationState};
-use crate::testkit::{control_font, has_pixel, high_contrast, premul, text_ladder};
+use crate::selector::{Checkbox, Toggle};
+use crate::state::{AuthorityState, ControlState, PointerState, SelectionState, ValidationState};
+use crate::testkit::{
+    control_font, has_pixel, high_contrast, marks_elision, monochrome, premul, text_ladder,
+};
 use crate::text::TextField;
 use crate::value::Slider;
 
@@ -43,6 +51,17 @@ fn choices(items: &[&str]) -> Vec<String> {
 
 fn toggle_row(label: &str, on: bool) -> FieldRow {
     FieldRow::new(label, FieldControl::Toggle(Toggle::new("", on)))
+}
+
+/// The layout `group` is drawn with in `bounds` when no other group shares
+/// its column.
+fn own_layout(group: &FieldGroup, bounds: Rect, scale: Scale, theme: &Theme) -> FieldLayout {
+    FieldLayout::new(bounds, group.slot_column(bounds.width, scale, theme))
+}
+
+/// The height `group` needs in a plate `width` pixels wide, in its own column.
+fn own_height(group: &FieldGroup, width: u32, scale: Scale, theme: &Theme) -> u32 {
+    group.measured_height(width, group.slot_column(width, scale, theme), scale, theme)
 }
 
 fn row_surface(row: &FieldRow, theme: &Theme, scale: Scale, w: u32, h: u32) -> Surface {
@@ -378,13 +397,13 @@ fn every_control_in_a_group_begins_at_one_x() {
         ],
     );
     let bounds = Rect::new(0, 0, W, 200);
-    let column = group.slot_column(bounds, scale, &theme);
+    let column = group.slot_column(bounds.width, scale, &theme);
     assert!(column > 0, "a group of measured controls resolves a column");
 
     let lefts: Vec<i32> = (0..group.len())
         .map(|i| {
             let rect = group
-                .row_rect(i, bounds, scale, &theme)
+                .row_rect(i, own_layout(&group, bounds, scale, &theme), scale, &theme)
                 .expect("a row rect");
             group.rows()[i]
                 .slot_rect(FieldLayout::new(rect, column), scale, &theme)
@@ -412,7 +431,8 @@ fn a_group_holding_a_filling_control_gives_it_the_ceiling() {
         ],
     );
     assert!(
-        filling.slot_column(bounds, scale, &theme) > measured.slot_column(bounds, scale, &theme),
+        filling.slot_column(bounds.width, scale, &theme)
+            > measured.slot_column(bounds.width, scale, &theme),
         "a slider takes whatever column it is given, up to the ceiling"
     );
 }
@@ -474,12 +494,12 @@ fn an_expanded_slot_reports_its_row_and_anchor() {
             ),
         ],
     );
-    let column = group.slot_column(bounds, scale, &theme);
+    let column = group.slot_column(bounds.width, scale, &theme);
     let layout = FieldLayout::new(bounds, column);
     assert_eq!(group.popup_anchor(layout, scale, &theme), None);
 
     let rect = group
-        .row_rect(1, bounds, scale, &theme)
+        .row_rect(1, own_layout(&group, bounds, scale, &theme), scale, &theme)
         .expect("a row rect");
     let slot = group.rows()[1]
         .slot_rect(FieldLayout::new(rect, column), scale, &theme)
@@ -529,12 +549,15 @@ fn a_resolved_layout_carries_the_column_and_the_placed_list() {
 
     let closed = group.layout(bounds, viewport, scale, &theme);
     assert_eq!(closed.bounds, bounds);
-    assert_eq!(closed.column, group.slot_column(bounds, scale, &theme));
+    assert_eq!(
+        closed.column,
+        group.slot_column(bounds.width, scale, &theme)
+    );
     assert_eq!(closed.popup, Rect::EMPTY, "no list is open");
 
     let slot = {
         let rect = group
-            .row_rect(1, bounds, scale, &theme)
+            .row_rect(1, own_layout(&group, bounds, scale, &theme), scale, &theme)
             .expect("a row rect");
         group.rows()[1]
             .slot_rect(FieldLayout::new(rect, closed.column), scale, &theme)
@@ -587,7 +610,9 @@ fn a_layout_places_no_list_for_a_row_it_cannot_draw() {
     );
     let layout = group.layout(tall, viewport, scale, &theme);
     let slot = {
-        let rect = group.row_rect(0, tall, scale, &theme).expect("a row rect");
+        let rect = group
+            .row_rect(0, own_layout(&group, tall, scale, &theme), scale, &theme)
+            .expect("a row rect");
         group.rows()[0]
             .slot_rect(FieldLayout::new(rect, layout.column), scale, &theme)
             .expect("a slot")
@@ -612,7 +637,15 @@ fn a_layout_places_no_list_for_a_row_it_cannot_draw() {
 
     // The same group in a plate with no room for its one row.
     let squashed = Rect::new(0, 0, W, 1);
-    assert_eq!(group.row_rect(0, squashed, scale, &theme), None);
+    assert_eq!(
+        group.row_rect(
+            0,
+            own_layout(&group, squashed, scale, &theme),
+            scale,
+            &theme
+        ),
+        None
+    );
     assert_eq!(
         group.layout(squashed, viewport, scale, &theme).popup,
         Rect::EMPTY
@@ -773,7 +806,7 @@ fn up_and_down_walk_the_rows_and_clamp_at_the_ends() {
             toggle_row("Three", false),
         ],
     );
-    let layout = FieldLayout::new(bounds, group.slot_column(bounds, scale, &theme));
+    let layout = FieldLayout::new(bounds, group.slot_column(bounds.width, scale, &theme));
     let mut damage = sink();
     let mut press = |key: NamedKey, group: &mut FieldGroup| {
         group.on_key(
@@ -817,7 +850,7 @@ fn a_text_slot_keeps_home_and_end_but_never_traps_the_cursor() {
             toggle_row("Two", false),
         ],
     );
-    let layout = FieldLayout::new(bounds, group.slot_column(bounds, scale, &theme));
+    let layout = FieldLayout::new(bounds, group.slot_column(bounds.width, scale, &theme));
     let mut damage = sink();
     group.adopt_focus(Some(0));
 
@@ -847,7 +880,13 @@ fn an_out_of_range_focus_clears_rather_than_holding() {
     let bounds = Rect::new(0, 0, W, 200);
     let mut group = FieldGroup::new("A", vec![toggle_row("One", false)]);
     let mut damage = sink();
-    group.set_focus(Some(7), bounds, Scale::ONE, &theme, &mut damage);
+    group.set_focus(
+        Some(7),
+        own_layout(&group, bounds, Scale::ONE, &theme),
+        Scale::ONE,
+        &theme,
+        &mut damage,
+    );
     assert_eq!(group.focus(), None, "fail closed");
     group.adopt_focus(Some(7));
     assert_eq!(group.focus(), None);
@@ -891,41 +930,98 @@ fn a_pointer_crossing_a_row_reports_only_that_row() {
     );
 }
 
+/// A sentence that wraps at every width the agreement tests use.
+const WRAPPING: &str = "A sentence long enough that it has to wrap in a narrow column.";
+
+/// The column a sibling group holding a slider resolves in a plate `width`
+/// pixels wide: the ceiling, wider than any toggle's.
+fn slider_column(width: u32, scale: Scale, theme: &Theme) -> u32 {
+    FieldGroup::new(
+        "B",
+        vec![FieldRow::new(
+            "Scale",
+            FieldControl::Slider(Slider::new(500)),
+        )],
+    )
+    .slot_column(width, scale, theme)
+}
+
 #[test]
 fn a_row_wraps_into_exactly_the_span_its_group_reserved_it_for() {
-    // The group measures a row's height against a span it derives from its
-    // own width; the row then lays its description out against a span it
-    // derives from the rectangle it was given. A description that wrapped
-    // into a different column than the one the height was reserved for would
-    // lose its last line, so the two must be the same figure.
+    // A description wrapped into another span than its height was reserved
+    // for loses its last line: in the group's own column and in a wider one.
     for theme in [Theme::dark(), high_contrast(), text_ladder(22)] {
         for scale in [Scale::ONE, Scale::from_percent(200).expect("scale")] {
             for width in [120, W, 640] {
                 let group = FieldGroup::new(
                     "A",
                     vec![
-                        toggle_row("One", false).with_description(
-                            "A sentence long enough that it has to wrap in a narrow column.",
-                        ),
+                        toggle_row("One", false).with_description(WRAPPING),
                         toggle_row("Two", false),
                     ],
                 );
-                let height = group.measured_height(width, scale, &theme);
-                let bounds = Rect::new(0, 0, width, height);
-                let column = group.slot_column(bounds, scale, &theme);
-                let Some(rect) = group.row_rect(0, bounds, scale, &theme) else {
-                    continue;
-                };
-                assert_eq!(
-                    crate::form::debug_row_text_span(FieldLayout::new(rect, column), scale, &theme),
-                    group.row_text_span(width, scale, &theme),
-                    "row and group disagree at {width}px under {} at {}%",
-                    theme.name(),
-                    scale.percent()
-                );
+                let own = group.slot_column(width, scale, &theme);
+                for column in [own, slider_column(width, scale, &theme)] {
+                    let height = group.measured_height(width, column, scale, &theme);
+                    let layout = FieldLayout::new(Rect::new(0, 0, width, height), column);
+                    let Some(rect) = group.row_rect(0, layout, scale, &theme) else {
+                        continue;
+                    };
+                    let painted = crate::form::debug_row_text_span(
+                        FieldLayout::new(rect, column),
+                        scale,
+                        &theme,
+                    );
+                    let context = format!(
+                        "{width}px, column {column}, under {} at {}%",
+                        theme.name(),
+                        scale.percent()
+                    );
+                    assert_eq!(
+                        painted,
+                        group.row_text_span(width, column, scale, &theme),
+                        "row and group disagree at {context}"
+                    );
+                    assert_eq!(
+                        rect.height,
+                        group.rows()[0].measured_height(painted, scale, &theme),
+                        "the row is not reserved what it draws at {context}"
+                    );
+                }
             }
         }
     }
+}
+
+#[test]
+fn a_group_laid_out_in_a_wider_shared_column_is_measured_in_it() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let group = FieldGroup::new(
+        "A",
+        vec![toggle_row("One", false).with_description(WRAPPING)],
+    );
+    let own = group.slot_column(W, scale, &theme);
+    let shared = slider_column(W, scale, &theme);
+    assert!(shared > own, "the sibling's column is the wider");
+    let height = group.measured_height(W, shared, scale, &theme);
+    assert!(
+        height > group.measured_height(W, own, scale, &theme),
+        "the wider column leaves the description less room, so it needs more lines"
+    );
+    let rect = group
+        .row_rect(
+            0,
+            FieldLayout::new(Rect::new(0, 0, W, height), shared),
+            scale,
+            &theme,
+        )
+        .expect("the row fits the height measured for its column");
+    let painted = crate::form::debug_row_text_span(FieldLayout::new(rect, shared), scale, &theme);
+    assert_eq!(
+        rect.height,
+        group.rows()[0].measured_height(painted, scale, &theme)
+    );
 }
 
 #[test]
@@ -937,17 +1033,17 @@ fn a_groups_height_is_what_its_rows_actually_draw() {
         toggle_row("Two", false).with_description("with a second line"),
     ];
     let group = FieldGroup::new("A", rows.clone());
-    let height = group.measured_height(W, scale, &theme);
+    let height = own_height(&group, W, scale, &theme);
     let bounds = Rect::new(0, 0, W, height);
     let drawn: u32 = (0..group.len())
         .map(|i| {
             group
-                .row_rect(i, bounds, scale, &theme)
+                .row_rect(i, own_layout(&group, bounds, scale, &theme), scale, &theme)
                 .expect("every row fits its own measured height")
                 .height
         })
         .sum();
-    let span = group.row_text_span(W, scale, &theme);
+    let span = group.row_text_span(W, group.slot_column(W, scale, &theme), scale, &theme);
     let wanted: u32 = rows
         .iter()
         .map(|r| r.measured_height(span, scale, &theme))
@@ -967,25 +1063,32 @@ fn a_plate_too_short_for_every_row_omits_the_ones_it_cannot_draw() {
             toggle_row("Three", false),
         ],
     );
-    let full = group.measured_height(W, scale, &theme);
+    let full = own_height(&group, W, scale, &theme);
     let short = Rect::new(
         0,
         0,
         W,
         full - group.rows()[0].measured_height(
-            group.row_text_span(W, scale, &theme),
+            group.row_text_span(W, group.slot_column(W, scale, &theme), scale, &theme),
             scale,
             &theme,
         ),
     );
-    assert!(group.row_rect(0, short, scale, &theme).is_some());
+    assert!(group
+        .row_rect(0, own_layout(&group, short, scale, &theme), scale, &theme)
+        .is_some());
     assert_eq!(
-        group.row_rect(2, short, scale, &theme),
+        group.row_rect(2, own_layout(&group, short, scale, &theme), scale, &theme),
         None,
         "a row that was not drawn cannot be pressed"
     );
     assert_eq!(
-        group.row_at(short, scale, &theme, Point::new(10, to_i32(full) - 4)),
+        group.row_at(
+            own_layout(&group, short, scale, &theme),
+            scale,
+            &theme,
+            Point::new(10, to_i32(full) - 4)
+        ),
         None
     );
 }
@@ -1018,6 +1121,7 @@ fn every_appearance_draws_the_family() {
                     FieldControl::Combo(ComboBox::new(choices(&["Alloy", "Contrast"]))),
                 ),
                 FieldRow::new("Uptime", FieldControl::Reading(String::from("4 days"))),
+                flags_row("Access", rwx(true, false, true)),
                 FieldRow::new(
                     "Choose",
                     FieldControl::Button(Button::new(
@@ -1031,12 +1135,12 @@ fn every_appearance_draws_the_family() {
             ],
         )
         .with_footnote("Applies to this account only.");
-        let height = group.measured_height(W, scale, &theme);
+        let height = own_height(&group, W, scale, &theme);
         let mut surface = Surface::new(W, height).expect("surface");
         let bounds = Rect::new(0, 0, W, height);
         group.render(
             &mut surface,
-            FieldLayout::new(bounds, group.slot_column(bounds, scale, &theme)),
+            FieldLayout::new(bounds, group.slot_column(bounds.width, scale, &theme)),
             scale,
             &theme,
         );
@@ -1057,10 +1161,10 @@ fn a_group_reports_which_row_acted() {
         "A",
         vec![toggle_row("One", false), toggle_row("Two", false)],
     );
-    let column = group.slot_column(bounds, scale, &theme);
+    let column = group.slot_column(bounds.width, scale, &theme);
     let layout = FieldLayout::new(bounds, column);
     let rect = group
-        .row_rect(1, bounds, scale, &theme)
+        .row_rect(1, own_layout(&group, bounds, scale, &theme), scale, &theme)
         .expect("a row rect");
     let control = group.rows()[1]
         .control_rect(FieldLayout::new(rect, column), scale, &theme)
@@ -1110,14 +1214,14 @@ fn a_badged_caption_band_seats_the_capsule_above_the_first_row() {
     );
     assert!(bare.badge().is_none());
 
-    let grew = badged.measured_height(W, scale, &theme) - bare.measured_height(W, scale, &theme);
+    let grew = own_height(&badged, W, scale, &theme) - own_height(&bare, W, scale, &theme);
     let band = StatusPill::measured_height(scale, &theme)
         .saturating_sub(control_font(&theme, scale).line_height());
     assert_eq!(grew, band, "the caption band did not grow with its badge");
 
-    let bounds = Rect::new(0, 0, W, badged.measured_height(W, scale, &theme));
+    let bounds = Rect::new(0, 0, W, own_height(&badged, W, scale, &theme));
     let first = badged
-        .row_rect(0, bounds, scale, &theme)
+        .row_rect(0, own_layout(&badged, bounds, scale, &theme), scale, &theme)
         .expect("the row fits its own measured height");
     assert!(
         first.top() >= bounds.top() + to_i32(StatusPill::measured_height(scale, &theme)),
@@ -1142,12 +1246,12 @@ fn a_badge_set_in_place_matches_the_one_the_builder_puts_on() {
     set.set_badge(Some(badge));
     assert_eq!(set.badge(), built.badge());
     assert_eq!(
-        set.measured_height(W, scale, &theme),
-        built.measured_height(W, scale, &theme),
+        own_height(&set, W, scale, &theme),
+        own_height(&built, W, scale, &theme),
         "a badge put on in place has to be re-measured like any other"
     );
 
-    let height = built.measured_height(W, scale, &theme);
+    let height = own_height(&built, W, scale, &theme);
     let draw = |group: &FieldGroup| {
         let mut surface = Surface::new(W, height).expect("a surface");
         group.render(
@@ -1163,8 +1267,8 @@ fn a_badge_set_in_place_matches_the_one_the_builder_puts_on() {
     set.set_badge(None);
     assert!(set.badge().is_none());
     assert_eq!(
-        set.measured_height(W, scale, &theme),
-        bare.measured_height(W, scale, &theme)
+        own_height(&set, W, scale, &theme),
+        own_height(&bare, W, scale, &theme)
     );
 }
 
@@ -1178,7 +1282,7 @@ fn a_long_caption_is_cut_rather_than_drawn_under_its_badge() {
     let rows = vec![toggle_row("One", false)];
     let render = |caption: &str| {
         let group = FieldGroup::new(caption, rows.clone()).with_badge(badge.clone());
-        let height = group.measured_height(W, scale, &theme);
+        let height = own_height(&group, W, scale, &theme);
         let bounds = Rect::new(0, 0, W, height);
         let mut surface = Surface::new(W, height).expect("a surface");
         group.render(&mut surface, FieldLayout::new(bounds, 0), scale, &theme);
@@ -1204,4 +1308,517 @@ fn a_long_caption_is_cut_rather_than_drawn_under_its_badge() {
             );
         }
     }
+}
+
+// --- The pointer leaving a slot ------------------------------------------
+
+/// Regression: the row forwarded nothing once the pointer was off its slot,
+/// so the motion that left the control never reached it and the control kept
+/// drawing its hover look for good.
+#[test]
+fn the_motion_that_leaves_a_slot_takes_its_controls_hover_with_it() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let mut row = toggle_row("Reduce motion", false);
+    let bounds = Rect::new(0, 0, W, H);
+    let layout = FieldLayout::new(bounds, row.slot_width(scale, &theme).unwrap_or(0));
+    let rect = row
+        .control_rect(layout, scale, &theme)
+        .expect("a control rect");
+    let hover_of = |row: &FieldRow| match row.control() {
+        FieldControl::Toggle(toggle) => toggle.state().pointer,
+        _ => panic!("a toggle slot"),
+    };
+
+    let inside = Point::new(rect.left() + 2, rect.top() + to_i32(rect.height) / 2);
+    row.on_pointer(
+        &InputEvent::PointerMoved { to: inside },
+        layout,
+        scale,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(hover_of(&row), PointerState::Hover);
+
+    let mut left = sink();
+    row.on_pointer(
+        &InputEvent::PointerMoved {
+            to: Point::new(10, 10),
+        },
+        layout,
+        scale,
+        &theme,
+        &mut left,
+    );
+    assert_eq!(hover_of(&row), PointerState::None, "a stale hover");
+    assert!(
+        left.contains(inside),
+        "the control's own repaint is reported: {:?}",
+        left.rects()
+    );
+}
+
+// --- A set of flags ----------------------------------------------------
+
+/// The permission-style flag set every flag test starts from.
+fn rwx(read: bool, write: bool, execute: bool) -> FlagSet {
+    let flag = |label: &str, on: bool| {
+        Checkbox::new(
+            label,
+            if on {
+                SelectionState::Selected
+            } else {
+                SelectionState::Unselected
+            },
+        )
+    };
+    FlagSet::new(vec![
+        flag("Read", read),
+        flag("Write", write),
+        flag("Execute", execute),
+    ])
+}
+
+fn flags_row(label: &str, set: FlagSet) -> FieldRow {
+    FieldRow::new(label, FieldControl::Flags(set))
+}
+
+fn flag_set(row: &FieldRow) -> &FlagSet {
+    match row.control() {
+        FieldControl::Flags(set) => set,
+        _ => panic!("a flag-set slot"),
+    }
+}
+
+/// A row wide enough to seat `row`'s flags whole, laid out with the column
+/// its slot asks for.
+fn roomy(row: &FieldRow, theme: &Theme) -> FieldLayout {
+    let want = row
+        .slot_width(Scale::ONE, theme)
+        .expect("a flag set measures");
+    FieldLayout::new(Rect::new(0, 0, want * 3, H), want)
+}
+
+fn centre(rect: Rect) -> Point {
+    Point::new(
+        rect.left() + to_i32(rect.width) / 2,
+        rect.top() + to_i32(rect.height) / 2,
+    )
+}
+
+#[test]
+fn a_flag_set_measures_every_flag_and_the_room_after_it() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let set = rwx(true, false, false);
+    let checkboxes: u32 = set
+        .flags()
+        .iter()
+        .map(|flag| flag.measured_width(scale, &theme))
+        .sum();
+    let measured = set.measured_width(scale, &theme);
+    assert!(
+        measured > checkboxes,
+        "each flag keeps room after its label, {measured} over {checkboxes}"
+    );
+
+    // Given its measured width, every flag is seated at its own width, in
+    // order and edge to edge.
+    let bounds = Rect::new(4, 0, measured, H);
+    let mut left = bounds.left();
+    for (index, flag) in set.flags().iter().enumerate() {
+        let rect = set
+            .flag_rect(index, bounds, scale, &theme)
+            .expect("every flag is seated");
+        assert_eq!(rect.left(), left, "flag {index}");
+        assert!(rect.width > flag.measured_width(scale, &theme));
+        left = rect.right();
+    }
+    assert_eq!(
+        left,
+        bounds.right(),
+        "the set fills exactly what it measured"
+    );
+    assert_eq!(set.flag_rect(3, bounds, scale, &theme), None);
+}
+
+#[test]
+fn a_slot_too_narrow_for_the_flags_keeps_every_box_in_order() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let set = rwx(true, true, false);
+    let measured = set.measured_width(scale, &theme);
+    let side = Checkbox::new("", SelectionState::Unselected).measured_width(scale, &theme);
+    for width in [measured - 1, measured / 2, side * 3] {
+        let bounds = Rect::new(0, 0, width, H);
+        let rects: Vec<Rect> = (0..3)
+            .map(|index| set.flag_rect(index, bounds, scale, &theme).expect("seated"))
+            .collect();
+        for pair in rects.windows(2) {
+            assert!(
+                pair[0].right() <= pair[1].left(),
+                "flags overlap at {width}"
+            );
+        }
+        assert_eq!(rects[0].left(), 0);
+        assert_eq!(rects[2].right(), to_i32(width), "the set fills its slot");
+        assert!(
+            rects.iter().all(|rect| rect.width >= side),
+            "a box was cut at {width}: {rects:?}"
+        );
+    }
+}
+
+/// A label that has to give way is elided with the shared mark, the
+/// checkbox's own, rather than cut where its share of the slot ran out.
+#[test]
+fn a_flag_label_that_must_give_way_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    assert!(marks_elision(|text| {
+        let set = FlagSet::new(vec![Checkbox::new(text, SelectionState::Unselected)]);
+        let row = flags_row("Owner", set);
+        let bounds = Rect::new(0, 0, W, H);
+        let mut surface = Surface::new(W, H).expect("surface");
+        row.render(&mut surface, FieldLayout::new(bounds, W / 2), scale, &theme);
+        surface
+    }));
+}
+
+#[test]
+fn a_pressed_flag_names_itself_and_only_itself() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let mut row = flags_row("Owner", rwx(true, false, false));
+    let layout = roomy(&row, &theme);
+    let slot = row
+        .control_rect(layout, scale, &theme)
+        .expect("a control rect");
+    let write = flag_set(&row)
+        .flag_rect(1, slot, scale, &theme)
+        .expect("the write flag");
+    assert_eq!(
+        press_at(&mut row, layout, &theme, centre(write)),
+        Some(FieldAction::SetFlag { index: 1, on: true })
+    );
+    let read = flag_set(&row)
+        .flag_rect(0, slot, scale, &theme)
+        .expect("the read flag");
+    assert_eq!(
+        press_at(&mut row, layout, &theme, centre(read)),
+        Some(FieldAction::SetFlag {
+            index: 0,
+            on: false
+        }),
+        "a checked flag asks to be cleared"
+    );
+    assert_eq!(
+        flag_set(&row).flag_at(slot, scale, &theme, centre(write)),
+        Some(1)
+    );
+}
+
+#[test]
+fn a_committed_flag_changes_that_flag_alone() {
+    let mut set = rwx(false, false, false);
+    set.set_on(2, true);
+    set.set_on(9, true);
+    let states: Vec<SelectionState> = set.flags().iter().map(Checkbox::selection).collect();
+    assert_eq!(
+        states,
+        [
+            SelectionState::Unselected,
+            SelectionState::Unselected,
+            SelectionState::Selected
+        ]
+    );
+}
+
+#[test]
+fn left_and_right_walk_the_flags_and_space_toggles_the_one_they_rest_on() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let mut row = flags_row("Owner", rwx(false, false, false));
+    let layout = roomy(&row, &theme);
+    let slot = row
+        .control_rect(layout, scale, &theme)
+        .expect("a control rect");
+    row.set_focused(true);
+    let press = |row: &mut FieldRow, key: Key, damage: &mut tairix_geometry::Region| {
+        row.on_key(key, Modifiers::default(), layout, scale, &theme, damage)
+    };
+
+    let mut clamped = sink();
+    assert_eq!(
+        press(&mut row, Key::Named(NamedKey::Left), &mut clamped),
+        None
+    );
+    assert_eq!(flag_set(&row).focus(), 0, "a set of flags is not a ring");
+    assert!(
+        clamped.is_empty(),
+        "a ring that did not move repaints nothing"
+    );
+
+    let mut moved = sink();
+    press(&mut row, Key::Named(NamedKey::Right), &mut moved);
+    assert_eq!(flag_set(&row).focus(), 1);
+    for index in [0, 1] {
+        let rect = flag_set(&row)
+            .flag_rect(index, slot, scale, &theme)
+            .expect("a flag");
+        assert!(
+            moved.contains(centre(rect)),
+            "flag {index} was not reported"
+        );
+    }
+    let ringed: Vec<bool> = flag_set(&row)
+        .flags()
+        .iter()
+        .map(|flag| flag.state().focus.focused)
+        .collect();
+    assert_eq!(
+        ringed,
+        [false, true, false],
+        "the ring goes with the keyboard"
+    );
+
+    assert_eq!(
+        press(&mut row, Key::Char(' '), &mut sink()),
+        Some(FieldAction::SetFlag { index: 1, on: true })
+    );
+    press(&mut row, Key::Named(NamedKey::Right), &mut sink());
+    press(&mut row, Key::Named(NamedKey::Right), &mut sink());
+    assert_eq!(flag_set(&row).focus(), 2);
+    assert_eq!(
+        press(&mut row, Key::Named(NamedKey::Enter), &mut sink()),
+        Some(FieldAction::SetFlag { index: 2, on: true })
+    );
+}
+
+#[test]
+fn a_rebuilt_set_keeps_the_readers_place_and_clamps_a_stale_one() {
+    assert_eq!(rwx(false, false, false).with_focus(2).focus(), 2);
+    assert_eq!(rwx(false, false, false).with_focus(7).focus(), 2);
+    assert_eq!(FlagSet::new(Vec::new()).with_focus(3).focus(), 0);
+}
+
+#[test]
+fn a_denied_row_refuses_every_flag_to_the_pointer_and_the_keyboard() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let mut row = flags_row("Owner", rwx(true, false, false));
+    row.set_state(denied());
+    assert!(
+        flag_set(&row)
+            .flags()
+            .iter()
+            .all(|flag| flag.state().authority == AuthorityState::Denied),
+        "the row's refusal is every flag's"
+    );
+    let layout = roomy(&row, &theme);
+    let slot = row
+        .control_rect(layout, scale, &theme)
+        .expect("a control rect");
+    for index in 0..3 {
+        let rect = flag_set(&row)
+            .flag_rect(index, slot, scale, &theme)
+            .expect("a flag");
+        assert_eq!(press_at(&mut row, layout, &theme, centre(rect)), None);
+    }
+    row.set_focused(true);
+    assert_eq!(
+        row.on_key(
+            Key::Char(' '),
+            Modifiers::default(),
+            layout,
+            scale,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
+
+    let mut disabled = flags_row("Owner", rwx(true, false, false));
+    let mut state = ControlState::idle();
+    state.enabled = false;
+    disabled.set_state(state);
+    assert!(flag_set(&disabled)
+        .flags()
+        .iter()
+        .all(|flag| !flag.state().enabled && flag.state().authority == AuthorityState::Allowed));
+}
+
+#[test]
+fn a_pointer_crossing_the_flags_reports_the_two_it_moved_between() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let mut row = flags_row("Owner", rwx(false, false, false));
+    let layout = roomy(&row, &theme);
+    let slot = row
+        .control_rect(layout, scale, &theme)
+        .expect("a control rect");
+    let rect = |row: &FieldRow, index| {
+        flag_set(row)
+            .flag_rect(index, slot, scale, &theme)
+            .expect("a flag")
+    };
+    let (read, write, execute) = (rect(&row, 0), rect(&row, 1), rect(&row, 2));
+    row.on_pointer(
+        &InputEvent::PointerMoved { to: centre(read) },
+        layout,
+        scale,
+        &theme,
+        &mut sink(),
+    );
+    let mut crossing = sink();
+    row.on_pointer(
+        &InputEvent::PointerMoved { to: centre(write) },
+        layout,
+        scale,
+        &theme,
+        &mut crossing,
+    );
+    assert!(crossing.contains(centre(read)), "the flag it left");
+    assert!(crossing.contains(centre(write)), "the flag it entered");
+    assert!(
+        !crossing.contains(centre(execute)),
+        "a flag it never touched: {:?}",
+        crossing.rects()
+    );
+    let hovers: Vec<PointerState> = flag_set(&row)
+        .flags()
+        .iter()
+        .map(|flag| flag.state().pointer)
+        .collect();
+    assert_eq!(
+        hovers,
+        [PointerState::None, PointerState::Hover, PointerState::None]
+    );
+}
+
+#[test]
+fn a_group_lines_its_flags_up_like_any_other_measured_control() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let group = FieldGroup::new(
+        "ACCESS",
+        vec![
+            FieldRow::new("Mode", FieldControl::Reading(String::from("-rw-r--r--"))),
+            flags_row("Owner", rwx(true, true, false)),
+            flags_row("Group", rwx(true, false, false)),
+        ],
+    );
+    let wanted = rwx(false, false, false).measured_width(scale, &theme);
+    let width = group.natural_width(scale, &theme);
+    let bounds = Rect::new(0, 0, width, own_height(&group, width, scale, &theme));
+    assert_eq!(
+        group.slot_column(bounds.width, scale, &theme),
+        wanted,
+        "the widest measured control sets the column"
+    );
+    let rows: Vec<Rect> = (1..3)
+        .map(|index| {
+            let row = group
+                .row_rect(
+                    index,
+                    own_layout(&group, bounds, scale, &theme),
+                    scale,
+                    &theme,
+                )
+                .expect("a row");
+            group.rows()[index]
+                .control_rect(FieldLayout::new(row, wanted), scale, &theme)
+                .expect("a control")
+        })
+        .collect();
+    assert_eq!(rows[0].left(), rows[1].left());
+    assert_eq!(rows[0].width, wanted, "seated whole at the natural width");
+}
+
+/// The natural width is the narrowest that seats every measured control
+/// whole: one pixel less and the ceiling cuts the widest.
+#[test]
+fn a_groups_natural_width_is_the_narrowest_that_seats_its_controls() {
+    for theme in [Theme::dark(), text_ladder(22)] {
+        for scale in [Scale::ONE, Scale::from_percent(200).expect("scale")] {
+            let group =
+                FieldGroup::new("ACCESS", vec![flags_row("Owner", rwx(true, false, false))]);
+            let wanted = group.rows()[0]
+                .slot_width(scale, &theme)
+                .expect("a flag set measures");
+            let natural = group.natural_width(scale, &theme);
+            let column = |width: u32| {
+                let bounds = Rect::new(0, 0, width, own_height(&group, width, scale, &theme));
+                group.slot_column(bounds.width, scale, &theme)
+            };
+            assert_eq!(
+                column(natural),
+                wanted,
+                "{} at {}%",
+                theme.name(),
+                scale.percent()
+            );
+            assert!(column(natural - 1) < wanted);
+        }
+    }
+    // A control that takes whatever it is given constrains nothing, so the
+    // plate's chrome is all a group of them asks for.
+    let theme = Theme::dark();
+    let chrome = FieldGroup::new(
+        "A",
+        vec![FieldRow::new(
+            "Scale",
+            FieldControl::Slider(Slider::new(500)),
+        )],
+    )
+    .natural_width(Scale::ONE, &theme);
+    let toggle = toggle_row("One", false)
+        .slot_width(Scale::ONE, &theme)
+        .expect("a toggle measures");
+    assert_eq!(
+        FieldGroup::new("A", vec![toggle_row("One", false)]).natural_width(Scale::ONE, &theme),
+        chrome + toggle * 2
+    );
+}
+
+/// Every appearance and contrast policy draws the flags, and each flag's box
+/// carries its own state, so a set read in monochrome still says which flags
+/// are on.
+#[test]
+fn every_appearance_and_contrast_draws_each_flags_own_state() {
+    let scale = Scale::ONE;
+    let mut drawn = Vec::new();
+    for theme in [Theme::dark(), Theme::light(), high_contrast(), monochrome()] {
+        let row = flags_row("Owner", rwx(true, false, false));
+        let layout = roomy(&row, &theme);
+        let bounds = layout.bounds;
+        let mut surface = Surface::new(bounds.width, bounds.height).expect("surface");
+        row.render(&mut surface, layout, scale, &theme);
+        let slot = row
+            .control_rect(layout, scale, &theme)
+            .expect("a control rect");
+        let side = Checkbox::new("", SelectionState::Unselected).measured_width(scale, &theme);
+        let block = |index: usize| {
+            let rect = flag_set(&row)
+                .flag_rect(index, slot, scale, &theme)
+                .expect("a flag");
+            let x0 = u32::try_from(rect.left()).expect("on the surface");
+            (0..side)
+                .flat_map(|dy| (0..side).map(move |dx| (dx, dy)))
+                .map(|(dx, dy)| surface.get(x0 + dx, (H - side) / 2 + dy))
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(
+            block(0),
+            block(1),
+            "an on flag and an off one drew the same box under {}",
+            theme.name()
+        );
+        assert_eq!(block(1), block(2), "two off flags draw the same box");
+        drawn.push(surface.pixels().to_vec());
+    }
+    assert_ne!(
+        drawn[0], drawn[2],
+        "the heavier-contrast path reaches the flags"
+    );
 }

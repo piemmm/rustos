@@ -210,7 +210,8 @@ does.
 
 **Pointer and keyboard.** A primary press selects the icon under it (or
 clears the selection on empty desktop) and arms the shared
-`DoubleClickTracker`, so a second press within its window activates the icon
+`DoubleClickTracker` under the double-click interval the user chose, so a
+second press within it activates the icon
 — the desktop can never disagree with the file manager about what a gesture
 means. Motion drives hover feedback and, on arrival from elsewhere, the
 gesture-driven re-list below. While the desktop holds the keyboard, the

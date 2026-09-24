@@ -14,6 +14,9 @@ publish.workspace = true
 # vocabulary the window manager and taskbar already share, lifted to `lib/*`
 # so neither GUI crate depends on the other.
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }
+# `Duration64`, the one in-memory form of a span: the double-click interval a
+# press is paired under is the one the desktop publishes in that form.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 [lints]
 workspace = true

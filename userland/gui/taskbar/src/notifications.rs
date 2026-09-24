@@ -19,9 +19,35 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::{BundleId, Errno, ProcId};
 use tairix_icon::IconKind;
 
 pub use tairix_abi::notify_ipc::NotifySeverity;
+
+/// Most notifications the area holds at once.
+///
+/// A containment bound: a producer is any program of the user's, so an
+/// unbounded area would let one grow the session without limit. A raise past
+/// it is refused, never made room for by dropping another source's notice.
+pub const NOTIFICATIONS_MAX: usize = 32;
+
+/// Most notifications one source holds at once, so no one program can fill
+/// the area and crowd every other out.
+pub const SOURCE_NOTIFICATIONS_MAX: usize = 8;
+
+/// Who raised a notification, as the kernel attested it at the raise.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Producer {
+    /// The process instance, which alone may update or clear the notice: a
+    /// recycled pid names a different instance.
+    pub instance: ProcId,
+    /// The pid the instance called as, by which a reaped child's notices are
+    /// dropped.
+    pub pid: u64,
+    /// The signed bundle it runs, which is what the notification policy is
+    /// keyed on.
+    pub source: BundleId,
+}
 
 /// A stable identifier for a status signal, so the session can replace the
 /// signal set without a glyph losing its identity.
@@ -74,15 +100,15 @@ impl StatusSignal {
 
 /// A transient notification raised by a producer service.
 ///
-/// The `producer` is the raising service's kernel-attested identity (never a
-/// wire claim); within it the `key` names one notification, so a later raise
-/// with the same `(producer, key)` updates it in place and a clear removes
-/// exactly it. The `title`/`body` are producer-supplied display text (already
-/// validated by the notification IPC decoder); they carry no authority.
+/// Within its producer's instance the `key` names one notification, so a
+/// later raise with the same `(producer, key)` updates it in place and a clear
+/// removes exactly it. The `title`/`body` are producer-supplied display text
+/// (already validated by the notification IPC decoder); they carry no
+/// authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransientNotification {
-    /// The raising producer's attested identity.
-    pub producer: u64,
+    /// Who raised it.
+    pub producer: Producer,
     /// The producer-chosen slot naming this notification within `producer`.
     pub key: u32,
     /// How prominently the notification is presented.
@@ -97,7 +123,7 @@ impl TransientNotification {
     /// A notification from its attested producer, key, severity, and text.
     #[must_use]
     pub fn new(
-        producer: u64,
+        producer: Producer,
         key: u32,
         severity: NotifySeverity,
         title: impl Into<String>,
@@ -209,47 +235,69 @@ impl NotificationArea {
 
     /// Raise a notification, or update it in place when one with the same
     /// `(producer, key)` is already showing (refreshing its recency).
-    /// Returns whether anything changed — re-raising byte-identical content
+    /// Answers whether anything changed — re-raising byte-identical content
     /// keeps its place and reports `false`.
-    pub fn raise(&mut self, note: TransientNotification) -> bool {
-        if let Some(pos) = self
-            .notifications
-            .iter()
-            .position(|stored| stored.note.producer == note.producer && stored.note.key == note.key)
-        {
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LimitExceeded`] for a new notification past
+    /// [`NOTIFICATIONS_MAX`] or its source's [`SOURCE_NOTIFICATIONS_MAX`];
+    /// nothing changes. An update in place is never refused.
+    pub fn raise(&mut self, note: TransientNotification) -> Result<bool, Errno> {
+        if let Some(pos) = self.position(note.producer.instance, note.key) {
             if self.notifications[pos].note == note {
-                return false;
+                return Ok(false);
             }
             let seq = self.alloc_seq();
             self.notifications[pos].note = note;
             self.notifications[pos].seq = seq;
             self.sort();
-            return true;
+            return Ok(true);
+        }
+        let held = self
+            .notifications
+            .iter()
+            .filter(|stored| stored.note.producer.source == note.producer.source)
+            .count();
+        if self.notifications.len() >= NOTIFICATIONS_MAX || held >= SOURCE_NOTIFICATIONS_MAX {
+            return Err(Errno::LimitExceeded);
         }
         let seq = self.alloc_seq();
         self.notifications.push(Stored { seq, note });
         self.sort();
-        true
+        Ok(true)
     }
 
     /// Clear the notification identified by `(producer, key)`. Returns whether
     /// one was removed (idempotent: clearing an absent notification is a
     /// no-op, not an error).
-    pub fn clear(&mut self, producer: u64, key: u32) -> bool {
+    pub fn clear(&mut self, producer: ProcId, key: u32) -> bool {
+        self.retain(|note| !(note.producer.instance == producer && note.key == key))
+    }
+
+    /// Clear every notification raised as `pid` — how the session drops a
+    /// reaped child's notifications. Returns whether any were removed.
+    ///
+    /// By pid rather than instance because a reap names a pid; any notice
+    /// under it is from that child or from an earlier holder of the pid, and
+    /// both are gone.
+    pub fn clear_pid(&mut self, pid: u64) -> bool {
+        self.retain(|note| note.producer.pid != pid)
+    }
+
+    /// Keep only the notifications `keep` answers `true` for — how the session
+    /// withdraws what a changed policy no longer admits. Returns whether any
+    /// were removed.
+    pub fn retain(&mut self, mut keep: impl FnMut(&TransientNotification) -> bool) -> bool {
         let before = self.notifications.len();
-        self.notifications
-            .retain(|stored| !(stored.note.producer == producer && stored.note.key == key));
+        self.notifications.retain(|stored| keep(&stored.note));
         self.notifications.len() != before
     }
 
-    /// Clear every notification raised by `producer` — how the session drops
-    /// a dead producer's notifications when it exits. Returns whether any
-    /// were removed.
-    pub fn clear_producer(&mut self, producer: u64) -> bool {
-        let before = self.notifications.len();
+    fn position(&self, producer: ProcId, key: u32) -> Option<usize> {
         self.notifications
-            .retain(|stored| stored.note.producer != producer);
-        self.notifications.len() != before
+            .iter()
+            .position(|stored| stored.note.producer.instance == producer && stored.note.key == key)
     }
 
     /// Allocate the next recency sequence (saturating; never wraps).

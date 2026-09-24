@@ -239,9 +239,17 @@ mod tests {
             },
         };
         channel.reader_mut().push(record.to_le_bytes().to_vec());
-        let mut source = KeyboardInputSource::new(channel);
+        let mut source = KeyboardInputSource::new(
+            channel,
+            crate::keyboard::KeyRepeat {
+                delay: tairix_abi::time::Duration64::from_millis(500),
+                interval: None,
+            },
+        );
         assert_eq!(
-            source.poll(),
+            source
+                .poll_record(0)
+                .map(|polled| polled.map(|(event, _)| event)),
             Ok(Some(InputEvent::KeyPressed {
                 key: Key::Named(NamedKey::Enter),
                 modifiers: tairix_wm::Modifiers {
@@ -250,7 +258,7 @@ mod tests {
                 },
             }))
         );
-        assert_eq!(source.poll(), Ok(None));
+        assert_eq!(source.poll_record(0), Ok(None));
     }
 
     #[test]

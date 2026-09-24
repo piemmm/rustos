@@ -84,8 +84,7 @@ pub const PICKER_ORIGIN: Point = Point::new(120, 90);
 /// picker is up and there is something to choose" is announced here or
 /// nowhere, which is what lets a user diagnosing a picker that never appeared,
 /// or a QEMU vertical deciding when a row is worth clicking, wait on a fact
-/// rather than on a delay. Id `20_008` is the next free slot in the
-/// desktop-session event range.
+/// rather than on a delay.
 pub const PICKER_SHOWN: tairix_log::EventId = tairix_log::EventId(20_008);
 
 /// The exact message [`PICKER_SHOWN`] is emitted with. A log consumer keys on

@@ -46,8 +46,9 @@ fn a_windows_own_id_is_matched_before_any_popups() {
     assert_eq!(addressee(shadowed, 9), Some((0, Addressed::Window)));
 }
 
-/// The section strip answers from every section; everything else belongs to
-/// the attributes section alone.
+/// The section strip answers from every section until the permissions section
+/// takes the keyboard; everything else belongs to the section that draws a
+/// control for it, and a section that draws none reaches nothing.
 ///
 /// Regression: sectioning the window left the attribute keyboard live on every
 /// section, so typing on General filled a field the user could not see and an
@@ -60,40 +61,89 @@ fn a_key_reaches_only_the_section_that_draws_its_control() {
 
     let named = |code| KeyValue::Named(code);
     let typed = KeyValue::Char('a');
+    let rest = [
+        named(NamedKeyCode::Up),
+        named(NamedKeyCode::Down),
+        named(NamedKeyCode::Tab),
+        KeyValue::Char(' '),
+        typed,
+    ];
 
     for tab in PropertiesTab::ALL {
         // The strip is the window's own navigation.
         assert_eq!(
-            properties_key(tab, named(NamedKeyCode::Left)),
+            properties_key(tab, false, named(NamedKeyCode::Left)),
             PropertiesKey::Section(-1)
         );
         assert_eq!(
-            properties_key(tab, named(NamedKeyCode::Right)),
+            properties_key(tab, false, named(NamedKeyCode::Right)),
             PropertiesKey::Section(1)
         );
     }
 
     // On the attributes section its list and editor take the rest.
-    for key in [named(NamedKeyCode::Up), named(NamedKeyCode::Down), typed] {
+    for key in rest {
         assert_eq!(
-            properties_key(PropertiesTab::Attributes, key),
+            properties_key(PropertiesTab::Attributes, false, key),
             PropertiesKey::Attributes
         );
     }
     assert_eq!(
-        properties_key(PropertiesTab::Attributes, named(NamedKeyCode::Escape)),
+        properties_key(
+            PropertiesTab::Attributes,
+            false,
+            named(NamedKeyCode::Escape)
+        ),
         PropertiesKey::Attributes,
         "the section steps back out of its own typed line before the window closes"
     );
 
-    // On any other section they reach nothing, and Escape closes the window.
-    for tab in [PropertiesTab::General, PropertiesTab::Permissions] {
-        for key in [named(NamedKeyCode::Up), named(NamedKeyCode::Down), typed] {
-            assert_eq!(properties_key(tab, key), PropertiesKey::Ignored);
-        }
+    // Once the permissions section holds the keyboard it takes the arrows
+    // and Escape too, so Escape hands the keyboard back instead of closing.
+    for key in rest {
         assert_eq!(
-            properties_key(tab, named(NamedKeyCode::Escape)),
-            PropertiesKey::Close
+            properties_key(PropertiesTab::Permissions, false, key),
+            PropertiesKey::Permissions
+        );
+    }
+    assert_eq!(
+        properties_key(
+            PropertiesTab::Permissions,
+            false,
+            named(NamedKeyCode::Escape)
+        ),
+        PropertiesKey::Close
+    );
+    for key in [
+        named(NamedKeyCode::Left),
+        named(NamedKeyCode::Right),
+        named(NamedKeyCode::Escape),
+        typed,
+    ] {
+        assert_eq!(
+            properties_key(PropertiesTab::Permissions, true, key),
+            PropertiesKey::Permissions
+        );
+    }
+
+    // General draws no control, so the rest reaches nothing and Escape closes
+    // the window.
+    for key in rest {
+        assert_eq!(
+            properties_key(PropertiesTab::General, false, key),
+            PropertiesKey::Ignored
+        );
+    }
+    assert_eq!(
+        properties_key(PropertiesTab::General, false, named(NamedKeyCode::Escape)),
+        PropertiesKey::Close
+    );
+
+    // No section but the permissions section is ever handed the keyboard.
+    for tab in [PropertiesTab::General, PropertiesTab::Attributes] {
+        assert_ne!(
+            properties_key(tab, true, named(NamedKeyCode::Left)),
+            PropertiesKey::Permissions
         );
     }
 }

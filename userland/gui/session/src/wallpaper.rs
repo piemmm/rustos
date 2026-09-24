@@ -144,6 +144,8 @@ pub struct PreviewDone {
 pub enum WallpaperJob {
     /// The desktop's own backdrop, which is always taken first.
     Backdrop(WallpaperSource),
+    /// One picture of the screensaver's slideshow.
+    Slide(WallpaperSource),
     /// One gallery tile for a browsing application.
     Preview(PreviewJob),
 }
@@ -186,6 +188,12 @@ pub struct WallpaperDesk {
     rendering: Option<PreviewRequest>,
     /// The rendered preview waiting for the serve loop to hand it over.
     preview_done: Option<PreviewDone>,
+    /// The slideshow picture asked for and not yet taken by a preparer.
+    wanted_slide: Option<WallpaperSource>,
+    /// The slideshow picture a preparer has taken and not yet answered.
+    preparing_slide: Option<WallpaperSource>,
+    /// The prepared slideshow picture waiting for the serve loop.
+    slide_done: Option<Result<Surface, String>>,
     /// Set once the embedder is tearing down, so a parked preparer leaves.
     stopping: bool,
 }
@@ -240,7 +248,15 @@ impl WallpaperDesk {
     /// Whether a wallpaper is wanted that no preparer has taken.
     #[must_use]
     pub const fn has_work(&self) -> bool {
-        !self.stopping && ((self.wanted.is_some() && !self.preparing) || self.has_preview_work())
+        !self.stopping
+            && ((self.wanted.is_some() && !self.preparing)
+                || self.has_slide_work()
+                || self.has_preview_work())
+    }
+
+    /// Whether a slideshow picture is wanted that no preparer has taken.
+    const fn has_slide_work(&self) -> bool {
+        self.wanted_slide.is_some() && self.preparing_slide.is_none()
     }
 
     /// Whether a preview is wanted that no preparer has taken.
@@ -261,6 +277,11 @@ impl WallpaperDesk {
         if self.wanted.is_some() && !self.preparing {
             self.preparing = true;
             return self.wanted.clone().map(WallpaperJob::Backdrop);
+        }
+        if self.has_slide_work() {
+            let source = self.wanted_slide.take()?;
+            self.preparing_slide = Some(source.clone());
+            return Some(WallpaperJob::Slide(source));
         }
         if !self.has_preview_work() {
             return None;
@@ -301,6 +322,45 @@ impl WallpaperDesk {
     /// Take the rendered preview waiting to be handed over, if any.
     pub fn take_preview(&mut self) -> Option<PreviewDone> {
         self.preview_done.take()
+    }
+
+    /// Record a wanted slideshow picture, replacing one not yet taken:
+    /// only the newest slide is worth showing.
+    pub fn want_slide(&mut self, source: WallpaperSource) {
+        if !self.stopping {
+            self.wanted_slide = Some(source);
+        }
+    }
+
+    /// Record the result of preparing slide `source`, answering whether the
+    /// desk kept it (and so owes the serve loop a wake).
+    ///
+    /// An answer for a slide no longer being prepared is dropped: the
+    /// screensaver went down, or moved on to a newer picture.
+    pub fn deliver_slide(
+        &mut self,
+        source: &WallpaperSource,
+        outcome: Result<Surface, String>,
+    ) -> bool {
+        if self.preparing_slide.as_ref() != Some(source) {
+            return false;
+        }
+        self.preparing_slide = None;
+        self.slide_done = Some(outcome);
+        true
+    }
+
+    /// Take the prepared slideshow picture, if one is waiting.
+    pub fn take_slide(&mut self) -> Option<Result<Surface, String>> {
+        self.slide_done.take()
+    }
+
+    /// Forget every slide wanted, in preparation, or prepared: the
+    /// screensaver has gone.
+    pub fn forget_slides(&mut self) {
+        self.wanted_slide = None;
+        self.preparing_slide = None;
+        self.slide_done = None;
     }
 
     /// Record the result of preparing `source`.

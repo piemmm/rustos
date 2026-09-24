@@ -89,7 +89,7 @@
 
 use tairix_abi::switchboard_ipc::CommandSection;
 use tairix_abi::window_ipc::{AppBarClick, AppMenuItemId};
-use tairix_abi::PowerAction;
+use tairix_abi::{PowerAction, ProcId};
 use tairix_controls::{damage, TraySignalAction};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, PointerButton, PointerFocus};
@@ -198,7 +198,7 @@ pub enum TaskbarResponse {
     /// model — and from the session, which owns the live feed.
     DismissNotification {
         /// The dismissed notification's attested producer.
-        producer: u64,
+        producer: ProcId,
         /// The producer-chosen key naming the dismissed notification.
         key: u32,
     },
@@ -637,7 +637,7 @@ impl TaskbarInput {
         if let Some(index) = layout.card_at(self.pointer) {
             if let Some(note) = taskbar.notifications().notification(index) {
                 return Some(TaskbarResponse::DismissNotification {
-                    producer: note.producer,
+                    producer: note.producer.instance,
                     key: note.key,
                 });
             }

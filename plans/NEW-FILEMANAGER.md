@@ -50,7 +50,7 @@ which the drift guard enforces.
 | FM11 | Emptying the Trash: the pure model, the app verb, the navigable Trash view, and the QEMU witness | done |
 | FM12 | Pointer activation gestures — four gestures reaching the one `activate` decision | done |
 | FM13 | The places / devices rail | done |
-| FM-polish | UI polish: the resizable/maximizable window, the labelled permissions grid, and plate-filling icon-only buttons | done |
+| FM-polish | UI polish: the resizable/maximizable window, labelled permission controls, and plate-filling icon-only buttons | done |
 | FM-dialogs | The two popup surfaces made first class: the sectioned Properties window, the working "Open With…" chooser, and the control-plate label fix beneath both | done |
 | FM14 | Opening a second document reaches the viewer this manager started: the desktop resolves an application from the kernel's attestation, and the open-with table shares the one program-store walk | done |
 
@@ -77,17 +77,16 @@ places/devices rail; the grid view's file-class artwork it draws comes from
 increment** makes the browser window **resizable/maximizable**
 (`files.app` opens `resizable` and re-maps its zero-copy frame region on a
 `WindowEvent::Resized`, laying the shared renderer out to the new viewport;
-fail-closed re-map, min-size clamp), replaces the cramped, overlapping,
-unlabelled inline permission toggles with a **labelled permissions grid**
-(`render::PermGrid` — `Read`/`Write`/`Exec` × `Owner`/`Group`/`Other`), and
-enlarges **icon-only buttons** to fill their plate. The
+fail-closed re-map, min-size clamp), labels every permission toggle — the
+Permissions section is the shared form family's access and ownership groups
+(FM8b) — and enlarges **icon-only buttons** to fill their plate. The
 icon-only glyph is now sized from the plate (the smaller plate dimension inside
 its frame, less a margin proportional to the plate — `lib/controls`
 `icon_content_side`) instead of from the text inset (`control_inset`), which had
 shrunk it to a ~6px glyph adrift in the 28px control plate (the "tiny icon"
 defect); it is the one `lib/controls` icon-button paint path, so every icon-only
 button across the desktop benefits. Host tests: the `lib/browse`
-permission-grid non-overlap regression + updated hit-test scan, and the
+permission-toggle non-overlap regression + hit-test scan, and the
 `lib/controls` `icon_only_glyph_fills_the_plate_not_the_text_inset` regression;
 freestanding app builds + lints clean.
 
@@ -147,14 +146,14 @@ fields, and neither surface carries its own copy. Properties is then a
 `lib/controls` `Tabs` strip over the closed `render::PropertiesTab`
 vocabulary (General / Permissions / Attributes) and the selected section's
 body; `render::Field::tab` is the one definition of which section a field
-belongs to, and `Left`/`Right` walk the strip. The frame is resolved from the
+belongs to, and `Left`/`Right` walk the strip while it holds the keyboard.
+The frame is resolved from the
 **client alone**, never the node, so an alias row no longer moves every band
 below it — the same click meant different things on a link and a plain file.
-The permissions matrix sizes each cell from `Checkbox::glyph_side` (the
-control's own published render geometry) on a control-height pitch, and
-ownership is two labelled rows whose editable cell is a pressable plate — an
-idle `TextField` drew identically to the live editor over it, so a reader could
-not tell whether their keys were landing. The metadata rows are a
+The Permissions section is composed of the shared form family (FM8b), and
+each ownership id's editable cell is a pressable plate — an idle `TextField`
+drew identically to the live editor over it, so a reader could not tell
+whether their keys were landing. The metadata rows are a
 `lib/controls` `FactList` in both the window's General section and the trusted
 picker's panel, which deleted the hand-rolled two-column `FieldLayout`. The
 chooser draws each candidate's **own** application icon (it resolved through
@@ -1472,9 +1471,9 @@ panicking (§2.9).
 once, each pinned to its node by *path* — so the listing behind them may be
 reloaded or navigated away from without any of them describing or writing to
 something else — and the listing stays usable while they are open, which an
-in-window modal could not offer. Its client is the fields, the permissions
-grid, the ownership control and the extended-attribute list; no second panel
-header inside a window that already has a title bar. `files.app` opens one with
+in-window modal could not offer. Its client is the fields, the permission and
+ownership controls, and the extended-attribute list; no second panel header
+inside a window that already has a title bar. `files.app` opens one with
 `Alt+Enter` or the context menu's *Properties* row: the node is resolved from
 the listing that named it (`Browser::selected_target_path`), the window is
 appended once the round's borrow of its own window has ended, and the **read
@@ -1490,15 +1489,33 @@ model: `validate_mode` fails closed on any bit above `FS_MODE_MASK` (refused,
 never masked into a different mode), the validation runs *before* any syscall,
 and the change goes through an injected `fs_set_mode` seam under the user's own
 identity (**no new capability**); a refusal surfaces as `ModeError::Refused`
-leaving the mode untouched (§2.24, §5.4). The drawn control is a labelled grid
-below the fields — `Read`/`Write`/`Exec` headers over three
-`Owner`/`Group`/`Other` triad rows of `lib/controls` `Checkbox` toggles, placed
-and hit-tested from the one shared `render::PermGrid` geometry (§2.2).
-`render::PERMISSION_BITS`/`permission_cells` are the one definition of which
-bit each toggle carries. A press flips that `rwx` bit alone, preserving the
-setuid/setgid/sticky bits, and re-reads the node on success so the window shows
-what the kernel applied. Those higher bits stay visible in the octal/symbolic
-spelling and are edited via `chmod` — a deliberate scope boundary.
+leaving the mode untouched (§2.24, §5.4). The section is two groups of the
+shared form family (`FieldGroup`/`FieldRow`, `plans/GUI-CONTROLS-DESIGN.md`
+§11.41) stacked by the shared plate column (`tairix_controls::stack`), with no
+layout arithmetic of its own (`render::PermsSection`): **ACCESS** — the
+symbolic + octal mode as a `Reading` row, then one `Owner`/`Group`/`Other` row
+per class whose slot is a `FlagSet` of three labelled `Checkbox`es
+(`Read`/`Write`/`Execute`) — over **OWNERSHIP**, the owning user and group.
+Every control lines up in one column, the width a class's flags need, so
+neither a node's reading nor an open id editor can move one. The window's
+opening width is derived from the access group's natural width, so every flag
+opens seated whole under any type ladder; a narrower window elides the labels
+and keeps every box. `render::PERMISSION_BITS`/`permission_cells` are the one
+definition of which bit each flag carries. A press flips that `rwx` bit alone,
+preserving the setuid/setgid/sticky bits, and re-reads the node on success so
+the window shows what the kernel applied. Those higher bits stay visible in the
+octal/symbolic spelling and are edited via `chmod` — a deliberate scope
+boundary.
+
+The keyboard reaches every control the pointer does. From the strip, `Down` or
+`Tab` takes it into the section (`render::PermsCursor`, carried in
+`PropertiesView`); there `Up`/`Down` walk the rows and carry between the two
+groups, `Left`/`Right` walk an access row's flags (keeping the column as the
+cursor moves between classes), and `Space`/`Enter` toggle the flag or open the
+ownership cell — resolved by `render::properties_permissions_key` to the same
+`PropertiesTarget` a press is, so both reach one act — while `Tab` or `Escape`
+hands the keyboard back to the strip. `route::properties_key` gives the section
+the arrows and `Escape` only while it holds the keyboard.
 
 **Ownership.** Reassigning a file's *owner* is genuinely unlike the other write
 verbs, so it is gated by the dedicated `CAP_FS_CHOWN` (id 39, the Unix
@@ -1519,14 +1536,16 @@ model is `lib/browse::owner_edit::set_owner` (`OwnerChange`/`OwnerError`/
 `validate_owner`): it names *what* to change, refuses the reserved
 `FS_OWNER_UNCHANGED` sentinel as an explicit target before any syscall, and
 surfaces a refusal as `OwnerError::Refused` leaving the ownership untouched.
-The control is drawn only where the launching user holds `CAP_FS_CHOWN` (read
-once from the kernel-attested `self_origin`), so a session that cannot use it
-is never shown it (§2.24): an accent underline marks each value clickable, the
-`Owner` arm of `properties_hit` resolves a click to exactly the uid or gid it
-edits (measured from the same `uid N / gid N` spelling the fields draw), and
-the active `TextField` is drawn at `properties_owner_editor_rect`. A
-non-numeric or out-of-range id, or a VFS refusal, states its reason in the
-field and keeps the editor open.
+The cells are editable only where the launching user holds `CAP_FS_CHOWN`
+(read once from the kernel-attested `self_origin`): each is a pressable plate
+the `Owner` arm of `properties_hit` resolves to exactly the uid or gid it edits,
+and the active `TextField` takes that row's slot, published as
+`properties_owner_editor_rect`; a press on the open editor keeps the typing. A
+session without the capability is shown the same cells refused — the rows'
+`NeedsCapability` state wears the Authority Mark and the group's footnote says
+why — and a press or a key on them resolves to nothing (§2.24). A non-numeric
+or out-of-range id, or a VFS refusal, states its reason in the field and keeps
+the editor open.
 
 **Extended attributes** (the ARXFS `namespace.name` store,
 `plans/ARXFS-METADATA.md`). The window lists the node's *visible* attributes
@@ -1562,6 +1581,11 @@ syscall each on a discrete press, like every other write gesture in this app
 (rename, mkdir, delete, paste). Moving the app's write gestures to the worker
 is `plans/FIX-DESKTOP.md`'s staged work, not this increment's.
 
+**Remaining: keyboard reach in the attributes section.** Its *Remove* action
+has no key, and `Left`/`Right` walk the strip there rather than the attribute
+editor's caret. Which key removes a row, and whether the section takes the
+keyboard from the strip as the Permissions section does, is undecided.
+
 **Remaining: a QEMU vertical for the window and the cue.** Two loop-level
 behaviours the host tests structurally cannot reach are covered only by the
 desk-level seam today — that a Properties window opens on the session and
@@ -1576,12 +1600,18 @@ The existing `filepick`/`handover` verticals cover the `OpenWindow`/
 Host-tested in `lib/browse` (the field set/order, the alias row and its
 absence, `properties_panel_rect` centring/clamp, one whole-client scan proving
 every permission toggle, both owning ids, each attribute row, the editor and
-both actions are reachable and pairwise apart, the slot→index mapping under a
-scroll, the bands moving exactly one row when an alias adds one, each drawn
-state differing, the gutter drag, and the extent scaling with density), in
-`userland/apps/files` (the property desk answering two windows independently, a
-re-read superseding its own answer, a refusal delivered as its reason, and a
-closed window's answer dropped), in `lib/fsmeta` (the value display and the
+both actions are reachable and pairwise apart, every flag seated whole at the
+opening size under the shipped themes, double density and a wider type ladder,
+every toggle still apart at the narrowest window, the keyboard reaching every
+toggle and both owning ids as the targets a press resolves, its cursor walking,
+carrying and stepping back out, the open editor drawn inside its published
+rectangle and kept on a press, the slot→index mapping under a scroll, the bands
+moving exactly one row when an alias adds one, each drawn state differing, the
+gutter drag, and the extent scaling with density), in `userland/apps/files`
+(the property desk answering two windows independently, a re-read superseding
+its own answer, a refusal delivered as its reason, a closed window's answer
+dropped, and which part of the window each key reaches), in `lib/fsmeta` (the
+value display and the
 assignment grammar), and in `kernel/core`/`kernel/syscall`/`lib/rt` for the
 `fs_set_owner` primitive. Docs: `docs/src/desktop/apps.md`,
 `docs/src/architecture/syscalls.md`, `docs/src/security/capabilities.md`,
@@ -1888,11 +1918,12 @@ and never reaches this app — a property of the design, not a gap
 (`plans/NEW-MENUS.md` D20). The verb it carried is a menu row instead:
 discoverable, and reachable from the keyboard as the gesture never was.
 
-- **The pure detector.** `lib/browse::click::DoubleClickTracker` is the
+- **The pure detector.** `tairix_input::click::DoubleClickTracker` is the
   one host-proven rule that turns a stream of presses into single- and
-  double-click gestures (`ClickKind`). `register(now_ns, index, button)` pairs a
-  press with the previous one only when it lands on the **same** item with the
-  **same** button within `DOUBLE_CLICK_INTERVAL_NS` (half a second), so one
+  double-click gestures (`ClickKind`). `register(now_ns, index, button,
+  interval)` pairs a press with the previous one only when it lands on the
+  **same** item with the **same** button within the desktop's published
+  double-click interval (`DesktopInfo::double_click`), so one
   press of each button is two gestures begun rather than one completed; a
   completed double *consumes* both presses (a third quick press begins a fresh
   single — standard triple-click semantics), a non-monotonic clock reading fails

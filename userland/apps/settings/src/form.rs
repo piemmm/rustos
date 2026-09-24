@@ -38,9 +38,11 @@ use alloc::vec::Vec;
 
 use tairix_abi::desktop::{Appearance, Contrast, Density, Motion};
 use tairix_abi::net_ipc::NetServerAddr;
+use tairix_abi::time::Duration64;
+use tairix_abi::{BundleId, Errno};
 use tairix_controls::{
-    ComboBox, ControlState, FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout,
-    FieldRow, StatusPill, TextAction, ValidationState,
+    stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
+    FieldGroup, FieldGroupAction, FieldLayout, FieldRow, StatusPill, TextAction, ValidationState,
 };
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
@@ -51,13 +53,14 @@ use tairix_theme::{CursorSetId, SignalRole, Theme};
 use tairix_users::Salt;
 use tairix_util::conf::ValueShape;
 use tairix_wallpaper::{
-    Backdrop, CursorSize, DesktopSettings, IconFlow, IconSort, Rgb, SettingsKey, WallpaperFit,
+    Backdrop, CursorSize, DesktopSettings, IconFlow, IconSort, IdleAfter, PointerSpeed,
+    PrimaryButton, RepeatRate, Rgb, ScreensaverKind, SettingsKey, WallpaperFit,
 };
 
 use crate::accounts::{self, AccountFacts, AccountField, AccountRun, AccountSetting, Unappliable};
 use crate::machine::MachineSetting;
 use crate::network::{self, Addressing, Choice, IfaceSetting};
-use crate::stack;
+use crate::notices;
 
 /// The UI scales the surface offers, as percentages of the reference
 /// density.
@@ -69,6 +72,23 @@ use crate::stack;
 /// rounded to a neighbour, which would change a setting the reader only came
 /// to look at.
 const SCALE_LADDER: [u32; 7] = [100, 125, 150, 175, 200, 250, 300];
+
+/// The double-click intervals the Mouse pane offers, in milliseconds. A
+/// desktop set to one off the ladder keeps it, as the scale row does.
+const DOUBLE_CLICK_LADDER_MS: [u32; 7] = [200, 300, 400, 500, 600, 800, 1_000];
+
+/// The pointer speeds the Mouse pane offers, as percentages.
+const SPEED_LADDER: [u16; 7] = [50, 75, 100, 125, 150, 200, 300];
+
+/// The repeat delays the Keyboard pane offers, in milliseconds.
+const REPEAT_DELAY_LADDER_MS: [u32; 5] = [250, 375, 500, 750, 1_000];
+
+/// The repeat rates the Keyboard pane offers beside *Off*, per second.
+const REPEAT_RATE_LADDER: [u8; 7] = [5, 10, 15, 20, 30, 45, 60];
+
+/// The idle waits the Screensaver and Lock Screen panes offer beside
+/// *Never*, in minutes.
+const IDLE_LADDER_MINUTES: [u16; 9] = [1, 2, 5, 10, 15, 20, 30, 45, 60];
 
 /// The backdrop colours the backdrop row offers: the active theme's own
 /// desktop colour first, then a small fixed palette of named flat colours.
@@ -127,6 +147,24 @@ pub enum Setting {
     CursorSet,
     /// How large the pointer is drawn.
     CursorSize,
+    /// Whether the desktop shows notifications at all.
+    NotifyEnabled,
+    /// Which mouse button is primary.
+    PrimaryButton,
+    /// How far apart a double-click's presses may be.
+    DoubleClick,
+    /// How far the pointer moves for a movement of the mouse.
+    PointerSpeed,
+    /// How long a key is held before it repeats.
+    RepeatDelay,
+    /// How often a held key repeats.
+    RepeatRate,
+    /// How long the desktop sits idle before the screensaver starts.
+    ScreensaverAfter,
+    /// What the screensaver shows.
+    ScreensaverKind,
+    /// How long the desktop sits idle before the screen locks.
+    LockAfter,
 }
 
 impl Setting {
@@ -145,6 +183,15 @@ impl Setting {
             Self::Sort => SettingsKey::Sort,
             Self::CursorSet => SettingsKey::CursorSet,
             Self::CursorSize => SettingsKey::CursorSize,
+            Self::NotifyEnabled => SettingsKey::NotifyEnabled,
+            Self::PrimaryButton => SettingsKey::PointerPrimary,
+            Self::DoubleClick => SettingsKey::DoubleClick,
+            Self::PointerSpeed => SettingsKey::PointerSpeed,
+            Self::RepeatDelay => SettingsKey::RepeatDelay,
+            Self::RepeatRate => SettingsKey::RepeatRate,
+            Self::ScreensaverAfter => SettingsKey::ScreensaverAfter,
+            Self::ScreensaverKind => SettingsKey::ScreensaverKind,
+            Self::LockAfter => SettingsKey::LockAfter,
         }
     }
 
@@ -163,6 +210,15 @@ impl Setting {
             Self::Sort => "Sort",
             Self::CursorSet => "Pointer set",
             Self::CursorSize => "Pointer size",
+            Self::NotifyEnabled => "Show notifications",
+            Self::PrimaryButton => "Primary button",
+            Self::DoubleClick => "Double-click speed",
+            Self::PointerSpeed => "Pointer speed",
+            Self::RepeatDelay => "Repeat delay",
+            Self::RepeatRate => "Repeat rate",
+            Self::ScreensaverAfter => "Start after",
+            Self::ScreensaverKind => "Show",
+            Self::LockAfter => "Lock after",
         }
     }
 
@@ -195,6 +251,32 @@ impl Setting {
             Self::CursorSize => {
                 "How large the pointer is drawn, on top of the interface scale above."
             }
+            Self::NotifyEnabled => {
+                "Whether any notification reaches the desktop. Off shows none, whatever each \
+                 program below may show."
+            }
+            Self::PrimaryButton => "The button that selects and opens. The other one opens a menu.",
+            Self::DoubleClick => {
+                "How far apart two clicks may be and still open what they are on. Every \
+                 program on the desktop uses the same interval."
+            }
+            Self::PointerSpeed => "How far the pointer moves for a movement of the mouse.",
+            Self::RepeatDelay => "How long a key is held before it starts to repeat.",
+            Self::RepeatRate => {
+                "How often a held key repeats. Off types it once, however long it is held."
+            }
+            Self::ScreensaverAfter => {
+                "How long the desktop sits without a key press or a movement of the mouse before \
+                 the screensaver covers it."
+            }
+            Self::ScreensaverKind => {
+                "What covers the screen: black, the desktop's own picture dimmed, or the shipped \
+                 pictures one after another."
+            }
+            Self::LockAfter => {
+                "How long the desktop sits without a key press or a movement of the mouse before \
+                 the screen locks."
+            }
         }
     }
 
@@ -226,6 +308,47 @@ impl Setting {
                 )
             }
             Self::CursorSize => pick(&CursorSize::ALL, settings.cursor_size, cursor_size_label),
+            Self::NotifyEnabled => pick(&SWITCH, settings.notifications.enabled(), switch_label),
+            Self::PrimaryButton => pick(
+                &PrimaryButton::ALL,
+                settings.primary_button,
+                primary_button_label,
+            ),
+            Self::DoubleClick => labelled(
+                &millis_ladder(&DOUBLE_CLICK_LADDER_MS, settings.double_click),
+                settings.double_click,
+                millis_label,
+            ),
+            Self::PointerSpeed => labelled(
+                &speed_ladder(settings.pointer_speed),
+                settings.pointer_speed,
+                speed_label,
+            ),
+            Self::RepeatDelay => labelled(
+                &millis_ladder(&REPEAT_DELAY_LADDER_MS, settings.repeat_delay),
+                settings.repeat_delay,
+                millis_label,
+            ),
+            Self::RepeatRate => labelled(
+                &rate_ladder(settings.repeat_rate),
+                settings.repeat_rate,
+                rate_label,
+            ),
+            Self::ScreensaverAfter => labelled(
+                &idle_ladder(settings.screensaver_after),
+                settings.screensaver_after,
+                idle_label,
+            ),
+            Self::ScreensaverKind => pick(
+                &ScreensaverKind::ALL,
+                settings.screensaver,
+                screensaver_label,
+            ),
+            Self::LockAfter => labelled(
+                &idle_ladder(settings.lock_after),
+                settings.lock_after,
+                idle_label,
+            ),
         }
     }
 
@@ -264,6 +387,45 @@ impl Setting {
                 &mut settings.cursor_set,
             ),
             Self::CursorSize => set(&CursorSize::ALL, index, &mut settings.cursor_size),
+            Self::NotifyEnabled => match SWITCH.get(index) {
+                Some(enabled) => {
+                    settings.notifications.set_enabled(*enabled);
+                    true
+                }
+                None => false,
+            },
+            Self::PrimaryButton => set(&PrimaryButton::ALL, index, &mut settings.primary_button),
+            Self::DoubleClick => set(
+                &millis_ladder(&DOUBLE_CLICK_LADDER_MS, settings.double_click),
+                index,
+                &mut settings.double_click,
+            ),
+            Self::PointerSpeed => set(
+                &speed_ladder(settings.pointer_speed),
+                index,
+                &mut settings.pointer_speed,
+            ),
+            Self::RepeatDelay => set(
+                &millis_ladder(&REPEAT_DELAY_LADDER_MS, settings.repeat_delay),
+                index,
+                &mut settings.repeat_delay,
+            ),
+            Self::RepeatRate => set(
+                &rate_ladder(settings.repeat_rate),
+                index,
+                &mut settings.repeat_rate,
+            ),
+            Self::ScreensaverAfter => set(
+                &idle_ladder(settings.screensaver_after),
+                index,
+                &mut settings.screensaver_after,
+            ),
+            Self::ScreensaverKind => set(&ScreensaverKind::ALL, index, &mut settings.screensaver),
+            Self::LockAfter => set(
+                &idle_ladder(settings.lock_after),
+                index,
+                &mut settings.lock_after,
+            ),
         }
     }
 
@@ -303,18 +465,137 @@ fn set<T: Copy>(values: &[T], index: usize, field: &mut T) -> bool {
     }
 }
 
-/// The scale ladder as it stands for a desktop currently at `current`: the
-/// offered steps, with `current` appended when it is not one of them.
-fn scale_ladder(current: Scale) -> Vec<Scale> {
-    let mut ladder: Vec<Scale> = SCALE_LADDER
-        .iter()
-        .filter_map(|percent| Scale::from_percent(*percent))
-        .collect();
-    if !ladder.contains(&current) {
-        ladder.push(current);
-        ladder.sort_by_key(|scale| scale.percent());
+/// `steps` as a chooser offers them to a setting currently at `current`:
+/// `current` put in its place when it is not one of them, so opening a pane
+/// never changes a value the reader only came to look at.
+fn with_current<T: Copy + PartialEq, K: Ord>(
+    mut steps: Vec<T>,
+    current: T,
+    key: impl FnMut(&T) -> K,
+) -> Vec<T> {
+    if !steps.contains(&current) {
+        steps.push(current);
+        steps.sort_by_key(key);
     }
-    ladder
+    steps
+}
+
+/// `ladder`'s labels, and the index of `current` among them.
+fn labelled<T: Copy + PartialEq>(
+    ladder: &[T],
+    current: T,
+    label: fn(T) -> String,
+) -> (Vec<String>, usize) {
+    (
+        ladder.iter().map(|value| label(*value)).collect(),
+        ladder.iter().position(|v| *v == current).unwrap_or(0),
+    )
+}
+
+/// The scale ladder as it stands for a desktop currently at `current`.
+fn scale_ladder(current: Scale) -> Vec<Scale> {
+    with_current(
+        SCALE_LADDER
+            .iter()
+            .filter_map(|percent| Scale::from_percent(*percent))
+            .collect(),
+        current,
+        |scale| scale.percent(),
+    )
+}
+
+/// The spans a millisecond ladder offers a setting currently at `current`.
+fn millis_ladder(steps: &[u32], current: Duration64) -> Vec<Duration64> {
+    with_current(
+        steps
+            .iter()
+            .map(|ms| Duration64::from_millis(*ms))
+            .collect(),
+        current,
+        |span| *span,
+    )
+}
+
+fn millis_label(span: Duration64) -> String {
+    alloc::format!("{} ms", span.saturating_total_nanos() / 1_000_000)
+}
+
+/// The speeds the pointer row offers a desktop currently at `current`.
+fn speed_ladder(current: PointerSpeed) -> Vec<PointerSpeed> {
+    with_current(
+        SPEED_LADDER
+            .iter()
+            .filter_map(|percent| PointerSpeed::from_percent(*percent))
+            .collect(),
+        current,
+        |speed| speed.percent(),
+    )
+}
+
+fn speed_label(speed: PointerSpeed) -> String {
+    alloc::format!("{}%", speed.percent())
+}
+
+/// The repeat rates the keyboard row offers a desktop currently at
+/// `current`: off first, then slowest to fastest.
+fn rate_ladder(current: RepeatRate) -> Vec<RepeatRate> {
+    let steps = core::iter::once(RepeatRate::Off)
+        .chain(
+            REPEAT_RATE_LADDER
+                .iter()
+                .map(|rate| RepeatRate::PerSecond(*rate)),
+        )
+        .collect();
+    with_current(steps, current, |rate| match rate {
+        RepeatRate::Off => 0,
+        RepeatRate::PerSecond(rate) => *rate,
+    })
+}
+
+fn rate_label(rate: RepeatRate) -> String {
+    match rate {
+        RepeatRate::Off => String::from("Off"),
+        RepeatRate::PerSecond(rate) => alloc::format!("{rate} a second"),
+    }
+}
+
+/// The idle waits a pane offers a desktop currently at `current`: never
+/// first, then the waits in order.
+fn idle_ladder(current: IdleAfter) -> Vec<IdleAfter> {
+    let steps = core::iter::once(IdleAfter::Never)
+        .chain(
+            IDLE_LADDER_MINUTES
+                .iter()
+                .map(|minutes| IdleAfter::Minutes(*minutes)),
+        )
+        .collect();
+    with_current(steps, current, |after| match after {
+        IdleAfter::Never => 0,
+        IdleAfter::Minutes(minutes) => *minutes,
+    })
+}
+
+fn idle_label(after: IdleAfter) -> String {
+    match after {
+        IdleAfter::Never => String::from("Never"),
+        IdleAfter::Minutes(1) => String::from("1 minute"),
+        IdleAfter::Minutes(minutes) => alloc::format!("{minutes} minutes"),
+    }
+}
+
+const fn screensaver_label(kind: ScreensaverKind) -> &'static str {
+    match kind {
+        ScreensaverKind::Blank => "Black",
+        ScreensaverKind::Dim => "Dimmed desktop",
+        ScreensaverKind::Slideshow => "Slideshow",
+    }
+}
+
+const fn primary_button_label(button: PrimaryButton) -> &'static str {
+    match button {
+        PrimaryButton::Left => "Left",
+        PrimaryButton::Right => "Right",
+    }
 }
 
 /// The scale choices and which one is in effect.
@@ -443,6 +724,17 @@ const fn cursor_size_label(size: CursorSize) -> &'static str {
     }
 }
 
+/// A switch's two positions, in the order its row lists them.
+const SWITCH: [bool; 2] = [true, false];
+
+const fn switch_label(on: bool) -> &'static str {
+    if on {
+        "On"
+    } else {
+        "Off"
+    }
+}
+
 /// The backdrop choices and which one is in effect.
 fn backdrop_choices(current: Backdrop) -> (Vec<String>, usize) {
     let ladder = backdrop_ladder(current);
@@ -471,6 +763,11 @@ pub(crate) enum Owner {
     /// One field of one account, which the user-administration tools own
     /// and which this application may read no more of than its own record.
     Account(AccountSetting),
+    /// The level one notification source may reach the desktop at, in the
+    /// desktop's own document.
+    Source(BundleId),
+    /// A command the row offers, which writes no store at all.
+    Action(Action),
 }
 
 /// A settable a composition **declares** in a static table, as opposed to
@@ -488,6 +785,53 @@ enum Declared {
     Desktop(Setting),
     /// The machine's boot-time configuration store.
     Machine(MachineSetting),
+    /// A command about the pane's settings, rather than a setting.
+    Action(Action),
+}
+
+/// A command a pane offers beside its settings.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Action {
+    /// Lock the screen now, through the desktop's own lock.
+    LockNow,
+}
+
+impl Action {
+    /// The row's leading label, which is also its search term.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::LockNow => "Lock now",
+        }
+    }
+
+    fn row(self, documents: Documents<'_>) -> FieldRow {
+        match self {
+            Self::LockNow => {
+                let row = FieldRow::new(
+                    self.label(),
+                    FieldControl::Button(Button::new(
+                        ButtonContent::Label(String::from("Lock Now")),
+                        ControlRole::Neutral,
+                    )),
+                );
+                match documents.lock_refusal {
+                    None => row.with_description(
+                        "Covers the screen until this account's password is typed.",
+                    ),
+                    Some(refusal) => {
+                        let row = row.with_description(alloc::format!(
+                            "The desktop would not lock the screen: {refusal}."
+                        ));
+                        let state = row.state();
+                        row.with_state(ControlState {
+                            validation: ValidationState::of(false),
+                            ..state
+                        })
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Declared {
@@ -496,6 +840,7 @@ impl Declared {
         match self {
             Self::Desktop(setting) => setting.label(),
             Self::Machine(setting) => setting.label(),
+            Self::Action(action) => action.label(),
         }
     }
 
@@ -510,6 +855,7 @@ impl Declared {
                 },
             ),
             Self::Machine(setting) => setting.row(documents.config),
+            Self::Action(action) => action.row(documents),
         }
     }
 
@@ -518,6 +864,7 @@ impl Declared {
         match self {
             Self::Desktop(setting) => Owner::Desktop(setting),
             Self::Machine(setting) => Owner::Machine(setting),
+            Self::Action(action) => Owner::Action(action),
         }
     }
 }
@@ -527,12 +874,15 @@ impl Declared {
 struct GroupSpec {
     caption: &'static str,
     settings: &'static [Declared],
+    /// A sentence of consequence beneath the group, where one is owed.
+    footnote: Option<&'static str>,
 }
 
 /// The Login & startup pane's one group.
 const LOGIN_GROUPS: [GroupSpec; 1] = [GroupSpec {
     caption: "STARTUP",
     settings: &[Declared::Machine(MachineSetting::LoginType)],
+    footnote: None,
 }];
 
 /// The Caching pane's groups: the master switch, then the classes it is a
@@ -541,6 +891,7 @@ const CACHING_GROUPS: [GroupSpec; 2] = [
     GroupSpec {
         caption: "CACHING",
         settings: &[Declared::Machine(MachineSetting::CacheAll)],
+        footnote: None,
     },
     GroupSpec {
         caption: "WHAT IS CACHED",
@@ -550,6 +901,7 @@ const CACHING_GROUPS: [GroupSpec; 2] = [
             Declared::Machine(MachineSetting::CacheTransform),
             Declared::Machine(MachineSetting::CacheSemantic),
         ],
+        footnote: None,
     },
 ];
 
@@ -563,6 +915,7 @@ const TCP_IP_GROUPS: [GroupSpec; 2] = [
             Declared::Machine(MachineSetting::NetIpv6Enabled),
             Declared::Machine(MachineSetting::NetIpv6Privacy),
         ],
+        footnote: None,
     },
     GroupSpec {
         caption: "CONNECTIONS",
@@ -571,6 +924,7 @@ const TCP_IP_GROUPS: [GroupSpec; 2] = [
             Declared::Machine(MachineSetting::NetTcpKeepalive),
             Declared::Machine(MachineSetting::NetTcpEcn),
         ],
+        footnote: None,
     },
 ];
 
@@ -579,6 +933,7 @@ const APPEARANCE_GROUPS: [GroupSpec; 2] = [
     GroupSpec {
         caption: "APPEARANCE",
         settings: &[Declared::Desktop(Setting::Appearance)],
+        footnote: None,
     },
     GroupSpec {
         caption: "INTERFACE",
@@ -588,6 +943,7 @@ const APPEARANCE_GROUPS: [GroupSpec; 2] = [
             Declared::Desktop(Setting::Motion),
             Declared::Desktop(Setting::Scale),
         ],
+        footnote: None,
     },
 ];
 
@@ -601,10 +957,12 @@ const ACCESSIBILITY_GROUPS: [GroupSpec; 3] = [
             Declared::Desktop(Setting::Density),
             Declared::Desktop(Setting::Scale),
         ],
+        footnote: None,
     },
     GroupSpec {
         caption: "MOTION",
         settings: &[Declared::Desktop(Setting::Motion)],
+        footnote: None,
     },
     GroupSpec {
         caption: "POINTER",
@@ -612,8 +970,64 @@ const ACCESSIBILITY_GROUPS: [GroupSpec; 3] = [
             Declared::Desktop(Setting::CursorSet),
             Declared::Desktop(Setting::CursorSize),
         ],
+        footnote: None,
     },
 ];
+
+/// The Notifications pane's declared group: the desktop-wide switch. The
+/// sources beneath it are discovered.
+const NOTIFICATION_GROUPS: [GroupSpec; 1] = [GroupSpec {
+    caption: "NOTIFICATIONS",
+    settings: &[Declared::Desktop(Setting::NotifyEnabled)],
+    footnote: None,
+}];
+
+/// The Mouse pane's one group.
+const MOUSE_GROUPS: [GroupSpec; 1] = [GroupSpec {
+    caption: "POINTER",
+    settings: &[
+        Declared::Desktop(Setting::PrimaryButton),
+        Declared::Desktop(Setting::PointerSpeed),
+        Declared::Desktop(Setting::DoubleClick),
+    ],
+    footnote: None,
+}];
+
+/// The Keyboard pane's one group, and what the pane cannot offer.
+const KEYBOARD_GROUPS: [GroupSpec; 1] = [GroupSpec {
+    caption: "KEY REPEAT",
+    settings: &[
+        Declared::Desktop(Setting::RepeatDelay),
+        Declared::Desktop(Setting::RepeatRate),
+    ],
+    footnote: Some(
+        "This system has one built-in key layout and no list of the desktop's shortcuts, so \
+         there is no layout, key remapping or shortcut to set.",
+    ),
+}];
+
+/// The Screensaver pane's one group.
+const SCREENSAVER_GROUPS: [GroupSpec; 1] = [GroupSpec {
+    caption: "SCREENSAVER",
+    settings: &[
+        Declared::Desktop(Setting::ScreensaverAfter),
+        Declared::Desktop(Setting::ScreensaverKind),
+    ],
+    footnote: None,
+}];
+
+/// The Lock Screen pane's one group.
+const LOCK_GROUPS: [GroupSpec; 1] = [GroupSpec {
+    caption: "LOCK SCREEN",
+    settings: &[
+        Declared::Desktop(Setting::LockAfter),
+        Declared::Action(Action::LockNow),
+    ],
+    footnote: Some(
+        "Unlocking always asks for this account's password. That is not a setting: a lock \
+         that could be opened without one would protect nothing.",
+    ),
+}];
 
 /// The Wallpaper pane's one group: how the picture is placed, and how the
 /// icons standing on it are arranged.
@@ -625,6 +1039,7 @@ const WALLPAPER_GROUPS: [GroupSpec; 1] = [GroupSpec {
         Declared::Desktop(Setting::Icons),
         Declared::Desktop(Setting::Sort),
     ],
+    footnote: None,
 }];
 
 /// How a composition's changes become durable.
@@ -676,6 +1091,17 @@ pub enum Composition {
     /// account once an administrator has answered the listing, and the
     /// group directory.
     Users,
+    /// The Notifications pane: the desktop-wide switch, then one row per
+    /// source.
+    Notifications,
+    /// The Mouse pane.
+    Mouse,
+    /// The Keyboard pane.
+    Keyboard,
+    /// The Screensaver pane.
+    Screensaver,
+    /// The Lock Screen pane.
+    LockScreen,
 }
 
 impl Composition {
@@ -689,6 +1115,11 @@ impl Composition {
             Self::LoginStartup => &LOGIN_GROUPS,
             Self::Caching => &CACHING_GROUPS,
             Self::TcpIp => &TCP_IP_GROUPS,
+            Self::Notifications => &NOTIFICATION_GROUPS,
+            Self::Mouse => &MOUSE_GROUPS,
+            Self::Keyboard => &KEYBOARD_GROUPS,
+            Self::Screensaver => &SCREENSAVER_GROUPS,
+            Self::LockScreen => &LOCK_GROUPS,
             Self::Ethernet | Self::Dns | Self::Users => &[],
         }
     }
@@ -697,7 +1128,14 @@ impl Composition {
     #[must_use]
     pub const fn posture(self) -> Posture {
         match self {
-            Self::Appearance | Self::Accessibility | Self::Wallpaper => Posture::Immediate,
+            Self::Appearance
+            | Self::Accessibility
+            | Self::Wallpaper
+            | Self::Notifications
+            | Self::Mouse
+            | Self::Keyboard
+            | Self::Screensaver
+            | Self::LockScreen => Posture::Immediate,
             // Writing either of the machine's stores is a re-authenticated
             // run of the tool that owns them, which is not something to ask
             // for per pointer sample.
@@ -722,8 +1160,22 @@ impl Composition {
     pub(crate) const fn reads_desktop(self) -> bool {
         matches!(
             self,
-            Self::Appearance | Self::Accessibility | Self::Wallpaper
+            Self::Appearance
+                | Self::Accessibility
+                | Self::Wallpaper
+                | Self::Notifications
+                | Self::Mouse
+                | Self::Keyboard
+                | Self::Screensaver
+                | Self::LockScreen
         )
+    }
+
+    /// Whether this composition lists the sources the desktop said have
+    /// notified.
+    #[must_use]
+    pub(crate) const fn reads_notify_sources(self) -> bool {
+        matches!(self, Self::Notifications)
     }
 
     /// Whether this composition's rows read the machine's boot-time store.
@@ -764,6 +1216,11 @@ impl Composition {
         match self {
             Self::Appearance | Self::Accessibility => &SettingsKey::APPEARANCE,
             Self::Wallpaper => &SettingsKey::PINBOARD,
+            Self::Notifications => &SettingsKey::NOTIFICATIONS,
+            Self::Mouse => &SettingsKey::POINTER,
+            Self::Keyboard => &SettingsKey::KEYBOARD,
+            Self::Screensaver => &SettingsKey::SCREENSAVER,
+            Self::LockScreen => &SettingsKey::LOCK,
             Self::LoginStartup
             | Self::Caching
             | Self::TcpIp
@@ -786,6 +1243,12 @@ impl Composition {
             Self::Ethernet => network::ADDRESSING_FACTS.to_vec(),
             Self::Dns => network::RESOLVER_FACTS.to_vec(),
             Self::Users => accounts::ACCOUNT_FACTS.to_vec(),
+            Self::Notifications => self
+                .groups()
+                .iter()
+                .flat_map(|group| group.settings.iter().map(|declared| declared.label()))
+                .chain(notices::SOURCE_FACTS.iter().copied())
+                .collect(),
             _ => self
                 .groups()
                 .iter()
@@ -807,6 +1270,17 @@ impl Composition {
                 (groups, owners)
             }
             Self::Users => users(documents),
+            Self::Notifications => {
+                let (mut groups, mut owners) = self.declared(documents);
+                let (group, sources) = notices::source_group(
+                    &documents.settings.notifications,
+                    documents.notify_sources,
+                    documents.sources_full,
+                );
+                groups.push(group);
+                owners.push(sources.into_iter().map(Owner::Source).collect());
+                (groups, owners)
+            }
             _ => self.declared(documents),
         }
     }
@@ -816,13 +1290,17 @@ impl Composition {
         let mut groups = Vec::with_capacity(self.groups().len());
         let mut owners = Vec::with_capacity(self.groups().len());
         for spec in self.groups() {
-            groups.push(FieldGroup::new(
+            let group = FieldGroup::new(
                 spec.caption,
                 spec.settings
                     .iter()
                     .map(|declared| declared.row(documents))
                     .collect(),
-            ));
+            );
+            groups.push(match spec.footnote {
+                Some(footnote) => group.with_footnote(footnote),
+                None => group,
+            });
             owners.push(
                 spec.settings
                     .iter()
@@ -902,6 +1380,13 @@ pub(crate) struct Documents<'a> {
     /// What the reader has changed on the account rows since the listing,
     /// which is what each of them now says.
     pub(crate) staged_accounts: &'a [(AccountSetting, String)],
+    /// The sources the desktop said have notified, or `None` while it has
+    /// not said.
+    pub(crate) notify_sources: Option<&'a [BundleId]>,
+    /// Whether the last source change was refused for want of room.
+    pub(crate) sources_full: bool,
+    /// Why the desktop last refused to lock the screen, if it did.
+    pub(crate) lock_refusal: Option<Errno>,
 }
 
 /// Whether `owner`'s row holds a secret, and so is carried across a
@@ -909,7 +1394,11 @@ pub(crate) struct Documents<'a> {
 const fn secret_owner(owner: Owner) -> bool {
     match owner {
         Owner::Account(setting) => setting.field.is_secret(),
-        Owner::Desktop(_) | Owner::Machine(_) | Owner::Interface(_) => false,
+        Owner::Desktop(_)
+        | Owner::Machine(_)
+        | Owner::Interface(_)
+        | Owner::Source(_)
+        | Owner::Action(_) => false,
     }
 }
 
@@ -960,6 +1449,8 @@ pub enum FormOutcome {
     /// nothing was asked for; the pane's own action band has to re-render,
     /// because what it offers depends on whether anything now differs.
     Staged,
+    /// The reader asked for the screen to be locked now.
+    LockScreen,
 }
 
 /// A composed pane: the groups it draws, and the setting behind each row.
@@ -1012,6 +1503,13 @@ pub struct Form {
     /// The cursor sets the desktop answered with, kept so a rebuild offers
     /// the same choice space rather than collapsing to the built-in one.
     cursor_sets: Vec<CursorSetId>,
+    /// The sources the desktop said have notified, or `None` while it has
+    /// not said.
+    notify_sources: Option<Vec<BundleId>>,
+    /// Whether the last source change was refused for want of room.
+    sources_full: bool,
+    /// Why the desktop last refused to lock the screen, if it did.
+    lock_refusal: Option<Errno>,
     /// Which group holds the keyboard cursor.
     focus: usize,
     /// The first group drawn.
@@ -1041,6 +1539,9 @@ impl Form {
             accounts: documents.accounts.clone(),
             staged_accounts: documents.staged_accounts.to_vec(),
             cursor_sets: documents.cursor_sets.to_vec(),
+            notify_sources: documents.notify_sources.map(<[_]>::to_vec),
+            sources_full: documents.sources_full,
+            lock_refusal: documents.lock_refusal,
             focus: 0,
             first: 0,
         };
@@ -1088,6 +1589,22 @@ impl Form {
     pub(crate) fn adopt_resolvers(&mut self, resolvers: Option<&[NetServerAddr]>) {
         self.resolvers = resolvers.map(<[_]>::to_vec);
         self.rebuild();
+    }
+
+    /// Adopt what the desktop answered when asked to lock the screen.
+    pub(crate) fn adopt_lock_refusal(&mut self, refusal: Option<Errno>) {
+        if self.lock_refusal != refusal {
+            self.lock_refusal = refusal;
+            self.rebuild();
+        }
+    }
+
+    /// Adopt the sources the desktop said have notified.
+    pub(crate) fn adopt_notify_sources(&mut self, sources: Option<&[BundleId]>) {
+        self.notify_sources = sources.map(<[_]>::to_vec);
+        if self.composition.reads_notify_sources() {
+            self.rebuild();
+        }
     }
 
     /// Adopt the ungated account readings: the caller's own record and the
@@ -1240,7 +1757,7 @@ impl Form {
     /// is changed by a command line of its own, so neither is a pair.
     fn pending_for(&self, owner: Owner) -> Option<(String, String)> {
         match owner {
-            Owner::Desktop(_) | Owner::Account(_) => None,
+            Owner::Desktop(_) | Owner::Account(_) | Owner::Source(_) | Owner::Action(_) => None,
             Owner::Machine(setting) => {
                 let (working, effect) = (self.config.as_ref()?, self.config_in_effect.as_ref()?);
                 let value = setting.value(working);
@@ -1440,6 +1957,9 @@ impl Form {
             resolvers: self.resolvers.as_deref(),
             accounts: &self.accounts,
             staged_accounts: &self.staged_accounts,
+            notify_sources: self.notify_sources.as_deref(),
+            sources_full: self.sources_full,
+            lock_refusal: self.lock_refusal,
         });
         self.groups = groups;
         self.owners = owners;
@@ -1539,16 +2059,15 @@ impl Form {
     /// rather than a cut sentence.
     #[must_use]
     pub fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
-        let gap = stack::gap(scale, theme);
-        let column = stack::plate_width(width, scale, theme);
-        let plates: u32 = self
-            .groups
-            .iter()
-            .map(|group| group.measured_height(column, scale, theme))
-            .fold(0, u32::saturating_add);
-        let gaps =
-            gap.saturating_mul(u32::try_from(self.groups.len().saturating_add(1)).unwrap_or(1));
-        plates.saturating_add(gaps)
+        let plate = stack::plate_width(width, scale, theme);
+        let column = FieldGroup::shared_column(&self.groups, plate, scale, theme);
+        stack::height(
+            self.groups
+                .iter()
+                .map(|group| group.measured_height(plate, column, scale, theme)),
+            scale,
+            theme,
+        )
     }
 
     /// Draw the form into `surface` stacked down `bounds`, with any expanded
@@ -1709,6 +2228,9 @@ impl Form {
         };
         match action.action {
             FieldAction::Selected { index } => self.chose(owner, index),
+            FieldAction::Activated if owner == Owner::Action(Action::LockNow) => {
+                FormOutcome::LockScreen
+            }
             // An entry reports every keystroke, and what it now holds is
             // read straight back off the row: the working copy takes it
             // where the store would, and says so on the row where it would
@@ -1731,6 +2253,26 @@ impl Form {
                     cursor_sets: &self.cursor_sets,
                 };
                 if !setting.adopt(index, &mut self.settings, offered) {
+                    return FormOutcome::Changed;
+                }
+                FormOutcome::Apply(self.applied())
+            }
+            Owner::Source(source) => {
+                let Some(level) = notices::level_at(index) else {
+                    return FormOutcome::Changed;
+                };
+                // A source the policy has no room for keeps its level, and
+                // its row goes back to saying so.
+                let full = self
+                    .settings
+                    .notifications
+                    .set_level(source, level)
+                    .is_err();
+                if full || self.sources_full {
+                    self.sources_full = full;
+                    self.rebuild();
+                }
+                if full {
                     return FormOutcome::Changed;
                 }
                 FormOutcome::Apply(self.applied())
@@ -1772,6 +2314,8 @@ impl Form {
                 );
                 FormOutcome::Staged
             }
+            // A command row offers no choice list to choose from.
+            Owner::Action(_) => FormOutcome::Changed,
             Owner::Account(setting) => {
                 // The lock state is the pane's one closed account field;
                 // an index outside the list this surface built stages
@@ -1821,7 +2365,9 @@ impl Form {
                 }
                 admits
             }
-            Owner::Desktop(_) | Owner::Machine(_) => return FormOutcome::Changed,
+            Owner::Desktop(_) | Owner::Machine(_) | Owner::Source(_) | Owner::Action(_) => {
+                return FormOutcome::Changed
+            }
         };
         if let Some(held) = self
             .groups
@@ -1887,17 +2433,12 @@ impl Form {
             scale,
             theme,
         } = place;
-        let column = self
-            .groups
-            .iter()
-            .map(|group| group.slot_column(bounds, scale, theme))
-            .max()
-            .unwrap_or(0);
         let across = stack::plate_width(bounds.width, scale, theme);
+        let column = FieldGroup::shared_column(&self.groups, across, scale, theme);
         stack::place(bounds, first, self.groups.len(), scale, theme, |index| {
-            self.groups
-                .get(index)
-                .map_or(0, |group| group.measured_height(across, scale, theme))
+            self.groups.get(index).map_or(0, |group| {
+                group.measured_height(across, column, scale, theme)
+            })
         })
         .into_iter()
         .filter_map(|(index, rect)| {
@@ -1911,6 +2452,7 @@ impl Form {
                             Some(combo.popup_rect(slot, viewport, scale, theme))
                         }
                         FieldControl::Toggle(_)
+                        | FieldControl::Flags(_)
                         | FieldControl::Slider(_)
                         | FieldControl::Text(_)
                         | FieldControl::Button(_)
@@ -1954,6 +2496,8 @@ impl Form {
     /// The first group to draw from so that group `index` is seated.
     #[must_use]
     pub fn reveal_from(&self, index: usize, place: FormPlace<'_>) -> usize {
+        let across = stack::plate_width(place.bounds.width, place.scale, place.theme);
+        let column = FieldGroup::shared_column(&self.groups, across, place.scale, place.theme);
         stack::reveal_from(
             self.first,
             index,
@@ -1962,9 +2506,8 @@ impl Form {
             place.scale,
             place.theme,
             |at| {
-                let across = stack::plate_width(place.bounds.width, place.scale, place.theme);
                 self.groups.get(at).map_or(0, |group| {
-                    group.measured_height(across, place.scale, place.theme)
+                    group.measured_height(across, column, place.scale, place.theme)
                 })
             },
         )
@@ -1984,7 +2527,7 @@ impl Form {
             .into_iter()
             .find_map(|(index, layout)| (index == group).then_some(layout))?;
         let field_group = self.groups.get(group)?;
-        let bounds = field_group.row_rect(row, layout.bounds, place.scale, place.theme)?;
+        let bounds = field_group.row_rect(row, layout, place.scale, place.theme)?;
         field_group.rows().get(row)?.control_rect(
             FieldLayout::new(bounds, layout.column).with_popup(layout.popup),
             place.scale,
@@ -2048,6 +2591,13 @@ impl Form {
         &self.groups
     }
 
+    /// Where each seated group is laid out in `place`, for a test that holds
+    /// the paint to the heights the groups were measured for.
+    #[cfg(test)]
+    pub(crate) fn layouts_for_test(&self, place: FormPlace<'_>) -> Vec<(usize, FieldLayout)> {
+        self.layouts(place)
+    }
+
     /// Put `text` in group `group`'s row `row` and route the edit it
     /// reports, through the same path a keystroke takes.
     #[cfg(test)]
@@ -2076,6 +2626,19 @@ impl Form {
     /// working copy, the dirty set and the ceiling restatement, none of
     /// which a choice list's own keyboard mechanics (which `lib/controls`
     /// tests) has any part in.
+    /// Activate the button in row `row` of group `group`, as a press on it
+    /// would.
+    #[cfg(test)]
+    pub(crate) fn activate_for_test(&mut self, group: usize, row: usize) -> FormOutcome {
+        self.acted(Some((
+            group,
+            tairix_controls::FieldGroupAction {
+                row,
+                action: tairix_controls::FieldAction::Activated,
+            },
+        )))
+    }
+
     #[cfg(test)]
     pub(crate) fn choose_for_test(
         &mut self,

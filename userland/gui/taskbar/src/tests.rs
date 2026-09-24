@@ -12,6 +12,7 @@ use tairix_abi::window_ipc::{
     AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason,
     AppMenuRole, AppMenuRow, AppMenuShortcut, APP_MENU_MAX_ROWS,
 };
+use tairix_abi::{BundleId, Errno, ProcId};
 use tairix_controls::damage::Repaint;
 use tairix_controls::{
     ground_fill, plate_border, ActivityState, ChromeLayer, ControlRole, ControlState, MenuItem,
@@ -173,7 +174,8 @@ use crate::layout::{local_rect, Hit};
 use crate::library::{folder_label, LibraryFocus, LibraryRow};
 use crate::menu::{EntryRow, MenuRequest, MenuSubject};
 use crate::notifications::{
-    IconId, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
+    IconId, NotifySeverity, Producer, StatusKind, StatusSignal, TransientNotification,
+    NOTIFICATIONS_MAX, SOURCE_NOTIFICATIONS_MAX,
 };
 use crate::picker::{
     has_picker, slot_has_picker, PickerEntry, PICKER_CLOSE_GRACE_NS, PICKER_MIN_WINDOWS,
@@ -515,70 +517,176 @@ fn status_signals_set_and_dedup() {
     assert_eq!(bar.notifications().signal_count(), 2);
 }
 
+/// A producer instance `n` of a source named after it.
+fn producer(n: u8) -> Producer {
+    Producer {
+        instance: ProcId::from_raw([n; 16]),
+        pid: u64::from(n),
+        source: BundleId::new(&alloc::format!("com.example.p{n}")).expect("a bounded identity"),
+    }
+}
+
+/// A notification `key` from `producer` at `severity`.
+fn note(
+    producer: Producer,
+    key: u32,
+    severity: NotifySeverity,
+    body: &str,
+) -> TransientNotification {
+    TransientNotification::new(producer, key, severity, "Sync", body)
+}
+
 #[test]
 fn notifications_raise_upsert_and_clear() {
     let mut bar = bottom_bar();
-    assert!(bar.raise_notification(TransientNotification::new(
-        7,
-        1,
-        NotifySeverity::Info,
-        "Sync",
-        "Started",
-    )));
+    let p = producer(7);
+    assert_eq!(
+        bar.raise_notification(note(p, 1, NotifySeverity::Info, "Started")),
+        Ok(true)
+    );
     assert_eq!(bar.notifications().notification_count(), 1);
     // Re-raising the same (producer, key) with new content updates in place.
-    assert!(bar.raise_notification(TransientNotification::new(
-        7,
-        1,
-        NotifySeverity::Info,
-        "Sync",
-        "Halfway",
-    )));
+    assert_eq!(
+        bar.raise_notification(note(p, 1, NotifySeverity::Info, "Halfway")),
+        Ok(true)
+    );
     assert_eq!(bar.notifications().notification_count(), 1);
     assert_eq!(
         bar.notifications().notification(0).expect("present").body,
         "Halfway"
     );
     // Re-raising byte-identical content reports no change.
-    assert!(!bar.raise_notification(TransientNotification::new(
-        7,
-        1,
-        NotifySeverity::Info,
-        "Sync",
-        "Halfway",
-    )));
+    assert_eq!(
+        bar.raise_notification(note(p, 1, NotifySeverity::Info, "Halfway")),
+        Ok(false)
+    );
     // Clearing is idempotent.
-    assert!(bar.clear_notification(7, 1));
-    assert!(!bar.clear_notification(7, 1));
+    assert!(bar.clear_notification(p.instance, 1));
+    assert!(!bar.clear_notification(p.instance, 1));
     assert!(!bar.notifications().has_notifications());
+}
+
+/// A recycled pid is a different instance: it can neither replace nor clear
+/// what the earlier holder of the pid raised.
+#[test]
+fn a_notification_answers_only_to_the_instance_that_raised_it() {
+    let mut bar = bottom_bar();
+    let first = producer(7);
+    let recycled = Producer {
+        instance: ProcId::from_raw([0x77; 16]),
+        ..first
+    };
+    assert_eq!(
+        bar.raise_notification(note(first, 1, NotifySeverity::Info, "mine")),
+        Ok(true)
+    );
+    assert!(!bar.clear_notification(recycled.instance, 1));
+    assert_eq!(
+        bar.raise_notification(note(recycled, 1, NotifySeverity::Info, "theirs")),
+        Ok(true)
+    );
+    let bodies: Vec<&str> = bar
+        .notifications()
+        .notifications()
+        .map(|note| note.body.as_str())
+        .collect();
+    assert_eq!(bodies, ["theirs", "mine"]);
+}
+
+/// The area is bounded per source and in total, so no producer can grow the
+/// session without limit or crowd every other source out; an update in place
+/// is never refused.
+#[test]
+fn the_notification_area_refuses_a_raise_past_its_bounds() {
+    let mut bar = bottom_bar();
+    let noisy = producer(1);
+    for key in 0..SOURCE_NOTIFICATIONS_MAX {
+        let key = u32::try_from(key).expect("a small key");
+        assert_eq!(
+            bar.raise_notification(note(noisy, key, NotifySeverity::Info, "")),
+            Ok(true)
+        );
+    }
+    assert_eq!(
+        bar.raise_notification(note(noisy, 999, NotifySeverity::Critical, "")),
+        Err(Errno::LimitExceeded)
+    );
+    assert_eq!(
+        bar.raise_notification(note(noisy, 0, NotifySeverity::Info, "update")),
+        Ok(true),
+        "an update in place is not a new notice"
+    );
+    // Other sources still have room until the whole area is full.
+    let mut source = 2u8;
+    while bar.notifications().notification_count() < NOTIFICATIONS_MAX {
+        let p = producer(source);
+        for key in 0..SOURCE_NOTIFICATIONS_MAX {
+            if bar.notifications().notification_count() == NOTIFICATIONS_MAX {
+                break;
+            }
+            let key = u32::try_from(key).expect("a small key");
+            assert_eq!(
+                bar.raise_notification(note(p, key, NotifySeverity::Info, "")),
+                Ok(true)
+            );
+        }
+        source += 1;
+    }
+    assert_eq!(
+        bar.raise_notification(note(producer(200), 0, NotifySeverity::Critical, "")),
+        Err(Errno::LimitExceeded)
+    );
+    assert_eq!(bar.notifications().notification_count(), NOTIFICATIONS_MAX);
+}
+
+#[test]
+fn retaining_by_policy_withdraws_only_what_it_refuses() {
+    let mut bar = bottom_bar();
+    let _ = bar.take_repaint();
+    let (quiet, loud) = (producer(1), producer(2));
+    assert!(bar
+        .raise_notification(note(quiet, 1, NotifySeverity::Info, ""))
+        .is_ok());
+    assert!(bar
+        .raise_notification(note(loud, 1, NotifySeverity::Critical, ""))
+        .is_ok());
+    let _ = bar.take_repaint();
+    assert!(bar.retain_notifications(|note| note.producer.source != quiet.source));
+    assert_eq!(bar.notifications().notification_count(), 1);
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR
+    );
+    assert!(!bar.retain_notifications(|_| true), "nothing withdrawn");
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
 }
 
 #[test]
 fn notifications_order_by_severity_then_recency() {
     let mut bar = bottom_bar();
     let _ = bar.raise_notification(TransientNotification::new(
-        1,
+        producer(1),
         1,
         NotifySeverity::Info,
         "a",
         "",
     ));
     let _ = bar.raise_notification(TransientNotification::new(
-        1,
+        producer(1),
         2,
         NotifySeverity::Critical,
         "b",
         "",
     ));
     let _ = bar.raise_notification(TransientNotification::new(
-        1,
+        producer(1),
         3,
         NotifySeverity::Info,
         "c",
         "",
     ));
     let _ = bar.raise_notification(TransientNotification::new(
-        1,
+        producer(1),
         4,
         NotifySeverity::Warning,
         "d",
@@ -597,21 +705,19 @@ fn notifications_order_by_severity_then_recency() {
 fn raising_and_dismissing_a_notification_latches_the_popover_and_the_bar() {
     let mut bar = bottom_bar();
     let _ = bar.take_repaint();
+    let p = producer(7);
 
-    assert!(bar.raise_notification(TransientNotification::new(
-        7,
-        1,
-        NotifySeverity::Info,
-        "Sync",
-        "Started",
-    )));
+    assert_eq!(
+        bar.raise_notification(note(p, 1, NotifySeverity::Info, "Started")),
+        Ok(true)
+    );
     assert_eq!(
         bar.take_repaint(),
         TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR,
         "a raise shows a card in the popover and updates the bar's icon"
     );
 
-    assert!(bar.clear_notification(7, 1));
+    assert!(bar.clear_notification(p.instance, 1));
     assert_eq!(
         bar.take_repaint(),
         TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR,
@@ -620,36 +726,24 @@ fn raising_and_dismissing_a_notification_latches_the_popover_and_the_bar() {
 }
 
 #[test]
-fn clear_producer_drops_only_that_producers_notifications() {
+fn clearing_a_pid_drops_only_the_notifications_raised_under_it() {
     let mut bar = bottom_bar();
-    let _ = bar.raise_notification(TransientNotification::new(
-        1,
-        1,
-        NotifySeverity::Info,
-        "p1a",
-        "",
-    ));
-    let _ = bar.raise_notification(TransientNotification::new(
-        2,
-        1,
-        NotifySeverity::Info,
-        "p2a",
-        "",
-    ));
-    let _ = bar.raise_notification(TransientNotification::new(
-        1,
-        2,
-        NotifySeverity::Info,
-        "p1b",
-        "",
-    ));
-    assert!(bar.clear_producer_notifications(1));
+    let (one, two) = (producer(1), producer(2));
+    for (p, key) in [(one, 1), (two, 1), (one, 2)] {
+        assert!(bar
+            .raise_notification(note(p, key, NotifySeverity::Info, ""))
+            .is_ok());
+    }
+    assert!(bar.clear_pid_notifications(one.pid));
     assert_eq!(bar.notifications().notification_count(), 1);
     assert_eq!(
-        bar.notifications().notification(0).expect("present").title,
-        "p2a"
+        bar.notifications()
+            .notification(0)
+            .expect("present")
+            .producer,
+        two
     );
-    assert!(!bar.clear_producer_notifications(9), "absent producer");
+    assert!(!bar.clear_pid_notifications(9), "absent pid");
 }
 
 // ---- bar layout -----------------------------------------------------
@@ -5921,7 +6015,7 @@ fn popover_lays_out_one_card_per_shown_notification() {
     let mut bar = bottom_bar();
     for key in 0..3 {
         let _ = bar.raise_notification(TransientNotification::new(
-            1,
+            producer(1),
             key,
             NotifySeverity::Info,
             "n",
@@ -5945,7 +6039,7 @@ fn popover_caps_the_shown_cards() {
     let mut bar = bottom_bar();
     for key in 0..8 {
         let _ = bar.raise_notification(TransientNotification::new(
-            1,
+            producer(1),
             key,
             NotifySeverity::Info,
             "n",
@@ -5966,7 +6060,7 @@ fn popover_fails_closed_on_a_degenerate_screen() {
         &Theme::dark().floating(),
     );
     let _ = bar.raise_notification(TransientNotification::new(
-        1,
+        producer(1),
         1,
         NotifySeverity::Info,
         "n",
@@ -5984,7 +6078,7 @@ fn popover_fails_closed_on_a_degenerate_screen() {
 fn card_at_maps_a_point_to_its_notification() {
     let mut bar = bottom_bar();
     let _ = bar.raise_notification(TransientNotification::new(
-        4,
+        producer(4),
         9,
         NotifySeverity::Warning,
         "hi",
@@ -6002,7 +6096,7 @@ fn card_at_maps_a_point_to_its_notification() {
 fn pressing_a_card_dismisses_it() {
     let mut bar = bottom_bar();
     let _ = bar.raise_notification(TransientNotification::new(
-        4,
+        producer(4),
         9,
         NotifySeverity::Warning,
         "hi",
@@ -6013,7 +6107,7 @@ fn pressing_a_card_dismisses_it() {
     assert_eq!(
         press_at(&mut input, &mut bar, card.x, card.y),
         TaskbarResponse::DismissNotification {
-            producer: 4,
+            producer: producer(4).instance,
             key: 9,
         }
     );
@@ -6023,7 +6117,7 @@ fn pressing_a_card_dismisses_it() {
 fn pressing_popover_chrome_is_claimed_not_routed_to_the_bar() {
     let mut bar = bottom_bar();
     let _ = bar.raise_notification(TransientNotification::new(
-        4,
+        producer(4),
         9,
         NotifySeverity::Warning,
         "hi",
@@ -6054,7 +6148,7 @@ fn render_notifications_paints_a_card_in_every_theme() {
             &theme.clone().floating(),
         );
         let _ = bar.raise_notification(TransientNotification::new(
-            2,
+            producer(2),
             5,
             NotifySeverity::Critical,
             "Disk failing",
@@ -7173,7 +7267,7 @@ fn every_popup_the_bar_opens_grounds_itself_in_the_floating_chrome() {
 
     let mut bar = bottom_bar();
     let _ = bar.raise_notification(TransientNotification::new(
-        2,
+        producer(2),
         5,
         NotifySeverity::Info,
         "Ready",

@@ -2,7 +2,9 @@
 //! presses into single-click and double-click gestures.
 //!
 //! A double-click is two presses of the *same button* on the *same subject*
-//! close enough together in time. The decision lives here, once, so no surface
+//! within the desktop's one double-click interval, which its session publishes
+//! (`tairix_abi::desktop::DesktopInfo::double_click`) so every surface pairs
+//! presses under the interval the user chose. The decision lives here, once, so no surface
 //! can pair presses on terms of its own: the file manager and the trusted
 //! picker resolve a press to a row and ask this detector whether it completes a
 //! pair (`plans/NEW-FILEMANAGER.md` `FM12`), and the window manager asks the
@@ -23,16 +25,9 @@
 //! and a monotonic timestamp (the kernel monotonic clock, which needs no
 //! capability), and performs the action itself under the user's own identity.
 
-use crate::PointerButton;
+use tairix_abi::time::Duration64;
 
-/// The default maximum interval between the two presses of a double-click, in
-/// nanoseconds (half a second).
-///
-/// A deliberate, fixed UX convenience bound, not a hardware-scaled capacity: it
-/// is the human-perception window for "one gesture, two clicks", the same order
-/// of magnitude every desktop uses, and reaching it never fails anything — a
-/// slower second press is simply a fresh single click.
-pub const DOUBLE_CLICK_INTERVAL_NS: u64 = 500_000_000;
+use crate::PointerButton;
 
 /// What a press resolved to once the double-click rule was applied.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -80,26 +75,17 @@ impl DoubleClickTracker {
         Self { last: None }
     }
 
-    /// Register a `button` press on `subject` at monotonic time `now_ns`, using
-    /// the default [`DOUBLE_CLICK_INTERVAL_NS`] window, and report whether it
-    /// completes a double-click.
+    /// Register a `button` press on `subject` at monotonic time `now_ns`, and
+    /// report whether it completes a double-click within `interval`.
     #[must_use]
-    pub fn register(&mut self, now_ns: u64, subject: u64, button: PointerButton) -> ClickKind {
-        self.register_within(now_ns, subject, button, DOUBLE_CLICK_INTERVAL_NS)
-    }
-
-    /// Register a press against an explicit `interval_ns` window — the one
-    /// definition [`register`](Self::register) is a default-interval spelling
-    /// of, so the pairing rule has a single home. Exposed so a caller (or a
-    /// test) may choose a different window without a second detector.
-    #[must_use]
-    pub fn register_within(
+    pub fn register(
         &mut self,
         now_ns: u64,
         subject: u64,
         button: PointerButton,
-        interval_ns: u64,
+        interval: Duration64,
     ) -> ClickKind {
+        let interval_ns = interval.saturating_total_nanos();
         if let Some(prev) = self.last {
             // Pair only a press of the same button on the same subject that
             // follows the previous one within the window. `now_ns >=
@@ -136,7 +122,13 @@ impl DoubleClickTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClickKind, DoubleClickTracker, PointerButton, DOUBLE_CLICK_INTERVAL_NS};
+    use tairix_abi::time::Duration64;
+
+    use super::{ClickKind, DoubleClickTracker, PointerButton};
+
+    /// The interval every case pairs under unless it names its own.
+    const INTERVAL: Duration64 = Duration64::from_millis(500);
+    const INTERVAL_NS: u64 = 500_000_000;
 
     /// The primary button, which every pre-existing case below presses.
     const LEFT: PointerButton = PointerButton::Primary;
@@ -145,15 +137,18 @@ mod tests {
     #[test]
     fn a_lone_press_is_a_single_click() {
         let mut tracker = DoubleClickTracker::new();
-        assert_eq!(tracker.register(0, 3, LEFT), ClickKind::Single);
+        assert_eq!(tracker.register(0, 3, LEFT, INTERVAL), ClickKind::Single);
     }
 
     #[test]
     fn two_quick_presses_on_the_same_subject_are_a_double_click() {
         let mut tracker = DoubleClickTracker::new();
-        assert_eq!(tracker.register(1_000, 3, LEFT), ClickKind::Single);
         assert_eq!(
-            tracker.register(1_000 + DOUBLE_CLICK_INTERVAL_NS / 2, 3, LEFT),
+            tracker.register(1_000, 3, LEFT, INTERVAL),
+            ClickKind::Single
+        );
+        assert_eq!(
+            tracker.register(1_000 + INTERVAL_NS / 2, 3, LEFT, INTERVAL),
             ClickKind::Double
         );
     }
@@ -161,9 +156,9 @@ mod tests {
     #[test]
     fn a_press_exactly_at_the_interval_still_pairs() {
         let mut tracker = DoubleClickTracker::new();
-        assert_eq!(tracker.register(0, 0, LEFT), ClickKind::Single);
+        assert_eq!(tracker.register(0, 0, LEFT, INTERVAL), ClickKind::Single);
         assert_eq!(
-            tracker.register(DOUBLE_CLICK_INTERVAL_NS, 0, LEFT),
+            tracker.register(INTERVAL_NS, 0, LEFT, INTERVAL),
             ClickKind::Double
         );
     }
@@ -171,9 +166,9 @@ mod tests {
     #[test]
     fn a_slow_second_press_is_a_fresh_single_not_a_double() {
         let mut tracker = DoubleClickTracker::new();
-        assert_eq!(tracker.register(0, 3, LEFT), ClickKind::Single);
+        assert_eq!(tracker.register(0, 3, LEFT, INTERVAL), ClickKind::Single);
         assert_eq!(
-            tracker.register(DOUBLE_CLICK_INTERVAL_NS + 1, 3, LEFT),
+            tracker.register(INTERVAL_NS + 1, 3, LEFT, INTERVAL),
             ClickKind::Single
         );
     }
@@ -181,53 +176,66 @@ mod tests {
     #[test]
     fn a_quick_press_on_a_different_subject_is_a_single() {
         let mut tracker = DoubleClickTracker::new();
-        assert_eq!(tracker.register(0, 3, LEFT), ClickKind::Single);
-        assert_eq!(tracker.register(1, 4, LEFT), ClickKind::Single);
+        assert_eq!(tracker.register(0, 3, LEFT, INTERVAL), ClickKind::Single);
+        assert_eq!(tracker.register(1, 4, LEFT, INTERVAL), ClickKind::Single);
     }
 
     #[test]
     fn a_double_click_consumes_both_presses() {
         let mut tracker = DoubleClickTracker::new();
-        assert_eq!(tracker.register(0, 3, LEFT), ClickKind::Single);
-        assert_eq!(tracker.register(1, 3, LEFT), ClickKind::Double);
+        assert_eq!(tracker.register(0, 3, LEFT, INTERVAL), ClickKind::Single);
+        assert_eq!(tracker.register(1, 3, LEFT, INTERVAL), ClickKind::Double);
         // A third quick press begins a fresh single, never a second double.
-        assert_eq!(tracker.register(2, 3, LEFT), ClickKind::Single);
-        assert_eq!(tracker.register(3, 3, LEFT), ClickKind::Double);
+        assert_eq!(tracker.register(2, 3, LEFT, INTERVAL), ClickKind::Single);
+        assert_eq!(tracker.register(3, 3, LEFT, INTERVAL), ClickKind::Double);
     }
 
     #[test]
     fn a_reset_breaks_the_pair() {
         let mut tracker = DoubleClickTracker::new();
-        assert_eq!(tracker.register(0, 3, LEFT), ClickKind::Single);
+        assert_eq!(tracker.register(0, 3, LEFT, INTERVAL), ClickKind::Single);
         tracker.reset();
         // Without the remembered first press, the next is a lone single even
         // on the same subject within the window.
-        assert_eq!(tracker.register(1, 3, LEFT), ClickKind::Single);
+        assert_eq!(tracker.register(1, 3, LEFT, INTERVAL), ClickKind::Single);
     }
 
     #[test]
     fn a_backwards_clock_reading_fails_closed_to_a_single() {
         let mut tracker = DoubleClickTracker::new();
-        assert_eq!(tracker.register(10_000, 3, LEFT), ClickKind::Single);
+        assert_eq!(
+            tracker.register(10_000, 3, LEFT, INTERVAL),
+            ClickKind::Single
+        );
         // A reading before the remembered press must not pair (it would
         // otherwise underflow the interval test); it is a fresh single.
-        assert_eq!(tracker.register(9_000, 3, LEFT), ClickKind::Single);
+        assert_eq!(
+            tracker.register(9_000, 3, LEFT, INTERVAL),
+            ClickKind::Single
+        );
         // And that fresh press is now the remembered one: a proper follow-up
         // pairs against it.
-        assert_eq!(tracker.register(9_500, 3, LEFT), ClickKind::Double);
+        assert_eq!(
+            tracker.register(9_500, 3, LEFT, INTERVAL),
+            ClickKind::Double
+        );
     }
 
     #[test]
     fn a_custom_interval_is_honoured() {
         let mut tracker = DoubleClickTracker::new();
-        assert_eq!(tracker.register_within(0, 1, LEFT, 100), ClickKind::Single);
-        assert_eq!(tracker.register_within(50, 1, LEFT, 100), ClickKind::Double);
+        let short = Duration64::from_millis(100);
+        assert_eq!(tracker.register(0, 1, LEFT, short), ClickKind::Single);
         assert_eq!(
-            tracker.register_within(200, 1, LEFT, 100),
+            tracker.register(50_000_000, 1, LEFT, short),
+            ClickKind::Double
+        );
+        assert_eq!(
+            tracker.register(200_000_000, 1, LEFT, short),
             ClickKind::Single
         );
         assert_eq!(
-            tracker.register_within(400, 1, LEFT, 100),
+            tracker.register(400_000_000, 1, LEFT, short),
             ClickKind::Single
         );
     }
@@ -237,21 +245,21 @@ mod tests {
         let mut tracker = DoubleClickTracker::new();
         // A left press then a right press on the same subject is two gestures
         // begun, not one completed.
-        assert_eq!(tracker.register(0, 3, LEFT), ClickKind::Single);
-        assert_eq!(tracker.register(1, 3, RIGHT), ClickKind::Single);
+        assert_eq!(tracker.register(0, 3, LEFT, INTERVAL), ClickKind::Single);
+        assert_eq!(tracker.register(1, 3, RIGHT, INTERVAL), ClickKind::Single);
         // The right press is now the remembered one, so the right pair
         // completes...
-        assert_eq!(tracker.register(2, 3, RIGHT), ClickKind::Double);
+        assert_eq!(tracker.register(2, 3, RIGHT, INTERVAL), ClickKind::Double);
         // ...and the left run was broken by it rather than left pending.
-        assert_eq!(tracker.register(3, 3, LEFT), ClickKind::Single);
-        assert_eq!(tracker.register(4, 3, LEFT), ClickKind::Double);
+        assert_eq!(tracker.register(3, 3, LEFT, INTERVAL), ClickKind::Single);
+        assert_eq!(tracker.register(4, 3, LEFT, INTERVAL), ClickKind::Double);
     }
 
     #[test]
     fn a_right_double_click_on_a_different_subject_is_a_single() {
         let mut tracker = DoubleClickTracker::new();
-        assert_eq!(tracker.register(0, 3, RIGHT), ClickKind::Single);
-        assert_eq!(tracker.register(1, 4, RIGHT), ClickKind::Single);
+        assert_eq!(tracker.register(0, 3, RIGHT, INTERVAL), ClickKind::Single);
+        assert_eq!(tracker.register(1, 4, RIGHT, INTERVAL), ClickKind::Single);
     }
 
     #[test]
@@ -261,8 +269,8 @@ mod tests {
         // subject is compared whole, so a truncating key cannot conflate them.
         let a = 1_u64 << 33;
         let b = (1_u64 << 34) | 1;
-        assert_eq!(tracker.register(0, a, LEFT), ClickKind::Single);
-        assert_eq!(tracker.register(1, b, LEFT), ClickKind::Single);
-        assert_eq!(tracker.register(2, b, LEFT), ClickKind::Double);
+        assert_eq!(tracker.register(0, a, LEFT, INTERVAL), ClickKind::Single);
+        assert_eq!(tracker.register(1, b, LEFT, INTERVAL), ClickKind::Single);
+        assert_eq!(tracker.register(2, b, LEFT, INTERVAL), ClickKind::Double);
     }
 }

@@ -12,11 +12,11 @@ use alloc::vec::Vec;
 
 use tairix_controls::{
     ActivityState, AuthorityState, Button, ButtonContent, Card, Checkbox, ComboBox, ControlRole,
-    ControlState, Dialog, FieldControl, FieldGroup, FieldRow, HelpTip, IconButton, ListRow, Menu,
-    MenuItem, Panel, Progress, ProgressValue, Radio, ScrollBar, ScrollModel, ScrollOrientation,
-    ScrollRange, SearchField, SelectionState, Slider, SplitButton, Tab, TableCell, TableRow, Tabs,
-    TabsOrientation, TextArea, TextField, Toggle, Toolbar, Tooltip, ValidationState, WindowControl,
-    WindowControlKind,
+    ControlState, Dialog, FieldControl, FieldGroup, FieldRow, FlagSet, HelpTip, IconButton,
+    ListRow, Menu, MenuItem, Panel, Progress, ProgressValue, Radio, ScrollBar, ScrollModel,
+    ScrollOrientation, ScrollRange, SearchField, SelectionState, Slider, SplitButton, Tab,
+    TableCell, TableRow, Tabs, TabsOrientation, TextArea, TextField, Toggle, Toolbar, Tooltip,
+    ValidationState, WindowControl, WindowControlKind,
 };
 use tairix_icon::IconKind;
 
@@ -332,6 +332,14 @@ fn forms() -> Vec<DemoItem> {
                     ComboBox::new(vec!["Alloy".into(), "Contrast".into()]).with_selected(0),
                 ),
             ),
+            FieldRow::new(
+                "Clock shows",
+                FieldControl::Flags(FlagSet::new(vec![
+                    Checkbox::new("Date", SelectionState::Selected),
+                    Checkbox::new("Seconds", SelectionState::Unselected),
+                    Checkbox::new("Weekday", SelectionState::Unselected),
+                ])),
+            ),
             FieldRow::new("Interface scale", FieldControl::Slider(Slider::new(500))),
             FieldRow::new(
                 "Host name",
@@ -356,7 +364,7 @@ fn forms() -> Vec<DemoItem> {
     vec![DemoItem::new(
         "Field group",
         DemoWidget::FieldGroup(group),
-        300,
+        380,
     )]
 }
 

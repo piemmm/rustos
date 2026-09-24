@@ -50,6 +50,10 @@ pub const SETTINGS_LABEL: &str = "Settings";
 /// the shipped pictures — itself.
 pub const SETTINGS_RUN_PATH: &str = "/System/Applications/settings.app/Run";
 
+/// The Settings bundle's signed identifier: the one application the session
+/// tells which programs have notified, and lets ask for the screen to lock.
+pub const SETTINGS_BUNDLE_ID: &str = "os.tairix.settings";
+
 /// Label of the Date & Time app, for launch diagnostics.
 pub const DATETIME_LABEL: &str = "Date & Time";
 

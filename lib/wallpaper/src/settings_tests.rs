@@ -5,6 +5,10 @@ use tairix_appconf::Document;
 
 use super::*;
 use crate::catalog;
+use crate::idle::{IdleAfter, ScreensaverKind};
+use crate::input::{PointerSpeed, PrimaryButton, RepeatRate};
+use crate::notify::NotifyLevel;
+use tairix_abi::time::Duration64;
 
 /// The settings a document naming exactly `text` yields under the strict
 /// reading over the defaults, or the refusal it raised.
@@ -104,6 +108,15 @@ fn the_render_is_canonical_and_round_trips() {
         scale: Scale::from_percent(150).expect("150% is a scale"),
         cursor_set: CursorSetId::new("High Visibility").expect("a legal set name"),
         cursor_size: CursorSize::Larger,
+        notifications: quietened(),
+        primary_button: PrimaryButton::Right,
+        double_click: Duration64::from_millis(300),
+        pointer_speed: PointerSpeed::from_percent(150).expect("a speed"),
+        repeat_delay: Duration64::from_millis(250),
+        repeat_rate: RepeatRate::Off,
+        screensaver_after: IdleAfter::Minutes(5),
+        screensaver: ScreensaverKind::Slideshow,
+        lock_after: IdleAfter::Minutes(15),
     };
     let text = rendered(&settings);
     assert_eq!(
@@ -119,9 +132,131 @@ fn the_render_is_canonical_and_round_trips() {
          motion = reduced\n\
          scale = 150\n\
          cursor.set = High Visibility\n\
-         cursor.size = larger\n"
+         cursor.size = larger\n\
+         notify.enabled = false\n\
+         notify.sources = com.example.chat:none os.tairix.netstack:critical\n\
+         pointer.primary = right\n\
+         pointer.double_click_ms = 300\n\
+         pointer.speed = 150\n\
+         key.repeat_delay_ms = 250\n\
+         key.repeat_rate = off\n\
+         screensaver.after_min = 5\n\
+         screensaver.kind = slideshow\n\
+         lock.after_min = 15\n"
     );
     assert_eq!(read(&text).expect("re-reads"), settings);
+}
+
+/// A policy distinguishable from the default in both of its keys.
+fn quietened() -> NotifyPolicy {
+    let mut policy = NotifyPolicy::default();
+    policy.set_enabled(false);
+    for (source, level) in [
+        ("os.tairix.netstack", NotifyLevel::Critical),
+        ("com.example.chat", NotifyLevel::None),
+    ] {
+        let source = tairix_abi::BundleId::new(source).expect("a bounded identity");
+        assert!(policy.set_level(source, level).is_ok());
+    }
+    policy
+}
+
+#[test]
+fn the_input_keys_default_to_the_documented_policy() {
+    let settings = DesktopSettings::default();
+    assert_eq!(settings.primary_button, PrimaryButton::Left);
+    assert_eq!(
+        settings.double_click,
+        tairix_abi::desktop::DOUBLE_CLICK_DEFAULT
+    );
+    assert_eq!(settings.pointer_speed, PointerSpeed::NORMAL);
+    assert_eq!(settings.repeat_delay, crate::input::REPEAT_DELAY_DEFAULT);
+    assert_eq!(settings.repeat_rate, RepeatRate::PerSecond(30));
+    assert_eq!(settings.screensaver_after, IdleAfter::Minutes(10));
+    assert_eq!(settings.screensaver, ScreensaverKind::Blank);
+    assert_eq!(settings.lock_after, IdleAfter::Minutes(15));
+}
+
+#[test]
+fn an_input_value_outside_its_bounds_is_refused_whole() {
+    for (text, key) in [
+        ("pointer.primary = middle", SettingsKey::PointerPrimary),
+        ("pointer.double_click_ms = 50", SettingsKey::DoubleClick),
+        ("pointer.double_click_ms = 0.5", SettingsKey::DoubleClick),
+        ("pointer.speed = 500", SettingsKey::PointerSpeed),
+        ("key.repeat_delay_ms = 3000", SettingsKey::RepeatDelay),
+        ("key.repeat_rate = 0", SettingsKey::RepeatRate),
+        ("screensaver.after_min = 0", SettingsKey::ScreensaverAfter),
+        ("screensaver.kind = fireworks", SettingsKey::ScreensaverKind),
+        ("lock.after_min = soon", SettingsKey::LockAfter),
+    ] {
+        let document = alloc::format!("{text}\n");
+        assert_eq!(
+            read(&document),
+            Err(DocumentRefusal::InvalidValue(key)),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn the_notification_keys_read_the_policy_they_spell() {
+    let settings = read(
+        "notify.enabled = off\n\
+         notify.sources = os.tairix.netstack:critical com.example.chat:none\n",
+    )
+    .expect("a legal policy");
+    assert_eq!(settings.notifications, quietened());
+    // Every other key keeps what the base held: the policy is its own group.
+    assert_eq!(settings.appearance, DesktopSettings::default().appearance);
+}
+
+#[test]
+fn an_empty_source_list_is_the_default_policy() {
+    let settings = read("notify.sources = \"\"\n").expect("an empty list is a policy");
+    assert_eq!(settings.notifications, NotifyPolicy::default());
+    assert_eq!(
+        rendered(&DesktopSettings::default())
+            .lines()
+            .find(|line| line.starts_with("notify.sources")),
+        Some("notify.sources = \"\"")
+    );
+}
+
+#[test]
+fn a_notification_value_outside_its_grammar_is_refused_whole() {
+    for (text, key) in [
+        ("notify.enabled = sometimes", SettingsKey::NotifyEnabled),
+        (
+            "notify.sources = com.example.chat",
+            SettingsKey::NotifySources,
+        ),
+        (
+            "notify.sources = com.example.chat:all",
+            SettingsKey::NotifySources,
+        ),
+        (
+            "notify.sources = a.b:none a.b:critical",
+            SettingsKey::NotifySources,
+        ),
+    ] {
+        let document = alloc::format!("{text}\n");
+        assert_eq!(
+            read(&document),
+            Err(DocumentRefusal::InvalidValue(key)),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_stored_source_list_the_registry_refuses_costs_only_itself() {
+    let document = Document::parse("notify.enabled = false\nnotify.sources = x:loud\n")
+        .expect("a well-formed document");
+    let (settings, refused) = DesktopSettings::load(&document);
+    assert_eq!(refused, alloc::vec![SettingsKey::NotifySources]);
+    assert!(!settings.notifications.enabled());
+    assert_eq!(settings.notifications.sources().count(), 0);
 }
 
 #[test]
@@ -657,18 +792,24 @@ fn a_refused_merge_changes_nothing_at_all() {
 }
 
 #[test]
-fn the_two_key_groups_partition_the_registry() {
+fn the_key_groups_partition_the_registry() {
     // Every key belongs to exactly one group, so a surface that renders
     // its group can never leave a key with no owner or post one twice.
+    let groups: [&[SettingsKey]; 7] = [
+        &SettingsKey::PINBOARD,
+        &SettingsKey::APPEARANCE,
+        &SettingsKey::NOTIFICATIONS,
+        &SettingsKey::POINTER,
+        &SettingsKey::KEYBOARD,
+        &SettingsKey::SCREENSAVER,
+        &SettingsKey::LOCK,
+    ];
     for key in SettingsKey::ALL {
-        let pinboard = SettingsKey::PINBOARD.contains(&key);
-        let appearance = SettingsKey::APPEARANCE.contains(&key);
-        assert!(pinboard ^ appearance, "{key} is in neither group or both");
+        let owners = groups.iter().filter(|group| group.contains(&key)).count();
+        assert_eq!(owners, 1, "{key} is in {owners} groups");
     }
-    assert_eq!(
-        SettingsKey::PINBOARD.len() + SettingsKey::APPEARANCE.len(),
-        SettingsKey::ALL.len()
-    );
+    let grouped: usize = groups.iter().map(|group| group.len()).sum();
+    assert_eq!(grouped, SettingsKey::ALL.len());
 }
 
 #[test]

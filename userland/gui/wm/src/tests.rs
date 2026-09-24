@@ -1405,7 +1405,7 @@ fn theme_corner_radius_shapes_windows() {
 
 use crate::input::{
     ClickKind, DoubleClickTracker, InputEvent, InputResponse, InputRouter, Key, Modifiers,
-    NamedKey, PointerButton, PointerFocus, DOUBLE_CLICK_INTERVAL_NS,
+    NamedKey, PointerButton, PointerFocus,
 };
 
 /// The clock reading an event is delivered at when its *time* is immaterial,
@@ -4019,18 +4019,14 @@ fn two_quick_presses_on_a_title_bar_ask_to_toggle_the_size() {
     let mut router = InputRouter::new();
     let bar = title_point(&c, id);
 
+    let half = c.double_click().saturating_total_nanos() / 2;
     assert_eq!(
         click_at(&mut router, &mut c, bar, 1_000),
         InputResponse::FurniturePressed { window: id },
         "the first press is the move gesture it has always been"
     );
     assert_eq!(
-        click_at(
-            &mut router,
-            &mut c,
-            bar,
-            1_000 + DOUBLE_CLICK_INTERVAL_NS / 2
-        ),
+        click_at(&mut router, &mut c, bar, 1_000 + half),
         InputResponse::WindowControl {
             window: id,
             control: WindowControlKind::SizeToggle,
@@ -4053,10 +4049,37 @@ fn two_slow_presses_on_a_title_bar_are_two_separate_moves() {
         click_at(&mut router, &mut c, bar, 0),
         InputResponse::FurniturePressed { window: id }
     );
+    let past = c.double_click().saturating_total_nanos() + 1;
     assert_eq!(
-        click_at(&mut router, &mut c, bar, DOUBLE_CLICK_INTERVAL_NS + 1),
+        click_at(&mut router, &mut c, bar, past),
         InputResponse::FurniturePressed { window: id },
         "past the window the second press is a fresh gesture"
+    );
+}
+
+/// The title bars pair presses under the interval the seat holds, so the one
+/// the user chose reaches the window manager too.
+#[test]
+fn a_title_bar_pairs_presses_under_the_seats_own_interval() {
+    let (mut c, id) = decorated_compositor();
+    c.set_double_click(tairix_abi::time::Duration64::from_millis(200));
+    let mut router = InputRouter::new();
+    let bar = title_point(&c, id);
+    assert_eq!(
+        click_at(&mut router, &mut c, bar, 0),
+        InputResponse::FurniturePressed { window: id }
+    );
+    assert_eq!(
+        click_at(&mut router, &mut c, bar, 300_000_000),
+        InputResponse::FurniturePressed { window: id },
+        "300 ms is past a 200 ms interval"
+    );
+    assert_eq!(
+        click_at(&mut router, &mut c, bar, 450_000_000),
+        InputResponse::WindowControl {
+            window: id,
+            control: WindowControlKind::SizeToggle,
+        }
     );
 }
 
@@ -4142,12 +4165,13 @@ fn a_title_bar_double_click_keys_on_the_whole_window_id() {
     // The router keys the pair on the window id, which the shared rule
     // compares as a whole `u64`; two ids are two subjects.
     let mut tracker = DoubleClickTracker::new();
+    let interval = tairix_abi::desktop::DOUBLE_CLICK_DEFAULT;
     assert_eq!(
-        tracker.register(0, WindowId(1).0, PointerButton::Primary),
+        tracker.register(0, WindowId(1).0, PointerButton::Primary, interval),
         ClickKind::Single
     );
     assert_eq!(
-        tracker.register(1, WindowId(1).0, PointerButton::Primary),
+        tracker.register(1, WindowId(1).0, PointerButton::Primary, interval),
         ClickKind::Double
     );
 }

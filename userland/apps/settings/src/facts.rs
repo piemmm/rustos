@@ -22,14 +22,12 @@ use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{CpuInfoRecord, SystemIdentity, Uptime};
 use tairix_abi::time::{WallClockReading, WallTimeState};
-use tairix_controls::{FieldControl, FieldGroup, FieldLayout, FieldRow};
+use tairix_controls::{stack, FieldControl, FieldGroup, FieldLayout, FieldRow};
 use tairix_geometry::{Rect, Scale};
 use tairix_procinfo::format_uptime;
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_util::size::{format_binary, SIZE_TEXT_MAX};
-
-use crate::stack;
 
 /// The label of every About reading, in the order the pane lists them.
 pub(crate) const ABOUT_FACTS: &[&str] = &[
@@ -128,13 +126,15 @@ impl Facts {
     /// The width is part of the question because a row's description wraps:
     /// a narrower column needs a taller plate.
     pub(crate) fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
-        let gap = stack::gap(scale, theme);
         let plate = stack::plate_width(width, scale, theme);
-        self.groups
-            .iter()
-            .fold(gap.saturating_mul(2), |total, group| {
-                total.saturating_add(group.measured_height(plate, scale, theme))
-            })
+        let column = FieldGroup::shared_column(&self.groups, plate, scale, theme);
+        stack::height(
+            self.groups
+                .iter()
+                .map(|group| group.measured_height(plate, column, scale, theme)),
+            scale,
+            theme,
+        )
     }
 
     /// How many plates the column seats from the one it draws from.
@@ -142,28 +142,27 @@ impl Facts {
         self.placed(bounds, scale, theme).len()
     }
 
-    /// Where each drawn plate sits.
-    fn placed(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<(usize, Rect)> {
+    /// Where each drawn plate sits, and the one slot column every plate's
+    /// readings line up in so a value does not step left and right down the
+    /// pane.
+    fn placed(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<(usize, FieldLayout)> {
         let plate = stack::plate_width(bounds.width, scale, theme);
+        let column = FieldGroup::shared_column(&self.groups, plate, scale, theme);
         stack::place(bounds, self.first, self.len(), scale, theme, |index| {
-            self.groups
-                .get(index)
-                .map_or(0, |group| group.measured_height(plate, scale, theme))
+            self.groups.get(index).map_or(0, |group| {
+                group.measured_height(plate, column, scale, theme)
+            })
         })
+        .into_iter()
+        .map(|(index, rect)| (index, FieldLayout::new(rect, column)))
+        .collect()
     }
 
-    /// Paint the column, every plate's readings in one slot column so a value
-    /// does not step left and right down the pane.
+    /// Paint the column.
     pub(crate) fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
-        let column = self
-            .groups
-            .iter()
-            .map(|group| group.slot_column(bounds, scale, theme))
-            .max()
-            .unwrap_or(0);
-        for (index, rect) in self.placed(bounds, scale, theme) {
+        for (index, layout) in self.placed(bounds, scale, theme) {
             if let Some(group) = self.groups.get(index) {
-                group.render(surface, FieldLayout::new(rect, column), scale, theme);
+                group.render(surface, layout, scale, theme);
             }
         }
     }

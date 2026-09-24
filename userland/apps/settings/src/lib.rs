@@ -30,9 +30,9 @@ mod frame;
 mod gallery;
 mod machine;
 mod network;
+mod notices;
 mod registry;
 mod shell;
-mod stack;
 mod statement;
 mod volumes;
 

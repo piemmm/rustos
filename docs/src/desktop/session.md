@@ -387,7 +387,8 @@ Neither ever lays out a tile an edge would cut.
 
 **Pointer and keyboard.** A primary press selects the icon under it (or
 clears the selection on an empty desktop) and arms the shared
-`DoubleClickTracker`, so a second press within its window activates the icon
+`DoubleClickTracker` under the double-click interval the user chose, so a
+second press within it activates the icon
 — the desktop can never disagree with the file manager about what a gesture
 means. Motion drives hover feedback and, on arrival from elsewhere, the
 gesture-driven re-list below. A secondary press opens the [pinboard's context
@@ -597,6 +598,30 @@ bundle paths).
 The answer arrives at the chain's **one** delivery point, alongside every
 application's, and is put through that same action path — so a chosen row and
 the equivalent gesture on the icon column cannot diverge.
+
+## The notification intake
+
+Every notice reaches the desktop through `serve_notify`, the one intake. The
+producer is the kernel-attested `call_peer_origin` of the call, and the notice
+is attributed to the bundle the kernel attests it runs — the one name a policy
+can be keyed on that the sender cannot choose. A producer running no verified
+bundle has no such name, so it is refused. The user's notification policy is
+applied there and nowhere else: a raise it refuses is never delivered, drawn
+or recorded as shown, withdraws whatever the same key showed before, and is
+answered as accepted, because the producer did nothing wrong. A clear always
+applies. When the policy changes, what is already showing is held to it.
+
+A notice is keyed on the producer's process instance, so a recycled pid can
+neither replace nor clear what an earlier holder raised; a reaped child's
+notices are dropped by its pid. The area holds at most
+`NOTIFICATIONS_MAX` notices and `SOURCE_NOTIFICATIONS_MAX` from any one
+source, so no program can grow the session without limit or crowd every other
+source out; a raise past either is refused `LimitExceeded`.
+
+The session remembers which sources have notified since it started, at most
+`NOTIFY_SOURCES_MAX` of them, and answers them through `QueryNotifySources` to
+its own Settings application alone: which programs a user runs is theirs to
+see, not any application's to learn.
 
 ## Resolving taskbar responses
 
@@ -1497,8 +1522,9 @@ load-bearing:
   session the instant it becomes visible would leak part of a password entry
   into whatever holds focus.
 - **It stays on top.** `keep_topmost` raises it immediately before every
-  composite, so an application that opens or raises a window behind the lock
-  cannot surface over it.
+  composite — beneath only the screensaver, when one is up — so an
+  application that opens or raises a window behind the lock cannot surface
+  over it.
 
 The lock holds no authority to authenticate anybody. It offers the typed
 password to the per-console **elevation broker** — the login supervisor that
@@ -1536,6 +1562,38 @@ console that has an elevation endpoint to unlock with. The bar refuses the
 row until told otherwise, because a lock that could never be undone would
 strand the user rather than protect them. The same one attestation governs
 the clock menu's set-time row below, which needs the same broker.
+
+The lock is put up three ways, all through one `lock_screen` routine that
+takes the trusted prompts down first: the Lock row, the idle policy below, and
+the Settings application's *Lock Now*, which reaches the session as the
+`LockScreen` window request. That request is honoured only for the desktop's
+own Settings bundle — its attested identifier, signed by the publisher the
+session itself runs under — because a lock any program could raise would be a
+way to keep the user out of their own desktop; it is refused
+`NotSupported` where there is no broker to unlock with.
+
+## Idleness: the screensaver and the idle lock
+
+The session keeps one idle deadline (`idle::IdleClock`): the last seat input,
+a held key's repeat included, and the two waits the user's settings name —
+`screensaver.after_min` and `lock.after_min`. A deadline is folded into the
+serve loop's park only while its action is still pending, so a desktop whose
+screensaver is up and whose screen is locked arms no timer, and one whose
+policy names neither never wakes for idleness. A session that cannot verify a
+password never locks on its own.
+
+The screensaver (`saver::Screensaver`) is one full-screen surface, raised over
+everything before each composite, with the lock kept directly beneath it; an
+order that already stands restacks and repaints nothing, so a wake while both
+are up recomposites no more than the change it brought. It is black, the
+desktop's own backdrop dimmed (the colour and the picture, with no icon or
+window on it), or a slideshow of the shipped pictures, one every
+`SLIDE_INTERVAL_NS`. Each slide is prepared at the screen's size on the
+wallpaper worker, through the same sandboxed decode the backdrop uses; a
+session with no worker leaves the slideshow black rather than decoding on the
+serve loop. The wake that takes the screensaver down is drained into nothing:
+the gesture that wakes the screen reaches nothing behind it, and the next one
+goes where input goes — to a lock, when one came up beneath.
 
 ## Asking for an account that may
 
@@ -1985,6 +2043,11 @@ screen rectangle the source is constructed with (an empty screen is refused
 at construction), starting at the screen centre — into an absolute
 `PointerMoved`, and a `Pressed` / `Released` record becomes a
 `PointerPressed` / `PointerReleased` carrying the resolved `PointerButton`.
+The user's pointer policy is applied here too, so nothing above sees the
+unmapped form: the button order (a new order waits until no button is held,
+so a press and its release always map through the same one) and the speed, a
+percentage each displacement is scaled by with its sub-count remainder carried,
+so slow motion is never lost.
 The accumulation lives here deliberately: the seat channel is
 screen-independent, and only this seat-owning session knows the compositor's
 pixel extent, so a driver never needs display-geometry authority and a
@@ -2011,7 +2074,16 @@ shell pumps: a `Pressed` / `Released` record becomes a `KeyPressed` /
 the wire ABI's twelve function-key codes fold into one `NamedKey::Function`)
 and the held `Modifiers`. The `SessionInputRouter` routes a key to the window
 manager, which delivers it to the focused window; the taskbar takes no keyboard
-input. As with the pointer the crate holds no input capability of its own, and
+input.
+
+It is also the one place a held key repeats. A USB keyboard reports a held key
+once and a PS/2 one repeats it itself, so the source drops a press of the key
+already held and repeats that key under the user's policy: after the repeat
+delay, then at the repeat rate, one repeat per drain so a late loop never
+catches up in a burst. A release of that key or a change of modifiers stops
+it, and the repeat's next deadline is folded into the park only while a key is
+repeating. A key held across the edge into a lock or into another user's
+session stops repeating there. As with the pointer the crate holds no input capability of its own, and
 a malformed record fails closed with its `Errno` rather than being
 misinterpreted (`AGENTS.md` §5.4 / §2.9). The ABI record is documented in
 [Input events](../abi/input.md).

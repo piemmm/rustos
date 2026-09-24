@@ -212,13 +212,8 @@ pub use vfs::{LinkInfo, LinkReader, NoLinks, NoProbe, VfsDirectorySource};
 /// assertion measures against (`plans/APPWIN.md` AW3/AW5).
 pub const WIN_WIDTH: u32 = 480;
 
-/// Window content height of a browser view, in pixels (see
-/// [`WIN_WIDTH`]).
-///
-/// Sized so the editable Properties popup (the metadata fields plus the
-/// labelled owner/group/other × read/write/execute permissions grid) fits at
-/// the default window size; the window is resizable, so a user may grow it
-/// further.
+/// Window content height of a browser view, in logical pixels (see
+/// [`WIN_WIDTH`]); the window is resizable, so a user may grow it further.
 pub const WIN_HEIGHT: u32 = 480;
 
 /// The smallest client width, in logical pixels, a *listing* still reads at.

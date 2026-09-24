@@ -5902,6 +5902,41 @@ fn iconless_manifest_fixture(id: &str, name: &str) -> Vec<u8> {
 /// raise lands keyed to its attested identity; another producer cannot clear
 /// it; the click-to-dismiss gesture routes through the session router to the
 /// bar and clears the model; and a producer clearing its own is idempotent.
+/// The attested origin of a producer instance `fill` running `bundle`.
+fn producer_origin(fill: u8, pid: u64, bundle: &str) -> tairix_abi::Origin {
+    tairix_abi::Origin::new(
+        tairix_abi::origin::TrustDomain::User,
+        1000,
+        1000,
+        pid,
+        tairix_abi::ProcId::from_raw([fill; 16]),
+        tairix_abi::origin::CapabilitySummary::EMPTY,
+        tairix_abi::origin::ORIGIN_CONSOLE_NONE,
+    )
+    .with_app(
+        tairix_abi::AppIdentity::new(bundle, tairix_abi::PublisherId::from_raw([1; 32]))
+            .expect("a well-formed identity"),
+    )
+}
+
+/// A raise of `key` at `severity`.
+fn raise(key: u32, severity: NotifySeverity) -> NotifyRequest {
+    NotifyRequest::Raise {
+        key,
+        severity,
+        title: NotifyTitle::new("Battery low").expect("title"),
+        body: NotifyBody::new("12% remaining").expect("body"),
+    }
+}
+
+fn notification_count(shell: &DesktopShell) -> usize {
+    shell
+        .session()
+        .taskbar()
+        .notifications()
+        .notification_count()
+}
+
 #[test]
 fn notifications_relay_raise_dismiss_and_isolate_producers() {
     const W: u32 = 1024;
@@ -5921,45 +5956,37 @@ fn notifications_relay_raise_dismiss_and_isolate_producers() {
         test_pressure(),
     )
     .expect("compositor");
+    let policy = tairix_wallpaper::NotifyPolicy::default();
+    let battery = producer_origin(42, 42, "os.tairix.battery");
 
-    // Producer 42 raises a notification: it lands keyed to producer 42.
-    shell.apply_notify(
-        &mut comp,
-        42,
-        NotifyRequest::Raise {
-            key: 1,
-            severity: NotifySeverity::Warning,
-            title: NotifyTitle::new("Battery low").expect("title"),
-            body: NotifyBody::new("12% remaining").expect("body"),
-        },
-    );
+    // The producer raises a notification: it lands keyed to that instance.
     assert_eq!(
-        shell
-            .session()
-            .taskbar()
-            .notifications()
-            .notification_count(),
-        1
+        shell.serve_notify(
+            &mut comp,
+            &battery,
+            raise(1, NotifySeverity::Warning),
+            &policy
+        ),
+        Ok(())
     );
+    assert_eq!(notification_count(&shell), 1);
     let note = shell
         .session()
         .taskbar()
         .notifications()
         .notification(0)
         .expect("present");
-    assert_eq!(note.producer, 42);
+    assert_eq!(note.producer.instance, battery.proc_id());
+    assert_eq!(note.producer.source.as_str(), "os.tairix.battery");
     assert_eq!(note.title.as_str(), "Battery low");
 
-    // A different producer cannot clear producer 42's notification.
-    shell.apply_notify(&mut comp, 99, NotifyRequest::Clear { key: 1 });
+    // A different producer cannot clear it.
+    let other = producer_origin(99, 99, "com.example.other");
     assert_eq!(
-        shell
-            .session()
-            .taskbar()
-            .notifications()
-            .notification_count(),
-        1
+        shell.serve_notify(&mut comp, &other, NotifyRequest::Clear { key: 1 }, &policy),
+        Ok(())
     );
+    assert_eq!(notification_count(&shell), 1);
 
     // Clicking the card routes through the session router to the bar and
     // clears the model — proving the router forwards a press on the popover
@@ -5977,23 +6004,212 @@ fn notifications_relay_raise_dismiss_and_isolate_producers() {
     assert_eq!(
         outcome,
         ShellOutcome::Taskbar(TaskbarResponse::DismissNotification {
-            producer: 42,
+            producer: battery.proc_id(),
             key: 1,
         })
     );
-    assert!(!shell
-        .session()
-        .taskbar()
-        .notifications()
-        .has_notifications());
+    assert_eq!(notification_count(&shell), 0);
 
-    // Producer 42 clearing its own now-gone notification is a harmless no-op.
-    shell.apply_notify(&mut comp, 42, NotifyRequest::Clear { key: 1 });
-    assert!(!shell
+    // The producer clearing its own now-gone notification is a harmless no-op.
+    assert_eq!(
+        shell.serve_notify(
+            &mut comp,
+            &battery,
+            NotifyRequest::Clear { key: 1 },
+            &policy
+        ),
+        Ok(())
+    );
+    assert_eq!(notification_count(&shell), 0);
+}
+
+/// A notice the policy refuses is never shown, is answered as accepted, and
+/// withdraws what the same key showed before.
+#[test]
+fn a_notice_the_policy_refuses_is_never_shown() {
+    let (mut shell, mut comp) = headless_desktop();
+    let chat = producer_origin(7, 7, "com.example.chat");
+    let mut policy = tairix_wallpaper::NotifyPolicy::default();
+    assert!(shell
+        .serve_notify(&mut comp, &chat, raise(1, NotifySeverity::Info), &policy)
+        .is_ok());
+    assert_eq!(notification_count(&shell), 1);
+
+    let chat_id = tairix_abi::BundleId::new("com.example.chat").expect("a bounded identity");
+    assert!(policy
+        .set_level(chat_id, tairix_wallpaper::NotifyLevel::Critical)
+        .is_ok());
+    assert_eq!(
+        shell.serve_notify(&mut comp, &chat, raise(1, NotifySeverity::Warning), &policy),
+        Ok(()),
+        "a suppressed notice is not the producer's fault"
+    );
+    assert_eq!(
+        notification_count(&shell),
+        0,
+        "the replaced notice went too"
+    );
+    assert!(shell
+        .serve_notify(
+            &mut comp,
+            &chat,
+            raise(2, NotifySeverity::Critical),
+            &policy
+        )
+        .is_ok());
+    assert_eq!(notification_count(&shell), 1);
+
+    policy.set_enabled(false);
+    assert!(shell
+        .serve_notify(
+            &mut comp,
+            &chat,
+            raise(3, NotifySeverity::Critical),
+            &policy
+        )
+        .is_ok());
+    assert_eq!(
+        notification_count(&shell),
+        1,
+        "the switch shows nothing new"
+    );
+}
+
+/// A policy change holds what is already showing to the new policy.
+#[test]
+fn a_changed_policy_withdraws_what_it_no_longer_admits() {
+    let (mut shell, mut comp) = headless_desktop();
+    let policy = tairix_wallpaper::NotifyPolicy::default();
+    for (fill, bundle) in [(1, "com.example.chat"), (2, "os.tairix.netstack")] {
+        let origin = producer_origin(fill, u64::from(fill), bundle);
+        assert!(shell
+            .serve_notify(&mut comp, &origin, raise(1, NotifySeverity::Info), &policy)
+            .is_ok());
+    }
+    let mut muted = policy.clone();
+    let chat = tairix_abi::BundleId::new("com.example.chat").expect("a bounded identity");
+    assert!(muted
+        .set_level(chat, tairix_wallpaper::NotifyLevel::None)
+        .is_ok());
+    shell.withdraw_unadmitted(&mut comp, &muted);
+    let left: Vec<&str> = shell
         .session()
         .taskbar()
         .notifications()
-        .has_notifications());
+        .notifications()
+        .map(|note| note.producer.source.as_str())
+        .collect();
+    assert_eq!(left, ["os.tairix.netstack"]);
+}
+
+/// A producer running no verified bundle has no name a policy could hold, so
+/// it is refused and nothing is shown or remembered for it.
+#[test]
+fn a_producer_with_no_bundle_is_refused() {
+    let (mut shell, mut comp) = headless_desktop();
+    let bare = tairix_abi::Origin::new(
+        tairix_abi::origin::TrustDomain::User,
+        1000,
+        1000,
+        5,
+        tairix_abi::ProcId::from_raw([5; 16]),
+        tairix_abi::origin::CapabilitySummary::EMPTY,
+        tairix_abi::origin::ORIGIN_CONSOLE_NONE,
+    );
+    let policy = tairix_wallpaper::NotifyPolicy::default();
+    assert_eq!(
+        shell.serve_notify(
+            &mut comp,
+            &bare,
+            raise(1, NotifySeverity::Critical),
+            &policy
+        ),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(notification_count(&shell), 0);
+}
+
+/// Only the desktop's own Settings application learns which programs have
+/// notified, and it learns every one that has, suppressed or not.
+#[test]
+fn the_sources_that_notified_are_answered_to_settings_alone() {
+    let (mut shell, mut comp) = headless_desktop();
+    let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
+    let own = tairix_abi::AppIdentity::new("os.tairix.desktop", publisher).expect("identity");
+    shell.set_own_app(Some(own));
+    let mut policy = tairix_wallpaper::NotifyPolicy::default();
+    policy.set_enabled(false);
+    let chat = producer_origin(7, 7, "com.example.chat");
+    assert!(shell
+        .serve_notify(&mut comp, &chat, raise(1, NotifySeverity::Info), &policy)
+        .is_ok());
+
+    let settings =
+        tairix_abi::AppIdentity::new(crate::SETTINGS_BUNDLE_ID, publisher).expect("identity");
+    let answered: Vec<&str> = shell
+        .notify_sources(Some(&settings))
+        .expect("Settings is answered")
+        .iter()
+        .map(tairix_abi::BundleId::as_str)
+        .collect();
+    assert_eq!(answered, ["com.example.chat"]);
+    let files = tairix_abi::AppIdentity::new("os.tairix.files", publisher).expect("identity");
+    assert_eq!(
+        shell.notify_sources(Some(&files)).map(<[_]>::len),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        shell.notify_sources(None).map(<[_]>::len),
+        Err(Errno::PermissionDenied)
+    );
+}
+
+/// Only the desktop's own Settings application may ask for the lock, and
+/// only where a password can be verified to open it again.
+#[test]
+fn a_lock_is_asked_for_by_settings_alone_and_only_where_it_can_open() {
+    let (mut shell, mut comp) = headless_desktop();
+    let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
+    let own = tairix_abi::AppIdentity::new("os.tairix.desktop", publisher).expect("identity");
+    let settings =
+        tairix_abi::AppIdentity::new(crate::SETTINGS_BUNDLE_ID, publisher).expect("identity");
+    let files = tairix_abi::AppIdentity::new("os.tairix.files", publisher).expect("identity");
+    shell.set_own_app(Some(own));
+
+    assert_eq!(
+        shell.request_lock(Some(&settings)),
+        Err(Errno::NotSupported),
+        "no broker: a lock nothing could open would strand the user"
+    );
+    shell.set_elevation_available(&mut comp, true);
+    assert_eq!(
+        shell.request_lock(Some(&files)),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(shell.request_lock(None), Err(Errno::PermissionDenied));
+    assert!(!shell.take_lock_request());
+    assert_eq!(shell.request_lock(Some(&settings)), Ok(()));
+    assert!(shell.take_lock_request());
+    assert!(!shell.take_lock_request(), "one request, one lock");
+}
+
+/// The screensaver's ground is the backdrop alone: the colour where no
+/// picture is installed.
+#[test]
+fn the_backdrop_ground_is_the_colour_where_no_picture_is_installed() {
+    let (shell, _comp) = headless_desktop();
+    let ground = shell
+        .backdrop_ground(
+            tairix_wallpaper::Backdrop::Colour(tairix_wallpaper::Rgb::new(10, 20, 30)),
+            8,
+            4,
+        )
+        .expect("a ground");
+    assert_eq!((ground.width(), ground.height()), (8, 4));
+    assert_eq!(
+        ground.get(3, 2),
+        Some(tairix_wm::Color::rgb(10, 20, 30).premultiply())
+    );
 }
 
 // ---- window-owner responsiveness (vigil) -----------------------------
@@ -8528,12 +8744,55 @@ fn keep_topmost_raises_the_lock_above_a_window_added_after_it() {
         "a window added after the lock is on top of it by default"
     );
 
-    lock.keep_topmost(&mut comp);
+    lock.keep_topmost(&mut comp, None);
 
     assert_eq!(
         comp.window_at(Point::new(0, 0)),
         Some(lock_id),
         "keep_topmost raises the lock back above it"
+    );
+}
+
+/// A screensaver up over a lock stays above it, and holding that order is
+/// free: the lock sits directly beneath the screensaver rather than being
+/// raised over it and lowered back on every wake, which would recomposite the
+/// whole screen each time.
+#[test]
+fn a_lock_under_a_screensaver_keeps_its_place_without_restacking() {
+    let blank = |comp: &mut Compositor| {
+        let mut saver = crate::Screensaver::new();
+        assert!(saver.start(tairix_wallpaper::ScreensaverKind::Blank, None, 0, comp, 0));
+        saver
+    };
+    let keep = |saver: &crate::Screensaver, lock: &ScreenLock, comp: &mut Compositor| {
+        saver.keep_topmost(comp);
+        lock.keep_topmost(comp, saver.window());
+    };
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
+    let lock_id = locked_window(&comp);
+
+    let mut saver = blank(&mut comp);
+    let intruder = opaque_window(&mut comp, Point::new(0, 0), 10, 10);
+    comp.raise(intruder);
+    keep(&saver, &lock, &mut comp);
+    assert_eq!(comp.window_at(Point::new(0, 0)), saver.window());
+    assert!(saver.dismiss(&mut comp));
+    assert_eq!(
+        comp.window_at(Point::new(0, 0)),
+        Some(lock_id),
+        "the lock was directly beneath the screensaver, over the intruder"
+    );
+
+    let saver = blank(&mut comp);
+    keep(&saver, &lock, &mut comp);
+    let _ = comp.composite();
+    keep(&saver, &lock, &mut comp);
+    assert!(
+        !comp.has_damage(),
+        "holding an order that already stands repaints nothing"
     );
 }
 
@@ -8726,7 +8985,7 @@ fn an_unengaged_lock_is_harmless() {
     assert!(!lock.is_locked());
     assert_eq!(comp.window_count(), 0, "nothing was ever added");
 
-    lock.keep_topmost(&mut comp);
+    lock.keep_topmost(&mut comp, None);
     lock.repaint(&shell, &mut comp);
     lock.abandon(&mut comp);
 
@@ -10527,16 +10786,14 @@ fn the_bars_popover_and_readout_frost_what_is_behind_them() {
 
     let mut notified = shell();
     let mut comp = compositor();
-    notified.apply_notify(
-        &mut comp,
-        42,
-        NotifyRequest::Raise {
-            key: 1,
-            severity: NotifySeverity::Warning,
-            title: NotifyTitle::new("Battery low").expect("title"),
-            body: NotifyBody::new("12% remaining").expect("body"),
-        },
-    );
+    assert!(notified
+        .serve_notify(
+            &mut comp,
+            &producer_origin(42, 42, "os.tairix.battery"),
+            raise(1, NotifySeverity::Warning),
+            &tairix_wallpaper::NotifyPolicy::default(),
+        )
+        .is_ok());
     assert_eq!(
         blur_of(
             &comp,

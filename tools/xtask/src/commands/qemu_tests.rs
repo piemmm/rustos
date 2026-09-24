@@ -8306,12 +8306,18 @@ static TESTS: &[QemuTest] = &[
             ScreendumpPlan {
                 marker: WINDOW_RETITLED_MARKER,
                 occurrences: 1,
+                suffix: SETTINGS_LOCK_DUMP,
+                assert: assert_settings_lock_screendump,
+            },
+            ScreendumpPlan {
+                marker: WINDOW_RETITLED_MARKER,
+                occurrences: 2,
                 suffix: SETTINGS_ABSENCE_DUMP,
                 assert: assert_settings_absence_screendump,
             },
             ScreendumpPlan {
                 marker: WINDOW_RETITLED_MARKER,
-                occurrences: 2,
+                occurrences: 3,
                 suffix: SETTINGS_STORAGE_DUMP,
                 assert: assert_settings_storage_screendump,
             },
@@ -11473,9 +11479,11 @@ fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     Ok(pen.steps())
 }
 
-/// The Settings vertical's screendump names: the window on General, a pane
-/// that states an absence, Storage, and the desktop redrawn light.
+/// The Settings vertical's screendump names: the window on General, on Lock
+/// Screen, on a pane that states an absence, on Storage, and the desktop
+/// redrawn light.
 const SETTINGS_GENERAL_DUMP: &str = "general";
+const SETTINGS_LOCK_DUMP: &str = "lock-screen";
 const SETTINGS_ABSENCE_DUMP: &str = "absence";
 const SETTINGS_STORAGE_DUMP: &str = "storage";
 const SETTINGS_LIGHT_DUMP: &str = "light";
@@ -11519,6 +11527,7 @@ struct SettingsFrame {
 struct SettingsWalk {
     capsule: tairix_geometry::Point,
     settings_row: tairix_geometry::Point,
+    lock_row: tairix_geometry::Point,
     absence_row: tairix_geometry::Point,
     strip_page: tairix_geometry::Point,
     storage_row: tairix_geometry::Point,
@@ -11527,6 +11536,7 @@ struct SettingsWalk {
     light_choice: tairix_geometry::Point,
     dark_row: tairix_geometry::Point,
     general: SettingsFrame,
+    lock: SettingsFrame,
     absence: SettingsFrame,
     storage: SettingsFrame,
 }
@@ -11738,6 +11748,17 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
     shell.lay_out(viewport, scale, &theme);
     let general = settings_frame(&shell, viewport, &theme, origin)?;
 
+    // A pane the idle interface composes: its one setting and the command
+    // beside it, where the session's own lock is asked for.
+    let lock_row = settings_walk_to(&mut shell, Category::LockScreen, viewport, &theme)?;
+    if shell
+        .setting_rect(Setting::LockAfter, viewport, scale, &theme)
+        .is_none()
+    {
+        return Err("settings script: Lock Screen draws no lock row".to_string());
+    }
+    let lock = settings_frame(&shell, viewport, &theme, origin)?;
+
     let absence_row = settings_walk_to(&mut shell, SETTINGS_ABSENCE_CATEGORY, viewport, &theme)?;
     let absence = settings_frame(&shell, viewport, &theme, origin)?;
 
@@ -11790,6 +11811,7 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
     Ok(SettingsWalk {
         capsule,
         settings_row,
+        lock_row: to_screen(lock_row)?,
         absence_row: to_screen(absence_row)?,
         strip_page: to_screen(strip_page)?,
         storage_row: to_screen(storage_row)?,
@@ -11798,6 +11820,7 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
         light_choice: to_screen(light_choice)?,
         dark_row,
         general,
+        lock,
         absence,
         storage,
     })
@@ -11828,39 +11851,40 @@ fn settings_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         MouseButton::Primary,
         walk.settings_row,
     );
+    pen.click(WINDOW_SHOWN_MARKER, 1, MouseButton::Primary, walk.lock_row);
     pen.click(
-        WINDOW_SHOWN_MARKER,
+        WINDOW_RETITLED_MARKER,
         1,
         MouseButton::Primary,
         walk.absence_row,
     );
     pen.click(
         WINDOW_RETITLED_MARKER,
-        1,
+        2,
         MouseButton::Primary,
         walk.strip_page,
     );
     pen.click(
         WINDOW_RETITLED_MARKER,
-        1,
+        2,
         MouseButton::Primary,
         walk.storage_row,
     );
     pen.click(
         WINDOW_RETITLED_MARKER,
-        2,
+        3,
         MouseButton::Primary,
         walk.appearance_row,
     );
     pen.click(
         WINDOW_RETITLED_MARKER,
-        3,
+        4,
         MouseButton::Primary,
         walk.appearance_combo,
     );
     pen.click(
         WINDOW_RETITLED_MARKER,
-        3,
+        4,
         MouseButton::Primary,
         walk.light_choice,
     );
@@ -12044,6 +12068,26 @@ fn assert_settings_general_screendump(t: &QemuTest, path: &Path) -> Result<(), S
 }
 
 /// [`ScreendumpPlan`] assertion for the Settings vertical's **second** dump:
+/// Lock Screen composes a form — its setting and its *Lock Now* command on a
+/// plate — rather than stating an absence.
+fn assert_settings_lock_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    let theme = tairix_theme::Theme::dark();
+    let image = read_screendump(t, path)?;
+    let walk = settings_walk()?;
+    assert_settings_strip(t, path, &image, &theme, walk.lock)?;
+    let edges = settings_plate_edges(t, path, &image, &theme, walk.lock.content)?;
+    if edges < MIN_SETTINGS_PLATE_EDGES {
+        return Err(format!(
+            "test --qemu ({}): screendump {}: Lock Screen's column draws {edges} plate edges \
+             (expected >= {MIN_SETTINGS_PLATE_EDGES}: a plate's top and bottom rim)",
+            t.package,
+            path.display(),
+        ));
+    }
+    Ok(())
+}
+
+/// [`ScreendumpPlan`] assertion for the Settings vertical's **third** dump:
 /// the pane the strip walked to states its absence in words on the surface,
 /// with no plate and no control.
 fn assert_settings_absence_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
@@ -12124,7 +12168,7 @@ fn row_holds_track(row: &[Rgb], fill: tairix_theme::Rgba, groove: tairix_theme::
     false
 }
 
-/// [`ScreendumpPlan`] assertion for the Settings vertical's **third** dump:
+/// [`ScreendumpPlan`] assertion for the Settings vertical's **fourth** dump:
 /// Storage, reached past the strip's fold, drawing its volume cards and at
 /// least one capacity track that is neither empty nor full.
 fn assert_settings_storage_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {

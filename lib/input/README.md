@@ -42,9 +42,10 @@ This crate owns the device-level input types the desktop routes:
 - **Double-click detection** (`click`, `DoubleClickTracker`,
   `plans/NEW-FILEMANAGER.md` FM12): the one pure rule that turns a stream of
   presses into single-click and double-click gestures.
-  `register(now_ns, subject, button)` pairs a press with the previous one only
-  when it lands on the *same* subject with the *same* button within
-  `DOUBLE_CLICK_INTERVAL_NS` (half a second) — the two buttons mean different
+  `register(now_ns, subject, button, interval)` pairs a press with the previous
+  one only when it lands on the *same* subject with the *same* button within
+  `interval` — the desktop's one double-click interval, which its session
+  publishes in `DesktopInfo::double_click` — and the two buttons mean different
   gestures, so one press of each is two begun rather than one completed; a
   completed double consumes both presses (a third quick press starts a fresh
   single), a non-monotonic clock reading fails closed to a single, and `reset`

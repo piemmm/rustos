@@ -87,15 +87,33 @@ that key's own closed vocabulary:
 | `scale`     | a bare decimal percentage in `Scale`'s own range  | `100`                                         |
 | `cursor.set`| a cursor-set name (a plain leaf name within `CURSOR_SET_NAME_MAX`) | `Standard`                   |
 | `cursor.size`| `normal` \| `large` \| `larger` \| `largest`     | `normal`                                      |
+| `notify.enabled` | `true` \| `false` (the format engine also reads `on` \| `off`) | `true`                  |
+| `notify.sources` | `<bundle-id>:<level>` entries, one space apart, in identity order; levels `warning` \| `critical` \| `none` | empty |
+| `pointer.primary` | `left` \| `right`                              | `left`                                        |
+| `pointer.double_click_ms` | whole milliseconds within `DOUBLE_CLICK_MIN..=DOUBLE_CLICK_MAX` | `500`            |
+| `pointer.speed` | a bare decimal percentage, `25..=400`            | `100`                                         |
+| `key.repeat_delay_ms` | whole milliseconds, `100..=2000`           | `500`                                         |
+| `key.repeat_rate` | `off`, or repeats a second, `1..=60`           | `30`                                          |
+| `screensaver.after_min` | `never`, or whole minutes, `1..=1440`    | `10`                                          |
+| `screensaver.kind` | `blank` \| `dim` \| `slideshow`               | `blank`                                       |
+| `lock.after_min` | `never`, or whole minutes, `1..=1440`           | `15`                                          |
 
 Keys and values are case-sensitive: each has one canonical spelling.
 
-The keys fall into two groups, which is a reader's distinction rather than the
-document's: `SettingsKey::PINBOARD` describes the backdrop and the icons
-standing on it, and `SettingsKey::APPEARANCE` describes how every surface of
-the desktop is drawn. They share one document because they share one owner and
-one published scope — the session writes both, in one round trip, and a
-desktop half-adopted from two documents is a desktop nobody chose.
+The keys fall into groups, which is a reader's distinction rather than the
+document's, and each surface posts only its own: `SettingsKey::PINBOARD` (the
+backdrop and the icons standing on it), `APPEARANCE` (how every surface is
+drawn), `NOTIFICATIONS`, `POINTER`, `KEYBOARD`, `SCREENSAVER` and `LOCK`.
+They share one document because they share one owner and one published scope,
+and a desktop half-adopted from several documents is a desktop nobody chose.
+
+A notification source is the kernel-attested bundle identity of the program
+that posted, never a name it gave itself; a source with no entry shows
+everything, and an entry at `all` is not a spelling at all — its absence is.
+`NotifyPolicy::set_level` refuses a change whose spelling would outgrow one
+settings value. Every span is a `Duration64` in memory and on every wire;
+milliseconds and minutes are the document's spelling, for the person who edits
+it.
 
 The four appearance value sets are `tairix_abi::desktop`'s own
 (`Appearance`, `Contrast`, `Density`, `Motion`), imported rather than

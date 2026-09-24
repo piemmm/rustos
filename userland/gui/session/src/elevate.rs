@@ -65,8 +65,7 @@ pub const ELEVATE_ORIGIN: Point = Point::new(280, 160);
 ///
 /// Emitted when [`ElevatePrompt::ask`] successfully opens the window, so a
 /// host that must type into the fields can wait for a real surface rather
-/// than racing the click that asked for it. Id `20_004` is the next free
-/// slot in the desktop-session event range.
+/// than racing the click that asked for it.
 pub const ELEVATE_PROMPT_SHOWN: tairix_log::EventId = tairix_log::EventId(20_004);
 
 /// The exact message [`ELEVATE_PROMPT_SHOWN`] is emitted with. A log

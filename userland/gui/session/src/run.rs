@@ -130,19 +130,19 @@ mod program {
         BundleIndex, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
         DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
         DocumentRelay, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
-        FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, InputSource,
-        KeyboardInputSource, Launch, LaunchHost, LaunchTable, LaunchTarget, LayerDecision,
-        LayerFeed, LoadedPinboard, LoadedPrograms, LockedDrain, OwnerBundleGate, OwnerWindow,
-        PickConclusion, Prepared, PresentedOwners, PreviewDone, PreviewJob, PreviewRequest,
-        PromptOutcome, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel, SessionClock,
-        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox,
-        SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService,
-        WallpaperSource, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
-        APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
-        DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
-        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
-        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
-        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, IdleAction,
+        IdleClock, IdlePolicy, InputPolicy, InputSource, KeyboardInputSource, Launch, LaunchHost,
+        LaunchTable, LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms,
+        LockedDrain, OwnerBundleGate, OwnerWindow, PickConclusion, Prepared, PresentedOwners,
+        PreviewDone, PreviewJob, PreviewRequest, PromptOutcome, ScreenFade, ScreenLock,
+        Screensaver, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
+        SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource,
+        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
+        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, DESKTOP_RESTYLED,
+        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
+        FILES_RUN_PATH, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE,
+        LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
         SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
@@ -521,6 +521,13 @@ mod program {
             let origin = Origin::from_bytes(&buf[..len])?;
             Ok(origin.capabilities().holds_cap(cap))
         }
+
+        fn caller_app(&mut self, ticket: u64) -> Result<Option<tairix_abi::AppIdentity>, Errno> {
+            let mut buf = [0u8; ORIGIN_WIRE_LEN];
+            let len = tairix_rt::call_peer_origin(WINDOW_ENDPOINT, ticket, &mut buf)
+                .map_err(Errno::from_syscall)?;
+            Ok(Origin::from_bytes(&buf[..len])?.app().copied())
+        }
     }
 
     /// The production [`EventSink`]: one non-blocking `ipc_send` to the
@@ -780,7 +787,7 @@ mod program {
             }
         }
         loop {
-            match keyboard.poll_record() {
+            match keyboard.poll_record(now_ns) {
                 Ok(None) => break,
                 Ok(Some((event, _))) => {
                     drain.feed(lock, &event, now_ns, unlocker, shell, compositor);
@@ -789,6 +796,75 @@ mod program {
             }
         }
         Drained::Empty
+    }
+
+    /// Secure the screen, however it was asked for: the icon bar's Lock row,
+    /// the idle policy, or the desktop's Settings application.
+    ///
+    /// The prompts go down first: an unanswered question must not sit behind a
+    /// lock where the user cannot see what they are agreeing to. A lock that
+    /// could not be put up says so rather than leaving the user believing the
+    /// screen is secured.
+    fn lock_screen(
+        lock: &mut ScreenLock,
+        (confirm, elevate): (&mut ConfirmPrompt, &mut ElevatePrompt),
+        named: (&str, &str),
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        confirm.abandon(shell, compositor);
+        elevate.abandon(shell, compositor);
+        if !lock.engage(named, shell, compositor) {
+            io::write_stderr_line("desktop: could not lock the screen; it is still open");
+        }
+    }
+
+    /// Drain the seat's pointer and keyboard into nothing, keeping only the
+    /// pointer's position — the wake that takes the screensaver down.
+    fn drain_away(
+        pointer: &mut DeviceInputSource<SeatInputChannel<PointerReader>>,
+        keyboard: &mut KeyboardInputSource<SeatInputChannel<KeyboardReader>>,
+        compositor: &mut Compositor,
+        now_ns: u64,
+    ) -> Drained {
+        loop {
+            match pointer.poll() {
+                Ok(None) => break,
+                Ok(Some(tairix_wm::InputEvent::PointerMoved { to })) => {
+                    let _ = compositor.move_cursor(to);
+                }
+                Ok(Some(_)) => {}
+                Err(_) => return Drained::Faulted,
+            }
+        }
+        loop {
+            match keyboard.poll_record(now_ns) {
+                Ok(None) => break,
+                Ok(Some(_)) => {}
+                Err(_) => return Drained::Faulted,
+            }
+        }
+        keyboard.cancel_repeat();
+        Drained::Empty
+    }
+
+    /// The slideshow picture at catalog position `index`, placed to fill a
+    /// `screen`-sized display.
+    fn slide_source(
+        catalog: &[WallpaperName],
+        index: usize,
+        screen: Rect,
+    ) -> Option<WallpaperSource> {
+        let name = catalog.get(index)?;
+        let path = tairix_wallpaper::wallpaper_path(&name.category, &name.file);
+        Some(WallpaperSource {
+            choice: tairix_wallpaper::WallpaperChoice::Image(
+                tairix_wallpaper::WallpaperPath::new(&path).ok()?,
+            ),
+            fit: tairix_wallpaper::WallpaperFit::Fill,
+            width: screen.width,
+            height: screen.height,
+        })
     }
 
     /// Classify one drain fault: losing the seat is the session's normal
@@ -1045,8 +1121,8 @@ mod program {
     }
 
     /// Attest the producer of a pending notification call, decode the request
-    /// fail-closed, and relay it to the taskbar model, returning the status
-    /// the producer receives.
+    /// fail-closed, and serve it held to the user's notification `policy`,
+    /// returning the status the producer receives.
     ///
     /// The producer's identity is the kernel-attested `call_peer_origin` on
     /// the notification endpoint, never a wire claim, so a notification is
@@ -1056,6 +1132,7 @@ mod program {
     fn serve_notify(
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
+        policy: &tairix_wallpaper::NotifyPolicy,
         ticket: u64,
         request: &[u8],
     ) -> Result<(), Errno> {
@@ -1064,8 +1141,7 @@ mod program {
             .map_err(Errno::from_syscall)?;
         let origin = Origin::from_bytes(&buf[..len])?;
         let request = NotifyRequest::from_bytes(request)?;
-        shell.apply_notify(compositor, origin.pid(), request);
-        Ok(())
+        shell.serve_notify(compositor, &origin, request, policy)
     }
 
     /// Attest the caller of a pending Switchboard call from the kernel and
@@ -1717,7 +1793,11 @@ mod program {
         else {
             return fail(EXIT_BAD_MODE, "queried mode has no pointer surface");
         };
-        let mut keyboard = KeyboardInputSource::new(SeatInputChannel::new(KeyboardReader));
+        // Built on the defaults; the loop head reconciles the user's policy
+        // into it, and into the pointer, once the settings load.
+        let mut input_policy = InputPolicy::of(&DesktopSettings::default());
+        let mut keyboard =
+            KeyboardInputSource::new(SeatInputChannel::new(KeyboardReader), input_policy.repeat);
 
         // The serve loop's own parser-sandbox worker: this binary re-entered as
         // a capability-empty child, where untrusted images are decoded rather
@@ -2257,6 +2337,11 @@ mod program {
         // or missing name here cannot unlock anybody's session. An unset or
         // malformed value simply leaves the prompt unnamed.
         let mut lock = ScreenLock::new();
+        // The idle deadline the screensaver and the idle lock ride, and the
+        // screensaver it puts up.
+        let mut idle = IdleClock::new(tairix_rt::clock_get());
+        let mut idle_policy = IdlePolicy::default();
+        let mut saver = Screensaver::new();
         // The taskbar clock. It is read here so the bar carries the time from
         // the first frame rather than blank until the minute turns, and its
         // tick is folded into the park below — one wake a minute, the fewest a
@@ -2274,6 +2359,9 @@ mod program {
         // The bar's trailing capsule wears this account's identity disc, the
         // same mark the login screen drew for it.
         shell.set_account(&mut compositor, shown_name);
+        // What tells this desktop's own Settings application apart from a
+        // bundle merely claiming its identifier.
+        shell.set_own_app(self_origin.app().copied());
         // Offer the rows that need re-authentication only where this session
         // really has a broker for it: the Lock row (which would otherwise
         // strand the user behind a screen with no way back) and the clock's
@@ -2308,7 +2396,38 @@ mod program {
         let mut reply = [0u8; WINDOW_REPLY_MAX];
         // The look the retained prompts were last painted in.
         let mut prompts_style = shell.style_generation();
+        // Whether the screen was locked or handed to another session as of the
+        // last turn, so a key held across that edge stops repeating.
+        let mut was_screened = false;
         loop {
+            // Whatever path adopted a settings change, the seat's sources and
+            // the window manager are brought to it here, before the next park.
+            let input_now = InputPolicy::of(desktop.settings());
+            if input_now != input_policy {
+                pointer.set_policy(input_now.primary, input_now.speed);
+                keyboard.set_repeat(input_now.repeat);
+                compositor.set_double_click(input_now.double_click);
+                if input_now.double_click != input_policy.double_click {
+                    publish_desktop(&compositor);
+                }
+                input_policy = input_now;
+            }
+            // A key held into a lock, or into another user's session, must not
+            // go on repeating there; one pressed at the lock repeats as usual.
+            let screened = lock.is_locked() || switch.is_background();
+            if screened && !was_screened {
+                keyboard.cancel_repeat();
+            }
+            was_screened = screened;
+            let idle_now = IdlePolicy::of(desktop.settings(), shell.can_lock());
+            if idle_now != idle_policy {
+                idle.set_policy(idle_now);
+                idle_policy = idle_now;
+            }
+            // A screen handed to another session is theirs to blank.
+            if switch.is_background() && saver.dismiss(&mut compositor) {
+                wallpapers.forget_slides();
+            }
             // The park stays indefinite: a cache-report change the runtime's
             // rate limiter is holding back, a frame report this session's own
             // one is holding back, a composited frame the pacer is holding
@@ -2344,10 +2463,20 @@ mod program {
                 park = fade.park_deadline_ns(now_ns, park);
                 park = clock.park_deadline_ns(now_ns, park);
                 park = lock.park_deadline_ns(now_ns, park);
+                park = keyboard.park_deadline_ns(now_ns, park);
+                park = idle.park_deadline_ns(now_ns, park);
+                park = saver.park_deadline_ns(now_ns, park);
                 switch.park_deadline_ns(park)
             };
             let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
-            if waited != 0 {
+            // A held key's repeat is seat input the device never sent, so a
+            // wait that ended for one is served exactly as the seat's input is.
+            let repeat_due = waited != 0
+                && Errno::from_syscall(waited) == Errno::TimedOut
+                && keyboard.repeat_due(tairix_rt::clock_get());
+            if repeat_due {
+                token = SEAT_TOKEN;
+            } else if waited != 0 {
                 if Errno::from_syscall(waited) != Errno::TimedOut {
                     // A dead wait-set would degrade the loop into a busy poll;
                     // exit fail-loud instead and let the supervisor decide.
@@ -2370,6 +2499,43 @@ mod program {
                 // this is what opens a picker whose dwell has elapsed and
                 // takes down one whose grace has.
                 shell.tick_taskbar(&mut compositor, now_ns);
+                // Idleness produces no event, so this is where it is acted on.
+                while let Some(action) = idle.due(now_ns) {
+                    match action {
+                        IdleAction::Lock => lock_screen(
+                            &mut lock,
+                            (&mut confirm, &mut elevate),
+                            (account, shown_name),
+                            &mut shell,
+                            &mut compositor,
+                        ),
+                        IdleAction::StartScreensaver => {
+                            let screen = compositor.screen_rect();
+                            let settings = desktop.settings();
+                            let ground = shell.backdrop_ground(
+                                settings.backdrop,
+                                screen.width,
+                                screen.height,
+                            );
+                            let _ = saver.start(
+                                settings.screensaver,
+                                ground,
+                                wallpaper_catalog.len(),
+                                &mut compositor,
+                                now_ns,
+                            );
+                        }
+                    }
+                }
+                if let Some(source) =
+                    saver
+                        .due_slide(now_ns, wallpaper_catalog.len())
+                        .and_then(|index| {
+                            slide_source(&wallpaper_catalog, index, compositor.screen_rect())
+                        })
+                {
+                    wallpapers.want_slide(source);
+                }
                 // A pointer at rest produces no events either, so this is what
                 // shows the tip whose dwell has elapsed.
                 if shell.tooltip_tick(now_ns) {
@@ -2421,6 +2587,11 @@ mod program {
             // the seat member ready for as long as it moved and every
             // application blocked in a window call would hang until it
             // stopped.
+            // Seat input, a held key's repeat included, is what idleness is
+            // counted from.
+            if token == SEAT_TOKEN {
+                idle.input(tairix_rt::clock_get());
+            }
             if token == WINDOW_TOKEN {
                 // Serve the pending window request: the wait-set peeked a
                 // queued call and only this task ever dequeues, so the
@@ -2472,6 +2643,17 @@ mod program {
                         |owner| identity.app_of(owner),
                     );
                     let _ = tairix_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
+                    // The desktop's Settings application asked for the lock;
+                    // it is put up once the request that asked is answered.
+                    if shell.take_lock_request() {
+                        lock_screen(
+                            &mut lock,
+                            (&mut confirm, &mut elevate),
+                            (account, shown_name),
+                            &mut shell,
+                            &mut compositor,
+                        );
+                    }
                     // A request that moved real geometry — a size-state
                     // change — owes its app the new extent, and the host
                     // could not send it while the engine held the borrow.
@@ -2526,7 +2708,13 @@ mod program {
                 let mut request = [0u8; NOTIFY_MAX_REQUEST];
                 let mut ticket = 0u64;
                 if let Ok(len) = tairix_rt::call_recv(NOTIFY_ENDPOINT, &mut request, &mut ticket) {
-                    let result = serve_notify(&mut shell, &mut compositor, ticket, &request[..len]);
+                    let result = serve_notify(
+                        &mut shell,
+                        &mut compositor,
+                        &desktop.settings().notifications,
+                        ticket,
+                        &request[..len],
+                    );
                     let reply = encode_status_reply(result);
                     let _ = tairix_rt::call_reply(NOTIFY_ENDPOINT, ticket, &reply);
                 }
@@ -2684,6 +2872,9 @@ mod program {
                     &mut compositor,
                     tairix_rt::clock_get(),
                 );
+                if let Some(Ok(frame)) = wallpapers.take_slide() {
+                    saver.show_slide(frame, &mut compositor);
+                }
                 if let Some(loaded) = catalogs.collect() {
                     adopt_programs(loaded, &mut shell, &mut compositor, &mut programs);
                 }
@@ -2882,7 +3073,7 @@ mod program {
                         // dead producer leaves no stuck notification — the
                         // notification counterpart of the window teardown
                         // above, run for every reaped child, windowed or not.
-                        shell.clear_producer_notifications(&mut compositor, pid);
+                        shell.clear_pid_notifications(&mut compositor, pid);
                         // A reaped child is gone, not hung: drop its delivery
                         // evidence so a recycled task id starts clean. And a
                         // reaped Switchboard can publish nothing more — clear
@@ -2963,6 +3154,10 @@ mod program {
                             );
                         };
                         pointer = rebuilt;
+                        // Keep the user's button order and speed, and restart
+                        // idleness so the screen does not blank or lock at once.
+                        pointer.set_policy(input_policy.primary, input_policy.speed);
+                        idle.input(tairix_rt::clock_get());
                     }
                     Ok(SessionWake::End) => {
                         io::write_stderr_line(
@@ -2975,6 +3170,17 @@ mod program {
                         let _ = writeln!(Stderr, "desktop: {}", refusal.reason());
                     }
                 }
+            } else if token == SEAT_TOKEN && saver.is_shown() {
+                // The waking gesture reaches nothing behind the screensaver;
+                // the next input goes to a lock, if one came up underneath.
+                let now_ns = tairix_rt::clock_get();
+                if drain_away(&mut pointer, &mut keyboard, &mut compositor, now_ns)
+                    == Drained::Faulted
+                {
+                    return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
+                }
+                saver.dismiss(&mut compositor);
+                wallpapers.forget_slides();
             } else if token == SEAT_TOKEN && lock.is_locked() {
                 // Locked: the seat's events belong to the lock and to
                 // nothing else. They are drained straight out of the
@@ -3137,7 +3343,7 @@ mod program {
                 // there is nothing here for the shell.
                 let mut typed = false;
                 while !stepped_aside && !chain_held {
-                    match keyboard.poll_record() {
+                    match keyboard.poll_record(now_ns) {
                         Ok(None) => break,
                         Ok(Some((event, record))) => {
                             let outcome = shell.apply(event, &mut compositor, now_ns);
@@ -3305,11 +3511,11 @@ mod program {
                 );
                 owner_bundles.publish(switchboard_pid, &apps.strip, &mut RtSwitchboardMailbox);
             }
-            // Nothing an application does may surface over a locked
-            // screen: whatever opened, raised, or resized behind the lock
-            // this wake, the lock goes back on top before the frame is
-            // shown. Idle when the screen is not locked.
-            lock.keep_topmost(&mut compositor);
+            // Nothing an application opened or raised this wake may surface
+            // over a locked screen: the lock goes back on top, beneath only
+            // the screensaver, before the frame is shown.
+            saver.keep_topmost(&mut compositor);
+            lock.keep_topmost(&mut compositor, saver.window());
             // A prompt keeps the pixels it was painted in, so one standing
             // through a change of look is repainted in the look now in force
             // rather than left in the one the user just left.
@@ -3513,6 +3719,10 @@ mod program {
                         let outcome = prepare_wallpaper_surface(&mut sandbox, &source);
                         self.desk.lock().deliver(source, outcome)
                     }
+                    WallpaperJob::Slide(source) => {
+                        let outcome = prepare_wallpaper_surface(&mut sandbox, &source);
+                        self.desk.lock().deliver_slide(&source, outcome)
+                    }
                     WallpaperJob::Preview(job) => {
                         let pixels = render_wallpaper_preview(&mut sandbox, &job);
                         self.desk.lock().deliver_preview(PreviewDone {
@@ -3544,6 +3754,24 @@ mod program {
         /// Take the rendered preview waiting to be handed over, if any.
         fn take_preview(&self) -> Option<PreviewDone> {
             self.desk.lock().take_preview()
+        }
+
+        /// Ask for a slideshow picture. A desk with no worker takes none, so a
+        /// slideshow there stays black rather than decoding on the serve loop.
+        fn want_slide(&self, source: WallpaperSource) {
+            let mut desk = self.desk.lock();
+            desk.want_slide(source);
+            if desk.has_work() {
+                self.work.notify_one();
+            }
+        }
+
+        fn take_slide(&self) -> Option<Result<Surface, alloc::string::String>> {
+            self.desk.lock().take_slide()
+        }
+
+        fn forget_slides(&self) {
+            self.desk.lock().forget_slides();
         }
 
         /// Record `source` as wanted and wake a preparer.
@@ -4509,7 +4737,7 @@ mod program {
             shell.settle(compositor);
         }
         loop {
-            match keyboard.poll_record() {
+            match keyboard.poll_record(now_ns) {
                 Ok(None) => break,
                 Ok(Some((event @ tairix_wm::InputEvent::KeyPressed { .. }, _))) => {
                     let at = shell.router().pointer();
@@ -5581,18 +5809,13 @@ mod program {
                     *switchboard = Some(revived);
                 }
             }
-            ShellOutcome::Taskbar(TaskbarResponse::LockSession) => {
-                // Secure the screen. The prompt goes down first: an
-                // unanswered question must not sit behind a lock where the
-                // user cannot see what they are agreeing to. A lock that
-                // could not be put up says so rather than leaving the user
-                // believing the screen is secured.
-                confirm.abandon(shell, compositor);
-                elevate.abandon(shell, compositor);
-                if !lock.engage((account, shown_name), shell, compositor) {
-                    io::write_stderr_line("desktop: could not lock the screen; it is still open");
-                }
-            }
+            ShellOutcome::Taskbar(TaskbarResponse::LockSession) => lock_screen(
+                lock,
+                (confirm, elevate),
+                (account, shown_name),
+                shell,
+                compositor,
+            ),
             ShellOutcome::Taskbar(TaskbarResponse::SwitchUser) => {
                 // Step aside for another account. The prompt goes down
                 // first: an unanswered question must not be left on a screen
@@ -6374,6 +6597,9 @@ mod program {
             prepare_wallpaper(pinboard, wallpapers, shell, desktop, compositor, now_ns);
         }
         adopt_appearance(change.appearance, &wanted, shell, compositor);
+        if change.notifications {
+            shell.withdraw_unadmitted(compositor, &wanted.notifications);
+        }
         // A re-layout, a re-list, and a new wallpaper all show as the same
         // repaint of the desktop layer, so one present covers whichever of
         // them the change asked for.

@@ -4,11 +4,11 @@
 //!
 //! A row is one setting: a label, an optional description line, and a trailing
 //! slot holding one real [`Toggle`], [`ComboBox`], [`Slider`], [`TextField`],
-//! [`Button`], read-only reading, or stated absence of one. It composes the row
-//! chrome [`ListRow`](crate::collection::ListRow) and
-//! [`TableRow`](crate::collection::TableRow) paint and restates neither that nor
-//! any control. A group is the captioned plate those rows sit on, resolving one
-//! slot column so every control in it begins at the same x.
+//! [`Button`], [`FlagSet`] of checkboxes, read-only reading, or stated absence
+//! of one. It composes the row chrome [`ListRow`](crate::collection::ListRow)
+//! and [`TableRow`](crate::collection::TableRow) paint and restates neither
+//! that nor any control. A group is the captioned plate those rows sit on,
+//! resolving one slot column so every control in it begins at the same x.
 //!
 //! Three obligations fall on a caller, and each is what stops a settings pane
 //! lying about the machine:
@@ -42,11 +42,11 @@ use crate::combo::{ComboAction, ComboBox};
 use crate::damage;
 use crate::metric::StatusPill;
 use crate::paint::{
-    centred_text_y, foreground, grab_after, inset, line_budget, paint_row, paint_run,
-    paint_surface_plate, plate_border, role_font, route_pointer, row_content_span, surface_rect,
-    text_plate_height, to_i32, ChromeLayer, TextBlock,
+    bead_band, centred_text_y, foreground, grab_after, inset, line_budget, paint_row, paint_run,
+    paint_surface_plate, plate_border, role_font, route_pointer, row_content_span,
+    row_width_for_content, surface_rect, text_plate_height, to_i32, ChromeLayer, TextBlock,
 };
-use crate::selector::{SelectorAction, Toggle};
+use crate::selector::{box_side, Checkbox, SelectorAction, Toggle};
 use crate::state::{ControlState, PointerState, RenderInvariant, SelectionState};
 use crate::text::{TextAction, TextField};
 use crate::value::{Slider, SliderAction};
@@ -54,13 +54,17 @@ use crate::value::{Slider, SliderAction};
 /// What a [`FieldRow`]'s trailing slot holds: one control, one reading, or a
 /// stated absence of one.
 ///
-/// These are the settables a pane actually has — a boolean, a choice, a
-/// bounded value, a string, a command — plus the two read-only forms. A row
-/// holds exactly one, because a setting with two controls is two settings.
+/// These are the settables a pane actually has — a boolean, a few independent
+/// flags, a choice, a bounded value, a string, a command — plus the two
+/// read-only forms. A row holds exactly one, because a setting with two
+/// controls is two settings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FieldControl {
     /// A boolean setting.
     Toggle(Toggle),
+    /// A small set of independent flags, such as the read, write and execute
+    /// bits of one permission class.
+    Flags(FlagSet),
     /// A one-of-several setting.
     Combo(ComboBox),
     /// A bounded value.
@@ -86,6 +90,15 @@ pub enum FieldControl {
 pub enum FieldAction {
     /// The [`Toggle`] slot requests its value become `on`.
     Set {
+        /// The requested new on/off value.
+        on: bool,
+    },
+    /// The [`FlagSet`] slot's flag at `index` requests its value become `on`.
+    /// Only that flag is named, so the owner commits the one flag the reader
+    /// changed and leaves its siblings as they are.
+    SetFlag {
+        /// The zero-based index of the flag, in the order the set was built.
+        index: usize,
         /// The requested new on/off value.
         on: bool,
     },
@@ -218,15 +231,16 @@ impl FieldControl {
     /// The width this control needs, or [`None`] when it takes whatever
     /// column it is given.
     ///
-    /// A boolean, a command, a choice and a reading are as wide as their own
-    /// content; a bounded value and a free-text entry are as wide as the
-    /// surface can afford, because a cramped slider cannot be aimed and a
-    /// cramped entry cannot be read.
+    /// A boolean, a set of flags, a command, a choice and a reading are as
+    /// wide as their own content; a bounded value and a free-text entry are
+    /// as wide as the surface can afford, because a cramped slider cannot be
+    /// aimed and a cramped entry cannot be read.
     #[must_use]
     fn wanted_width(&self, scale: Scale, theme: &Theme) -> Option<u32> {
         let font = role_font(theme, scale, TextRole::Body);
         match self {
             FieldControl::Toggle(toggle) => Some(toggle.measured_width(scale, theme)),
+            FieldControl::Flags(flags) => Some(flags.measured_width(scale, theme)),
             FieldControl::Combo(combo) => Some(combo.measured_width(scale, theme)),
             FieldControl::Button(button) => Some(button.measured_width(scale, theme)),
             FieldControl::Reading(text) | FieldControl::Unmeasured(text) => {
@@ -270,6 +284,11 @@ impl FieldControl {
         };
         match self {
             FieldControl::Toggle(c) => c.set_state(apply(c.state())),
+            FieldControl::Flags(c) => {
+                for flag in &mut c.flags {
+                    flag.set_state(apply(flag.state()));
+                }
+            }
             FieldControl::Combo(c) => c.set_state(apply(c.state())),
             FieldControl::Slider(c) => c.set_state(apply(c.state())),
             FieldControl::Text(c) => c.set_state(apply(c.state())),
@@ -285,6 +304,7 @@ impl FieldControl {
     fn set_focused(&mut self, focused: bool) -> bool {
         match self {
             FieldControl::Toggle(c) => c.set_focused(focused),
+            FieldControl::Flags(c) => c.set_focused(focused),
             FieldControl::Combo(c) => c.set_focused(focused),
             FieldControl::Slider(c) => c.set_focused(focused),
             FieldControl::Text(c) => c.set_focused(focused),
@@ -311,6 +331,7 @@ impl FieldControl {
         let rect = self.drawn_rect(slot, scale, theme);
         match self {
             FieldControl::Toggle(c) => c.render(surface, rect, scale, theme),
+            FieldControl::Flags(c) => c.render(surface, rect, scale, theme),
             FieldControl::Combo(c) => c.render(surface, rect, scale, theme),
             FieldControl::Slider(c) => c.render(surface, rect, scale, theme),
             FieldControl::Text(c) => c.render(surface, rect, scale, theme),
@@ -356,6 +377,277 @@ impl FieldControl {
     }
 }
 
+/// A small set of independent flags on one line — the read, write and execute
+/// bits of one permission class, say — each a labelled [`Checkbox`].
+///
+/// The set owns only the layout that seats its flags side by side, which flag
+/// the pointer is over, which holds a press, and which the keyboard rests on;
+/// the box, the press, the focus ring, the disabled look and the Authority
+/// Mark are each flag's own. Left and Right move the keyboard between flags,
+/// clamping at either end; Space and Enter toggle the one it rests on. The
+/// owner learns which flag changed from [`FieldAction::SetFlag`], which names
+/// it by index, and commits that value alone.
+///
+/// Equal sets draw the same pixels, so a host may use `==` as its repaint
+/// gate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlagSet {
+    flags: Vec<Checkbox>,
+    /// The flag the keyboard rests on.
+    focus: usize,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The flag the pointer was last over.
+    hovered: RenderInvariant<Option<usize>>,
+    /// The flag holding a press, which keeps receiving the stream wherever
+    /// the pointer goes.
+    armed: RenderInvariant<Option<usize>>,
+}
+
+impl FlagSet {
+    /// A set of `flags`, laid out in the order given, with the keyboard on
+    /// the first.
+    #[must_use]
+    pub fn new(flags: Vec<Checkbox>) -> Self {
+        Self {
+            flags,
+            focus: 0,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            hovered: RenderInvariant::new(None),
+            armed: RenderInvariant::new(None),
+        }
+    }
+
+    /// This set with the keyboard resting on flag `index`, clamped to the
+    /// last flag, so an owner that rebuilds the set from its model keeps the
+    /// reader's place in it.
+    #[must_use]
+    pub fn with_focus(mut self, index: usize) -> Self {
+        self.focus = index.min(self.flags.len().saturating_sub(1));
+        self
+    }
+
+    /// The flags, in layout order.
+    #[must_use]
+    pub fn flags(&self) -> &[Checkbox] {
+        &self.flags
+    }
+
+    /// The flag the keyboard rests on.
+    #[must_use]
+    pub fn focus(&self) -> usize {
+        self.focus
+    }
+
+    /// Set flag `index` on or off, for the owner to commit a value the set
+    /// reported as a request; an out-of-range index changes nothing.
+    pub fn set_on(&mut self, index: usize, on: bool) {
+        if let Some(flag) = self.flags.get_mut(index) {
+            flag.set_selection(if on {
+                SelectionState::Selected
+            } else {
+                SelectionState::Unselected
+            });
+        }
+    }
+
+    /// The width this set needs at `scale` to seat every flag whole.
+    #[must_use]
+    pub fn measured_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        self.natural_widths(scale, theme)
+            .fold(0, u32::saturating_add)
+    }
+
+    /// The room each flag keeps after its label: the theme's control gap, and
+    /// never less than the Signal Bead band, because a checkbox draws its bead
+    /// in its trailing corner and a flag marked denied would otherwise stamp
+    /// it over the end of its own label.
+    fn trail(scale: Scale, theme: &Theme) -> u32 {
+        let band = text_plate_height(theme, scale, TextRole::Body);
+        scale
+            .scale_length(theme.metrics().control_gap)
+            .max(bead_band(theme, scale, band))
+            .max(1)
+    }
+
+    /// Each flag's own width: its checkbox's, and the room after it.
+    fn natural_widths<'a>(
+        &'a self,
+        scale: Scale,
+        theme: &'a Theme,
+    ) -> impl Iterator<Item = u32> + 'a {
+        let trail = Self::trail(scale, theme);
+        self.flags
+            .iter()
+            .map(move |flag| flag.measured_width(scale, theme).saturating_add(trail))
+    }
+
+    /// Where each flag is drawn within `bounds`, in layout order.
+    ///
+    /// Each takes its own width from the leading edge while the set has room.
+    /// When it does not, every box keeps its size and the labels share what
+    /// is left in proportion to what each wanted, so it is words that elide —
+    /// through the checkbox's own mark — and never a box that goes; only a
+    /// slot too narrow for the boxes themselves narrows them, evenly. This is
+    /// the one layout the paint and both hit tests read, so a press can never
+    /// land on a flag drawn elsewhere.
+    fn flag_rects(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
+        let Some((x, y, w, h)) = surface_rect(bounds) else {
+            return Vec::new();
+        };
+        let natural: Vec<u32> = self.natural_widths(scale, theme).collect();
+        let total = natural.iter().copied().fold(0u32, u32::saturating_add);
+        if total == 0 || w == 0 || h == 0 {
+            return Vec::new();
+        }
+        let side = box_side(scale, theme);
+        let count = u32::try_from(natural.len()).unwrap_or(u32::MAX);
+        let boxes = side.saturating_mul(count);
+        let width_of = |want: u32| -> u32 {
+            if total <= w {
+                return want;
+            }
+            if boxes <= w {
+                let room = u64::from(w - boxes);
+                let words = u64::from(total.saturating_sub(boxes)).max(1);
+                let label = u64::from(want.saturating_sub(side)) * room / words;
+                return side.saturating_add(u32::try_from(label).unwrap_or(0));
+            }
+            w / count.max(1)
+        };
+        let last = natural.len().saturating_sub(1);
+        let mut left = x;
+        let mut rects = Vec::with_capacity(natural.len());
+        for (index, want) in natural.iter().enumerate() {
+            // The last flag takes the rounding remainder, so a narrowed set
+            // still fills its slot to the pixel.
+            let width = if total > w && index == last {
+                x.saturating_add(w).saturating_sub(left)
+            } else {
+                width_of(*want)
+            };
+            rects.push(Rect::new(to_i32(left), to_i32(y), width, h));
+            left = left.saturating_add(width);
+        }
+        rects
+    }
+
+    /// The rectangle flag `index` is drawn and pressed in within `bounds`,
+    /// or [`None`] past the last flag.
+    #[must_use]
+    pub fn flag_rect(
+        &self,
+        index: usize,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        self.flag_rects(bounds, scale, theme).get(index).copied()
+    }
+
+    /// The flag under `point` in `bounds`, if any.
+    #[must_use]
+    pub fn flag_at(
+        &self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        point: Point,
+    ) -> Option<usize> {
+        self.flag_rects(bounds, scale, theme)
+            .iter()
+            .position(|rect| rect.contains(point))
+    }
+
+    /// Give the set keyboard focus, which rings the flag it rests on.
+    fn set_focused(&mut self, focused: bool) {
+        let focus = self.focus;
+        for (index, flag) in self.flags.iter_mut().enumerate() {
+            flag.set_focused(focused && index == focus);
+        }
+    }
+
+    /// Paint every flag into its rectangle within `bounds`.
+    fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        for (flag, rect) in self.flags.iter().zip(self.flag_rects(bounds, scale, theme)) {
+            flag.render(surface, rect, scale, theme);
+        }
+    }
+
+    /// Route a pointer event to the flags it concerns — the one it left, the
+    /// one it entered, and any holding a press — and report what one of them
+    /// asked for.
+    fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<FieldAction> {
+        if let InputEvent::PointerMoved { to } = event {
+            *self.pointer = *to;
+        }
+        let rects = self.flag_rects(bounds, scale, theme);
+        let over = rects.iter().position(|rect| rect.contains(*self.pointer));
+        let route = route_pointer(&mut self.hovered, *self.armed, over);
+        *self.armed = grab_after(*self.armed, event, over);
+        let mut fired = None;
+        for index in route.into_iter().flatten() {
+            let (Some(flag), Some(rect)) = (self.flags.get_mut(index), rects.get(index)) else {
+                continue;
+            };
+            if let Some(SelectorAction::Set { on }) = flag.on_pointer(event, *rect, damage) {
+                fired = Some(FieldAction::SetFlag { index, on });
+            }
+        }
+        fired
+    }
+
+    /// Feed a key event: Left and Right move the keyboard between flags,
+    /// clamping at either end, and every other key goes to the flag it rests
+    /// on, which toggles on Space or Enter.
+    fn on_key(
+        &mut self,
+        key: Key,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<FieldAction> {
+        let last = self.flags.len().checked_sub(1)?;
+        let next = match key {
+            Key::Named(NamedKey::Left) => self.focus.saturating_sub(1),
+            Key::Named(NamedKey::Right) => self.focus.saturating_add(1).min(last),
+            _ => {
+                let index = self.focus;
+                return self
+                    .flags
+                    .get_mut(index)?
+                    .on_key(key)
+                    .map(|SelectorAction::Set { on }| FieldAction::SetFlag { index, on });
+            }
+        };
+        // Moving a ring the reader cannot see changes no pixel.
+        let ringed = self
+            .flags
+            .get(self.focus)
+            .is_some_and(|flag| flag.state().focus.focused);
+        if ringed {
+            let rects = self.flag_rects(bounds, scale, theme);
+            damage::move_mark(
+                Some(self.focus),
+                Some(next),
+                |i| rects.get(i).copied(),
+                damage,
+            );
+        }
+        self.focus = next;
+        self.set_focused(ringed);
+        None
+    }
+}
+
 /// One setting: a label, an optional secondary description line, and a
 /// trailing slot holding one [`FieldControl`].
 ///
@@ -377,6 +669,9 @@ pub struct FieldRow {
     state: ControlState,
     /// The last pointer position — hit-testing input, never drawn.
     pointer: RenderInvariant<Point>,
+    /// The slot's control while the pointer is over it, so the motion that
+    /// leaves it still reaches it and takes its hover look away.
+    hovered: RenderInvariant<Option<usize>>,
     /// The slot's control while it holds a press, so a drag that leaves the
     /// slot still resolves on it.
     armed: RenderInvariant<Option<usize>>,
@@ -392,6 +687,7 @@ impl FieldRow {
             control,
             state: ControlState::idle(),
             pointer: RenderInvariant::new(Point::ORIGIN),
+            hovered: RenderInvariant::new(None),
             armed: RenderInvariant::new(None),
         }
     }
@@ -655,9 +951,10 @@ impl FieldRow {
     /// The row's own chrome takes the hover, exactly as a list row's does, and
     /// no press look: a setting row is not itself activatable, so a press
     /// belongs to the control in its slot. The event reaches that control while
-    /// the pointer is over its drawn rectangle, while it is holding a press —
-    /// so a drag that leaves the slot still reaches the slider it began on —
-    /// and throughout while its choice list is open.
+    /// the pointer is over its drawn rectangle, on the motion that leaves it,
+    /// while it is holding a press — so a drag that leaves the slot still
+    /// reaches the slider it began on — and throughout while its choice list is
+    /// open.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -678,17 +975,18 @@ impl FieldRow {
 
         let rect = self.control_rect(layout, scale, theme)?;
         let over = rect.contains(*self.pointer).then_some(SLOT);
-        let grabbed = *self.armed;
-        *self.armed = grab_after(grabbed, event, over);
+        let route = route_pointer(&mut self.hovered, *self.armed, over);
+        *self.armed = grab_after(*self.armed, event, over);
         // An open choice list is modal and is drawn outside the row, so the row
         // keeps the stream until the list itself resolves it.
-        if over.is_none() && grabbed.is_none() && !self.popup_open() {
+        if route.iter().all(Option::is_none) && !self.popup_open() {
             return None;
         }
         match &mut self.control {
             FieldControl::Toggle(c) => c
                 .on_pointer(event, rect, damage)
                 .map(|SelectorAction::Set { on }| FieldAction::Set { on }),
+            FieldControl::Flags(c) => c.on_pointer(event, rect, scale, theme, damage),
             FieldControl::Combo(c) => c
                 .on_pointer(event, rect, layout.popup, scale, theme, damage)
                 .map(combo_action),
@@ -722,6 +1020,7 @@ impl FieldRow {
             FieldControl::Toggle(c) => c
                 .on_key(key)
                 .map(|SelectorAction::Set { on }| FieldAction::Set { on }),
+            FieldControl::Flags(c) => c.on_key(key, rect, scale, theme, damage),
             FieldControl::Combo(c) => c
                 .on_key(key, rect, layout.popup, scale, theme, damage)
                 .map(combo_action),
@@ -888,13 +1187,13 @@ impl FieldGroup {
     pub fn set_focus(
         &mut self,
         index: Option<usize>,
-        bounds: Rect,
+        layout: FieldLayout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) {
         let index = index.filter(|&i| i < self.rows.len());
-        let rects = self.row_rects(bounds, scale, theme);
+        let rects = self.row_rects(layout, scale, theme);
         damage::move_mark(self.focus, index, |i| rects.get(i).copied(), damage);
         self.adopt_focus(index);
     }
@@ -909,31 +1208,20 @@ impl FieldGroup {
         }
     }
 
-    /// The one slot column this group's controls line up in: the widest width
-    /// any of its rows wants, and half the row content span when any row's
-    /// control fills whatever it is given.
+    /// The one slot column this group's controls line up in, in a plate
+    /// `width` pixels wide: the widest width any of its rows wants, and half
+    /// the row content span when any row's control fills whatever it is
+    /// given.
     ///
-    /// The span is measured against the plate's *inner* width — the width the
-    /// rows themselves span — so the column a group resolves is the column its
-    /// rows can actually seat.
+    /// An owner stacking several groups may lay them all out in the widest of
+    /// their columns, so controls line up down the whole surface; every
+    /// geometric question a group answers is asked with the column it is laid
+    /// out in, because the column decides how much room a row's words wrap
+    /// into. The span is measured against the *band* a row's control sits in
+    /// rather than the row's own height, so resolving the column cannot depend
+    /// on the heights the column itself decides.
     #[must_use]
-    pub fn slot_column(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
-        let Some((_, _, w, h)) = surface_rect(bounds) else {
-            return 0;
-        };
-        if h < text_plate_height(theme, scale, TextRole::Body) {
-            return 0;
-        }
-        self.column_for(w, scale, theme)
-    }
-
-    /// [`slot_column`](Self::slot_column) for a plate `width` pixels wide,
-    /// which is all the column actually depends on.
-    ///
-    /// The span is measured against the *band* a row's control sits in rather
-    /// than the row's own height, so resolving the column cannot depend on the
-    /// heights the column itself decides.
-    fn column_for(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+    pub fn slot_column(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
         let Some(cw) = Self::content_span(width, scale, theme) else {
             return 0;
         };
@@ -946,6 +1234,39 @@ impl FieldGroup {
             }
         }
         widest.min(ceiling)
+    }
+
+    /// The one column every group in `groups` lines up in, in plates `width`
+    /// pixels wide: the widest any of them resolves, so a control does not
+    /// step left and right down a surface stacking them.
+    #[must_use]
+    pub fn shared_column(groups: &[Self], width: u32, scale: Scale, theme: &Theme) -> u32 {
+        groups
+            .iter()
+            .map(|group| group.slot_column(width, scale, theme))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The narrowest plate this group can be given without cutting any row's
+    /// control: every control that measures its own width is seated whole,
+    /// and the labels keep the other half of the span to elide into.
+    ///
+    /// A control that takes whatever column it is given constrains nothing,
+    /// so a group of only those answers the plate's own chrome. An owner that
+    /// sizes its surface from this opens it with every control readable.
+    #[must_use]
+    pub fn natural_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        let widest = self
+            .rows
+            .iter()
+            .filter_map(|row| row.slot_width(scale, theme))
+            .max()
+            .unwrap_or(0);
+        let band = text_plate_height(theme, scale, TextRole::Body);
+        // The slot is never granted more than half the span.
+        row_width_for_content(scale, theme, widest.saturating_mul(2), band)
+            .saturating_add(plate_border(theme, scale).saturating_mul(2))
     }
 
     /// The content span a row of a plate `width` pixels wide is laid out
@@ -961,31 +1282,31 @@ impl FieldGroup {
     }
 
     /// The span a row's own text is laid out across in a plate `width` pixels
-    /// wide: the content span less the shared slot column and one gap.
+    /// wide whose slots line up in `column`: the content span less the column
+    /// and one gap.
     ///
     /// This is what a row's description wraps into, so it is what
-    /// [`FieldRow::measured_height`] is asked about. An owner that stacks
-    /// rows itself reads it from the group rather than re-deriving the
-    /// column's arithmetic.
+    /// [`FieldRow::measured_height`] is asked about.
     #[must_use]
-    pub fn row_text_span(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+    pub fn row_text_span(&self, width: u32, column: u32, scale: Scale, theme: &Theme) -> u32 {
         let Some(cw) = Self::content_span(width, scale, theme) else {
             return 0;
         };
         let (_, gap) = Self::insets(scale, theme);
-        words_span(cw, self.column_for(width, scale, theme), gap)
+        words_span(cw, column, gap)
     }
 
     /// The height this group needs at `scale` to draw its caption, every row,
-    /// and its footnote, in a plate `width` pixels wide.
+    /// and its footnote, in a plate `width` pixels wide whose slots line up in
+    /// `column`.
     ///
-    /// The width is part of the question because a row's description and the
+    /// Both are part of the question because a row's description and the
     /// group's footnote are prose: they wrap, so how tall a group has to be
-    /// depends on how wide it is given.
+    /// depends on how much room its words are given.
     #[must_use]
-    pub fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+    pub fn measured_height(&self, width: u32, column: u32, scale: Scale, theme: &Theme) -> u32 {
         let (pad, gap) = Self::insets(scale, theme);
-        let span = self.row_text_span(width, scale, theme);
+        let span = self.row_text_span(width, column, scale, theme);
         let rows = self
             .rows
             .iter()
@@ -1081,13 +1402,13 @@ impl FieldGroup {
     /// This is the one layout the paint, the hit test, and the focus reporting
     /// all read, so a press can never land on a row [`render`](Self::render)
     /// did not draw.
-    fn row_rects(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
-        let Some(inner) = Self::inner(bounds, scale, theme) else {
+    fn row_rects(&self, layout: FieldLayout, scale: Scale, theme: &Theme) -> Vec<Rect> {
+        let Some(inner) = Self::inner(layout.bounds, scale, theme) else {
             return Vec::new();
         };
         let (inner_x, _, inner_w, _) = inner;
         let (mut top, bottom) = self.rows_span(inner, scale, theme);
-        let span = self.row_text_span(bounds.width, scale, theme);
+        let span = self.row_text_span(layout.bounds.width, layout.column, scale, theme);
         let mut rects = Vec::with_capacity(self.rows.len());
         for row in &self.rows {
             let row_h = row.measured_height(span, scale, theme);
@@ -1106,18 +1427,24 @@ impl FieldGroup {
     pub fn row_rect(
         &self,
         index: usize,
-        bounds: Rect,
+        layout: FieldLayout,
         scale: Scale,
         theme: &Theme,
     ) -> Option<Rect> {
-        self.row_rects(bounds, scale, theme).get(index).copied()
+        self.row_rects(layout, scale, theme).get(index).copied()
     }
 
     /// The row under `point`, if any. A point over a row omitted for lack of
     /// room answers [`None`].
     #[must_use]
-    pub fn row_at(&self, bounds: Rect, scale: Scale, theme: &Theme, point: Point) -> Option<usize> {
-        self.row_rects(bounds, scale, theme)
+    pub fn row_at(
+        &self,
+        layout: FieldLayout,
+        scale: Scale,
+        theme: &Theme,
+        point: Point,
+    ) -> Option<usize> {
+        self.row_rects(layout, scale, theme)
             .iter()
             .position(|r| r.contains(point))
     }
@@ -1137,7 +1464,7 @@ impl FieldGroup {
         theme: &Theme,
     ) -> Option<(usize, Rect)> {
         let index = self.rows.iter().position(FieldRow::popup_open)?;
-        let rect = self.row_rect(index, layout.bounds, scale, theme)?;
+        let rect = self.row_rect(index, layout, scale, theme)?;
         let slot =
             self.rows
                 .get(index)?
@@ -1158,13 +1485,14 @@ impl FieldGroup {
     /// the widest itself and places the list through those pieces instead.
     #[must_use]
     pub fn layout(&self, bounds: Rect, viewport: Rect, scale: Scale, theme: &Theme) -> FieldLayout {
-        let layout = FieldLayout::new(bounds, self.slot_column(bounds, scale, theme));
+        let layout = FieldLayout::new(bounds, self.slot_column(bounds.width, scale, theme));
         let placed = self
             .popup_anchor(layout, scale, theme)
             .and_then(|(row, slot)| match self.rows.get(row)?.control() {
                 FieldControl::Combo(combo) => Some(combo.popup_rect(slot, viewport, scale, theme)),
                 // Every other slot control draws wholly inside its own row.
                 FieldControl::Toggle(_)
+                | FieldControl::Flags(_)
                 | FieldControl::Slider(_)
                 | FieldControl::Text(_)
                 | FieldControl::Button(_)
@@ -1242,7 +1570,7 @@ impl FieldGroup {
             }
         }
 
-        let rects = self.row_rects(layout.bounds, scale, theme);
+        let rects = self.row_rects(layout, scale, theme);
         for (row, rect) in self.rows.iter().zip(rects.iter()) {
             row.render(
                 surface,
@@ -1302,7 +1630,7 @@ impl FieldGroup {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
-        let rects = self.row_rects(layout.bounds, scale, theme);
+        let rects = self.row_rects(layout, scale, theme);
         let over = rects.iter().position(|r| r.contains(*self.pointer));
         let expanded = self.rows.iter().position(FieldRow::popup_open);
         let route = route_pointer(&mut self.hovered, *self.armed, over);
@@ -1359,11 +1687,11 @@ impl FieldGroup {
             _ => None,
         };
         if let Some(next) = moved {
-            self.set_focus(Some(next), layout.bounds, scale, theme, damage);
+            self.set_focus(Some(next), layout, scale, theme, damage);
             return None;
         }
         let index = self.focus?;
-        let rect = self.row_rect(index, layout.bounds, scale, theme)?;
+        let rect = self.row_rect(index, layout, scale, theme)?;
         let row_layout = FieldLayout::new(rect, layout.column).with_popup(layout.popup);
         let row = self.rows.get_mut(index)?;
         row.on_key(key, modifiers, row_layout, scale, theme, damage)

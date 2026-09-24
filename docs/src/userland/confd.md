@@ -164,7 +164,8 @@ edits: a published value is what every other application sees, and a reader
 must not act on one that may never be published.
 
 The desktop session's own settings — the appearance axes, the scale, the
-pointer pair and the pinboard keys, whose registry is
+pointer pair, the pinboard keys, the notification policy, the pointer and
+keyboard policy, and the idle waits, whose registry is
 [`lib/wallpaper`](../lib/wallpaper.md#the-registry) — live in its published
 scope, under the publisher `os.tairix.desktop`. That is how
 [Settings](../desktop/settings.md) shows what the desktop is drawn with without

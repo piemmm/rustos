@@ -473,6 +473,15 @@ impl Duration64 {
         Self { secs, nanos: 0 }
     }
 
+    /// Construct a span from whole milliseconds, exactly.
+    #[must_use]
+    pub const fn from_millis(millis: u32) -> Self {
+        Self {
+            secs: (millis / 1000) as i64,
+            nanos: (millis % 1000) * 1_000_000,
+        }
+    }
+
     /// Construct a span from seconds and a nanosecond field.
     ///
     /// Returns [`Errno::TimestampOutOfRange`] if `nanos >= NANOS_PER_SEC`.
@@ -722,6 +731,23 @@ mod tests {
         PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS,
     };
     use crate::Errno;
+
+    #[test]
+    fn a_millisecond_span_is_exact_on_either_side_of_a_second() {
+        assert_eq!(Duration64::from_millis(0), Duration64::ZERO);
+        assert_eq!(
+            Duration64::from_millis(500).saturating_total_nanos(),
+            500_000_000
+        );
+        let span = Duration64::from_millis(1_250);
+        assert_eq!((span.secs(), span.subsec_nanos()), (1, 250_000_000));
+        let widest = Duration64::from_millis(u32::MAX);
+        assert_eq!(
+            widest.saturating_total_nanos(),
+            u64::from(u32::MAX) * 1_000_000
+        );
+        assert!(widest.subsec_nanos() < NANOS_PER_SEC);
+    }
 
     #[test]
     fn plausibility_window_admits_the_release_epoch_and_its_ceiling() {

@@ -68,28 +68,38 @@ pub enum PropertiesKey {
     Section(i32),
     /// The attributes section's own list cursor and `key = value` editor.
     Attributes,
+    /// The permissions section's own cursor, its flags and its ownership
+    /// cells.
+    Permissions,
     /// Close the window.
     Close,
     /// Nothing the showing section draws.
     Ignored,
 }
 
-/// What `key` acts on while `tab` is the section on show.
+/// What `key` acts on while `tab` is the section on show, `held` saying
+/// whether the permissions section has taken the keyboard from the strip.
 ///
 /// The section strip is the window's own navigation, so it answers on every
-/// section. Everything else belongs to the **attributes** section — its list
-/// cursor and its one text surface — and a section that draws neither must not
-/// reach them: typing on General would otherwise fill a field the user cannot
-/// see, and a stray arrow would move an invisible cursor and pay for a
-/// repaint. `Escape` still closes the window from any section, since that is
-/// the window's own answer and not a section's.
+/// section until the permissions section takes the keyboard: from then on
+/// Left and Right walk that section's flags, and `Escape` hands the keyboard
+/// back rather than closing the window. Everything else belongs to the section
+/// that draws a control for it — the attributes section's list cursor and its
+/// one text surface, the permissions section's cursor — and a section that
+/// draws neither must not reach them: typing on General would otherwise fill
+/// a field the user cannot see, and a stray arrow would move an invisible
+/// cursor and pay for a repaint. Otherwise `Escape` closes the window, since
+/// that is the window's own answer and not a section's.
 #[must_use]
-pub fn properties_key(tab: PropertiesTab, key: KeyValue) -> PropertiesKey {
+pub fn properties_key(tab: PropertiesTab, held: bool, key: KeyValue) -> PropertiesKey {
+    let permissions = tab == PropertiesTab::Permissions;
     match key {
+        _ if permissions && held => PropertiesKey::Permissions,
         KeyValue::Named(NamedKeyCode::Left) => PropertiesKey::Section(-1),
         KeyValue::Named(NamedKeyCode::Right) => PropertiesKey::Section(1),
         _ if tab == PropertiesTab::Attributes => PropertiesKey::Attributes,
         KeyValue::Named(NamedKeyCode::Escape) => PropertiesKey::Close,
+        _ if permissions => PropertiesKey::Permissions,
         _ => PropertiesKey::Ignored,
     }
 }

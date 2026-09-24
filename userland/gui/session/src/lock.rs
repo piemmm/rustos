@@ -24,8 +24,9 @@
 //!   [`is_locked`](ScreenLock::is_locked); a window cannot enforce it from
 //!   the inside.
 //! * **It stays on top.** [`keep_topmost`](ScreenLock::keep_topmost) raises
-//!   it before every composite, so an application that opens or raises a
-//!   window behind the lock cannot surface above it.
+//!   it before every composite, beneath only the screensaver, so an
+//!   application that opens or raises a window behind the lock cannot
+//!   surface above it.
 //!
 //! # Who decides it may open again
 //!
@@ -121,15 +122,21 @@ impl ScreenLock {
         true
     }
 
-    /// Raise the lock above everything, so a window opened or raised behind
-    /// it cannot surface over it.
+    /// Raise the lock above everything but `above` — the screensaver, which
+    /// hides the lock until the user comes back — so a window opened or
+    /// raised behind it cannot surface over it.
     ///
     /// The embedder calls this immediately before each composite while
-    /// locked. It is cheap and idempotent, and does nothing at all when the
-    /// screen is not locked.
-    pub fn keep_topmost(&self, compositor: &mut Compositor) {
+    /// locked, after the screensaver has been kept on top. A lock already
+    /// where it belongs restacks and repaints nothing, and it does nothing at
+    /// all when the screen is not locked. An `above` the compositor does not
+    /// hold leaves the lock on top.
+    pub fn keep_topmost(&self, compositor: &mut Compositor, above: Option<WindowId>) {
         if let Some(engaged) = self.engaged.as_ref() {
-            let _ = compositor.raise(engaged.wm);
+            let beneath = above.is_some_and(|anchor| compositor.stack_below(engaged.wm, anchor));
+            if !beneath {
+                let _ = compositor.raise(engaged.wm);
+            }
         }
     }
 

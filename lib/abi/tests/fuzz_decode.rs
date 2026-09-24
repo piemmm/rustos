@@ -31,6 +31,7 @@ use tairix_abi::appdata_ipc::{
     APPDATA_BLOB_ENTRY_LEN, APPDATA_BLOB_LIST_MAX, APPDATA_DOCUMENT_MAX, APPDATA_GRANT_REPLY_LEN,
     APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST, APPDATA_QUOTA_REPLY_LEN, APPDATA_TEMP_REPLY_LEN,
 };
+use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
 use tairix_abi::display_ipc::{
     decode_mode_reply, decode_stats_reply, DisplayRequest, DisplayStats,
 };
@@ -92,13 +93,15 @@ use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_desktop_reply, decode_hand_over_reply, decode_menu_text_reply,
-    decode_minted_id_reply, decode_open_target_reply, decode_wallpapers_reply, AppBar, AppBarClick,
-    AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
-    AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
-    BundleRunPath, DocumentName, HandOverDocument, MenuOutcome, MenuRefusal, TooltipText,
-    WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle,
+    decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply, decode_hand_over_reply,
+    decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
+    decode_open_target_reply, decode_wallpapers_reply, AppBar, AppBarClick, AppMenu, AppMenuBundle,
+    AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
+    AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut, BundleRunPath, DocumentName,
+    HandOverDocument, MenuOutcome, MenuRefusal, TooltipText, WindowEvent, WindowRegion,
+    WindowRequest, WindowSizing, WindowTitle,
 };
+use tairix_abi::BUNDLE_ID_MAX;
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, Origin, PortName,
     ReadyCondition, ServiceLimit, ServiceManifest, ServiceNotice, ServiceUnit,
@@ -715,6 +718,19 @@ fn exercise_window_ipc(bytes: &[u8]) {
     // its own entries must refuse rather than read past it.
     if let Ok(page) = decode_wallpapers_reply(bytes) {
         assert_eq!(page.entries().count(), page.len());
+    }
+    // So does a name list, and every name it admits is inside its bound.
+    if let Ok(list) = decode_cursor_sets_reply(bytes) {
+        assert_eq!(list.names().count(), list.len());
+        assert!(list
+            .names()
+            .all(|name| !name.is_empty() && name.len() <= CURSOR_SET_NAME_MAX));
+    }
+    if let Ok(list) = decode_notify_sources_reply(bytes) {
+        assert_eq!(list.names().count(), list.len());
+        assert!(list
+            .names()
+            .all(|name| !name.is_empty() && name.len() <= BUNDLE_ID_MAX));
     }
 }
 
@@ -1591,6 +1607,8 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
         WindowRequest::PickFile { window_id: 3 },
         WindowRequest::QueryWallpapers { from: 7 },
         WindowRequest::QueryCursorSets,
+        WindowRequest::QueryNotifySources,
+        WindowRequest::LockScreen,
         WindowRequest::RenderWallpaper {
             window_id: 3,
             shm_handle: 11,

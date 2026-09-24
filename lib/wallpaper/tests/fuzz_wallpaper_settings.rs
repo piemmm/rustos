@@ -31,71 +31,124 @@ use tairix_wallpaper::{merge, DesktopSettings};
 /// Fixed-iteration sweep run when no budget is set.
 const SMOKE_ITERATIONS: u64 = 5_000;
 
-/// Every key of the registry, so no `set_field`/`field_value` arm is left
-/// unfuzzed. The count is asserted against `SettingsKey::ALL` below, so a
-/// key added without a value table here fails rather than silently going
-/// uncovered.
-const KEYS: &[&str] = &[
-    "wallpaper",
-    "fit",
-    "backdrop",
-    "icons",
-    "sort",
-    "appearance",
-    "contrast",
-    "density",
-    "motion",
-    "scale",
-    "cursor.set",
-    "cursor.size",
+/// Every key of the registry with values it accepts and values it refuses,
+/// so no `set_field`/`field_value` arm is left unfuzzed. The names are
+/// asserted against `SettingsKey::ALL` below, so a key added without a row here
+/// fails rather than silently going uncovered.
+///
+/// Refused values are drawn at a fixed low rate per key, so the share of
+/// documents accepted whole — and with it the round trip's coverage — does not
+/// fall as the registry grows.
+const KEYS: &[(&str, &[&str], &[&str])] = &[
+    (
+        "wallpaper",
+        &[
+            "none",
+            "/System/Graphics/Wallpapers/TAIRiX/tairix-dark.jpg",
+            "/Users/ada/Documents/sunset.png",
+            // The format engine quotes a `#`, so a name holding one round-trips.
+            "/Users/ada/Documents/sunset#2.png",
+        ],
+        &[],
+    ),
+    ("fit", &["fill", "fit", "stretch", "centre", "tile"], &[]),
+    ("backdrop", &["theme", "112233", "ffffff", "000000"], &[]),
+    ("icons", &["leading", "trailing"], &[]),
+    ("sort", &["name", "kind", "size", "date"], &[]),
+    ("appearance", &["dark", "light"], &[]),
+    ("contrast", &["normal", "high", "monochrome"], &[]),
+    ("density", &["compact", "normal", "comfortable"], &[]),
+    ("motion", &["full", "reduced"], &[]),
+    (
+        "scale",
+        &["100", "150", "300"],
+        &["24", "801", "-100", "1e3"],
+    ),
+    (
+        "cursor.set",
+        &["Standard", "High Visibility", "Gone Away"],
+        &[".."],
+    ),
+    (
+        "cursor.size",
+        &["normal", "large", "larger", "largest"],
+        &[],
+    ),
+    (
+        "notify.enabled",
+        &["true", "false", "on", "off"],
+        &["maybe"],
+    ),
+    (
+        "notify.sources",
+        &[
+            "\"\"",
+            "com.example.chat:none",
+            "os.tairix.netstack:critical com.example.chat:warning",
+        ],
+        &[
+            "com.example.chat:all",
+            "com.example.chat:none com.example.chat:critical",
+            "Upper.Case:none",
+        ],
+    ),
+    ("pointer.primary", &["left", "right"], &["middle"]),
+    (
+        "pointer.double_click_ms",
+        &["100", "250", "500", "750", "2000"],
+        &["99", "2001", "-1"],
+    ),
+    (
+        "pointer.speed",
+        &["25", "50", "100", "150", "400"],
+        &["24", "401"],
+    ),
+    (
+        "key.repeat_delay_ms",
+        &["100", "250", "500", "1000", "2000"],
+        &["99", "2001"],
+    ),
+    (
+        "key.repeat_rate",
+        &["off", "1", "10", "30", "60"],
+        &["0", "61"],
+    ),
+    (
+        "screensaver.after_min",
+        &["never", "1", "10", "1440"],
+        &["0", "1441"],
+    ),
+    (
+        "screensaver.kind",
+        &["blank", "dim", "slideshow"],
+        &["fireworks"],
+    ),
+    (
+        "lock.after_min",
+        &["never", "1", "15", "1440"],
+        &["0", "later"],
+    ),
 ];
-const WALLPAPER_VALUES: &[&str] = &[
-    "none",
-    "/System/Graphics/Wallpapers/TAIRiX/tairix-dark.jpg",
-    "/Users/ada/Documents/sunset.png",
-    // A `#` no longer ends a value: the format engine quotes one, so a file
-    // the user really named this way must survive the round trip.
-    "/Users/ada/Documents/sunset#2.png",
-];
-const FIT_VALUES: &[&str] = &["fill", "fit", "stretch", "centre", "tile"];
-const BACKDROP_VALUES: &[&str] = &["theme", "112233", "ffffff", "000000"];
-const ICONS_VALUES: &[&str] = &["leading", "trailing"];
-const SORT_VALUES: &[&str] = &["name", "kind", "size", "date"];
-const APPEARANCE_VALUES: &[&str] = &["dark", "light"];
-const CONTRAST_VALUES: &[&str] = &["normal", "high", "monochrome"];
-const DENSITY_VALUES: &[&str] = &["compact", "normal", "comfortable"];
-const MOTION_VALUES: &[&str] = &["full", "reduced"];
-const SCALE_VALUES: &[&str] = &["100", "150", "300", "24", "801", "-100", "1e3"];
-const CURSOR_SET_VALUES: &[&str] = &["Standard", "High Visibility", "Gone Away", ".."];
-const CURSOR_SIZE_VALUES: &[&str] = &["normal", "large", "larger", "largest"];
 const BAD_TOKENS: &[&str] = &["", " ", "has space", "bogus", "relative/path.png"];
 
 fn value_for(rng: &mut Prng, key: &str) -> &'static str {
     if rng.below(32) == 0 {
         return rng.pick(BAD_TOKENS);
     }
-    match key {
-        "wallpaper" => rng.pick(WALLPAPER_VALUES),
-        "fit" => rng.pick(FIT_VALUES),
-        "backdrop" => rng.pick(BACKDROP_VALUES),
-        "icons" => rng.pick(ICONS_VALUES),
-        "sort" => rng.pick(SORT_VALUES),
-        "appearance" => rng.pick(APPEARANCE_VALUES),
-        "contrast" => rng.pick(CONTRAST_VALUES),
-        "density" => rng.pick(DENSITY_VALUES),
-        "motion" => rng.pick(MOTION_VALUES),
-        "scale" => rng.pick(SCALE_VALUES),
-        "cursor.set" => rng.pick(CURSOR_SET_VALUES),
-        "cursor.size" => rng.pick(CURSOR_SIZE_VALUES),
-        _ => unreachable!(),
+    let Some(&(_, accepted, refused)) = KEYS.iter().find(|(name, _, _)| *name == key) else {
+        unreachable!("every generated key comes from the table");
+    };
+    if !refused.is_empty() && rng.below(16) == 0 {
+        return rng.pick(refused);
     }
+    rng.pick(accepted)
 }
 
 fn document(rng: &mut Prng) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::new();
-    let mut keys: Vec<&str> = KEYS.to_vec();
+    let mut keys: Vec<&str> = KEYS.iter().map(|(name, _, _)| *name).collect();
     let n = rng.below(keys.len() + 1);
     for _ in 0..n {
         let index = rng.below(keys.len());
@@ -160,7 +213,11 @@ fn the_generator_names_every_registry_key() {
         .iter()
         .map(|key| key.name())
         .collect();
-    assert_eq!(registry, KEYS, "the generator and the registry disagree");
+    let generated: Vec<&str> = KEYS.iter().map(|(name, _, _)| *name).collect();
+    assert_eq!(
+        registry, generated,
+        "the generator and the registry disagree"
+    );
 }
 
 #[test]

@@ -59,6 +59,9 @@ extern crate alloc;
 pub mod apply;
 pub mod catalog;
 pub mod fit;
+pub mod idle;
+pub mod input;
+pub mod notify;
 pub mod settings;
 
 #[cfg(feature = "rt")]
@@ -71,6 +74,12 @@ pub use catalog::{
     MAX_WALLPAPER_CATALOG_ENTRIES, MAX_WALLPAPER_CATEGORIES, WALLPAPER_STORE,
 };
 pub use fit::{decode_request, nominal_source_size, place, Placement};
+pub use idle::{IdleAfter, ScreensaverKind};
+pub use input::{
+    PointerSpeed, PrimaryButton, RepeatRate, REPEAT_DELAY_DEFAULT, REPEAT_DELAY_MAX,
+    REPEAT_DELAY_MIN,
+};
+pub use notify::{NotifyLevel, NotifyPolicy, PolicyFull};
 pub use settings::{
     merge, Backdrop, CursorSize, DesktopSettings, DocumentRefusal, IconFlow, IconSort, Rgb,
     SettingsKey, WallpaperChoice, WallpaperFit, WallpaperPath, WallpaperPathError,

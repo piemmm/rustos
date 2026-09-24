@@ -84,7 +84,11 @@ From the leading end to the trailing end:
   **file manager**, which runs windowless at start and opens a window on demand
   (see *The application strip*).
 - **Notification area** — status/notification icons, packed immediately
-  before the clock.
+  before the clock. The transient notifications behind its popover are keyed on
+  the producer's attested process instance and bounded — at most
+  `NOTIFICATIONS_MAX` in all and `SOURCE_NOTIFICATIONS_MAX` from one source,
+  a raise past either refused — and the session holds them to the user's
+  notification policy ([session](session.md#the-notification-intake)).
 - **Clock** — immediately before the account capsule. Its display text is
   held by a `Clock` model whose label the caller sets (formatting a `Time64`
   value into a string is an upstream concern, `AGENTS.md` §21); the bar stores

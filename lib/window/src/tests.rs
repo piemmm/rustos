@@ -14,7 +14,7 @@ use core::cell::RefCell;
 use tairix_abi::desktop::{Appearance, DesktopInfo};
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
-use tairix_abi::origin::{ProcId, PROC_ID_LEN};
+use tairix_abi::origin::{AppIdentity, ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
@@ -23,7 +23,7 @@ use tairix_abi::window_ipc::{
     WindowRequest, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX,
     WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
-use tairix_abi::{CapabilityId, Errno};
+use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
@@ -125,6 +125,9 @@ struct MockIdentity {
     layer_holders: Vec<u64>,
     /// An attestation failure to surface instead of an answer.
     attest_error: Option<Errno>,
+    /// The application each ticket is attested as running; absent means it
+    /// runs no verified bundle.
+    apps: Vec<(u64, AppIdentity)>,
 }
 
 fn proc_id(fill: u8) -> ProcId {
@@ -137,6 +140,7 @@ impl MockIdentity {
         Self {
             layer_holders: tickets.to_vec(),
             attest_error: None,
+            apps: Vec::new(),
         }
     }
 }
@@ -156,6 +160,17 @@ impl CallerIdentity for MockIdentity {
             return Err(err);
         }
         Ok(cap == CapabilityId::DESKTOP_LAYER && self.layer_holders.contains(&ticket))
+    }
+
+    fn caller_app(&mut self, ticket: u64) -> Result<Option<AppIdentity>, Errno> {
+        if let Some(err) = self.attest_error {
+            return Err(err);
+        }
+        Ok(self
+            .apps
+            .iter()
+            .find(|(held, _)| *held == ticket)
+            .map(|(_, app)| *app))
     }
 }
 
@@ -206,6 +221,11 @@ struct RecordingHost {
     refuse_render: Option<Errno>,
     /// The cursor sets this host offers.
     cursor_sets: Vec<CursorSetName>,
+    /// The sources this host answers, and the application every
+    /// notify-source query and lock request was attributed to.
+    notify_sources: Vec<BundleId>,
+    asked_by: Vec<Option<AppIdentity>>,
+    locks: usize,
 }
 
 impl Default for RecordingHost {
@@ -226,6 +246,9 @@ impl Default for RecordingHost {
             renders: Vec::new(),
             refuse_render: None,
             cursor_sets: Vec::new(),
+            notify_sources: Vec::new(),
+            asked_by: Vec::new(),
+            locks: 0,
             menu_opens: Vec::new(),
             tooltips: Vec::new(),
             refuse_tooltip: None,
@@ -471,6 +494,23 @@ impl WindowHost for RecordingHost {
 
     fn cursor_sets(&mut self) -> &[CursorSetName] {
         &self.cursor_sets
+    }
+
+    fn notify_sources(&mut self, caller: Option<&AppIdentity>) -> Result<&[BundleId], Errno> {
+        self.asked_by.push(caller.copied());
+        if caller.is_none() {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(&self.notify_sources)
+    }
+
+    fn lock_screen(&mut self, caller: Option<&AppIdentity>) -> Result<(), Errno> {
+        self.asked_by.push(caller.copied());
+        if caller.is_none() {
+            return Err(Errno::PermissionDenied);
+        }
+        self.locks += 1;
+        Ok(())
     }
 
     fn wallpaper_render_requested(
@@ -2184,6 +2224,53 @@ fn a_host_with_no_cursor_store_answers_an_empty_choice_space() {
     let answered = client.cursor_sets(&mut frame).expect("the choice space");
     assert!(answered.is_empty());
     assert_eq!(answered.names().count(), 0);
+}
+
+/// The application a reserved request is decided against is the one the
+/// kernel attests for that very call, handed to the host verbatim.
+#[test]
+fn a_notify_source_query_reaches_the_host_with_the_attested_application() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let settings = AppIdentity::new("os.tairix.settings", PublisherId::from_raw([7; 32]))
+        .expect("a well-formed identity");
+    loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, settings)];
+    loopback.borrow_mut().host.notify_sources =
+        alloc::vec![BundleId::new("os.tairix.netstack").expect("a bounded identity")];
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_NOTIFY_SOURCES_REPLY_MAX];
+
+    let answered = client.notify_sources(&mut frame).expect("the host answers");
+    assert!(answered.names().eq([b"os.tairix.netstack".as_slice()]));
+    assert_eq!(loopback.borrow().host.asked_by, alloc::vec![Some(settings)]);
+
+    assert_eq!(client.lock_screen(), Ok(()));
+    assert_eq!(loopback.borrow().host.locks, 1);
+}
+
+/// A caller running no verified bundle is handed to the host as exactly that,
+/// and the host's refusal reaches the caller whole.
+#[test]
+fn a_caller_with_no_application_is_refused_by_the_host() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_NOTIFY_SOURCES_REPLY_MAX];
+    assert_eq!(
+        client.notify_sources(&mut frame).map(|list| list.len()),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(client.lock_screen(), Err(Errno::PermissionDenied));
+    assert_eq!(loopback.borrow().host.asked_by, alloc::vec![None, None]);
+    assert_eq!(loopback.borrow().host.locks, 0);
+}
+
+/// An attestation that fails refuses the request before the host is asked.
+#[test]
+fn a_failed_attestation_refuses_a_reserved_request_before_the_host() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    loopback.borrow_mut().identity.attest_error = Some(Errno::NotFound);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    assert_eq!(client.lock_screen(), Err(Errno::NotFound));
+    assert!(loopback.borrow().host.asked_by.is_empty());
 }
 
 /// A desktop that listed no store answers an empty catalog, not an error:

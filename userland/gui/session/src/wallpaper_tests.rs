@@ -35,6 +35,7 @@ fn backdrop(desk: &mut WallpaperDesk) -> Option<WallpaperSource> {
     match desk.next_job() {
         Some(WallpaperJob::Backdrop(source)) => Some(source),
         Some(WallpaperJob::Preview(_)) => panic!("a preview was handed out, not the backdrop"),
+        Some(WallpaperJob::Slide(_)) => panic!("a slide was handed out, not the backdrop"),
         None => None,
     }
 }
@@ -357,4 +358,67 @@ fn a_stopped_desk_takes_no_preview() {
     desk.stop();
     assert!(!desk.want_preview(preview(7, 0)));
     assert!(desk.next_job().is_none());
+}
+
+/// The slide a preparer takes next, failing for any other job.
+fn slide(desk: &mut WallpaperDesk) -> Option<WallpaperSource> {
+    match desk.next_job() {
+        Some(WallpaperJob::Slide(source)) => Some(source),
+        Some(WallpaperJob::Backdrop(_)) => panic!("the backdrop was handed out, not a slide"),
+        Some(WallpaperJob::Preview(_)) => panic!("a preview was handed out, not a slide"),
+        None => None,
+    }
+}
+
+#[test]
+fn a_wanted_slide_is_prepared_once_and_handed_over_once() {
+    let mut desk = WallpaperDesk::new();
+    let one = image("/System/Graphics/Wallpapers/one.jpg");
+    desk.want_slide(one.clone());
+    assert!(desk.has_work());
+    assert_eq!(slide(&mut desk), Some(one.clone()));
+    assert!(
+        !desk.has_work(),
+        "a slide in preparation is not handed out twice"
+    );
+    assert!(desk.deliver_slide(&one, Ok(screen(&one))));
+    assert!(desk.take_slide().is_some_and(|outcome| outcome.is_ok()));
+    assert!(desk.take_slide().is_none());
+}
+
+#[test]
+fn the_backdrop_is_prepared_before_a_slide() {
+    let mut desk = WallpaperDesk::new();
+    let paper = image("/Users/ada/paper.png");
+    let one = image("/System/Graphics/Wallpapers/one.jpg");
+    desk.want_slide(one.clone());
+    assert!(matches!(desk.take(&paper), Prepared::Pending));
+    assert_eq!(backdrop(&mut desk), Some(paper));
+    assert_eq!(slide(&mut desk), Some(one));
+}
+
+/// A slide finished after the screensaver went down owes the loop nothing.
+#[test]
+fn a_slide_for_a_screensaver_that_went_down_is_dropped() {
+    let mut desk = WallpaperDesk::new();
+    let one = image("/System/Graphics/Wallpapers/one.jpg");
+    desk.want_slide(one.clone());
+    assert_eq!(slide(&mut desk), Some(one.clone()));
+    desk.forget_slides();
+    assert!(!desk.deliver_slide(&one, Ok(screen(&one))));
+    assert!(desk.take_slide().is_none());
+}
+
+/// Only the newest slide asked for is worth preparing.
+#[test]
+fn a_newer_slide_replaces_one_not_yet_taken() {
+    let mut desk = WallpaperDesk::new();
+    let (one, two) = (
+        image("/System/Graphics/Wallpapers/one.jpg"),
+        image("/System/Graphics/Wallpapers/two.jpg"),
+    );
+    desk.want_slide(one);
+    desk.want_slide(two.clone());
+    assert_eq!(slide(&mut desk), Some(two));
+    assert_eq!(slide(&mut desk), None);
 }

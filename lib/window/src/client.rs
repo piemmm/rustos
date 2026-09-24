@@ -24,12 +24,13 @@ use tairix_abi::input::{
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply, decode_hand_over_reply,
-    decode_menu_text_reply, decode_minted_id_reply, decode_open_target_reply, decode_terrain_reply,
-    decode_wallpapers_reply, AppBar, AppMenu, BundleRunPath, CursorSetList, HandOverDocument,
-    HandOverOutcome, LayerDepth, OpenTarget, PointerAction, TerrainPlate, TooltipText,
-    WallpaperPage, WindowEvent, WindowRegion, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
-    WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN,
-    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
+    decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
+    decode_open_target_reply, decode_terrain_reply, decode_wallpapers_reply, AppBar, AppMenu,
+    BundleRunPath, HandOverDocument, HandOverOutcome, LayerDepth, NameList, OpenTarget,
+    PointerAction, TerrainPlate, TooltipText, WallpaperPage, WindowEvent, WindowRegion,
+    WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
+    WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX,
+    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
     WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
 };
 use tairix_abi::{Errno, ProcId};
@@ -889,11 +890,41 @@ impl<T: WindowTransport> WindowClient<T> {
     pub fn cursor_sets<'a>(
         &mut self,
         into: &'a mut [u8; WINDOW_CURSOR_SETS_REPLY_MAX],
-    ) -> Result<CursorSetList<'a>, Errno> {
+    ) -> Result<NameList<'a>, Errno> {
         let len = WindowRequest::QueryCursorSets.encode(&mut self.frame)?;
         let n = self.transport.call(&self.frame[..len], into)?;
         let frame = into.get(..n).ok_or(Errno::LengthOutOfRange)?;
         decode_cursor_sets_reply(frame)
+    }
+
+    /// The bundle identities of every source that has posted a notification
+    /// since the desktop started, in the order they first did.
+    ///
+    /// The session answers only its own Settings application. `into` is the
+    /// caller's own reply buffer and the answer borrows from it.
+    ///
+    /// # Errors
+    ///
+    /// The session's refusal ([`Errno::PermissionDenied`] for any other
+    /// caller), a transport failure, or a malformed reply.
+    pub fn notify_sources<'a>(
+        &mut self,
+        into: &'a mut [u8; WINDOW_NOTIFY_SOURCES_REPLY_MAX],
+    ) -> Result<NameList<'a>, Errno> {
+        let len = WindowRequest::QueryNotifySources.encode(&mut self.frame)?;
+        let n = self.transport.call(&self.frame[..len], into)?;
+        let frame = into.get(..n).ok_or(Errno::LengthOutOfRange)?;
+        decode_notify_sources_reply(frame)
+    }
+
+    /// Ask the session to lock the screen now.
+    ///
+    /// # Errors
+    ///
+    /// The session's refusal ([`Errno::PermissionDenied`] for any caller but
+    /// its own Settings application) or a transport failure.
+    pub fn lock_screen(&mut self) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::LockScreen)
     }
 
     /// Ask the session to render catalog entry `index` as a `side`x`side`

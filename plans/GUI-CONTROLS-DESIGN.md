@@ -770,6 +770,9 @@ Checkboxes and radio buttons must not rely on color alone. Use shape and fill:
 - Checkbox mixed: horizontal mark.
 - Radio selected: center bead.
 - Warning or denied state: rail or rim plus label text.
+- A checkbox answers its own `measured_width` — box, gap and label — so a
+  container seating several side by side (§11.41's flag set) sizes each from
+  the figure the checkbox's own layout uses.
 
 ### 11.6 Slider
 
@@ -1096,7 +1099,7 @@ The title bar combines application identity, title text, a stable drag region, a
 - Everything in the band that is not a control drags the window — the identity slot and the title text included — so the drag region does not have to be reserved against the text.
 - Pressing an inactive title bar activates the window. Movement beyond the theme drag threshold begins a move and captures the pointer until release or cancel.
 - A title-bar drag follows the pointer without easing. Snap previews may appear as container-owned overlays without moving the pointer target.
-- A double-click or equivalent gesture may invoke `SizeToggle` only when session policy enables it. The explicit size-toggle button remains required. **Implemented**: two primary presses on a window's title bar within `DOUBLE_CLICK_INTERVAL_NS` report `WindowControl { SizeToggle }` and start no move-grab; the pairing is the shared `tairix_input::DoubleClickTracker` keyed on the window id, and a press anywhere but a title bar in between breaks the pair.
+- A double-click or equivalent gesture may invoke `SizeToggle` only when session policy enables it. The explicit size-toggle button remains required. **Implemented**: two primary presses on a window's title bar within the seat's published double-click interval report `WindowControl { SizeToggle }` and start no move-grab; the pairing is the shared `tairix_input::DoubleClickTracker` keyed on the window id, and a press anywhere but a title bar in between breaks the pair.
 - The title bar exposes the application name and current window title to accessibility tools even when the visible title is truncated.
 - Window titles are untrusted application data: the window manager bounds their length, renders them as plain text, rejects or replaces control characters, and applies the text engine's directional-isolation rules rather than interpreting markup.
 - Attention state is shown with a bounded bead or rim segment, not a decorative loop.
@@ -1877,11 +1880,10 @@ the parts it is made of. The bar is a read-only instrument, like both of them.
 ### 11.41 FieldRow and FieldGroup
 
 A settings surface is a column of captioned groups of label/description/control
-rows. That shape is the language's, not each application's: before this family
-the file manager hand-rolled a permissions grid, the wallpaper surface a
-column of four drop-downs, and the Date & Time window a three-column grid of
-six fields. A `FieldRow` is one setting; a `FieldGroup` is the captioned plate its
-rows sit on.
+rows. That shape is the language's, not each application's: the Settings
+panes, the Date & Time window and the file manager's Permissions section all
+compose it, and none carries a layout of its own. A `FieldRow` is one setting;
+a `FieldGroup` is the captioned plate its rows sit on.
 
 - **A row composes the row chrome, it does not restate it.** The hover wash,
   the leading pressure and selection rails, the activity Heat Seam, the
@@ -1915,7 +1917,30 @@ rows sit on.
   read. Each control answers its own width (`measured_width`), so the column
   comes from the controls' own layout rather than a second copy of it. A choice
   control measures its **widest** choice, not the selected one, so choosing a
-  different value never resizes the field or moves the column.
+  different value never resizes the field or moves the column. A group also
+  answers its **natural width** — the narrowest plate that seats every measured
+  control whole under the ceiling — so an owner sizing a window from its
+  content opens it with every control readable.
+- **A few independent flags are one slot, not several settings.** A
+  `FlagSet` holds a small set of labelled checkboxes (§11.5) on one line — the
+  read, write and execute bits of one permission class. Each flag *is* a
+  `Checkbox`: the set restates none of its box, press, focus ring, disabled
+  look or Authority Mark, and owns only the layout seating them side by side,
+  the flag the pointer is over, the one holding a press, and the one the
+  keyboard rests on. It measures every flag's own width plus the room after
+  its label — never less than the Signal Bead band, so a flag marked denied
+  does not stamp its bead over its own label — and in a slot too narrow for
+  that, every box keeps its size while the labels share what is left and elide
+  through the checkbox's own mark; only a slot narrower than the boxes narrows
+  them. Left and Right move the keyboard between flags and clamp at either end;
+  Space and Enter toggle the one it rests on. The row reports the one flag that
+  changed as `SetFlag { index, on }`, so the owner commits that flag alone. The
+  row's refusal is every flag's.
+- **A column of groups is one plate column.** Groups stacked down a pane are
+  placed, measured and scrolled by the one shared plate column
+  (`tairix_controls::stack`): a gap above and beside each plate, whole plates
+  only after the first, a height that seats every plate, and the reveal that
+  scrolls one into view — so no surface carries its own copy of the gaps.
 - **A group draws one plate, not a plate per row** (§10's plate seating), and
   its caption and footnote begin exactly where a row's label does, so the three
   read as one column rather than three indents. The footnote is where a setting
@@ -1937,8 +1962,13 @@ rows sit on.
   takes it and answers the whole layout — the group's slot column, and the
   list placed by the one drop-down placement rule (§11.9) — so an owner laying
   its groups out independently carries none of that arithmetic. An owner
-  sharing one column across several groups resolves the widest itself and
-  places the list through the anchor instead.
+  sharing one column across several groups takes the widest
+  (`FieldGroup::shared_column`) and places the list through the anchor
+  instead. The column is an input to every row question a group answers —
+  its height, its rows' rectangles and hit test, its focus damage — because
+  it decides what a description wraps into: a group measured in its own
+  narrower column and drawn in a wider shared one would cut the
+  description's last line.
 - **The cursor clamps within a group and never traps itself.** Up and Down walk
   rows and stop at the ends, because a group is a fixed set of settings rather
   than a cycling ring and the surface above it carries the cursor *between*
@@ -1952,7 +1982,8 @@ rows sit on.
   for and commits nothing itself; the slider slot's live value and its settle
   point stay distinct (§11.6), and a durable change is made on the settle
   alone. A pointer crossing one row reports that row; motion within it is
-  hit-testing input and reports nothing.
+  hit-testing input and reports nothing — except the motion that leaves the
+  slot's control, which reaches it so its hover look goes with the pointer.
 
 ### 11.42 TextArea
 

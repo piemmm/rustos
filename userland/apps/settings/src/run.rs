@@ -1066,6 +1066,8 @@ mod program {
             /// Whether the region holds the picture.
             rendered: bool,
         },
+        /// The reader asked for the screen to be locked: ask the desktop.
+        LockScreen,
         /// End the program.
         Quit,
     }
@@ -1085,6 +1087,7 @@ mod program {
             ShellOutcome::Changed => Acted::Changed,
             ShellOutcome::Apply(document) => Acted::Apply(document),
             ShellOutcome::Elevate(asked) => Acted::Elevate(asked),
+            ShellOutcome::LockScreen => Acted::LockScreen,
         };
         match event {
             WindowEvent::CloseRequested { .. } => Acted::Quit,
@@ -1435,6 +1438,19 @@ mod program {
                     shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
                 }
             }
+            Acted::LockScreen => {
+                // The desktop answers from memory and puts its own lock up
+                // once it has, so the round trip costs no I/O either side.
+                let answer = surface.window.client().lock_screen();
+                if let Err(err) = answer {
+                    let _ = writeln!(
+                        Stderr,
+                        "settings: the desktop would not lock the screen ({err})"
+                    );
+                }
+                shell.adopt_lock_answer(answer);
+                shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+            }
             Acted::Opened => {
                 if drain_open_targets(shell, surface, themes.active(), desktop.scale()) {
                     shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
@@ -1526,7 +1542,15 @@ mod program {
             // And for the account readings, if this round put the pane that
             // states them on show or spent the salt it held.
             let accounts_landed = desks.accounts.request(shell);
-            if volumes_landed || machine_landed || network_landed || accounts_landed {
+            // And for the sources that have notified, which the session
+            // answers from memory, if this round put that pane on show.
+            let sources_landed = settle_notify_sources(shell, surface.window.client());
+            if volumes_landed
+                || machine_landed
+                || network_landed
+                || accounts_landed
+                || sources_landed
+            {
                 shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
             }
             if matches!(event, WindowEvent::ContentReleased { .. }) {
@@ -1540,9 +1564,14 @@ mod program {
                 || machine_landed
                 || volumes_landed
                 || accounts_landed
+                || sources_landed
                 || matches!(
                     acted,
-                    Acted::Whole | Acted::Apply(_) | Acted::Opened | Acted::Rendered { .. }
+                    Acted::Whole
+                        | Acted::Apply(_)
+                        | Acted::LockScreen
+                        | Acted::Opened
+                        | Acted::Rendered { .. }
                 );
             let repaint = match (whole, matches!(acted, Acted::Changed)) {
                 (true, _) => Repaint::Whole,
@@ -1604,7 +1633,45 @@ mod program {
         let (config, facts) = read_machine(&mut (), &mut ());
         shell.adopt_config(config);
         shell.adopt_machine(facts);
+        // And the sources that have notified, should the launch have named
+        // the pane that lists them.
+        settle_notify_sources(shell, surface.window.client());
         shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+    }
+
+    /// Ask the desktop which sources have notified, if the pane that lists
+    /// them has come on show, answering whether an answer landed.
+    ///
+    /// The session answers from memory, so the round trip costs no I/O on
+    /// either side. A name this build would not accept as a bundle identity
+    /// is dropped rather than offered: a policy for it could never be kept.
+    fn settle_notify_sources(
+        shell: &mut Shell,
+        client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
+    ) -> bool {
+        if !shell.notify_sources_wanted() {
+            return false;
+        }
+        let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_NOTIFY_SOURCES_REPLY_MAX];
+        let sources = match client.notify_sources(&mut frame) {
+            Ok(answered) => Some(
+                answered
+                    .names()
+                    .filter_map(|name| core::str::from_utf8(name).ok())
+                    .filter(|name| tairix_abi::validate_bundle_id(name).is_ok())
+                    .filter_map(|name| tairix_abi::BundleId::new(name).ok())
+                    .collect(),
+            ),
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "settings: the desktop would not say which programs have notified ({err})"
+                );
+                None
+            }
+        };
+        shell.adopt_notify_sources(sources);
+        true
     }
 
     /// Put `worker` on a desk of its own and start it.

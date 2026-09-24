@@ -573,8 +573,9 @@ reachable from the keyboard as the gesture never was
 The pairing is the shared, pure `click::DoubleClickTracker`
 (`plans/NEW-FILEMANAGER.md` FM12), keyed on the **button** as well as the item:
 a press selects the item under the pointer, and a second press *of the same
-button* on that *same* item within `DOUBLE_CLICK_INTERVAL_NS` (half a second,
-timed by the capability-free monotonic `clock_get`) completes the gesture. One
+button* on that *same* item within the desktop's double-click interval (the one
+the session publishes in `DesktopInfo::double_click`, timed by the
+capability-free monotonic `clock_get`) completes the gesture. One
 press of each button is therefore two gestures begun, never one completed. The
 tracker is reset whenever a press lands on chrome (a toolbar tool) rather than
 an item, and by a right-click, so neither a click *through* the chrome and back
@@ -1807,8 +1808,9 @@ inside a window that already has a title bar.
   **Permissions** (the mode bits and the owning ids), **Attributes** (the
   extended-attribute store). Which section a field belongs to is the one
   `render::Field::tab` definition, so the strip, the body and the hit-test
-  cannot disagree. `Left`/`Right` walk the strip without wrapping past either
-  end, so every section is reachable with no pointer.
+  cannot disagree. While the strip holds the keyboard, `Left`/`Right` walk it
+  without wrapping past either end, so every section is reachable with no
+  pointer.
 
 The three-band frame is resolved from the **client alone**, never from the
 node, so which fields a node happens to show can no longer move a control
@@ -1831,18 +1833,20 @@ capability-free permission toggles resolve before the privileged ownership
 control, and a press on nothing resolves to nothing. It resolves the strip
 before the body it selects, and then only the controls the **selected** section
 actually drew — so a press can never reach a toggle on a section the user is
-not looking at. It takes the same `can_chown` gate the draw took, so a session
-that may not reassign an owner resolves nothing on an ownership cell rather
-than opening an editor whose commit could only be refused — the hit-test
-previously resolved that cell whatever the capability, so a session without it
-could click where the undrawn control sat (the kernel always enforced the
-write, so this was a fail-open UI rather than an escalation).
+not looking at. It takes the same `PropertiesControls` the draw took — the
+ownership gate and any open id editor among them — so a session that may not
+reassign an owner resolves nothing on an ownership cell rather than opening an
+editor whose commit could only be refused, and a press lands on exactly the
+control that was painted.
 
 The keyboard is scoped the same way, through the host-tested
-`route::properties_key`: `Left`/`Right` walk the strip from any section,
-`Escape` closes the window, and everything else belongs to the **attributes**
-section's list and editor — so no key reaches a control the selected section
-does not draw.
+`route::properties_key`. The strip holds the keyboard to begin with: there
+`Left`/`Right` walk it and `Escape` closes the window. The **Permissions**
+section takes the keyboard on `Down` or `Tab` and hands it back on `Tab` or
+`Escape`; while it holds it, the arrows and `Space`/`Enter` are its own (below).
+On the **Attributes** section everything but the strip's arrows belongs to its
+list and editor. So no key reaches a control the selected section does not
+draw.
 
 ### Editing permissions
 
@@ -1863,23 +1867,40 @@ no authority, so the trusted picker never calls the write path.
 
 ### The drawn permission control
 
-The Permissions section draws the node's symbolic and octal mode, then a
-**labelled permissions grid** — `Read`/`Write`/`Exec` column headers over three
-`Owner`/`Group`/`Other` triad rows of clickable `lib/controls` `Checkbox`
-toggles reflecting the current mode. Each cell is exactly the box the checkbox
-draws (`Checkbox::glyph_side`, the control's own published render geometry
-rather than a font metric guessed at from outside), centred under its column
-header on a control-height row pitch. `render::PERMISSION_BITS` and
-`permission_cells` are the one definition of which of the nine
-owner/group/other bits each toggle carries, and the `Permission` arm of
-`render::properties_hit` returns the bit a click flips (and nothing off a
-toggle, fail closed). The shared `render::PermGrid` geometry places the painted
-grid, its headers and row labels, and the hit-test from one definition, so a
-click always lands on the box it depicts (§2.2). Only the file manager's window
-draws it; the trusted read-only picker draws `draw_properties` and never
-resolves a toggle, so the write surface is separated from the picker by call
-site, not a runtime flag (`AGENTS.md` §2.2). The grid fails closed — drawing
-nothing rather than off-client — when the window is dragged too small (§5.4).
+The Permissions section is composed of the shared form family
+([`lib/controls`](../lib/controls.md), `FieldGroup`/`FieldRow`) and carries no
+layout of its own: two groups stacked down the body by the shared plate column
+(`tairix_controls::stack`). **ACCESS** holds the node's symbolic and octal mode
+as a read-only `Reading` row, then one row per class — `Owner`, `Group`,
+`Other` — whose slot is a `FlagSet` of three labelled `Checkbox`es, `Read`,
+`Write` and `Execute`, reflecting the current mode. **OWNERSHIP** holds the two
+owning ids (below). Every control in the section lines up in one column, the
+width a class's flags need, so neither a node's reading nor an open id editor
+can move one. `render::PERMISSION_BITS` and `permission_cells` are the one
+definition of which of the nine owner/group/other bits each flag carries, and
+the `Permission` arm of `render::properties_hit` returns the bit a click flips
+(and nothing off a flag, fail closed). The paint, the hit-test and the keyboard
+all read the one placement (`render::PermsSection`), so a click always lands
+on the box it depicts (§2.2). Only the file manager's window draws it; the
+trusted read-only picker draws `draw_properties` and never resolves a toggle,
+so the write surface is separated from the picker by call site, not a runtime
+flag (`AGENTS.md` §2.2).
+
+The window opens wide enough to seat every flag whole: its width is the larger
+of its own floor and the access group's `natural_width`, so a wider type ladder
+is seated rather than cut. A window dragged narrower keeps every box and elides
+the labels through the checkbox's own mark; one dragged too short omits the rows
+it cannot draw whole, and a row that was not drawn cannot be pressed (§5.4).
+
+The keyboard reaches every control the pointer does. Once the section holds
+it, `Up`/`Down` walk the rows and carry from one group into the next,
+`Left`/`Right` walk an access row's flags — keeping the column as the cursor
+moves between classes — and `Space`/`Enter` toggle the flag, or open the
+ownership cell, the cursor rests on. `render::properties_permissions_key`
+resolves that key to the same `PropertiesTarget` a press on the control is, so
+the window acts on both through one path; the cursor itself is
+`render::PermsCursor`, carried in `PropertiesView` like the attribute list's
+scroll.
 
 A primary-button press on a toggle flips only that `rwx` bit — preserving the
 current setuid/setgid/sticky bits (the settable word masked by `FS_MODE_MASK`,
@@ -1925,28 +1946,31 @@ the trusted picker never calls the write path.
 
 ### The drawn ownership control
 
-Beneath the grid the Permissions section draws an **Owner** row and a **Group**
-row, each labelled and carrying its id in a control-height cell. Where the
-launching user holds `CAP_FS_CHOWN` — read once from the kernel-attested
-`self_origin` at start-up — the cell is a pressable plate, so it reads as "press
-to change this"; where they do not, the id is a plain value and no control is
-offered at all, since a session that cannot reassign ownership should not be
-shown one (`AGENTS.md` §2.24). While one is being edited the shared
-`lib/controls` `TextField` is drawn over it at
-`render::properties_owner_editor_rect`. The plate matters: an *idle text field*
-draws like the live one over it, so a reader could not tell whether their keys
-were landing.
+The section's **OWNERSHIP** group holds an **Owner** row and a **Group** row,
+each carrying its id in its slot. Where the launching user holds `CAP_FS_CHOWN`
+— read once from the kernel-attested `self_origin` at start-up — the id is a
+pressable plate, so it reads as "press to change this". Where they do not, the
+same plates are shown refused: the rows' state is `NeedsCapability`, so they
+wear the Authority Mark, the group's footnote says why, and a press or a key on
+them resolves to nothing (`AGENTS.md` §2.24). While one is being edited, the
+row's slot holds the shared `lib/controls` `TextField` itself, published as
+`render::properties_owner_editor_rect` for the host that feeds it keys, and a
+press on it leaves the typing alone rather than reopening the editor. The plate
+matters: an *idle text field* draws like the live one, so a reader could not
+tell whether their keys were landing.
 
 `render::OwnerField` and the `Owner` arm of `render::properties_hit` resolve a
-click to exactly the uid or gid cell it edits — one definition placing the
-drawn cell and the hit-test (§2.2) — and a click off a cell resolves nothing
-(fail closed, §5.4). Like the permission control the write surface is separated
-by call site, *and* additionally gated on the runtime capability, since owner
-reassignment is privileged. Switching section abandons a half-typed id: the
-editor belongs to the section it is drawn in, and one left open behind a
-section the user cannot see would take their next keystroke.
+click to exactly the uid or gid cell it edits — one placement serving the drawn
+cell and the hit-test (§2.2) — and a click off a cell resolves nothing (fail
+closed, §5.4). Like the permission control the write surface is separated by
+call site, *and* additionally gated on the runtime capability, since owner
+reassignment is privileged. Switching section abandons a half-typed id and hands
+the keyboard back to the strip: both belong to the section they are drawn in,
+and either left live behind a section the user cannot see would take their
+next keystroke.
 
-The editor opens on a click pre-filled with the current id and bounded to a
+The editor opens on a click, or on `Space`/`Enter` from the section's keyboard
+cursor, pre-filled with the current id and bounded to a
 `u32`'s ten digits, live-validates the typed value, and on `Enter` commits over
 `fs_set_owner` under the user's own identity (the kernel enforces
 `CAP_FS_CHOWN` and the group-membership rule); `Escape` cancels. A non-numeric
@@ -2018,8 +2042,7 @@ to scroll with. The app must not clamp a granted size itself: resizing its
 own window back up while a drag keeps shrinking makes the two fight once per
 pointer sample, which is what made the listing visibly bounce as the window
 approached its minimum. An app never answers a resize with a larger size of
-its own. The default window is sized so the editable Properties popup
-(metadata plus the permissions grid) fits without resizing.
+its own.
 
 Icon-only buttons size their glyph from the plate itself — the smaller plate
 dimension inside its frame, less a small margin proportional to the plate

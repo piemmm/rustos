@@ -478,8 +478,9 @@ actions, reporting each through `InputResponse`:
   exists to explain (`plans/TOOLTIPS.md`). Its pixels do not change, so the
   change marks no damage.
 - **Double-clicking a title bar toggles the window's size** — two primary
-  presses on the same window's title bar within
-  `DOUBLE_CLICK_INTERVAL_NS` report
+  presses on the same window's title bar within the seat's double-click
+  interval (`Compositor::double_click`, the one the session publishes to every
+  application) report
   `WindowControl { control: SizeToggle }` and start **no** move-grab, so the
   window cannot drift under the gesture. The first press is the move gesture
   it has always been, and a press anywhere but a title bar in between breaks

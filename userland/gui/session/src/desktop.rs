@@ -230,6 +230,9 @@ pub struct PinboardChange {
     pub backdrop: BackdropWork,
     /// What the desktop's appearance owes.
     pub appearance: AppearanceWork,
+    /// The notification policy changed: what is already showing must be
+    /// held to the new one.
+    pub notifications: bool,
 }
 
 /// The outcome of one desktop gesture: whether the gesture re-listed the
@@ -434,6 +437,7 @@ impl<S: DirectorySource> Desktop<S> {
                 cursor: settings.cursor_set != self.settings.cursor_set
                     || settings.cursor_size != self.settings.cursor_size,
             },
+            notifications: settings.notifications != self.settings.notifications,
         };
         self.settings = settings;
         Some(change)
@@ -710,10 +714,12 @@ impl<S: DirectorySource> Desktop<S> {
         self.selected = Some(index);
         Self::mark_cell(layout, self.selected, damage);
         let subject = u64::try_from(index).unwrap_or(u64::MAX);
-        if self
-            .clicks
-            .register(now_ns, subject, PointerButton::Primary)
-            == ClickKind::Double
+        if self.clicks.register(
+            now_ns,
+            subject,
+            PointerButton::Primary,
+            self.settings.double_click,
+        ) == ClickKind::Double
         {
             return self.activate(index, apps);
         }

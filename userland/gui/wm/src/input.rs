@@ -82,7 +82,7 @@ use crate::{Compositor, PointerTarget};
 // `tairix_wm::{InputEvent, PointerButton}` (one definition).
 pub use tairix_input::{
     ClickKind, DoubleClickTracker, InputEvent, Key, Modifiers, NamedKey, PointerButton,
-    PointerFocus, DOUBLE_CLICK_INTERVAL_NS,
+    PointerFocus,
 };
 
 /// What the [`InputRouter`] did with an [`InputEvent`].
@@ -780,10 +780,12 @@ impl InputRouter {
             match part {
                 FurniturePart::TitleBar => {
                     self.title_clicks = pending_title_click;
-                    if self
-                        .title_clicks
-                        .register(now_ns, window.0, PointerButton::Primary)
-                        == ClickKind::Double
+                    if self.title_clicks.register(
+                        now_ns,
+                        window.0,
+                        PointerButton::Primary,
+                        compositor.double_click(),
+                    ) == ClickKind::Double
                     {
                         // The second press of a pair asks to toggle the size
                         // rather than to move: it starts no move-grab, so the

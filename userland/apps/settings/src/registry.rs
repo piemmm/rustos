@@ -23,9 +23,10 @@ use tairix_icon::IconKind;
 
 use crate::accounts::ACCOUNT_FACTS;
 use crate::facts::{ABOUT_FACTS, CLOCK_FACTS};
-use crate::form::{Composition, Setting};
+use crate::form::{Action, Composition, Setting};
 use crate::machine::MachineSetting;
 use crate::network::{ADDRESSING_FACTS, RESOLVER_FACTS};
+use crate::notices::SOURCE_FACTS;
 use crate::volumes::VOLUME_FACTS;
 
 /// One top-level entry of the sidebar: a group of related settings.
@@ -535,6 +536,29 @@ const ACCESSIBILITY_SETTINGS: &[&str] = &[
     Setting::CursorSize.label(),
 ];
 
+/// The Notifications pane's setting labels: the desktop-wide switch, plus
+/// the subject its discovered source rows are searched by.
+const NOTIFICATION_SETTINGS: &[&str] = &[Setting::NotifyEnabled.label(), SOURCE_FACTS[0]];
+
+/// The Lock Screen pane's setting labels: its setting, and its command.
+const LOCK_SETTINGS: &[&str] = &[Setting::LockAfter.label(), Action::LockNow.label()];
+
+/// The Screensaver pane's setting labels.
+const SCREENSAVER_SETTINGS: &[&str] = &[
+    Setting::ScreensaverAfter.label(),
+    Setting::ScreensaverKind.label(),
+];
+
+/// The Mouse pane's setting labels.
+const MOUSE_SETTINGS: &[&str] = &[
+    Setting::PrimaryButton.label(),
+    Setting::PointerSpeed.label(),
+    Setting::DoubleClick.label(),
+];
+
+/// The Keyboard pane's setting labels.
+const KEYBOARD_SETTINGS: &[&str] = &[Setting::RepeatDelay.label(), Setting::RepeatRate.label()];
+
 /// The Wallpaper pane's setting labels: its four rows, plus the picture
 /// the gallery beneath them chooses.
 const WALLPAPER_SETTINGS: &[&str] = &[
@@ -638,13 +662,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
             pane: Pane::LockScreen,
             name: "lock-screen",
             title: "Lock Screen",
-            backing: PaneBacking::None {
-                missing: "This desktop keeps no idle time, so there is no moment for it to lock \
-                          the screen after. Locking it now is on the icon bar's system menu, and \
-                          unlocking always asks for this account's password.",
-                needs: "An idle deadline in the desktop session.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::LockScreen)),
+            settings: LOCK_SETTINGS,
         }],
     },
     CategoryRow {
@@ -655,12 +674,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
             pane: Pane::Screensaver,
             name: "screensaver",
             title: "Screensaver",
-            backing: PaneBacking::None {
-                missing: "This desktop keeps no idle time, so there is no moment for it to blank \
-                          or cover the screen after.",
-                needs: "An idle deadline in the desktop session.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Screensaver)),
+            settings: SCREENSAVER_SETTINGS,
         }],
     },
     CategoryRow {
@@ -761,12 +776,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
             pane: Pane::Notifications,
             name: "notifications",
             title: "Notifications",
-            backing: PaneBacking::None {
-                missing: "The desktop shows notifications but keeps no policy for them, so there \
-                          is nothing here to allow or refuse.",
-                needs: "A per-source notification policy in the desktop session.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Notifications)),
+            settings: NOTIFICATION_SETTINGS,
         }],
     },
     CategoryRow {
@@ -777,13 +788,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
             pane: Pane::Keyboard,
             name: "keyboard",
             title: "Keyboard",
-            backing: PaneBacking::None {
-                missing: "This system has one built-in key layout, keeps no key-repeat setting, \
-                          and holds no list of the desktop's shortcuts.",
-                needs: "A key-layout registry, a key-repeat policy in the desktop session, and a \
-                        desktop-wide shortcut registry.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Keyboard)),
+            settings: KEYBOARD_SETTINGS,
         }],
     },
     CategoryRow {
@@ -794,12 +800,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
             pane: Pane::Mouse,
             name: "mouse",
             title: "Mouse",
-            backing: PaneBacking::None {
-                missing: "The desktop keeps no pointer policy, so there is no button order, no \
-                          speed and no double-click interval to set.",
-                needs: "A pointer policy in the desktop session.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Mouse)),
+            settings: MOUSE_SETTINGS,
         }],
     },
     CategoryRow {

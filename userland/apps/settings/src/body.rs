@@ -11,8 +11,11 @@
 //! The shell asks this what to measure, what to draw, and how it scrolls;
 //! it never asks which of two options happens to be set.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 
+use tairix_abi::BundleId;
+use tairix_controls::stack;
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconArtwork;
 use tairix_raster::Surface;
@@ -59,6 +62,9 @@ pub(crate) struct Answered<'a> {
     /// The per-account edits a returning Users pane carries, which is none
     /// for every other pane.
     pub(crate) staged_accounts: &'a [(AccountSetting, String)],
+    /// The sources the desktop said have notified, or `None` while it has
+    /// not said.
+    pub(crate) notify_sources: Option<&'a [BundleId]>,
 }
 
 impl<'a> Answered<'a> {
@@ -73,6 +79,9 @@ impl<'a> Answered<'a> {
             resolvers: self.network.resolvers_slice(),
             accounts: self.accounts,
             staged_accounts: self.staged_accounts,
+            notify_sources: self.notify_sources,
+            sources_full: false,
+            lock_refusal: None,
         }
     }
 }
@@ -90,7 +99,7 @@ pub(crate) enum Body {
         /// The settable rows, which stay put.
         form: Form,
         /// The pictures, which are what scrolls.
-        gallery: Gallery,
+        gallery: Box<Gallery>,
     },
     /// The mounted volumes: one read-only card each, discovered rather than
     /// declared.
@@ -110,7 +119,7 @@ impl Body {
             }
             Some(PaneContent::Pictures(composition)) => Self::Pictures {
                 form: Form::new(composition, answered.documents()),
-                gallery: Gallery::new(answered.catalog, answered.settings),
+                gallery: Box::new(Gallery::new(answered.catalog, answered.settings)),
             },
             Some(PaneContent::Volumes) => Self::Volumes(Readings::new(answered.volumes)),
             Some(PaneContent::About) => Self::Facts(Facts::about(answered.machine)),
@@ -253,20 +262,20 @@ impl Body {
                 u64::from(place.bounds.height),
             ),
             Self::Form(form) => (
-                crate::stack::as_extent(form.groups_len()),
-                crate::stack::as_extent(form.seated(place)),
+                stack::as_extent(form.groups_len()),
+                stack::as_extent(form.seated(place)),
             ),
             Self::Pictures { gallery, .. } => {
                 let range = gallery.scroll_range(band, place.scale, place.theme, offset);
                 (range.content_extent(), range.viewport_extent())
             }
             Self::Volumes(readings) => (
-                crate::stack::as_extent(readings.len()),
-                crate::stack::as_extent(readings.seated(place.bounds, place.scale, place.theme)),
+                stack::as_extent(readings.len()),
+                stack::as_extent(readings.seated(place.bounds, place.scale, place.theme)),
             ),
             Self::Facts(facts) => (
-                crate::stack::as_extent(facts.len()),
-                crate::stack::as_extent(facts.seated(place.bounds, place.scale, place.theme)),
+                stack::as_extent(facts.len()),
+                stack::as_extent(facts.seated(place.bounds, place.scale, place.theme)),
             ),
         }
     }

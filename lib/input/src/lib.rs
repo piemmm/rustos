@@ -38,11 +38,10 @@
 //! # Gestures composed from those events
 //!
 //! [`click`](mod@click) holds the one double-click rule: two presses of the
-//! same button on the same *subject* within
-//! [`DOUBLE_CLICK_INTERVAL_NS`]. It lives beside the events rather than in any
-//! one surface because the subjects differ but the rule does not — a listing
-//! row in the file manager and the trusted picker, a window id on the window
-//! manager's title bars.
+//! same button on the same *subject* within the desktop's published interval.
+//! It lives beside the events rather than in any one surface because the
+//! subjects differ but the rule does not — a listing row in the file manager,
+//! an icon on the desktop, a window id on the window manager's title bars.
 //!
 //! [`InputRouter`]: https://docs.rs/tairix-wm
 //! [`tairix_geometry`]: tairix_geometry
@@ -53,7 +52,7 @@
 
 pub mod click;
 
-pub use click::{ClickKind, DoubleClickTracker, DOUBLE_CLICK_INTERVAL_NS};
+pub use click::{ClickKind, DoubleClickTracker};
 
 use tairix_geometry::Point;
 

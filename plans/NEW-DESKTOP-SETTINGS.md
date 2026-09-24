@@ -45,11 +45,11 @@ dropped is a category the surface then has to lie about.
 | **DS8b** | Ethernet and DNS stage and apply through that writer — the addressing reading becomes a settable per-interface form, and Apply is the one elevated `configure` run | DS8 | DS8b | done |
 | **DS9a** | The three reads' plumbing and the command family they and the write side are driven through: the ungated `GROUP_DIRECTORY` and `SELF_ACCOUNT` queries end to end, the shared `lib/useradmin` client, `users --list`, and the `usermod`/`userdel`/`passwd`/`groupdel` bundles | DS6, DS8a | DS9 | done |
 | **DS9** | Users & Groups — the pane itself: the three reads composed, the per-account staged edits, and the one elevated run that applies them | DS9a | DS9 | done |
-| **DS10** | Notifications — a per-source allow/deny and minimum severity enforced at the session's one `NotifyRequest` intake | DS3 | DS10 | planned |
-| **DS11** | Keyboard and Mouse — the session's pointer and key-repeat policy, and the one double-click interval it publishes for every app | DS3 | DS11 | planned |
-| **DS12** | Lock Screen and Screensaver — the session's single idle deadline and the one timer armed only while a policy has one pending | DS3 | DS12 | planned |
+| **DS10** | Notifications — a per-source allow/deny and minimum severity enforced at the session's one `NotifyRequest` intake | DS3 | DS10 | done |
+| **DS11** | Keyboard and Mouse — the session's pointer and key-repeat policy, and the one double-click interval it publishes for every app | DS3 | DS11 | done |
+| **DS12** | Lock Screen and Screensaver — the session's single idle deadline and the one timer armed only while a policy has one pending | DS3 | DS12 | done |
 | **DS13** | The `settings_qemu_aarch64` vertical and the docs pages the surface owes | DS2–DS9 | DS13 | done |
-| **DS14** | Retire the second form idiom — `datetime.app`'s six-field row and `lib/browse`'s `PermGrid`, with the private layout arithmetic each carries deleted | DS1 | DS14, §6 | in progress — `datetime.app` landed with DS1 (its grid deleted, its extent now measured through `Dialog::height_for_content`); `PermGrid` remains |
+| **DS14** | Retire the second form idiom — `datetime.app`'s six-field row and `lib/browse`'s `PermGrid`, with the private layout arithmetic each carries deleted | DS1 | DS14, §6 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -213,11 +213,12 @@ write path on landing.
   That shape is not this app's to invent privately: the file manager
   hand-rolled a permissions grid, the wallpaper surface a column of four
   drop-downs, and `datetime.app` a row of six fields. `lib/controls::form` is
-  the one family (DS1). `datetime.app` is converted (DS14), the wallpaper
-  copy went with the application that carried it (DS4), and `PermGrid` is
-  what remains — because two form idioms in one desktop is the duplication
-  `AGENTS.md` §2.2 forbids. The family composes the existing row chrome and control families; it
-  re-implements no plate, press, focus, disabled or Authority-Mark rendering.
+  the one family (DS1): `datetime.app` and the file manager's Permissions tab
+  are drawn with it (DS14), and the wallpaper copy went with the application
+  that carried it (DS4), because two form idioms in one desktop is the
+  duplication `AGENTS.md` §2.2 forbids. The family composes the existing row
+  chrome and control families; it re-implements no plate, press, focus,
+  disabled or Authority-Mark rendering.
 
 - **The pane registry is one closed table, and it is data.** `Category` and
   `Pane` are closed enums; one ordered `CATEGORIES` table is the single
@@ -365,8 +366,8 @@ owner the change goes to; the last column is what a refusal looks like.
 | Appearance | the session's published settings document | session apply (merged over what it holds) | apply refused, stated on `stderr`, row reverts |
 | Wallpaper | session's published settings document; the store catalog and each preview served by the session | session apply (merged) | apply refused, stated; a preview that did not arrive draws its placeholder |
 | Displays | `SEAT_LIST`, `DesktopInfo`, `Compositor::window_scale` | session apply (scale only) | mode change: no interface (§3) |
-| Lock Screen | session's lock policy document | session apply | apply refused, stated |
-| Screensaver | session's idle policy document | session apply | apply refused, stated |
+| Lock Screen | the session's published settings document (`lock.after_min`) | session apply; *Lock Now* is the `LockScreen` window request | apply refused, stated; a refused lock stated on its row |
+| Screensaver | the session's published settings document (`screensaver.*`) | session apply | apply refused, stated |
 | Power | — | — (no policy interface, §3) | pane states absence |
 | Networking → Ethernet | nothing ungated exists: the live readings need `CAP_SYSINFO_HW`/`CAP_SYSINFO_GLOBAL` and stay the Switchboard's, and `network.conf` carries the very identity and addressing those gates protect. The configured addressing is read by the admin-authenticated run (DS8a) | elevated `configure`, which writes the store and hands the changed interfaces to the running stack (DS8) | pane states where the live readings live; a refused apply keeps the working copy and states why |
 | Networking → Wi-Fi | — | — | pane states absence (§3) |
@@ -374,9 +375,9 @@ owner the change goes to; the last column is what a refusal looks like.
 | Networking → TCP/IP | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure`, which also hands the policy to the running stack | working copy stands, refusal stated; a stack that did not take it keeps the saved value for next boot and says so |
 | Bluetooth | — | — | pane states absence (§3) |
 | Sound | — | — | pane states absence (§3) |
-| Notifications | session's notification policy document | session apply | apply refused, stated |
-| Keyboard | one built-in US layout (`lib/hid`) | session apply (repeat/double-click) | layout: no registry (§3) |
-| Mouse | `lib/cursor` registry, session pointer policy | session apply | apply refused, stated |
+| Notifications | the session's published settings document (`notify.*`); the sources that have notified from the session's `QueryNotifySources`, answered to Settings alone | session apply | apply refused, stated |
+| Keyboard | the session's published settings document (`key.*`) | session apply (repeat) | layout, remap, shortcuts: no registry (§3), stated on the pane |
+| Mouse | the session's published settings document (`pointer.*`) | session apply | apply refused, stated |
 | Trackpad | — | — | pane states absence (§3) |
 | Touchscreen | — | — | pane states absence (§3) |
 | Printers & Scanners | — | — | pane states absence (§3) |
@@ -1262,49 +1263,100 @@ never-widen and last-administrator rules remain the only arbiters.
 
 ### DS10 — Notifications
 
-The session owns the notification feed the taskbar draws, so it owns the
-policy: a per-source allow/deny and a minimum severity, plus the desktop-wide
-"show none" switch, in DS3's document. The session enforces it where it
-already receives a `NotifyRequest` — one gate, at the one intake — so a
-suppressed notification is never delivered, drawn, or logged as shown. Sources
-are named by their attested bundle identity, never by anything a sender says
-about itself, and a source that has never notified is not listed (an empty
-list reads as *none*, which is the truth).
+**Done.** What it guarantees:
 
-### DS11 — Keyboard and Mouse: the session's input policy
+- **One gate, at the one intake.** `serve_notify` attributes every notice to
+  the bundle the kernel attests its producer runs (`Origin::app`), and holds
+  it to `DesktopSettings::notifications` there and nowhere else. A producer
+  running no verified bundle has no name a policy could hold and is refused
+  `PermissionDenied`. A refused raise is never delivered, drawn or recorded as
+  shown, withdraws what the same key showed before, and is answered as
+  accepted; a clear always applies; a changed policy withdraws what it no
+  longer admits (`PinboardChange::notifications`).
+- **The policy is two keys.** `notify.enabled` is the desktop-wide switch and
+  `notify.sources` one `<bundle>:<level>` entry per source that does not show
+  everything (`lib/wallpaper::notify`, levels *all* / *warning* / *critical*
+  / *none*). A bundle identifier has more segments than a key may, so the map
+  is one value rather than a key family; `NotifyPolicy::set_level` refuses a
+  change whose spelling would outgrow it, which still holds at least thirteen
+  sources of the longest legal identifier. The apply document bound
+  (`PINBOARD_DOCUMENT_MAX`) is twice one value.
+- **Who may see who notified.** The session remembers at most
+  `NOTIFY_SOURCES_MAX` sources seen since it started and answers them through
+  the `QueryNotifySources` window request to its own Settings application
+  alone (`is_settings_surface`: the attested `SETTINGS_BUNDLE_ID` under the
+  session's own publisher). The reply is the shared name-list codec the cursor
+  sets already used, now one definition for both.
+- **The two defects the intake carried are gone.** The notification area was
+  unbounded — any program could grow the session without limit — and is now
+  `NOTIFICATIONS_MAX` in all and `SOURCE_NOTIFICATIONS_MAX` per source, a raise
+  past either refused `LimitExceeded`. It was keyed on the recyclable pid, so a
+  later process under the same pid could replace or clear another's notice; it
+  is keyed on the attested `ProcId`, and a reaped child's notices are dropped
+  by its pid.
+- **The pane** lists the union of the seen sources and the policy's own, in
+  identity order, or *None*; states it when the desktop would not say, and when
+  the policy is full.
 
-The session routes every pointer and key event, so it is the owner: DS3's
-document grows `pointer.primary` (left/right), `pointer.double_click_ms`,
-`pointer.speed`, `key.repeat_delay_ms`, and `key.repeat_rate`. Button mapping
-and key repeat are applied where the session already resolves the event, so no
-app sees the unmapped form. The **double-click interval** is the one that needs
-care: apps resolve their own double-click today (the file manager's activation
-gesture does), which is two intervals waiting to disagree. The session
-therefore *publishes* it alongside the scale and appearance the window channel
-already carries in `DesktopInfo`, and the file manager's private constant is
-deleted and read from there in this stage — one interval for the desktop, set
-once. The document spells the intervals in milliseconds, because a file a human
-edits should; every ABI-visible and in-memory form of them — the `DesktopInfo`
-field included — is `Duration64`, like every other span `lib/abi` carries, and
-`lib/abi` has no millisecond field to copy. Cursor set and size come from DS3.
-Layout, modifier remap, and shortcuts state §3's absence and name what each
-needs.
+D140 (the loaded notification-icon set is never installed) is the status
+glyphs' defect, not the policy's, and stays recorded in
+`plans/OPEN-DEFECTS.md`.
+
+### DS11 — Keyboard and Mouse
+
+**Done.** The plan's premise that the file manager kept a private interval was
+stale: every resolver — the file manager's listing and chooser, the desktop's
+icons, the window manager's title bars — paired presses under `lib/input`'s
+fixed default. That default is deleted; `DoubleClickTracker::register` takes
+the interval, and there is one.
+
+- **Five keys** (`lib/wallpaper::input`): `pointer.primary`,
+  `pointer.double_click_ms`, `pointer.speed`, `key.repeat_delay_ms` and
+  `key.repeat_rate` (`off` or repeats a second), in two groups
+  (`SettingsKey::POINTER`, `SettingsKey::KEYBOARD`) so neither pane posts the
+  other's keys. Every span is a `Duration64` in memory; milliseconds are the
+  document's spelling alone.
+- **The interval is published.** `DesktopInfo` carries it
+  (`DOUBLE_CLICK_MIN..=DOUBLE_CLICK_MAX`, decoded fail-closed), which grew the
+  desktop notice's payload bound with it. The compositor holds the seat's
+  interval for the title bars and `desktop_info` publishes it; the file manager
+  reads its own `DesktopInfo`.
+- **Applied where the session resolves the event.** `DeviceInputSource`
+  applies the button order — a new one waits until no button is held — and the
+  speed, carrying the sub-count remainder. `KeyboardInputSource` is the one
+  place a key repeats: it drops a device's own repeat of the held key, repeats
+  under the policy one per drain, and folds its deadline into the park only
+  while a key repeats. A key held across the edge into a lock or another
+  session stops. The serve loop reconciles `InputPolicy::of` the settings at
+  its head, so every adopt path reaches the sources, and a resumed session's
+  rebuilt pointer keeps the policy.
+- **The panes.** Mouse offers the three pointer rows, Keyboard the two repeat
+  rows and states that there is one built-in layout and no shortcut list. A
+  value off a ladder is offered as itself.
 
 ### DS12 — Lock Screen and Screensaver: the idle interface
 
-The one new subsystem this plan builds. The session gains a single idle
-deadline: the `Time64` timestamp of the last input event, and one timer armed
-**only** while a policy has a deadline pending — never a tick, never a poll, so
-an idle desktop still wakes no core it did not have to. Two policies ride it,
-both in DS3's document: blank-or-screensaver after *M* minutes, and lock after
-*N*.
-The Screensaver pane offers what the desktop can actually draw — blank, the
-desktop backdrop dimmed, and the wallpaper slideshow the chooser's catalog
-already enumerates — and nothing it cannot. The Lock Screen pane sets the
-lock deadline, states plainly that unlocking always requires this account's
-password (it is not a setting, and pretending it were would be a security
-lie), and offers **Lock Now**, which is the session's existing lock, not a
-second one.
+**Done.** What it guarantees:
+
+- **One idle deadline** (`idle::IdleClock`): the last seat input, a key's
+  repeat included, and `screensaver.after_min` / `lock.after_min` (`never` or
+  whole minutes), each folded into the park only while its action is pending.
+  A session that cannot verify a password never locks on its own; a resumed
+  session starts idle afresh.
+- **The screensaver** (`saver::Screensaver`, `screensaver.kind`) is one
+  full-screen surface kept over the lock: black, the backdrop dimmed, or a
+  slideshow of the shipped catalog, one picture every `SLIDE_INTERVAL_NS`,
+  each prepared at screen size through the wallpaper worker's new slide slot
+  and the one sandboxed decode. No worker, no slides: it stays black rather
+  than decoding on the serve loop. The waking gesture is drained into nothing.
+- **One lock.** The Lock row, the idle policy and *Lock Now* all go through one
+  `lock_screen` routine over `ScreenLock`. *Lock Now* is the `LockScreen`
+  window request, honoured for the desktop's own Settings application alone
+  and refused `NotSupported` without a broker; a refusal is stated on its row.
+  Unlocking always asks for the account's password, which the pane states
+  rather than offers.
+- **Defaults** are a ten-minute black screensaver and a fifteen-minute lock:
+  security is the default.
 
 ### DS13 — the QEMU vertical, and docs
 
@@ -1312,7 +1364,8 @@ second one.
 a gate mis-count in one choreography cannot wedge the other. It boots the
 autoload root disk, unlocks, logs in, starts `desktop`, opens the capsule's
 system menu and chooses *Settings…*, then photographs the window on General,
-on Bluetooth's stated absence, and on Storage — reached past the strip's fold
+on Lock Screen's composed form, on Bluetooth's stated absence, and on Storage —
+reached past the strip's fold
 by the strip's own scrollbar — before walking to Appearance, choosing Light,
 and photographing the desktop redrawn light. Its last gesture is the system
 menu's *Dark Appearance* row.
@@ -1365,13 +1418,33 @@ on the confd page.
 
 ### DS14 — retire the second form idiom
 
-The file manager's hand-rolled permissions grid (`lib/browse`'s `PermGrid`) and
-`datetime.app`'s six-field row are rebuilt on `FieldGroup`/`FieldRow`, and the
-private layout arithmetic each carries is deleted. Leaving three form idioms in
-one desktop after DS1 is exactly the duplication `AGENTS.md` §2.2 forbids, and
-the conversion is what proves the family is genuinely general rather than shaped
-around one app. Their existing tests are retargeted, not
-weakened, and the QEMU verticals that dump those surfaces re-baselined.
+Every form in the desktop is now drawn with `lib/controls::form`, and neither
+private layout survives. `datetime.app`'s six-field row landed with DS1. The
+file manager's Permissions tab is an **Access** group (the mode as a reading,
+then one Owner/Group/Other row of flags each) over an **Ownership** group, and
+`PermGrid`, `PermsLayout` and `OwnerRows` are deleted with their arithmetic.
+
+- **One new slot, `FieldControl::Flags`.** A `FlagSet` is a row of checkboxes
+  in one slot, reported as `FieldAction::SetFlag { index, on }`. Every box
+  stays whole in a narrow slot and the labels share what is left, and each
+  flag leaves room for a denied flag's lock mark after its label.
+- **The column placement is shared.** `tairix_controls::stack` (`gap`,
+  `plate_width`, `height`, `column_width`, `place`, `reveal_from`,
+  `as_extent`) is the one placement both Settings and the Properties window
+  use; Settings' copy is deleted, not kept beside it.
+- **The tab has keyboard reach.** The arrows walk rows and flags, Space and
+  Enter act, and Tab or Escape give the keyboard back to the tab strip. Paint,
+  hit-testing and keys read one placement, so they cannot disagree.
+- **A refused session gets the same rows, not a different layout.** Without
+  `CAP_FS_CHOWN` the ownership rows carry the Authority Mark and a footnote
+  says why; a press or key on them resolves to nothing.
+
+Host tests cover the `FlagSet` contract across the dark, light,
+high-contrast and monochrome fixtures, the flags seated whole at the default
+size and 200 %, every toggle reachable and apart at the minimum window, the
+keyboard reaching all eleven controls, and damage scoped to the rows that
+changed. No QEMU vertical dumps the Properties window, so none was
+re-baselined.
 
 ---
 

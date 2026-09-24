@@ -1813,6 +1813,19 @@ pub(crate) fn row_content_span(
     Some((content_x, content_right - content_x))
 }
 
+/// The row width whose [`row_content_span`] is `content` pixels wide, for a
+/// row `h` pixels tall: the same reservation on both edges, inverted, so an
+/// owner sizing a surface from what its content asks for reserves exactly
+/// what the row will take.
+#[must_use]
+pub(crate) fn row_width_for_content(scale: Scale, theme: &Theme, content: u32, h: u32) -> u32 {
+    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+    content
+        .saturating_add(row_gutter(theme, scale, u32::MAX))
+        .saturating_add(pad.saturating_mul(3))
+        .saturating_add(bead_band(theme, scale, h))
+}
+
 /// Paint the shared row chrome — background tint, leading pressure and
 /// selection rails, the bottom activity Heat Seam, the trailing Signal Bead,
 /// and the keyboard focus ring — into `rect`, returning the inner content

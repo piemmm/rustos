@@ -185,6 +185,7 @@ pub mod elevate;
 pub mod fade;
 pub mod frames;
 pub mod holdback;
+pub mod idle;
 pub mod input;
 pub mod keyboard;
 pub mod launch;
@@ -192,10 +193,12 @@ pub mod layer;
 pub mod library;
 pub mod lock;
 pub mod menu;
+pub mod notify;
 pub mod pace;
 pub mod picker;
 pub mod pinboard;
 pub mod presenter;
+pub mod saver;
 pub mod seat;
 pub mod session;
 pub mod settings;
@@ -233,8 +236,8 @@ pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 pub use cli::{parse, CliError, Command, USAGE};
 pub use clock::{spell as spell_clock, SessionClock};
 pub use config::{
-    DATETIME_LABEL, DATETIME_RUN_PATH, FILES_LABEL, FILES_RUN_PATH, SETTINGS_LABEL,
-    SETTINGS_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
+    DATETIME_LABEL, DATETIME_RUN_PATH, FILES_LABEL, FILES_RUN_PATH, SETTINGS_BUNDLE_ID,
+    SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
 };
 pub use confirm::{Answer, ConfirmPrompt, CONFIRM_ORIGIN};
 pub use desktop::{
@@ -253,8 +256,9 @@ pub use fade::{
 };
 pub use frames::{FrameStatsPublisher, FrameStatsSink, MIN_FRAME_PUBLISH_INTERVAL_NS};
 pub use holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
+pub use idle::{IdleAction, IdleClock, IdlePolicy};
 pub use input::{SessionInputResponse, SessionInputRouter};
-pub use keyboard::{KeyInputChannel, KeyboardInputSource};
+pub use keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
 pub use launch::{
     admitted_pid, bundle_of_run_path, launch_argv, launch_failure_report, reap_launched,
     resolve_launch, DocumentRelay, Handover, Launch, LaunchHost, LaunchTable, LaunchTarget,
@@ -267,6 +271,7 @@ pub use layer::{
 };
 pub use library::{catalogued, load_library, load_programs, LoadedLibrary, LoadedPrograms};
 pub use lock::{LockOutcome, LockedDrain, ScreenLock};
+pub use notify::{is_settings_surface, producer_of, NotifySources};
 pub use pace::FramePacer;
 pub use picker::{
     ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_SHOWN,
@@ -274,10 +279,12 @@ pub use picker::{
 };
 pub use pinboard::PinboardCommand;
 pub use presenter::TaskbarPresenter;
+pub use saver::{Screensaver, SLIDE_INTERVAL_NS};
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use settings::{
-    load_pinboard, publish_pinboard, serve_pinboard_apply, LoadedPinboard, PinboardApplyRefusal,
+    load_pinboard, publish_pinboard, serve_pinboard_apply, InputPolicy, LoadedPinboard,
+    PinboardApplyRefusal,
 };
 pub use shell::{
     DesktopShell, InputSource, ShellOutcome, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE,

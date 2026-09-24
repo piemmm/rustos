@@ -80,6 +80,25 @@ pub fn high_contrast() -> Theme {
     )
 }
 
+/// A theme identical to [`Theme::dark`] but with [`Contrast::Monochrome`], the
+/// policy under which a state must be told apart by shape rather than by hue.
+#[must_use]
+pub fn monochrome() -> Theme {
+    let base = Theme::dark();
+    Theme::new(
+        base.id(),
+        "Test Monochrome",
+        base.appearance(),
+        *base.palette(),
+        *base.metrics(),
+        *base.fonts(),
+        base.cursors().clone(),
+        base.motion(),
+        base.density(),
+        Contrast::Monochrome,
+    )
+}
+
 /// `rgba` as the premultiplied pixel an opaque fill of it leaves.
 #[must_use]
 pub fn premul(rgba: Rgba) -> Pixel {
