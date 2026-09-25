@@ -118,6 +118,23 @@ measures it, obtains the memory map, computes the `LoadPlan` (B1) and the
 multiboot2 info (B2), places the segments, calls `ExitBootServices`, and
 enters the kernel's multiboot2 `_start`. Adds the `x86_64-unknown-uefi`
 target to the toolchain/CI matrix and `cargo xtask` build/deps/cfg checks.
+
+Two further hand-offs, both `plans/FINISH-x86_64.md` prerequisites:
+
+- **The screen.** When a Graphics Output Protocol is present the loader picks
+  one mode before `ExitBootServices`. It takes the panel's preferred mode from
+  the EDID the firmware reports, and otherwise keeps the mode the firmware
+  already set; it never guesses a resolution. A 32-bpp direct-RGB linear mode
+  is required. The loader passes that mode's base, pitch, geometry and channel
+  masks in the multiboot2 framebuffer tag. With no GOP, or no acceptable mode,
+  no tag is emitted and the kernel boots headless.
+- **Entropy.** Where `EFI_RNG_PROTOCOL` is present the loader draws a seed and
+  hands it over for the kernel to mix, never to use alone. This is the second
+  source `plans/OPEN-DEFECTS.md` D166 needs. Multiboot2 defines no seed tag,
+  so it travels in a TAIRiX tag defined once in `lib/multiboot2`: builder and
+  parser, with a round-trip test. The kernel zeroes the tag's bytes once it has
+  mixed them. The seed never goes on the command line, which is readable and
+  logged.
 Vertical: an **OVMF** QEMU boot that loads the kernel from the ESP with no
 `-kernel` in the argv and reaches the same first-boot witness the PVH path
 does.

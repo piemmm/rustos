@@ -79,10 +79,10 @@ for filesystems, the feature section below.
 | Runtime CPU-feature dispatch (page-zero accel) | ✓ ERMS | ✓ DC ZVA | — baseline | — baseline |
 | Runtime CPU-feature dispatch (hash group-scan accel) | — baseline | ✓ NEON | — baseline | — baseline |
 | Crypto backend availability + boot self-test (SHA-256) | ✓ SHA-NI | ▢ soft | — soft | — soft |
-| Framebuffer / display | ✓ | ✓ | ▢ | ✓ |
+| Framebuffer / display | ◐ driver | ✓ | ◐ driver | ✓ |
 | Sandboxed font service (`fontd`, glyph rendering) | ✓ floor | ✓ store | ✓ floor | ▢ |
-| Graphical login screen (`greeter.app`) | ◐ | ◐ | ▢ | ▢ |
-| Fast user switching (concurrent desktop sessions) | ◐ | ◐ | ▢ | ▢ |
+| Graphical login screen (`greeter.app`) | ▢ | ◐ | ▢ | ▢ |
+| Fast user switching (concurrent desktop sessions) | ▢ | ◐ | ▢ | ▢ |
 | Block storage | ✓ virtio | ✓ virtio + eMMC + USB | ✓ virtio | — |
 | Networking | ◐ virtio | ◐ virtio + GENET | ◐ virtio | — |
 | DHCPv4 / DHCPv6 address configuration | ✓ | ✓ | ✓ | — |
@@ -95,7 +95,7 @@ for filesystems, the feature section below.
 | Network offloads (RX/TX csum, TSO, mergeable RX, multiqueue RX) | ✓ virtio | ✓ virtio + GENET | ✓ virtio | — |
 | NIC completion-interrupt masking (no per-frame interrupt storm) | ✓ virtio | ✓ virtio + GENET | ✓ virtio | — |
 | Receive pre-filter (foreign traffic shed before the stack wakes) | ✓ | ✓ | ✓ | — |
-| Input devices | ✓ ps2 + USB | ✓ virtio + USB | ✓ virtio | ✓ host |
+| Input devices | ✓ virtio + ◐ ps2 | ✓ virtio + USB | ✓ virtio | ✓ host |
 | Audio playback and capture (`audiod` mixer, one path, no bypass) | ◐ virtio | ◐ virtio | ◐ virtio | ▢ |
 | Production kernel binary | ✓ | ✓ | ▢ | ▢ |
 | Bootable image | ▢ iso | ✓ rpi.img | ▢ | ▢ |

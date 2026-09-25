@@ -1595,6 +1595,7 @@ You are not exempt from any rule above. In addition:
     | Boot chain / bootloader (Rust-only UEFI/BIOS loader, kernel ELF load + multiboot2 handoff, GPT/ESP whole-disk image) | `plans/BOOTLOADER.md` |
     | Pre-boot Supervisor console (ESC-at-boot REPL, pre-mount diagnostics/control, the `lib/supervisor` engine, the `lib/vt` lone-ESC resolution) | `plans/NEW-SUPERVISOR.md` |
     | Architecture ports / Arch HAL parity | `plans/WIRING.md`; `plans/ARCHSUPPORT.md` (x86_64 product parity: image, storage floor, unlock/login, autoload, verticals) |
+    | x86_64 to the desktop: the UEFI GOP boot display, x86_64 write-combining, the shared boot framebuffer console and console/seat layout, the x86_64 `image`/`run` targets, the greeter and desktop verticals, and the Surface Go 2 stage after it | `plans/FINISH-x86_64.md` |
     | CPU feature detection + self-optimising routine selection: build-time target-cpu/feature floor, the `cpufeatures` Arch-HAL slice, the `lib/cpuops` ops-table dispatch/benchmark framework | `plans/FIX-HARDWARE-FEATURES.md` |
     | CPU frequency scaling: the in-kernel governor and its idle-bracket utilisation, the launch boost, the `cpufreq_bind`/`cpufreq_wait` mechanism seam, the boot-time clock floor, and the live-clock estimator's idle exclusion | `plans/CPUFREQ.md` |
     | Raspberry Pi bring-up | `plans/PI.md` |

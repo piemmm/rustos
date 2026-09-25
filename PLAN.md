@@ -80,6 +80,7 @@ plan's ledger. A `blocked` row names its blocker.
 |---|---|---|
 | WIRING | Arch HAL migration and cross-arch parity, W0–W17 (`plans/WIRING.md`) | done |
 | ARCHSUPPORT | x86_64 product parity with aarch64 (`plans/ARCHSUPPORT.md`) | in progress |
+| FINISH-x86_64 | An x86_64 image booting from UEFI firmware to the desktop in QEMU; the Surface Go 2 next (`plans/FINISH-x86_64.md`) | planned |
 | PI | Raspberry Pi 4 bring-up (`plans/PI.md`) | in progress |
 | BOOTLOADER | The first-party Rust UEFI/BIOS boot chain and GPT image (`plans/BOOTLOADER.md`) | in progress |
 | NEW-SUPERVISOR | The pre-boot Supervisor console (`plans/NEW-SUPERVISOR.md`) | in progress |

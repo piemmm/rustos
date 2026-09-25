@@ -13,6 +13,19 @@ sweep — ending with the deletion of the embedded spawn registry (`PLAN.md`,
 `plans/SPAWN.md`, `plans/USERS.md`, and `plans/DISPLAY.md` first; every rule
 in all of them applies here without exception.
 
+## Ledger
+
+| Id | Item | Status |
+|---|---|---|
+| A1 | x86_64 whole-disk image builder | planned — delivered by `plans/BOOTLOADER.md` B4 |
+| A2 | Production boot storage floor + registry deletion | in progress — the deletion is blocked on A1 and the riscv64 image |
+| A3 | Interrupt-driven COM1 console + login/session supervision | done |
+| A4 | `devmgr` autoload over the ACPI/PCI tree | in progress |
+| A5 | Boot display, seat registry, graphical session | planned — delivered by `plans/FINISH-x86_64.md` |
+| A6 | QEMU vertical parity sweep + docs | planned |
+| A7 | ACPI power-off | planned |
+| A8 | x86_64 hardening unblock | planned |
+
 ## 0. Scope and decisions (binding for this plan)
 
 - **This is wiring, not new subsystems.** At the kernel/Arch-HAL tier the
@@ -82,18 +95,19 @@ in all of them applies here without exception.
   `vesa_display_qemu_x86_64`, `ps2_input_qemu_x86_64`, `irq_qemu_x86_64`;
   the virtio-PCI provisioning seam and an in-kernel driver host
   (`x86_64/driver_host.rs`) exist.
-- **Production boot gap (the whole point of this plan):**
-  `kernel/tairix-kernel/src/x86_64/boot.rs` wires only COM1 consoles,
-  installed memory, `LATE_IDENTITY`, init spawn, the embedded-registry
-  spawn producer, and the ACPI hardware-tree source. It has no
-  `root_unlock` module, no `with_app_store`/`with_users_db`/
-  `with_filesystem`/`with_volumes`/`with_seat_registry`, and no `devmgr`
-  autoload admission — all of which the aarch64 boot
-  (`src/aarch64/{boot,root_unlock}.rs`) already composes from shared code.
+- **Live boot verticals over the production x86_64 pipeline:**
+  `root_unlock_login`, `users_db`, `root_unlock_admission`, `spawn_session`,
+  `autoload_input` (virtio keyboard), `netstack_autoload`/`_static`/`_dhcp`/
+  `_dhcp6`/`_bond`, and `audio_virtio` (unlock → login → shell → `devmgr`
+  autoload → `audiod`).
+- **Production boot gap:** `kernel/tairix-kernel/src/x86_64/boot.rs` composes
+  the whole storage/store/users/volume pipeline, but has no boot display and
+  no `with_seat_registry` (A5, `plans/FINISH-x86_64.md`), and it still spawns
+  from the embedded registry (A2).
 
 ## 2. Increments (dependency order; each fully gated per §7)
 
-### A1 — `tools/mkimage` x86_64 image builder (`planned`; now on `plans/BOOTLOADER.md`)
+### A1 — `tools/mkimage` x86_64 image builder
 
 The Stage 8 deliverable `images/tairix-x86_64.iso` / bootable disk image
 (§12): GPT layout, a FAT/ESP boot partition carrying the loader + kernel +
@@ -118,18 +132,16 @@ fixture that boots the produced image with no `-kernel`. QEMU's `-kernel`
 PVH path remains the fast, firmware-free test path the existing x86_64
 verticals use.
 
-### A2 — Production boot storage floor + registry deletion (`in progress`)
+### A2 — Production boot storage floor + registry deletion
 
-The boot composition is **landed and host-gate-green** (the live QEMU
-verticals + registry deletion remain, gated on the A1 image builder —
-staged exactly as the riscv64 parity port was: production composition
-host-gate-green first, then boot-confirmed). Done-state:
+The production boot composes the shared storage pipeline and is proven on
+live guest boots. What it guarantees:
 
 - `boot_x86_64::seed_hardware_tree` returns the collected tree by value;
   `try_boot` hands it to `unlock_service::record_boot(/* dtb */ 0, tree, log)`,
   which resolves the bootstrap root block binding through
   `root_storage::resolve_root_block_driver`, stashes it, and moves the tree
-  into `HW_TREE` — dtb is `0` because the x86_64 bring-up re-resolves the
+  into `HW_TREE`. The dtb is `0` because the x86_64 bring-up re-resolves the
   transport from PCI config space, not a firmware device tree.
 - `try_boot` composes the shared pipeline exactly as the aarch64/riscv64
   boots do: `with_app_store` / `with_users_db` / `with_users_admin` /
@@ -139,137 +151,85 @@ host-gate-green first, then boot-confirmed). Done-state:
   it brings the bound virtio-blk-PCI root up over `mechanism_one` +
   `provision_virtio_pci`, routes the device's interrupt through **MSI-X**
   (binding the discovered PCI Interrupt-Line GSI, reusing its boot-assigned
-  vector), drives an `IrqParkWaiter` (with a `sti;hlt;cli` fallback park),
-  and hands the opened `VirtioBlk` to the shared
-  `unlock_orchestrate::finish_unlock`. `x86_64/init_spawn.rs` calls
-  `spawn_if_present(ctx)` before `admit_init`. The console-0 read half is
-  the fail-closed `NULL_CONSOLE_READ` this slice (interactive COM1 input is
-  A3), so `login` fails closed while the disk still mounts and the driver
-  store still serves.
-- `IoApicController::rearm` now unmasks the line (the riscv64-class
-  re-arm fix), so a user-space INTx `irq_wait` re-arm re-enables its pin.
+  vector), parks on an `IrqParkWaiter`, and hands the opened `VirtioBlk` to
+  the shared `unlock_orchestrate::finish_unlock`. The passphrase is read from
+  the interrupt-driven COM1 console (A3).
+- `IoApicController::rearm` unmasks the line, so a user-space INTx `irq_wait`
+  re-arm re-enables its pin.
+- Live verticals, each a thin bin over the shared virtio-PCI bring-up
+  (`run_virtio_pci_scenario` in `tests/integration/virtio_qemu_support`) and a
+  transport-generic scenario tail the aarch64 siblings share:
+  `root_unlock_login_qemu_x86_64` (the root-mount → login policy) and
+  `users_db_qemu_x86_64` (the boot-time users-database read over a plaintext
+  users-root volume). The encrypted-root fixture's `/System` partition is
+  sized from its planted content by the policy and assembly the Pi image uses
+  (`tairix_syshelp::build_system_volume`, `tairix_syshelp::assemble_disk`).
 
-Two live boot verticals have now landed. **`root_unlock_login_qemu_x86_64`
-passes a real guest boot** — the first live-boot exercise of the x86_64
-root-mount->login *policy* over the virtio-**PCI** bus. It is a thin bin over
-the shared virtio-PCI bring-up (`run_virtio_pci_scenario`) and the shared
-`root_unlock_login` scenario tail — the same tail the aarch64 vertical runs,
-hoisted into `tests/integration/virtio_qemu_support` and made generic over the
-transport so both ports drive one definition (§2.2). The encrypted-root
-fixture's `/System` partition is sized from its planted content by the policy
-and assembly the Pi image uses (`tairix_syshelp::build_system_volume`,
-`tairix_syshelp::assemble_disk`), so one fixture serves every arch's bundle set
-(§24.1) and `qemu_tests.rs` reads each image's true sector count.
+Remaining: the A1 image builder, then — once the riscv64 image also exists —
+deleting `SPAWN_PROGRAMS`, the `*_rxe.rs` `include!`s (all but PID 1 `init`),
+`spawn_paths.rs`, and `program_manifests.rs` (§2.14).
 
-**`users_db_qemu_x86_64` passes a real guest boot too** — the first live-boot
-exercise of the x86_64 boot-time users-database read path over virtio-**PCI**.
-It is the thin-bin x86_64 sibling of `users_db_qemu_aarch64`: the same shared
-virtio-PCI bring-up plus the transport-generic `users_db_load` scenario tail
-(one definition, §2.2), over a planted plaintext users-root ARXFS volume
-(`FsDisk::UsersRoot`); it mounts the volume, runs
-`tairix_kernel_core::load_users_db`, and proves the parsed database
-authenticates the planted account while a wrong password is refused. No
-production code changed — the whole x86_64 users-database path was already in
-place. Being plaintext it needs no passphrase, so unlike the admission
-vertical below it does not depend on interactive console input.
+### A3 — Interrupt-driven console + login/session supervision
 
-Remaining for A2: the A1 image builder, and — once A1 lands for both remaining
-disk-booting ports — deleting `SPAWN_PROGRAMS`, the `*_rxe.rs` `include!`s (all
-but PID 1 `init`), `spawn_paths.rs`, and `program_manifests.rs` (§2.14).
-**`root_unlock_admission_qemu_x86_64` (the production kthread-admission path)
-is deferred to A3**, not A2: the production unlock kthread reads the passphrase
-from the fail-closed `NULL_CONSOLE_READ` this slice, so an interactive
-passphrase prompt — and hence the `USERS_DB_INSTALLED_MESSAGE` witness the
-aarch64 admission vertical keys on — is impossible until A3 wires
-interrupt-driven COM1 input. It is therefore *not* a thin bin over the shared
-scenario; it is a live exercise of the A3 console and belongs with A3.
+COM1 is an interrupt-driven, lossless console, and `init` supervises the login
+session over it. What it guarantees:
 
-### A3 — Interrupt-driven console + login/session supervision (`in progress`)
+- `tairix_arch_x86_64::serial` carries the 16550 receive primitives
+  (`read_console_bytes`, the receive-interrupt enable/disable, host-tested
+  `lsr_data_ready`/`ier_with_rx_*`). `kernel/tairix-kernel/src/x86_64/com1_rx.rs`
+  carries the `RflagsIrqControl` receive gate, the `COM1_INPUT` queue,
+  `Com1ConsoleRead`, `enable_uart_console_irq` (device IER + IO-APIC unmask)
+  and the device-IER flow-control brake. The COM1 GSI comes from the MADT
+  interrupt-source override for ISA IRQ 4, else identity.
+- `serial_sink` installs the read half gated on the unlock service's ownership
+  latch, so `login` never races the unlock kthread for console-0 input.
+  `root_unlock`'s `X86UnlockConsole` arms the receive interrupt and hands the
+  interactive read half to the unlock kthread.
+- **The console GSI never reaches the `irq_wait` table.** `IrqTable::fire`
+  masks a line before it finds the line unbound, and COM1's line is unbound by
+  design, so `production_external_irq_dispatch` drains the FIFO and returns,
+  latching the reschedule, as the aarch64 UART dispatch does.
+- The backpressured FIFO → `ConsoleInputQueue` drain is one shared definition
+  (`console_uart::drain_fifo_into_console`) used by the x86_64 16550 and the
+  aarch64 PL011; only the per-UART FIFO read, latch clear and brake are
+  injected.
+- PCI discovery (`boot_x86_64::seed_virtio_pci`) prefers ECAM when the firmware
+  advertises an MCFG (`q35`, real UEFI/PCIe) and otherwise uses mechanism #1
+  (CF8/CFC), over one `probe_virtio_pci`.
+- Live verticals: `root_unlock_admission_qemu_x86_64` (interactive passphrase →
+  `/System` mount → encrypted-root unlock → users database installed, over the
+  virtio-blk-PCI MSI-X completion path), `spawn_session_qemu_x86_64` (the
+  `wait` → reap → relaunch supervision cycle), and `audio_virtio_qemu_x86_64`
+  (a scripted passphrase, `login` form and shell command).
 
-**The interrupt-driven COM1 console is implemented and live-proven**: the
-x86_64 audio vertical drives a scripted passphrase, graphical `login` form,
-and shell command over it on a real guest boot. Done-state:
+### A4 — `devmgr` autoload over the ACPI/PCI tree
 
-- COM1 receive is interrupt-driven, replacing the fail-closed
-  `NULL_CONSOLE_READ`: `tairix_arch_x86_64::serial` gained the 16550 RX
-  primitives (`read_console_bytes`/`enable`/`disable_rx_interrupt`, pure
-  `lsr_data_ready`/`ier_with_rx_*` helpers, host-tested);
-  `kernel/tairix-kernel/src/x86_64/com1_rx.rs` carries the `RflagsIrqControl`
-  receive gate, the `COM1_INPUT` queue, the poll-backed `Com1ConsoleRead`,
-  `enable_uart_console_irq` (device IER + IO-APIC unmask), and the
-  device-IER flow-control brake; `production_external_irq_dispatch` drains
-  the FIFO into the console queue on the COM1 GSI (resolved from the MADT
-  interrupt-source-override for ISA IRQ 4, else identity); `serial_sink`
-  installs the unlock-gated interrupt-fed read half; and `root_unlock`'s
-  `X86UnlockConsole` arms the receive interrupt and hands the interactive
-  read half to the unlock kthread.
-- **The console GSI never reaches the `irq_wait` table.**
-  `IrqTable::fire` masks the controller line *before* it discovers the line
-  is unbound — deliberate containment for a stray edge, but COM1's line is
-  unbound by design (it feeds the console queue, not `irq_wait`), so falling
-  through to `fire` after the drain masked GSI 4 at the IO-APIC on the first
-  keystroke and never unmasked it. `production_external_irq_dispatch` now
-  drains and returns, latching the reschedule, exactly as the aarch64
-  device-IRQ dispatch short-circuits its UART line. Only an *unbounded*
-  console read exposed this: a reader carrying its own deadline (the
-  secret-entry animation, a TUI's timed read) re-polls and drains the FIFO in
-  its own context regardless, which is why the unlock passphrase and the
-  `login` form worked while the shell's first plain read parked forever.
-- **The lossless backpressured FIFO→`ConsoleInputQueue` drain is one shared
-  definition** (`kernel/tairix-kernel/src/console_uart.rs`
-  `drain_fifo_into_console`, host-tested), used by both the x86_64 16550 and
-  the aarch64 PL011 paths (the aarch64 `drain_uart_locked` was re-wired onto
-  it, §2.2/§2.21) — only the per-UART FIFO read / receive-latch clear /
-  flow-control brake are injected closures. **Regression-confirmed live**:
-  `root_unlock_admission_qemu_aarch64` (which types a passphrase over the
-  interrupt-driven PL011 console) still passes on a real guest boot.
+The x86_64 discovery emits generic match-key nodes (PCI
+`vendor:device:class`, virtio ids) that `devmgr` matches against the signed
+driver store through the same `lib/devmatch` policy as every port; only the
+per-port node emission is new. Live today: the virtio-input keyboard
+(`autoload_input_qemu_x86_64`), virtio-net (`netstack_autoload_qemu_x86_64`
+and the `netstack_*` family) and virtio-sound (`audio_virtio_qemu_x86_64`),
+each autoloaded into its own process in the production boot.
 
-**`root_unlock_admission_qemu_x86_64` is landed and passes a real guest boot
-(D7 + D8 closed).** It is a thin bin over `tairix_kernel::boot` with an
-`UnlockAdmissionSink` on `USERS_DB_INSTALLED_MESSAGE`, over `EncryptedRootDisk`
-with `serial: &[("ARXFS passphrase: ", …, UNLOCK_PASSPHRASE_LINE)]`. The
-production x86_64 kthread-admission bring-up now delivers the virtio-blk-PCI
-completion MSI-X on its dedicated vector (D7), wakes the scheduler-parked
-unlock kthread across the interactive passphrase read, mounts the read-only
-`/System` volume, unlocks the encrypted user-data root, and installs the users
-database — the full two-kthread admission witness the vertical is scoped to
-reach. The former D8 admission read stall (a consequence of the pre-fix
-kernel-heap OOM/pressure condition) does not reproduce; the install completes
-deterministically over repeated boots.
+Remaining:
 
-**Also landed this increment (a live-confirmed A2/A4 discovery fix).** The
-production x86_64 PCI discovery (`boot_x86_64::seed_virtio_pci`) had never
-worked on a live boot: it used ECAM only, but the QEMU default `pc`/i440fx
-machine exposes no MCFG/ECAM, so the root disk was never discovered. It now
-prefers ECAM when the firmware advertises an MCFG (real UEFI/PCIe, `q35`)
-and falls back to the universal PCI mechanism #1 (CF8/CFC port I/O)
-otherwise, over one generic `probe_virtio_pci` — hardware-capability
-detection, not a shim. Live-confirmed: the disk is now discovered and the
-virtio-blk driver loads on the `pc` machine (the D7 stall is strictly after
-that, in the completion wait).
+- The verticals `devmgr_hwtree_qemu_x86_64`, `driver_spawn_qemu_x86_64` and
+  `driver_unload_qemu_x86_64`.
+- PS/2: `drivers/input/ps2` has no bind table and discovery emits no i8042
+  node, so it is reachable only through the in-kernel host
+  (`ps2_input_qemu_x86_64`). Its node comes from the ACPI namespace (`PNP0303`),
+  so it waits on an AML reader (`plans/FINISH-x86_64.md` S4).
+- The virtio pointer lands with `plans/FINISH-x86_64.md` F6.
 
-### A4 — `devmgr` autoload over the ACPI/PCI tree (`planned`)
+### A5 — Boot display, seat registry, graphical session
 
-The x86_64 discovery emits the full generic match-key hardware tree
-(block/input/display/network nodes with PCI `vendor:device:class` and
-virtio ids) that the shared pre-unlock autoload path matches against the
-signed driver store — the same `lib/devmatch`/`root_storage` policy code,
-only the per-port node emission/probing is new (§2.21). User-space input
-(PS/2 + virtio) and network drivers autoload in the production boot.
-Verticals: `devmgr_hwtree_qemu_x86_64`, `autoload_input_qemu_x86_64`,
-`driver_spawn_qemu_x86_64`, `driver_unload_qemu_x86_64`.
+Delivered by `plans/FINISH-x86_64.md` (F1–F8), which owns the design: a UEFI
+GOP framebuffer handed over by the first-party loader, the shared boot console
+and console/seat layout, write-combining on x86_64, and the greeter and
+desktop verticals.
 
-### A5 — Boot display, seat registry, graphical session (`planned`)
-
-The VESA/GOP framebuffer feeds the shared `lib/fbcon` console engine as
-the x86_64 boot display (the engine is arch-neutral; only the mode-query/
-mapping glue is per-port), and the boot wires `with_seat_registry` so the
-display/seat/input lease path (`plans/DISPLAY.md`) and the graphical
-session work as on aarch64. Vertical: a framebuffer-console sibling of
-`framebuffer_display_*` driven through the production console path, plus
-the seat-lease scenario on x86_64.
-
-### A6 — QEMU vertical parity sweep + docs (`planned`)
+### A6 — QEMU vertical parity sweep + docs
 
 The remaining aarch64-only verticals gain x86_64 siblings (thin bins over
 the shared scenario crates): `sandbox`, `heap`, `file_map`, `mmio_map`,
@@ -281,7 +241,7 @@ with that increment instead. Same-change docs: `docs/src/platform/` x86_64
 page brought to the aarch64 page's level, README feature/architecture
 matrix rows updated (§13).
 
-### A7 — ACPI power-off (`planned`)
+### A7 — ACPI power-off
 
 `system_power` (`abi-v1` 105, `CAP_SYSTEM_POWER`) restarts an x86_64 machine
 through the legacy PC reset hardware (the 8042 pulse-reset, then the `0xCF9`
@@ -295,7 +255,7 @@ the PM1a/PM1b control block and sleep-type values, then writes the `SLP_TYP`
 x86_64 scenario asserting the guest exits on `PowerOff`, mirroring the
 equivalents on the two ports that have it.
 
-### A8 — x86_64 hardening unblock (`planned`)
+### A8 — x86_64 hardening unblock
 
 KPTI + IBRS/IBPB/STIBP/SSBD move from `Pending` to `Supported` in the
 port's §19.1 profile, with the side-channel conformance vertical proving
@@ -319,24 +279,4 @@ applies. Tracked here so this plan is not "done" while the profile is
   identical to the aarch64 events (one definition).
 - Each increment runs the full §7 gate (fmt, `cargo xtask ci` once,
   `cargo xtask fuzz --secs 5`, `tools/ci/soak.sh both --secs 20`) and
-  updates this plan's status lines to the done-state summary form (§13).
-
-## 4. Status
-
-- **A2 `in progress`**: the production boot composition + `root_unlock`
-  admission is landed and host-gate-green, and two live-boot verticals now
-  pass a real guest boot — `root_unlock_login_qemu_x86_64` (the unlock
-  *policy*) and `users_db_qemu_x86_64` (the boot-time users-database read
-  path), both thin bins over the shared virtio-PCI scenarios (see A2 above).
-  Its A1 image builder and the registry deletion remain.
-  `root_unlock_admission_qemu_x86_64` moved to **A3**: the production unlock
-  kthread reads `NULL_CONSOLE_READ`, so the interactive passphrase prompt it
-  needs is an A3 (interrupt-driven COM1) deliverable, not an A2 thin bin.
-- **A3 `in progress`**: the interrupt-driven COM1 console is implemented and
-  host-tested, and its shared FIFO-drain helper is regression-confirmed live
-  via the aarch64 interrupt-console vertical; the x86_64 production PCI
-  disk-discovery gap it surfaced is fixed and live-confirmed. Its x86_64
-  live verticals are blocked on `plans/OPEN-DEFECTS.md` D7 (the production
-  MSI-X kthread disk-completion never wakes the parked bring-up), a separate
-  A2 defect.
-- **A1, A4, A5, A6, A7, A8 `planned`.**
+  moves its ledger row, with its prose in the done-state summary form (§13).
