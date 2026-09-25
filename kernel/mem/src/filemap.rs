@@ -22,6 +22,7 @@ use crate::anon::{page_at, zero_frame, AnonError};
 use crate::frame::{Frame, PAGE_SIZE};
 use crate::phys::PhysMap;
 use crate::ptr::slice_within;
+use crate::retire::{Retire, Retiring};
 use crate::vmm::{AddressSpace, MapFlags, PageTable, PageTableError};
 
 /// The single permission set file-backed user memory is mapped with:
@@ -70,6 +71,10 @@ where
         return Err(AnonError::Overflow);
     }
     let page = page_at(va, 0)?;
+    // A fault that lost the race to another CPU draws no frame for it.
+    if space.is_mapped(page) {
+        return Err(AnonError::Map(PageTableError::AlreadyMapped));
+    }
     let Some(frame) = alloc_frame() else {
         return Err(AnonError::OutOfMemory);
     };
@@ -96,8 +101,9 @@ where
 }
 
 /// Sparsely release the `page_count`-page file-mapped region based at
-/// `base_va`: every *resident* page is unmapped, its frame zeroed and
-/// returned to `free_frame`, and every never-faulted hole is skipped.
+/// `base_va`: every *resident* page is unmapped, its frame handed to
+/// `release` zeroed once no CPU and no `retire` view can reach it, and every
+/// never-faulted hole is skipped.
 /// Returns the number of pages that were resident.
 ///
 /// The all-mapped precondition of [`crate::anon::unmap_anonymous`] is
@@ -112,19 +118,16 @@ where
 /// * [`AnonError::Unaligned`] if `base_va` is not page-aligned.
 /// * [`AnonError::Overflow`] if a page address overflows the address space.
 /// * [`AnonError::PhysUnmapped`] if a reclaimed frame cannot be reached to
-///   zero it (the frame is still freed; the first such error is reported
-///   after the whole region is torn down).
-pub fn unmap_file_region<P, F>(
+///   zero it; it is kept rather than released unscrubbed, and the error is
+///   reported after the whole region is torn down.
+pub fn unmap_file_region<P: PageTable>(
     space: &mut AddressSpace<P>,
     physmap: &dyn PhysMap,
     base_va: u64,
     page_count: u64,
-    mut free_frame: F,
-) -> Result<u64, AnonError>
-where
-    P: PageTable,
-    F: FnMut(Frame),
-{
+    retire: &mut dyn Retire,
+    release: &mut dyn FnMut(Frame),
+) -> Result<u64, AnonError> {
     if page_count == 0 {
         return Err(AnonError::ZeroLength);
     }
@@ -134,31 +137,31 @@ where
 
     // Validate the extent up front so a range that leaves the address space
     // tears nothing down (fail closed before any state).
-    page_at(base_va, page_count - 1)?;
+    let last = page_at(base_va, page_count - 1)?;
 
+    let mut retiring = Retiring::new(space.tlb().cloned(), retire, physmap, release);
     let mut resident = 0u64;
     let mut first_err = None;
-    for page_index in 0..page_count {
-        let page = page_at(base_va, page_index)?;
-        if space.translate(page).is_none() {
-            continue;
-        }
+    let mut from = page_at(base_va, 0)?;
+    while let Some(page) = space.next_live(from, last) {
         match space.unmap(page) {
             Ok(frame) => {
                 resident += 1;
-                if let Err(err) = zero_frame(physmap, frame) {
-                    first_err.get_or_insert(err);
-                }
-                free_frame(frame);
+                retiring.hold(page.start().as_u64(), frame);
             }
             Err(err) => {
                 first_err.get_or_insert(map_errno(err));
             }
         }
+        let Ok(next) = page_at(page.start().as_u64(), 1) else {
+            break;
+        };
+        from = next;
     }
+    let released = retiring.finish();
     match first_err {
         Some(err) => Err(err),
-        None => Ok(resident),
+        None => released.map(|()| resident),
     }
 }
 
@@ -197,6 +200,7 @@ mod tests {
     use crate::anon::AnonError;
     use crate::frame::{Frame, PhysAddr};
     use crate::phys::{PhysMap, SimPhysMap};
+    use crate::retire::Unpublished;
     use crate::uaccess::copy_in;
     use crate::vmm::{AddressSpace, HostPageTable, MapFlags, Page, VirtAddr};
     use crate::PAGE_SIZE;
@@ -422,9 +426,9 @@ mod tests {
             ),
             Err(AnonError::Map(_))
         ));
-        // The losing frame was scrubbed and returned, and the resident page
-        // still carries the first mapping's bytes.
-        assert_eq!(frames.freed_len(), before + 1);
+        // The losing fault drew no frame, and the resident page still carries
+        // the first mapping's bytes.
+        assert_eq!(frames.freed_len(), before);
         assert_eq!(read_user(&space, &sim, 0x4000, 1), vec![1]);
     }
 
@@ -447,7 +451,10 @@ mod tests {
             .expect("map");
         }
         let resident_count =
-            unmap_file_region(&mut space, &sim, base, 5, |f| frames.free(f)).expect("release");
+            unmap_file_region(&mut space, &sim, base, 5, &mut Unpublished, &mut |f| {
+                frames.free(f);
+            })
+            .expect("release");
         assert_eq!(resident_count, 2);
         assert_eq!(frames.freed_len(), 2);
         for index in 0..5u64 {
@@ -461,7 +468,10 @@ mod tests {
         let sim = sim();
         let frames = Frames::new(4);
         let resident_count =
-            unmap_file_region(&mut space, &sim, 0x10000, 8, |f| frames.free(f)).expect("release");
+            unmap_file_region(&mut space, &sim, 0x10000, 8, &mut Unpublished, &mut |f| {
+                frames.free(f);
+            })
+            .expect("release");
         assert_eq!(resident_count, 0);
         assert_eq!(frames.freed_len(), 0);
     }
@@ -472,11 +482,15 @@ mod tests {
         let sim = sim();
         let frames = Frames::new(4);
         assert_eq!(
-            unmap_file_region(&mut space, &sim, 0x10000, 0, |f| frames.free(f)),
+            unmap_file_region(&mut space, &sim, 0x10000, 0, &mut Unpublished, &mut |f| {
+                frames.free(f);
+            }),
             Err(AnonError::ZeroLength)
         );
         assert_eq!(
-            unmap_file_region(&mut space, &sim, 0x10001, 1, |f| frames.free(f)),
+            unmap_file_region(&mut space, &sim, 0x10001, 1, &mut Unpublished, &mut |f| {
+                frames.free(f);
+            }),
             Err(AnonError::Unaligned)
         );
     }
@@ -495,7 +509,10 @@ mod tests {
             |f| frames.free(f),
         )
         .expect("map");
-        unmap_file_region(&mut space, &sim, 0x4000, 1, |f| frames.free(f)).expect("release");
+        unmap_file_region(&mut space, &sim, 0x4000, 1, &mut Unpublished, &mut |f| {
+            frames.free(f);
+        })
+        .expect("release");
         let frame = frames.freed.borrow()[0];
         let ptr = sim.translate(frame.start(), PAGE_SIZE).expect("in window");
         // SAFETY: the sim window owns the frame's bytes for PAGE_SIZE and

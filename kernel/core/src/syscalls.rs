@@ -117,7 +117,7 @@ use tairix_kernel_irq::{
 use tairix_kernel_mem::sensitive::alloc_sensitive;
 use tairix_kernel_mem::{
     copy_in, copy_out, AllocError, DmaCustodian, FrameAllocator, PageCandidate, PhysMap,
-    RamzipFaultOutcome, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
+    RamzipFaultOutcome, Retire, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
 };
 use tairix_kernel_sched_api::{Priority, TaskId as SchedTaskId};
 use tairix_kernel_sec::{
@@ -137,7 +137,7 @@ use alloc::vec::Vec;
 
 use crate::aspace::{
     fold_region_pages, pages_spanning, AddressSpaceRegistry, FaultAccess, FaultLocality,
-    FileRegion, OpenBacking,
+    FileRegion, OpenBacking, SnapshotRetire,
 };
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
@@ -557,9 +557,6 @@ where
     /// it. Held `'static` because the leaked table lives for the running
     /// kernel's lifetime.
     identity: &'static LateIdentity,
-    /// The port's cross-CPU TLB shootdown, owed after a revocation unmaps
-    /// another process's pages; [`None`] where there is no TLB.
-    tlb_shootdown: Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)>,
     /// Serialises revocations of removed devices' authority, so each walk
     /// meets only the grants it revoked itself. Owned by the one handler set
     /// every CPU dispatches through.
@@ -994,21 +991,8 @@ where
             // fails closed with `NotImplemented` until then, never resolving
             // a guessed credential.
             identity: &NULL_IDENTITY,
-            tlb_shootdown: None,
             revocation: crate::sleeplock::SleepLock::new(()),
         }
-    }
-
-    /// Install the port's cross-CPU TLB shootdown, consuming and returning
-    /// `self`. Without one a revocation invalidates only the CPU it runs on,
-    /// which is exact only where there is no TLB.
-    #[must_use]
-    pub const fn with_tlb_shootdown(
-        mut self,
-        tlb_shootdown: Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)>,
-    ) -> Self {
-        self.tlb_shootdown = tlb_shootdown;
-        self
     }
 
     /// The state a revocation of device authority reaches.
@@ -1017,7 +1001,6 @@ where
             aspaces: self.aspaces,
             irq: self.irq,
             shared: self.shared_mem_facility,
-            shootdown: self.tlb_shootdown,
             signal: self.process_signal,
         }
     }
@@ -2335,11 +2318,11 @@ where
     /// This rebuilds the *whole* snapshot, so it costs a page-table walk and
     /// a fresh heap node per resident page of the task. A syscall or fault
     /// that knows which pages it changed publishes those instead
-    /// ([`Self::publish_region_mapping`] / [`Self::publish_region_teardown`])
-    /// and reaches this only as their fallback. The two unconditional users
-    /// are the compressed-tier batches — the warm/cluster restore and the
-    /// direct-reclaim compress-out — which move several pages at once and
-    /// report no list, so no smaller delta exists to name.
+    /// ([`Self::publish_region_mapping`], [`Self::retiring`],
+    /// [`Self::publish_region_teardown`]) and reaches this only as their
+    /// fallback. The unconditional users are
+    /// the compressed tier's warm and cluster restores, which move several
+    /// pages at once and report no list, so no smaller delta exists to name.
     fn refreeze_task_aspace(&self, process: ProcessId) {
         let cpu = SchedulerArch::current_cpu(self.arch);
         if let Some(frozen) = crate::kthread::with_current_live_space(cpu, |live| live.freeze()) {
@@ -2347,6 +2330,19 @@ where
                 .write()
                 .reregister_space(process, Box::new(frozen));
         }
+    }
+
+    /// Run `release`, a teardown in the calling task's own space, with
+    /// `process`'s snapshot as the view it must retire pages from before
+    /// releasing their frames; a snapshot that had to be suspended instead
+    /// is re-frozen once the release is done.
+    fn retiring<R>(&self, process: ProcessId, release: impl FnOnce(&mut dyn Retire) -> R) -> R {
+        let mut retire = SnapshotRetire::new(self.aspaces, process);
+        let result = release(&mut retire);
+        if retire.suspended() {
+            self.refreeze_task_aspace(process);
+        }
+        result
     }
 
     /// Publish the teardown of the `page_count`-page region based at `base`
@@ -3127,11 +3123,9 @@ where
     /// compression; a pinned or real-time task yields nothing; and a port
     /// with no referenced bit reclaims nothing (fail closed, never a spin).
     ///
-    /// A sweep that compressed any page freed its frame and dropped its
-    /// PTE, so the registry snapshot is re-frozen once afterwards (several
-    /// pages changed at once) to keep the copy path from reading a freed
-    /// frame — the same republish [`Self::resolve_ramzip_fault`] does per
-    /// restored page, batched here.
+    /// Each page leaves the registry snapshot before the tier reads it, and
+    /// returns to it if the tier refuses it, so the copy path can neither
+    /// change a page being sealed nor reach a freed frame.
     ///
     /// `task` is the kernel-trusted current task of the faulting CPU.
     pub fn ramzip_direct_reclaim(&self, process: ProcessId) {
@@ -3168,14 +3162,19 @@ where
         };
         let residue = crate::memstats::MEM_STATS.ramzip_reclaimable_residue();
         let cpu = SchedulerArch::current_cpu(self.arch);
-        let compressed = crate::kthread::with_current_live_space(cpu, |live| {
-            live.ramzip_reclaim(tier, pressure, residue, want, template, self.log_sink)
-                .compressed
-        })
-        .unwrap_or(0);
-        if compressed > 0 {
-            self.refreeze_task_aspace(process);
-        }
+        self.retiring(process, |retire| {
+            crate::kthread::with_current_live_space(cpu, |live| {
+                live.ramzip_reclaim(
+                    tier,
+                    pressure,
+                    residue,
+                    want,
+                    template,
+                    self.log_sink,
+                    retire,
+                )
+            })
+        });
     }
 
     /// Enforce the caller's address-space growth bounds before a map of
@@ -6979,7 +6978,9 @@ where
                 // a fault's backing, and a release's extent, a choice between
                 // them.
                 drop(aspaces);
-                let _ = self.mem_map.unmap(base, len);
+                let _ = self.retiring(caller.process(), |retire| {
+                    self.mem_map.unmap(base, len, retire)
+                });
                 return Err(region_errno(refused));
             }
             aspaces.charge_aspace_bytes(caller.process(), charged);
@@ -7144,8 +7145,13 @@ where
             Ok(device_addr) => device_addr,
             Err(err) => {
                 // No device was handed a block its window cannot name, so it
-                // goes straight back rather than sit carved and unreported.
-                if self.dma_alloc_facility.free(carve.cpu_va).is_err() {
+                // goes straight back rather than sit carved and unreported. It
+                // was never published beyond the page table.
+                if self
+                    .dma_alloc_facility
+                    .free(carve.cpu_va, &mut tairix_kernel_mem::Unpublished)
+                    .is_err()
+                {
                     self.aspaces
                         .write()
                         .note_dma_carved(caller.process(), carve.len);
@@ -7199,17 +7205,15 @@ where
         // (covering a stale, double, or cross-task free) without releasing
         // anything. The default `NULL_DMA_ALLOC_FACILITY` fails closed with
         // `NotImplemented`.
-        let released = self.dma_alloc_facility.free(cpu_va)?;
+        // The buffer's pages leave the snapshot inside the free, before its
+        // frames are scrubbed and returned: a copy through a stale snapshot
+        // could otherwise write memory the task no longer owns.
+        let released = self.retiring(caller.process(), |retire| {
+            self.dma_alloc_facility.free(cpu_va, retire)
+        })?;
         self.aspaces
             .write()
             .note_dma_freed(caller.process(), released as u64);
-        // The free shrank the caller's live space; drop the buffer's own
-        // pages from the registry snapshot so the copy path no longer sees
-        // the released DMA window (leaving it in the stale snapshot would
-        // let a copy read or write memory the task no longer owns — fail
-        // closed). Only on success, and only over the extent the allocator
-        // reports it released.
-        self.publish_region_teardown(caller.process(), cpu_va, pages_spanning(released as u64));
         Ok(0)
     }
 
@@ -7334,35 +7338,31 @@ where
         {
             return Err(Errno::NotFound);
         }
-        // Hand the range to the installed producer, which zeroes the frames
-        // it reclaims (secret hygiene) and tolerates the never-faulted pages
-        // of the sparse region. The default `NULL_MEM_MAP` fails closed with
-        // `NotImplemented`. Success reports `Ok(0)` — the `Errno`-return ABI
-        // shape (`mem_unmap` returns an error code, not a value).
-        let result = self.mem_map.unmap(base, len).map(|()| 0);
-        // The unmap shrank the caller's live space; drop the released pages
-        // from the record, credit the page-rounded size back to the task's address-space
-        // accounting (the same figure `mem_map` charged), and drop the freed
-        // pages from the registry snapshot too — leaving them in a stale
-        // snapshot would let the copy path read or write memory the task no
-        // longer owns (fail closed, never expose freed memory). Only on
-        // success: a failed unmap left the mappings — and the accounting —
-        // unchanged. The credit saturates at zero, so a `len` that rounds
-        // larger than the live total can never underflow into a bogus huge
-        // usage.
-        //
-        // The pages are dropped as in-place deltas over the region just
-        // released, so the work is proportional to that region rather than
-        // to the caller's whole resident set, and the removal happens even
-        // when no live space is published on this CPU. Only a snapshot that
-        // cannot absorb a delta falls back to the wholesale re-freeze.
+        // Hand the range to the installed producer, which tolerates the
+        // never-faulted pages of the sparse region and zeroes each frame it
+        // reclaims (secret hygiene) only once the page has left the registry
+        // snapshot and every CPU's TLB — a copy through a stale snapshot, or
+        // a sibling thread through a stale translation, could otherwise
+        // write memory the task no longer owns. The default `NULL_MEM_MAP`
+        // fails closed with `NotImplemented`. Success reports `Ok(0)` — the
+        // `Errno`-return ABI shape (`mem_unmap` returns an error code, not a
+        // value).
+        let result = self
+            .retiring(caller.process(), |retire| {
+                self.mem_map.unmap(base, len, retire)
+            })
+            .map(|()| 0);
+        // Drop the released pages from the record and credit the page-rounded
+        // size back to the task's address-space accounting (the same figure
+        // `mem_map` charged). Only on success: a failed unmap left the
+        // accounting unchanged. The credit saturates at zero, so a `len` that
+        // rounds larger than the live total can never underflow into a bogus
+        // huge usage.
         if result.is_ok() {
             let credited = page_count * PAGE_SIZE as u64;
             let mut aspaces = self.aspaces.write();
             aspaces.remove_anon_range(caller.process(), base, page_count);
             aspaces.credit_aspace_bytes(caller.process(), credited);
-            drop(aspaces);
-            self.publish_region_teardown(caller.process(), base, page_count);
         }
         result
     }
@@ -7442,7 +7442,9 @@ where
                 // what the reserve above did; its own failure has no further
                 // recovery and leaves the record absent.
                 drop(aspaces);
-                let _ = self.file_map.release(base, len);
+                let _ = self.retiring(caller.process(), |retire| {
+                    self.file_map.release(base, len, retire)
+                });
                 return Err(region_errno(refused));
             }
             aspaces.charge_aspace_bytes(caller.process(), charged);
@@ -7537,18 +7539,17 @@ where
         // unmapped and their frames zeroed on free; a never-touched hole
         // costs nothing. Success reports `Ok(0)` — the `Errno`-return ABI
         // shape.
-        let result = self.file_map.release(base, len).map(|_resident| 0);
-        // Only on success: drop the record, credit the accounting, and drop
-        // the region's own pages from the registry snapshot too — leaving
-        // them in the stale snapshot would let the copy path read memory the
-        // task no longer owns (fail closed, never expose freed memory).
+        // Each page leaves the registry snapshot before its frame is freed.
+        let result = self
+            .retiring(caller.process(), |retire| {
+                self.file_map.release(base, len, retire)
+            })
+            .map(|_resident| 0);
+        // Only on success: drop the record and credit the accounting.
         if result.is_ok() {
-            {
-                let mut aspaces = self.aspaces.write();
-                aspaces.remove_file_region(caller.process(), base);
-                aspaces.credit_aspace_bytes(caller.process(), charged);
-            }
-            self.publish_region_teardown(caller.process(), base, pages_spanning(charged));
+            let mut aspaces = self.aspaces.write();
+            aspaces.remove_file_region(caller.process(), base);
+            aspaces.credit_aspace_bytes(caller.process(), charged);
         }
         result
     }
@@ -12204,6 +12205,10 @@ impl ImageBuildCtx for ServicesBuildCtx {
     fn audit(&self) -> &(dyn Sink + Sync) {
         self.services.audit()
     }
+
+    fn space_tlb(&self) -> Result<tairix_kernel_mem::SpaceTlb, AllocError> {
+        crate::procspace::new_space_tlb(self.services.runtime().tlb_shootdown())
+    }
 }
 
 /// A [`tairix_appload::Clock`] over the boot-installed
@@ -13421,17 +13426,6 @@ where
         process_signal: &'static (dyn ProcessSignal + 'static),
     ) -> Self {
         self.handlers = self.handlers.with_process_signal(process_signal);
-        self
-    }
-
-    /// Install the port's cross-CPU TLB shootdown: the hook-level mirror of
-    /// [`KernelSyscallHandlers::with_tlb_shootdown`].
-    #[must_use]
-    pub fn with_tlb_shootdown(
-        mut self,
-        tlb_shootdown: Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)>,
-    ) -> Self {
-        self.handlers = self.handlers.with_tlb_shootdown(tlb_shootdown);
         self
     }
 
@@ -17782,6 +17776,11 @@ mod tests {
         }
         fn now_ns(&self) -> u64 {
             0
+        }
+        fn tlb_shootdown(
+            &self,
+        ) -> Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)> {
+            None
         }
     }
 
@@ -25301,8 +25300,14 @@ mod tests {
             *self.mapping.lock() = Some((len, flags.bits(), addr_hint));
             Ok(0x5000_0000 | addr_hint)
         }
-        fn unmap(&self, base: u64, len: usize) -> Result<(), Errno> {
+        fn unmap(
+            &self,
+            base: u64,
+            len: usize,
+            retire: &mut dyn tairix_kernel_mem::Retire,
+        ) -> Result<(), Errno> {
             *self.release.lock() = Some((base, len));
+            retire.retire(base, pages_spanning(len as u64));
             Ok(())
         }
     }
@@ -25711,8 +25716,14 @@ mod tests {
             self.pages.lock().push((va, contents.len()));
             *self.map_page_result.lock()
         }
-        fn release(&self, base: u64, len: u64) -> Result<u64, Errno> {
+        fn release(
+            &self,
+            base: u64,
+            len: u64,
+            retire: &mut dyn tairix_kernel_mem::Retire,
+        ) -> Result<u64, Errno> {
             self.releases.lock().push((base, len));
+            retire.retire(base, pages_spanning(len));
             Ok(1)
         }
     }
@@ -27108,7 +27119,12 @@ mod tests {
             }
             self.map_result.lock().map(|()| addr_hint)
         }
-        fn unmap(&self, _base: u64, _len: usize) -> Result<(), Errno> {
+        fn unmap(
+            &self,
+            _base: u64,
+            _len: usize,
+            _retire: &mut dyn tairix_kernel_mem::Retire,
+        ) -> Result<(), Errno> {
             Err(Errno::NotImplemented)
         }
     }
@@ -27568,6 +27584,9 @@ mod tests {
     }
 
     impl LiveUserSpace for PublishedLive {
+        fn active_cpus(&self) -> Arc<tairix_kernel_mem::ActiveCpus> {
+            Arc::new(tairix_kernel_mem::ActiveCpus::new(0).expect("an empty set needs no storage"))
+        }
         fn map_anonymous(&mut self, _base: u64, _pages: u64) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
@@ -27586,7 +27605,12 @@ mod tests {
         fn reserve_anonymous_at(&mut self, _base: u64, _pages: u64) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
-        fn unmap_anonymous(&mut self, base: u64, pages: u64) -> Result<(), LiveSpaceError> {
+        fn unmap_anonymous(
+            &mut self,
+            base: u64,
+            pages: u64,
+            retire: &mut dyn tairix_kernel_mem::Retire,
+        ) -> Result<(), LiveSpaceError> {
             // Honoured against the inner space so a release is observable: a
             // page that was never resident is a sparse (demand-paged) hole, not
             // a failure.
@@ -27598,6 +27622,7 @@ mod tests {
                     let _ = self.space.unmap(page);
                 }
             }
+            retire.retire(base, pages);
             Ok(())
         }
         fn reserve_file_region(&mut self, _pages: u64) -> Result<u64, LiveSpaceError> {
@@ -27606,7 +27631,12 @@ mod tests {
         fn map_file_page_at(&mut self, _va: u64, _contents: &[u8]) -> Result<(), LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
         }
-        fn release_file_region(&mut self, _base: u64, _pages: u64) -> Result<u64, LiveSpaceError> {
+        fn release_file_region(
+            &mut self,
+            _base: u64,
+            _pages: u64,
+            _retire: &mut dyn tairix_kernel_mem::Retire,
+        ) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
         }
         fn map_device_window(&mut self, _phys: u64, _len: usize) -> Result<u64, LiveSpaceError> {
@@ -27647,7 +27677,11 @@ mod tests {
         ) -> Result<DmaMapping, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
-        fn free_dma(&mut self, _cpu_va: u64) -> Result<usize, LiveSpaceError> {
+        fn free_dma(
+            &mut self,
+            _cpu_va: u64,
+            _retire: &mut dyn tairix_kernel_mem::Retire,
+        ) -> Result<usize, LiveSpaceError> {
             Err(LiveSpaceError::Dma(DmaError::UnknownBuffer))
         }
         fn map_shared_chunks(
@@ -27681,6 +27715,7 @@ mod tests {
             _want: usize,
             _template: tairix_kernel_mem::PageCandidate,
             _sink: &dyn Sink,
+            _retire: &mut dyn tairix_kernel_mem::Retire,
         ) -> tairix_kernel_mem::RamzipReclaimSummary {
             tairix_kernel_mem::RamzipReclaimSummary::default()
         }
@@ -28882,8 +28917,13 @@ mod tests {
             *self.last.lock() = Some((len, addr_limit, custodian.node, custodian.generation));
             self.ret
         }
-        fn free(&self, cpu_va: u64) -> Result<usize, Errno> {
+        fn free(
+            &self,
+            cpu_va: u64,
+            retire: &mut dyn tairix_kernel_mem::Retire,
+        ) -> Result<usize, Errno> {
             *self.freed.lock() = Some(cpu_va);
+            retire.retire(cpu_va, 1);
             Ok(PAGE_SIZE)
         }
     }

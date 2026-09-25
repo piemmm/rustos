@@ -21,10 +21,11 @@
 //! # Concurrency
 //!
 //! The tier is a plain `&mut self` state machine, like
-//! [`crate::live::LiveSpace`]: the caller (the kernel's VM glue) holds
-//! it behind its own lock and guarantees the owning task is not
-//! concurrently running while its pages move — the same exclusivity
-//! the live-space mutation path already relies on.
+//! [`crate::live::LiveSpace`]: the caller holds it behind its own lock,
+//! and the space's lock excludes every other mutation of the space. The
+//! space's other threads may still be running, so compress-out takes a
+//! page out of every view before reading it, and a restore fills a frame
+//! nothing reaches until it is mapped.
 
 use alloc::collections::BTreeMap;
 

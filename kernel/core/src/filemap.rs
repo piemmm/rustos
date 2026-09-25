@@ -18,6 +18,7 @@
 //! [`NULL_MEM_MAP`](crate::memmap::NULL_MEM_MAP) does.
 
 use tairix_abi::Errno;
+use tairix_kernel_mem::Retire;
 
 /// The kernel-side producer of demand-paged, read-only file-backed user
 /// memory.
@@ -59,15 +60,16 @@ pub trait FileMap: Sync {
 
     /// Release the whole file region of `len` bytes based at `base`
     /// previously returned by [`FileMap::reserve`], sparsely unmapping the
-    /// pages fault history made resident (zeroing each frame on free) and
-    /// returning how many pages were resident.
+    /// pages fault history made resident (zeroing each frame on free, once
+    /// `retire` no longer reaches it) and returning how many pages were
+    /// resident.
     ///
     /// # Errors
     ///
     /// [`Errno::NotFound`] when `(base, len)` does not name a live file
     /// region of the caller's (fail closed: nothing is torn down);
     /// [`Errno::NotImplemented`] from the default producer.
-    fn release(&self, base: u64, len: u64) -> Result<u64, Errno>;
+    fn release(&self, base: u64, len: u64, retire: &mut dyn Retire) -> Result<u64, Errno>;
 }
 
 /// The file-mapping producer installed before any real one exists.
@@ -88,7 +90,7 @@ impl FileMap for NullFileMap {
         Err(Errno::NotImplemented)
     }
 
-    fn release(&self, _base: u64, _len: u64) -> Result<u64, Errno> {
+    fn release(&self, _base: u64, _len: u64, _retire: &mut dyn Retire) -> Result<u64, Errno> {
         Err(Errno::NotImplemented)
     }
 }
@@ -113,7 +115,7 @@ mod tests {
             Err(Errno::NotImplemented)
         );
         assert_eq!(
-            NULL_FILE_MAP.release(0x10_0000, 0x1000),
+            NULL_FILE_MAP.release(0x10_0000, 0x1000, &mut tairix_kernel_mem::Unpublished),
             Err(Errno::NotImplemented)
         );
     }

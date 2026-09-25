@@ -25,7 +25,8 @@ use tairix_fuzzseed::Prng;
 use tairix_kernel_mem::{
     AddressSpace, BootMemoryMap, CompressRefusal, EntropySource, FaultError, FrameAllocator,
     HostPageTable, MapFlags, MemoryClass, MemoryRegion, Page, PageCandidate, PhysAddr, PhysMap,
-    Ramzip, RamzipCaps, RegionKind, SealError, SimPhysMap, VirtAddr, VmContext, PAGE_SIZE,
+    Ramzip, RamzipCaps, RegionKind, SealError, SimPhysMap, Unpublished, VirtAddr, VmContext,
+    PAGE_SIZE,
 };
 use tairix_reclaim::{FreeMemorySource, MemoryPressure, PressureBand};
 
@@ -183,6 +184,7 @@ fn fuzz_ramzip_restore_is_fail_closed() {
                 page,
                 task,
                 &PageCandidate::cold_anonymous(),
+                &mut Unpublished,
             ) {
                 Ok(()) => {}
                 Err(CompressRefusal::Incompressible | CompressRefusal::TaskThrashing) => {

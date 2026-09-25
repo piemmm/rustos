@@ -39,7 +39,7 @@
 use core::sync::atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering};
 
 use tairix_arch_api::{
-    CoreClass, CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError,
+    CoreClass, CpuId, CpuMask, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError,
 };
 
 use crate::hybrid;
@@ -161,8 +161,7 @@ pub struct X86_64Arch {
     //
     // Allow `dead_code` only on the bare-metal target: on the host
     // target the field is read by `ticks_now`. The justification is
-    // the struct-layout invariant called out above (
-    // — `#[allow]` is paired with a justifying comment).
+    // the struct-layout invariant called out above.
     #[cfg_attr(all(target_arch = "x86_64", target_os = "none"), allow(dead_code))]
     host_tick_counter: AtomicU64,
 
@@ -488,6 +487,18 @@ impl CrossCpuTlbShootdown for X86_64Arch {
             // Host: no second CPU and no TLB; the conformance vertical
             // only checks the call is total and panic-free.
             let _ = (start_vaddr, page_count);
+        }
+    }
+
+    fn shootdown_user_range(&self, cpus: CpuMask<'_>, start_vaddr: u64, page_count: usize) {
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            let targets = cpus.iter().filter_map(|cpu| self.lapic_id_of(cpu));
+            crate::tlb_shootdown::shootdown_remote(start_vaddr, page_count, targets);
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            let _ = (cpus, start_vaddr, page_count);
         }
     }
 }

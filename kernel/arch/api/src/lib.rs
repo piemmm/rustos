@@ -213,7 +213,7 @@ pub use uaccess::{
     CopySpanFault, GuardedCopyFn,
 };
 
-pub use xtlb::{conformance as xtlb_conformance, CrossCpuTlbShootdown};
+pub use xtlb::{conformance as xtlb_conformance, CpuMask, CrossCpuTlbShootdown};
 
 pub use smp::{conformance as smp_conformance, SecondaryBringup, SmpError};
 

@@ -71,8 +71,11 @@ use tairix_abi::{
 };
 use tairix_caps::CapabilitySet;
 use tairix_collections::{RangeError, RangeKey, RangeMap, RangeSet};
-use tairix_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, VirtAddr, PAGE_SIZE};
+use tairix_kernel_mem::{
+    Frame, MapFlags, Page, PhysMap, Retire, UserAddressSpace, VirtAddr, PAGE_SIZE,
+};
 use tairix_kernel_sec::{ProcessId, TaskId};
+use tairix_sync::RwLock;
 
 use crate::filelock::OwnerId;
 use crate::pipe::PipeEnd;
@@ -137,6 +140,9 @@ pub enum AspaceError {
 struct TaskAddressSpace {
     space: Box<dyn UserAddressSpace + Send + Sync>,
     physmap: Box<dyn PhysMap + Send + Sync>,
+    /// The snapshot missed a delta and may still name a released frame, so
+    /// nothing resolves through it until it is replaced.
+    suspended: bool,
 }
 
 /// What the kernel recorded when it loaded a driver for a hardware-tree node.
@@ -1094,6 +1100,54 @@ pub(crate) fn pages_spanning(bytes: u64) -> u64 {
     bytes.div_ceil(PAGE_SIZE as u64)
 }
 
+/// `process`'s registry snapshot — the view the copy path translates its
+/// user addresses through — as the [`Retire`] its unmaps shut before a frame
+/// is released.
+///
+/// Called with the process's space locked, which comes before the registry.
+pub(crate) struct SnapshotRetire<'a> {
+    aspaces: &'a RwLock<AddressSpaceRegistry>,
+    process: ProcessId,
+    suspended: bool,
+}
+
+impl<'a> SnapshotRetire<'a> {
+    pub(crate) fn new(aspaces: &'a RwLock<AddressSpaceRegistry>, process: ProcessId) -> Self {
+        Self {
+            aspaces,
+            process,
+            suspended: false,
+        }
+    }
+
+    /// Whether the snapshot took a change it could not absorb in place and
+    /// was suspended; the caller re-freezes it from the live space.
+    pub(crate) fn suspended(&self) -> bool {
+        self.suspended
+    }
+}
+
+impl Retire for SnapshotRetire<'_> {
+    fn retire(&mut self, base: u64, pages: u64) {
+        self.retire_runs(&mut core::iter::once((base, pages)));
+    }
+
+    fn retire_runs(&mut self, runs: &mut dyn Iterator<Item = (u64, u64)>) {
+        let mut aspaces = self.aspaces.write();
+        for (base, pages) in runs {
+            self.suspended |= !aspaces.retire_region_pages(self.process, base, pages);
+        }
+    }
+
+    fn restore(&mut self, page: Page, frame: Frame, flags: MapFlags) {
+        let absorbed = self
+            .aspaces
+            .write()
+            .restore_page(self.process, page, (frame, flags));
+        self.suspended |= !absorbed;
+    }
+}
+
 /// Apply `publish` to every page of the `page_count`-page region based at
 /// `base`, reporting whether all of them were published.
 ///
@@ -1164,7 +1218,14 @@ impl AddressSpaceRegistry {
         if self.tasks.contains_key(&task) {
             return Err(AspaceError::AlreadyPresent);
         }
-        self.tasks.insert(task, TaskAddressSpace { space, physmap });
+        self.tasks.insert(
+            task,
+            TaskAddressSpace {
+                space,
+                physmap,
+                suspended: false,
+            },
+        );
         Ok(())
     }
 
@@ -1202,6 +1263,7 @@ impl AddressSpaceRegistry {
         match self.tasks.get_mut(&task) {
             Some(entry) => {
                 entry.space = space;
+                entry.suspended = false;
                 true
             }
             None => false,
@@ -1243,6 +1305,34 @@ impl AddressSpaceRegistry {
         fold_region_pages(base, page_count, |page| {
             self.note_faulted_page(task, page, None)
         })
+    }
+
+    /// [`Self::forget_region_pages`] for pages whose frames are about to be
+    /// released: a snapshot that cannot take the removal in place is
+    /// suspended, so the copy path cannot reach a freed frame through it,
+    /// and `false` tells the caller to re-freeze it.
+    pub fn retire_region_pages(&mut self, task: ProcessId, base: u64, page_count: u64) -> bool {
+        self.forget_region_pages(task, base, page_count) || !self.suspend(task)
+    }
+
+    /// Put `page` back in `task`'s snapshot, mapped as `mapping`; `false`, as
+    /// for [`Self::retire_region_pages`], when the snapshot had to be
+    /// suspended instead.
+    pub fn restore_page(
+        &mut self,
+        task: ProcessId,
+        page: Page,
+        mapping: (Frame, MapFlags),
+    ) -> bool {
+        self.note_faulted_page(task, page, Some(mapping)) || !self.suspend(task)
+    }
+
+    /// Suspend `task`'s snapshot, returning whether it had one.
+    fn suspend(&mut self, task: ProcessId) -> bool {
+        self.tasks
+            .get_mut(&task)
+            .map(|entry| entry.suspended = true)
+            .is_some()
     }
 
     /// Withdraw `task`'s entry, returning `true` if one was present.
@@ -2972,14 +3062,17 @@ impl AddressSpaceRegistry {
     /// no entry is registered.
     #[must_use]
     pub fn resolve(&self, task: ProcessId) -> Option<(&dyn UserAddressSpace, &dyn PhysMap)> {
-        self.tasks.get(&task).map(|entry| {
-            // Drop the `Send + Sync` auto-trait bounds the stored boxes
-            // carry: the copy path only needs the bare read-only views,
-            // and the registry's own `RwLock` already governs sharing.
-            let space: &dyn UserAddressSpace = &*entry.space;
-            let physmap: &dyn PhysMap = &*entry.physmap;
-            (space, physmap)
-        })
+        self.tasks
+            .get(&task)
+            .filter(|entry| !entry.suspended)
+            .map(|entry| {
+                // Drop the `Send + Sync` auto-trait bounds the stored boxes
+                // carry: the copy path only needs the bare read-only views,
+                // and the registry's own `RwLock` already governs sharing.
+                let space: &dyn UserAddressSpace = &*entry.space;
+                let physmap: &dyn PhysMap = &*entry.physmap;
+                (space, physmap)
+            })
     }
 
     /// Whether an address space is registered for `task`.
@@ -3142,6 +3235,71 @@ mod tests {
         // silently-created entry.
         assert!(!reg.note_faulted_page(ProcessId(99), page(0), None));
         assert!(!reg.contains(ProcessId(99)));
+    }
+
+    #[test]
+    fn retiring_a_frozen_snapshots_pages_drops_them_in_place_and_restoring_puts_one_back() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.register(ProcessId(8), frozen_space(1, 100), sim())
+            .expect("registration succeeds");
+        assert!(reg.retire_region_pages(ProcessId(8), page(1).start().as_u64(), 1));
+        let (space, _) = reg.resolve(ProcessId(8)).expect("still resolves");
+        assert!(space.translate(page(1)).is_none(), "the page is gone");
+
+        assert!(reg.restore_page(ProcessId(8), page(1), (Frame(100), MapFlags::USER)));
+        let (space, _) = reg.resolve(ProcessId(8)).expect("still resolves");
+        assert_eq!(space.translate(page(1)).expect("back").0, Frame(100));
+    }
+
+    #[test]
+    fn a_batch_retires_each_of_its_runs_and_keeps_the_pages_between_them() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.register(ProcessId(10), frozen_space(1, 100), sim())
+            .expect("registration succeeds");
+        for (n, frame) in [(2, 102), (3, 103), (4, 104)] {
+            assert!(reg.note_faulted_page(
+                ProcessId(10),
+                page(n),
+                Some((Frame(frame), MapFlags::USER))
+            ));
+        }
+        let aspaces = RwLock::new(reg);
+        let mut retire = SnapshotRetire::new(&aspaces, ProcessId(10));
+        let at = |n| page(n).start().as_u64();
+        retire.retire_runs(&mut [(at(1), 1), (at(3), 2)].into_iter());
+        assert!(!retire.suspended());
+
+        let reg = aspaces.read();
+        let (space, _) = reg.resolve(ProcessId(10)).expect("still resolves");
+        for n in [1, 3, 4] {
+            assert!(space.translate(page(n)).is_none(), "page {n} is retired");
+        }
+        assert_eq!(space.translate(page(2)).expect("kept").0, Frame(102));
+    }
+
+    #[test]
+    fn a_snapshot_that_cannot_drop_a_retired_page_resolves_nothing_until_replaced() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.register(ProcessId(9), user_space(1, 1), sim())
+            .expect("registration succeeds");
+        assert!(
+            !reg.retire_region_pages(ProcessId(9), page(1).start().as_u64(), 1),
+            "the caller must re-freeze it"
+        );
+        assert!(
+            reg.resolve(ProcessId(9)).is_none(),
+            "no copy reaches a frame the snapshot still names"
+        );
+        assert!(reg.reregister_space(ProcessId(9), frozen_space(2, 2)));
+        assert!(
+            reg.resolve(ProcessId(9)).is_some(),
+            "a fresh snapshot resolves"
+        );
+
+        assert!(
+            reg.retire_region_pages(ProcessId(98), 0, 1),
+            "a task with no snapshot has nothing to re-freeze"
+        );
     }
 
     #[test]

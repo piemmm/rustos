@@ -324,6 +324,18 @@ the real cross-CPU round-trip is proven by the three
 `cross_cpu_tlb_shootdown_qemu_*` QEMU verticals on real ≥ 2 emulated
 cores (`plans/WIRING.md` Stage W13).
 
+A user address space is active on only some CPUs, so its unmaps use the
+targeted form, `shootdown_user_range(cpus, start, pages)`: invalidate on the
+CPUs of the `CpuMask` other than the caller, which has already flushed its
+own. The mask is a borrowed view over the space's `ActiveCpus`
+(`kernel/mem::retire`), so the HAL allocates nothing. x86_64 raises the IPI at
+those CPUs alone and reloads `CR3` instead of issuing `invlpg` past 33 pages;
+riscv64 folds their harts into one SBI RFENCE call per 64-hart window, turns a
+refused call or an unrepresentable range into a whole-space fence of every
+hart, and starts no secondary hart on firmware without RFENCE; aarch64 owes
+nothing, its local flush being the broadcast already. The default broadcasts
+to every CPU, which over-invalidates and is always correct.
+
 ### Secondary-CPU bring-up
 
 `AGENTS.md` §4 mandates SMP from day one, so the kernel must start the

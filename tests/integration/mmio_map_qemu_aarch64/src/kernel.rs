@@ -40,8 +40,9 @@ use tairix_kernel_core::{
     ProcessSpace, SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{
-    page_count_for, AddressSpace, BootMemoryMap, DirectPhysMap, DmaCustodian, Frame,
-    FrameAllocator, LiveSpace, MemoryRegion, PhysAddr, RegionKind, UserStack, VirtAddr,
+    page_count_for, ActiveCpus, AddressSpace, BootMemoryMap, DirectPhysMap, DmaCustodian, Frame,
+    FrameAllocator, LiveSpace, MemoryRegion, PhysAddr, RegionKind, SpaceTlb, Unpublished,
+    UserStack, VirtAddr,
 };
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -386,8 +387,11 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         let len = args[1] as usize;
         let result = match page_count_for(len) {
             Ok(pages) => {
-                match with_current_live_space(BOOT_CPU, |space| space.unmap_anonymous(base, pages))
-                {
+                // This kernel serves no copy path, so the page table is the only view.
+                let unmapped = with_current_live_space(BOOT_CPU, |space| {
+                    space.unmap_anonymous(base, pages, &mut Unpublished)
+                });
+                match unmapped {
                     Some(Ok(())) => {
                         MEM_OK.store(true, Ordering::SeqCst);
                         note(TEST_MEM_UNMAPPED, "mem_map test: placed region released");
@@ -608,8 +612,13 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     {
         qemu_exit::exit_failure(FAIL_LIVE_BUILD);
     }
+    // One CPU runs this vertical, so no other needs reaching.
+    let Ok(cpus) = ActiveCpus::new(1) else {
+        qemu_exit::exit_failure(FAIL_LIVE_BUILD);
+    };
     let Ok(live) = LiveSpace::new(
         space,
+        SpaceTlb::new(cpus, None),
         identity,
         frames,
         VirtAddr::new(MMIO_WINDOW_BASE),

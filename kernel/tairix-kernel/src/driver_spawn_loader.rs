@@ -636,6 +636,10 @@ mod tests {
             &self.sink
         }
 
+        fn space_tlb(&self) -> Result<tairix_kernel_mem::SpaceTlb, tairix_kernel_mem::AllocError> {
+            tairix_kernel_core::new_space_tlb(None)
+        }
+
         unsafe fn admit_init(
             &self,
             _caps: CapabilitySet,

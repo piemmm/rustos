@@ -268,7 +268,7 @@ pub use procsignal::{
     ForegroundSignal, ForegroundSignalAlreadyInstalled, KernelProcessSignal, NullProcessSignal,
     ProcessSignal, NULL_PROCESS_SIGNAL,
 };
-pub use procspace::ProcessSpace;
+pub use procspace::{new_space_tlb, ProcessSpace};
 pub use procwait::{
     KernelProcessWait, NullProcessWait, ProcessTable, ProcessWait, Reap, WaitedChild,
     NULL_PROCESS_WAIT,

@@ -34,6 +34,7 @@ use tairix_arch_api::tlb::TlbShootdown;
 
 use crate::error::AllocError;
 use crate::frame::{Frame, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
+use crate::retire::SpaceTlb;
 
 // `bitflags_like!` — a tiny in-crate macro that synthesises just enough of
 // the well-known `bitflags` crate to avoid adding a dependency for one
@@ -336,6 +337,9 @@ pub struct AddressSpace<P: PageTable> {
     /// give `AddressSpace` a useful `Drop`. Kept page-keyed
     /// independently of the underlying table for cheap iteration.
     live: BTreeMap<Page, MapFlags>,
+    /// The other CPUs a cleared entry must be discarded on; [`None`] for a
+    /// space no dispatcher makes active.
+    tlb: Option<SpaceTlb>,
 }
 
 impl<P: PageTable> AddressSpace<P> {
@@ -349,6 +353,27 @@ impl<P: PageTable> AddressSpace<P> {
         Self {
             table,
             live: BTreeMap::new(),
+            tlb: None,
+        }
+    }
+
+    /// Reach the CPUs `tlb` tracks whenever an entry of this space is cleared.
+    /// Done before the space is made active on any CPU.
+    pub fn attach_tlb(&mut self, tlb: SpaceTlb) {
+        self.tlb = Some(tlb);
+    }
+
+    /// The reach [`Self::attach_tlb`] installed.
+    #[must_use]
+    pub fn tlb(&self) -> Option<&SpaceTlb> {
+        self.tlb.as_ref()
+    }
+
+    /// Discard `pages` cleared pages from `base` on every other CPU the space
+    /// may be cached on, returning once none can use them.
+    pub(crate) fn shoot_remote(&self, base: u64, pages: u64) {
+        if let Some(tlb) = &self.tlb {
+            tlb.shoot_remote(base, pages);
         }
     }
 
@@ -467,6 +492,23 @@ impl<P: PageTable> AddressSpace<P> {
         Some((page, self.unmap_entry(page)))
     }
 
+    /// [`Self::unmap_lowest`] without the TLB flush: the teardown of a space
+    /// that can no longer be cached anywhere.
+    ///
+    /// # Safety
+    ///
+    /// No CPU may hold, or come to hold, a translation of this space: it must
+    /// be active on none, and have been discarded by each CPU that ran it.
+    pub unsafe fn clear_lowest(&mut self) -> Option<(Page, Result<Frame, PageTableError>)> {
+        let (page, _) = self.live.pop_first()?;
+        let cleared = self
+            .table
+            .unmap(page.start().as_u64())
+            .map(|paddr| Frame::containing(PhysAddr::new(paddr)))
+            .map_err(from_map_error);
+        Some((page, cleared))
+    }
+
     /// Clear `page`'s page-table entry and flush it, leaving the record to the
     /// caller.
     fn unmap_entry(&mut self, page: Page) -> Result<Frame, PageTableError> {
@@ -493,6 +535,29 @@ impl<P: PageTable> AddressSpace<P> {
     #[must_use]
     pub fn mapped_pages(&self) -> usize {
         self.live.len()
+    }
+
+    /// Whether this layer records `page` as mapped.
+    #[must_use]
+    pub fn is_mapped(&self, page: Page) -> bool {
+        self.live.contains_key(&page)
+    }
+
+    /// Discard this CPU's cached translation of `page`: a fault found it
+    /// already mapped by another CPU, and a port may cache the absence the
+    /// fault walked, which would keep it faulting.
+    pub fn discard_stale(&mut self, page: Page) {
+        self.table.flush_page(page.start().as_u64());
+    }
+
+    /// The lowest page this layer records as mapped in `from..=last`: how a
+    /// release of a sparse range visits its resident pages alone.
+    #[must_use]
+    pub fn next_live(&self, from: Page, last: Page) -> Option<Page> {
+        if from > last {
+            return None;
+        }
+        self.live.range(from..=last).next().map(|(&page, _)| page)
     }
 
     /// Iterate over every page this layer currently records as mapped, in
@@ -859,6 +924,23 @@ mod tests {
         );
         assert_eq!(s.unmap_lowest(), Some((p(3), Ok(Frame(30)))));
         assert_eq!(s.unmap_lowest(), None);
+        assert_eq!(s.mapped_pages(), 0);
+    }
+
+    #[test]
+    fn clearing_an_inactive_space_flushes_nothing() {
+        let mut s = AddressSpace::new(HostPageTable::new());
+        s.map(p(2), Frame(20), MapFlags::READ).unwrap();
+        s.map(p(1), Frame(10), MapFlags::READ).unwrap();
+        let flushes = s.table.flush_count;
+        // SAFETY: the host double is active on no CPU.
+        unsafe {
+            assert_eq!(s.clear_lowest(), Some((p(1), Ok(Frame(10)))));
+            assert_eq!(s.clear_lowest(), Some((p(2), Ok(Frame(20)))));
+            assert_eq!(s.clear_lowest(), None);
+        }
+        assert_eq!(s.table.flush_count, flushes);
+        assert!(s.translate(p(1)).is_none() && s.translate(p(2)).is_none());
         assert_eq!(s.mapped_pages(), 0);
     }
 

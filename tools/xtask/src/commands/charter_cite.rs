@@ -457,6 +457,16 @@ fn stranded_dash(text: &str) -> Option<usize> {
     })
 }
 
+/// Where `text` has a parenthesis opened at a line end that holds one quoted
+/// phrase and nothing else: the title of the section a citation named.
+fn quoted_title(text: &str) -> Option<usize> {
+    text.match_indices("( \"").find_map(|(at, open)| {
+        let quoted = &text[at + open.len()..];
+        let close = quoted.find('"')?;
+        quoted[close + 1..].starts_with(')').then_some(at)
+    })
+}
+
 /// Scan one comment paragraph for citations, each with its byte offset in
 /// `text` so the caller can name the line it sits on.
 ///
@@ -471,6 +481,14 @@ fn scan_paragraph(text: &str, labels: &BTreeSet<String>) -> Vec<(usize, &'static
     }
     if let Some(at) = text.find("; —") {
         out.push((at, "semicolon running into a dash"));
+    }
+    // A citation that closed its line leaves the parenthesis open there, so
+    // the joined paragraph carries a space the author never wrote after it.
+    if let Some(at) = text.find("(—").or_else(|| text.find("( —")) {
+        out.push((at, "parenthesis opening on a dash"));
+    }
+    if let Some(at) = quoted_title(text) {
+        out.push((at, "parenthesis holding only a quotation"));
     }
     if let Some(at) = stranded_dash(text) {
         out.push((at, "sentence opening on a dash"));
@@ -923,6 +941,39 @@ mod tests {
             vec!["sentence opening on a dash"]
         );
         assert!(reasons("// the slot is set once. — Not later.").is_empty());
+        assert_eq!(
+            reasons("// fixed services only (— no bloat)."),
+            vec!["parenthesis opening on a dash"]
+        );
+        assert!(reasons("// the queue — bounded, fair — drains in order").is_empty());
+    }
+
+    #[test]
+    fn a_parenthesis_a_stripped_citation_left_open_at_a_line_end_is_refused() {
+        let paragraph = |src| {
+            bodies(src)
+                .iter()
+                .map(|b| comment_text(b))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let reasons_of = |src| {
+            scan_paragraph(&paragraph(src), &labels())
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            reasons_of("/// needs only these (\n/// — no bloat).\nfn f() {}\n"),
+            vec!["parenthesis opening on a dash"]
+        );
+        assert_eq!(
+            reasons_of("//! surface of the HAL (\n//! \"TLB shootdown\").\n"),
+            vec!["parenthesis holding only a quotation"]
+        );
+        assert!(reasons_of("// one-shot only (\n// tickless); no periodic mode\n").is_empty());
+        assert!(reasons_of("// the term (\"tickless\") is the charter's\n").is_empty());
+        assert!(reasons_of("// part = *(\n// \"/\" segment )\n").is_empty());
     }
 
     #[test]

@@ -1,5 +1,4 @@
-//! Timer-programming surface of the Arch HAL (
-//! "timer programming").
+//! Timer-programming surface of the Arch HAL.
 //!
 //! TAIRiX is a **tickless (`NO_HZ`)** kernel: the timer
 //! is armed *one-shot*, to the next event the scheduler needs, never at a

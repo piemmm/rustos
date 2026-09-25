@@ -34,6 +34,7 @@
 //! direct map, the frame allocator, and the device-window allocator.
 
 use alloc::collections::BTreeSet;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -41,7 +42,7 @@ use tairix_log::Sink;
 use tairix_reclaim::MemoryPressure;
 use tairix_sync::SpinLock;
 
-use crate::anon::{map_anonymous, unmap_anonymous, zero_frame, AnonError};
+use crate::anon::{map_anonymous, page_at, unmap_anonymous, AnonError};
 use crate::anon_window::AnonWindowMap;
 use crate::coldscan::{ColdPageScanner, ColdScanError};
 use crate::dma::{DmaCustodian, DmaError, DmaWindowMap};
@@ -53,7 +54,10 @@ use crate::ramzip::{
     FaultError, PageCandidate, Ramzip, RamzipFaultOutcome, RamzipReclaimSummary, VmContext,
     WarmOutcome,
 };
-use crate::vmm::{AddressSpace, FrozenAddressSpace, MapFlags, Page, PageTable, VirtAddr};
+use crate::retire::{ActiveCpus, Retire, Retiring, SpaceTlb, Unpublished};
+use crate::vmm::{
+    AddressSpace, FrozenAddressSpace, MapFlags, Page, PageTable, PageTableError, VirtAddr,
+};
 
 /// Monotonic allocator of the stable per-address-space id the global
 /// [`Ramzip`] tier keys a space's compressed entries on and the audit
@@ -131,6 +135,10 @@ pub struct DmaMapping {
 /// thread's syscall path through the per-CPU publication. Every method takes
 /// `&mut self`; that lock is what makes the access exclusive.
 pub trait LiveUserSpace: Send {
+    /// The CPUs this space is active on, for the dispatcher to keep current:
+    /// an unmap discards its translations on exactly these.
+    fn active_cpus(&self) -> Arc<ActiveCpus>;
+
     /// Map `page_count` fresh, zeroed `RW|USER` pages at the page-aligned
     /// `base_va` into this space, returning `base_va` on success.
     ///
@@ -165,15 +173,22 @@ pub trait LiveUserSpace: Send {
     /// or the precise placement/map error otherwise.
     fn map_anonymous_placed(&mut self, page_count: u64) -> Result<u64, LiveSpaceError>;
 
-    /// Release the `page_count`-page region based at `base_va`, zeroing
-    /// every frame before it is returned to the allocator (zero on free). The whole range is validated mapped before any page is
-    /// torn down (fail closed on a bad range).
+    /// Release the `page_count`-page region based at `base_va`. Each frame
+    /// is zeroed and returned to the allocator only once no CPU and no
+    /// `retire` view can reach it (zero on free). The whole range is
+    /// validated mapped before any page is torn down (fail closed on a bad
+    /// range).
     ///
     /// # Errors
     ///
     /// [`LiveSpaceError::Anon`] (e.g. [`AnonError::NotMapped`] when the
     /// range is not one this space mapped).
-    fn unmap_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<(), LiveSpaceError>;
+    fn unmap_anonymous(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+        retire: &mut dyn Retire,
+    ) -> Result<(), LiveSpaceError>;
 
     /// Reserve `page_count` pages of *address space* for a demand-paged
     /// **anonymous** mapping at a **kernel-chosen** base (the non-`FIXED`
@@ -293,17 +308,21 @@ pub trait LiveUserSpace: Send {
 
     /// Release the whole file region based at `base_va` (`page_count`
     /// pages, exactly as reserved), sparsely unmapping the pages fault
-    /// history made resident — zeroing each frame on free — and returning
-    /// the reservation to the file window. Returns the number of pages
-    /// that were resident.
+    /// history made resident — each frame zeroed on free once no CPU and no
+    /// `retire` view can reach it — and returning the reservation to the
+    /// file window. Returns the number of pages that were resident.
     ///
     /// # Errors
     ///
     /// [`LiveSpaceError::Anon`] — [`AnonError::NotMapped`] when
     /// `(base_va, page_count)` is not a live file region of this space
     /// (fail closed: nothing is torn down).
-    fn release_file_region(&mut self, base_va: u64, page_count: u64)
-        -> Result<u64, LiveSpaceError>;
+    fn release_file_region(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+        retire: &mut dyn Retire,
+    ) -> Result<u64, LiveSpaceError>;
 
     /// Map `len` bytes of device physical memory beginning at `phys_base`
     /// into this space, returning the kernel-chosen base user virtual
@@ -356,11 +375,10 @@ pub trait LiveUserSpace: Send {
 
     /// Unmap every device and framebuffer window whose physical span `keep`
     /// refuses, handing each released window's page-aligned base and page
-    /// count to `unmapped` once its entries are gone.
+    /// count to `unmapped` once its entries are gone from the page table and
+    /// from every CPU's TLB.
     ///
-    /// The frames are the device's, so nothing is freed. Each entry is
-    /// flushed on this CPU only; a caller that may share the space with
-    /// another CPU owes the cross-CPU shootdown.
+    /// The frames are the device's, so nothing is freed.
     ///
     /// # Errors
     ///
@@ -410,8 +428,9 @@ pub trait LiveUserSpace: Send {
     ) -> Result<DmaMapping, LiveSpaceError>;
 
     /// Release the DMA buffer whose CPU virtual base is `cpu_va`, zeroing
-    /// every backing byte (zero-on-free) before its frames return to the
-    /// allocator — the symmetric free for [`Self::alloc_dma`].
+    /// every backing byte (zero-on-free) once no CPU and no `retire` view can
+    /// reach it, before its frames return to the allocator — the symmetric
+    /// free for [`Self::alloc_dma`].
     ///
     /// A long-running driver that issues many transfers reclaims each
     /// request's buffers through this rather than leaking frames until it
@@ -420,10 +439,9 @@ pub trait LiveUserSpace: Send {
     /// base of a live carve in this space fails closed (covering a forged,
     /// stale, or double free) without releasing anything.
     ///
-    /// Reports the byte length released, so a caller can drop exactly those
-    /// pages from the address-space snapshot rather than rebuilding it. The
-    /// block's custody reservation is returned whether or not its release
-    /// completes, since once its record is gone it can never be surrendered.
+    /// Reports the byte length released. The block's custody reservation is
+    /// returned whether or not its release completes, since once its record
+    /// is gone it can never be surrendered.
     ///
     /// # Errors
     ///
@@ -431,7 +449,7 @@ pub trait LiveUserSpace: Send {
     /// not the base of a live DMA carve of this space, or the direct-map,
     /// page-table, or allocator refusal that stopped the release part-way; a
     /// block that is not returned to the allocator stays allocated.
-    fn free_dma(&mut self, cpu_va: u64) -> Result<usize, LiveSpaceError>;
+    fn free_dma(&mut self, cpu_va: u64, retire: &mut dyn Retire) -> Result<usize, LiveSpaceError>;
 
     /// Map an existing, kernel-owned **shared-memory region** whose backing
     /// is a *list* of physically-contiguous chunks (`(phys_base, pages)`)
@@ -531,7 +549,10 @@ pub trait LiveUserSpace: Send {
     /// admitted. `template` carries the task-level attributes the
     /// caller knows (pinned / sensitive / latency-critical); a pinned
     /// task yields nothing. `reclaimable_residue` is the cheaper-cache
-    /// residue the tier waits to drain first.
+    /// residue the tier waits to drain first. Each page leaves `retire`'s
+    /// view before it is read, and returns to it if the tier refuses it.
+    // Each argument is a distinct input of the sweep.
+    #[allow(clippy::too_many_arguments)]
     fn ramzip_reclaim(
         &mut self,
         tier: &SpinLock<Ramzip>,
@@ -540,6 +561,7 @@ pub trait LiveUserSpace: Send {
         want: usize,
         template: PageCandidate,
         sink: &dyn Sink,
+        retire: &mut dyn Retire,
     ) -> RamzipReclaimSummary;
 
     /// Opportunistically restore compressed entries adjacent to the
@@ -597,7 +619,7 @@ pub trait LiveUserSpace: Send {
 ///
 /// * `space` — the live arch [`AddressSpace<P>`] (its page-table frames come
 ///   from the backend's own [`PageTableFrames`](tairix_arch_api::frames::PageTableFrames)
-///   source, wired at spawn);
+///   source, wired at spawn), and `cpus`, the CPUs it is active on;
 /// * `physmap` — the kernel direct map used to zero anonymous frames on map
 ///   and on free;
 /// * `frames` — the kernel [`FrameAllocator`] anonymous pages are drawn from
@@ -627,6 +649,8 @@ pub trait LiveUserSpace: Send {
 ///   the reclaim clock hand rotates independently per space.
 pub struct LiveSpace<P: PageTable, M: PhysMap> {
     space: AddressSpace<P>,
+    /// The CPUs `space` is active on: the set its attached reach targets.
+    cpus: Arc<ActiveCpus>,
     physmap: M,
     frames: &'static FrameAllocator,
     mmio: MmioWindowMap,
@@ -659,7 +683,9 @@ pub struct LiveSpace<P: PageTable, M: PhysMap> {
 impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
     /// Retain `space` as a live, mutable user address space.
     ///
-    /// `physmap` is the kernel direct map (used to zero anonymous frames),
+    /// `tlb` is how an entry this space clears is discarded on the other CPUs
+    /// the space is active on. `physmap` is the kernel direct map (used to
+    /// zero anonymous frames),
     /// `frames` the allocator anonymous pages come from,
     /// `[mmio_window_base, mmio_window_base + mmio_window_pages * PAGE_SIZE)`
     /// the virtual range device windows are mapped into (guard-bracketed by
@@ -686,7 +712,8 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
     // mirroring `KernelSyscallHandlers::new`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        space: AddressSpace<P>,
+        mut space: AddressSpace<P>,
+        tlb: SpaceTlb,
         physmap: M,
         frames: &'static FrameAllocator,
         mmio_window_base: VirtAddr,
@@ -726,8 +753,11 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
                     .map_err(|_| MmioError::InvalidMapConfig)?,
             )
         };
+        let cpus = Arc::clone(tlb.active_cpus());
+        space.attach_tlb(tlb);
         Ok(Self {
             space,
+            cpus,
             physmap,
             frames,
             mmio,
@@ -756,6 +786,25 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
     pub fn space(&self) -> &AddressSpace<P> {
         &self.space
     }
+
+    /// Settle a fault's map of `page_count` pages from `base_va`: when another
+    /// CPU mapped them first, this CPU may still cache the absence the fault
+    /// walked, and would take the same fault again.
+    fn settle_fault(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+        mapped: Result<(), AnonError>,
+    ) -> Result<(), AnonError> {
+        if mapped == Err(AnonError::Map(PageTableError::AlreadyMapped)) {
+            for index in 0..page_count {
+                if let Ok(page) = page_at(base_va, index) {
+                    self.space.discard_stale(page);
+                }
+            }
+        }
+        mapped
+    }
 }
 
 impl<P, M> LiveUserSpace for LiveSpace<P, M>
@@ -763,6 +812,10 @@ where
     P: PageTable + Send,
     M: PhysMap + Send,
 {
+    fn active_cpus(&self) -> Arc<ActiveCpus> {
+        Arc::clone(&self.cpus)
+    }
+
     fn map_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<u64, LiveSpaceError> {
         // Copy the `'static` allocator handle out so the alloc/free closures
         // do not borrow `self` while `map_anonymous` borrows `self.space`
@@ -775,7 +828,7 @@ where
         // reservation already cleared. An unwound page returns to its
         // reservation (`free_committed`) so the commitment survives a
         // page-table-build failure without drifting the counter.
-        map_anonymous(
+        let mapped = map_anonymous(
             &mut self.space,
             &self.physmap,
             base_va,
@@ -784,7 +837,8 @@ where
             |frame| {
                 let _ = frames.free_committed(frame);
             },
-        )?;
+        );
+        self.settle_fault(base_va, page_count, mapped)?;
         // The reserved pages are now resident: convert them from
         // committed-unbacked headroom to real residency (the per-page
         // `alloc_user_committed` already lowered the global counter; keep the
@@ -822,7 +876,12 @@ where
         }
     }
 
-    fn unmap_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<(), LiveSpaceError> {
+    fn unmap_anonymous(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+        retire: &mut dyn Retire,
+    ) -> Result<(), LiveSpaceError> {
         // A file-mapped region is released only through
         // `release_file_region` (its residency is sparse and its
         // bookkeeping lives in the file window): an anonymous unmap naming
@@ -854,7 +913,8 @@ where
             &self.physmap,
             base_va,
             page_count,
-            |frame| {
+            retire,
+            &mut |frame| {
                 resident = resident.saturating_add(1);
                 let _ = frames.free(frame);
             },
@@ -976,7 +1036,7 @@ where
             return Err(LiveSpaceError::Anon(AnonError::NotMapped));
         }
         let frames = self.frames;
-        map_file_page(
+        let mapped = map_file_page(
             &mut self.space,
             &self.physmap,
             va,
@@ -988,7 +1048,8 @@ where
                 // panic).
                 let _ = frames.free(frame);
             },
-        )?;
+        );
+        self.settle_fault(va, 1, mapped)?;
         Ok(())
     }
 
@@ -996,6 +1057,7 @@ where
         &mut self,
         base_va: u64,
         page_count: u64,
+        retire: &mut dyn Retire,
     ) -> Result<u64, LiveSpaceError> {
         // The (base, extent) must name a live reservation exactly before
         // any teardown, so a bad pair fails closed without touching a
@@ -1012,7 +1074,8 @@ where
             &self.physmap,
             base_va,
             page_count,
-            |frame| {
+            retire,
+            &mut |frame| {
                 let _ = frames.free(frame);
             },
         )?;
@@ -1086,12 +1149,13 @@ where
         })
     }
 
-    fn free_dma(&mut self, cpu_va: u64) -> Result<usize, LiveSpaceError> {
+    fn free_dma(&mut self, cpu_va: u64, retire: &mut dyn Retire) -> Result<usize, LiveSpaceError> {
         let released = self.dma.free_at(
             &mut self.space,
             self.frames,
             &self.physmap,
             VirtAddr::new(cpu_va),
+            retire,
         );
         // Past an unknown buffer the record is gone whether or not the release
         // completed, so the block can never be surrendered for its room.
@@ -1172,6 +1236,7 @@ where
         want: usize,
         template: PageCandidate,
         sink: &dyn Sink,
+        retire: &mut dyn Retire,
     ) -> RamzipReclaimSummary {
         if want == 0 {
             return RamzipReclaimSummary::default();
@@ -1236,6 +1301,7 @@ where
                 page,
                 space_id,
                 &template,
+                retire,
             ) {
                 Ok(()) => summary.compressed += 1,
                 Err(_) => summary.refused += 1,
@@ -1333,11 +1399,37 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
         //    — every allocator frame lies in the direct map).
         //    The walk allocates nothing, so a teardown under memory pressure
         //    cannot fail for want of the memory it is about to return.
-        while let Some((page, unmapped)) = self.space.unmap_lowest() {
+        //
+        //    A space active nowhere needs no flush at all: every CPU that ran
+        //    it discarded its translations when it switched away.
+        let quiet = self.cpus.is_idle();
+        let frames = self.frames;
+        let mut release = |frame| {
+            let _ = frames.free(frame);
+        };
+        let mut unpublished = Unpublished;
+        let reach = if quiet {
+            None
+        } else {
+            self.space.tlb().cloned()
+        };
+        let mut retiring = Retiring::new(reach, &mut unpublished, &self.physmap, &mut release);
+        loop {
+            let next = if quiet {
+                // SAFETY: the set is idle and nothing can enter it again —
+                // the last handle a thread could run the space through is
+                // gone — so no CPU holds or can come to hold a translation.
+                unsafe { self.space.clear_lowest() }
+            } else {
+                self.space.unmap_lowest()
+            };
+            let Some((page, cleared)) = next else {
+                break;
+            };
             // The page was recorded live, so the unmap can only fail on a
             // backend defect; declining to touch the frame is the only
             // safe recovery (never a panic).
-            let Ok(frame) = unmapped else {
+            let Ok(frame) = cleared else {
                 continue;
             };
             if self.mmio.contains(page.start())
@@ -1346,10 +1438,9 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
             {
                 continue;
             }
-            if zero_frame(&self.physmap, frame).is_ok() {
-                let _ = self.frames.free(frame);
-            }
+            retiring.hold(page.start().as_u64(), frame);
         }
+        drop(retiring);
 
         // 3. Return the page-table frames themselves — the root and every
         //    intermediate table — to the source they were drawn from.
@@ -1382,6 +1473,7 @@ mod tests {
     use crate::frame::{FrameAllocator, MemoryClass, PhysAddr, PAGE_SIZE};
     use crate::mmio::SharedMemory;
     use crate::phys::SimPhysMap;
+    use crate::retire::{ActiveCpus, SpaceTlb, Unpublished};
     use crate::test_fixture::{custody, frame_backing};
     use crate::uaccess::{copy_in, copy_out};
     use crate::vmm::{AddressSpace, HostPageTable, Page, VirtAddr};
@@ -1412,6 +1504,11 @@ mod tests {
 
     fn sim() -> SimPhysMap {
         SimPhysMap::new(PhysAddr::new(SIM_BASE), SIM_BYTES)
+    }
+
+    /// A reach for a space no dispatcher runs: the host has no other CPU.
+    fn host_tlb() -> SpaceTlb {
+        SpaceTlb::new(ActiveCpus::new(1).expect("one word allocates"), None)
     }
 
     /// The node and admission generation the tests' carves are made for.
@@ -1481,6 +1578,7 @@ mod tests {
             let (frames, _simmap) = backing!();
             LiveSpace::new(
                 AddressSpace::new(HostPageTable::new()),
+                host_tlb(),
                 sim(),
                 frames,
                 VirtAddr::new(MMIO_WINDOW_BASE),
@@ -1519,7 +1617,8 @@ mod tests {
         let base = 0x4000;
         live.map_anonymous(base, 4).expect("map");
         assert_eq!(live.space().mapped_pages(), 4);
-        live.unmap_anonymous(base, 4).expect("unmap");
+        live.unmap_anonymous(base, 4, &mut Unpublished)
+            .expect("unmap");
         assert_eq!(live.space().mapped_pages(), 0);
     }
 
@@ -1534,7 +1633,8 @@ mod tests {
         // Releasing the whole three-page range reclaims the two resident
         // pages and skips the unbacked one — sparse residency is not an
         // error (the caller validates the reservation before it gets here).
-        live.unmap_anonymous(base, 3).expect("sparse release");
+        live.unmap_anonymous(base, 3, &mut Unpublished)
+            .expect("sparse release");
         assert_eq!(live.space().mapped_pages(), 0);
     }
 
@@ -1647,7 +1747,8 @@ mod tests {
     fn unmap_releases_a_placement_for_reuse() {
         let mut live = live_space!();
         let a = live.map_anonymous_placed(4).expect("room");
-        live.unmap_anonymous(a, 4).expect("placed region unmaps");
+        live.unmap_anonymous(a, 4, &mut Unpublished)
+            .expect("placed region unmaps");
         assert_eq!(live.space().mapped_pages(), 0);
         // The freed heap range is reused by the next placement (the bump
         // cursor did not simply advance past it).
@@ -1662,21 +1763,22 @@ mod tests {
         // Part of a placement releases just those pages: the anonymous ABI
         // releases what the caller names, so a region grown over several
         // calls can hand back the part that came free.
-        live.unmap_anonymous(a, 2).expect("a held range releases");
+        live.unmap_anonymous(a, 2, &mut Unpublished)
+            .expect("a held range releases");
         assert_eq!(live.space().mapped_pages(), 1, "only the named pages went");
 
         // A range running past what the window holds is refused whole,
         // before any teardown — the page it does not hold makes the whole
         // release fail closed.
         assert_eq!(
-            live.unmap_anonymous(a + 2 * PAGE_SIZE as u64, 2),
+            live.unmap_anonymous(a + 2 * PAGE_SIZE as u64, 2, &mut Unpublished),
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
         );
         assert_eq!(live.space().mapped_pages(), 1, "no partial teardown");
 
         // The remaining page releases, and the whole placement's space is
         // then available again.
-        live.unmap_anonymous(a + 2 * PAGE_SIZE as u64, 1)
+        live.unmap_anonymous(a + 2 * PAGE_SIZE as u64, 1, &mut Unpublished)
             .expect("the last held page releases");
         assert_eq!(live.space().mapped_pages(), 0);
         assert_eq!(
@@ -1703,7 +1805,8 @@ mod tests {
         assert_eq!(live.space().mapped_pages(), 1, "one page faulted in");
         // Releasing the whole reservation reclaims the one resident page and
         // skips the three never-touched ones, and frees the placement.
-        live.unmap_anonymous(base, 4).expect("sparse release");
+        live.unmap_anonymous(base, 4, &mut Unpublished)
+            .expect("sparse release");
         assert_eq!(live.space().mapped_pages(), 0);
         // The freed placement base is reusable.
         assert_eq!(live.reserve_anonymous(4), Ok(base));
@@ -1755,7 +1858,8 @@ mod tests {
 
         // Unmap: the three never-touched reservations are released and the
         // one resident page is freed, returning the tally to zero.
-        live.unmap_anonymous(base, 4).expect("sparse release");
+        live.unmap_anonymous(base, 4, &mut Unpublished)
+            .expect("sparse release");
         assert_eq!(frames.committed_frames(), 0, "every commitment released");
         assert_eq!(live.space().mapped_pages(), 0);
     }
@@ -1803,7 +1907,8 @@ mod tests {
 
         // Release: the two resident frames go back, and the six pages that were
         // never committed credit nothing — the standing reservation is untouched.
-        live.unmap_anonymous(base, 8).expect("sparse release");
+        live.unmap_anonymous(base, 8, &mut Unpublished)
+            .expect("sparse release");
         assert_eq!(
             frames.committed_frames(),
             4,
@@ -1814,7 +1919,7 @@ mod tests {
         assert_eq!(live.reserve_anonymous_growable(8), Ok(base));
         // The standing `mem_map` reservation still releases correctly: its own
         // four never-touched pages, and no more.
-        live.unmap_anonymous(held, 4)
+        live.unmap_anonymous(held, 4, &mut Unpublished)
             .expect("release the reservation");
         assert_eq!(frames.committed_frames(), 0);
     }
@@ -1893,6 +1998,7 @@ mod tests {
             .expect("a fresh cell");
         let mut live = LiveSpace::new(
             AddressSpace::new(HostPageTable::new()),
+            host_tlb(),
             RecordingSim {
                 inner: sim(),
                 recorded,
@@ -1925,7 +2031,8 @@ mod tests {
         );
         assert_eq!(recorded.last_len.load(Ordering::Relaxed), 2 * PAGE_SIZE);
 
-        live.free_dma(mapping.cpu_va).expect("live carve frees");
+        live.free_dma(mapping.cpu_va, &mut Unpublished)
+            .expect("live carve frees");
         assert_eq!(
             recorded.calls.load(Ordering::Relaxed),
             2,
@@ -1978,9 +2085,13 @@ mod tests {
     /// A live space over the shared sim map, so a test can observe the bytes
     /// its carves hold after the space is gone.
     macro_rules! shared_live_space {
-        ($frames:expr, $simmap:expr) => {{
+        ($frames:expr, $simmap:expr) => {
+            shared_live_space!($frames, $simmap, host_tlb())
+        };
+        ($frames:expr, $simmap:expr, $tlb:expr) => {{
             LiveSpace::new(
                 AddressSpace::new(HostPageTable::new()),
+                $tlb,
                 SharedSim($simmap),
                 $frames,
                 VirtAddr::new(MMIO_WINDOW_BASE),
@@ -2175,6 +2286,7 @@ mod tests {
         {
             let mut live = LiveSpace::new(
                 AddressSpace::new(HostPageTable::new()),
+                host_tlb(),
                 SharedSim(simmap),
                 frames,
                 VirtAddr::new(MMIO_WINDOW_BASE),
@@ -2272,6 +2384,7 @@ mod tests {
         let before = frames.free_frames();
         let mut live = LiveSpace::new(
             AddressSpace::new(HostPageTable::new()),
+            host_tlb(),
             sim(),
             frames,
             VirtAddr::new(MMIO_WINDOW_BASE),
@@ -2293,7 +2406,8 @@ mod tests {
                 .alloc_dma(2 * PAGE_SIZE, 0, custodian(held))
                 .expect("a free block");
             assert!(frames.free_frames() < before, "the carve consumed frames");
-            live.free_dma(mapping.cpu_va).expect("free by cpu base");
+            live.free_dma(mapping.cpu_va, &mut Unpublished)
+                .expect("free by cpu base");
             assert_eq!(
                 frames.free_frames(),
                 before,
@@ -2304,7 +2418,7 @@ mod tests {
         }
         // A free of an address that names no live carve fails closed.
         assert_eq!(
-            live.free_dma(DMA_WINDOW_BASE + PAGE_SIZE as u64),
+            live.free_dma(DMA_WINDOW_BASE + PAGE_SIZE as u64, &mut Unpublished),
             Err(LiveSpaceError::Dma(DmaError::UnknownBuffer))
         );
         held.with(|r| assert_eq!(r.reserved, 0, "a refused free returns nothing"));
@@ -2337,7 +2451,7 @@ mod tests {
             .free_order(frame, 0)
             .expect("the block is freed behind the space's back");
         assert_eq!(
-            live.free_dma(mapping.cpu_va),
+            live.free_dma(mapping.cpu_va, &mut Unpublished),
             Err(LiveSpaceError::Dma(DmaError::Alloc(
                 AllocError::InvariantViolation
             ))),
@@ -2345,7 +2459,7 @@ mod tests {
         );
         held.with(|r| assert_eq!(r.reserved, 0, "the room went back"));
         assert_eq!(
-            live.free_dma(mapping.cpu_va),
+            live.free_dma(mapping.cpu_va, &mut Unpublished),
             Err(LiveSpaceError::Dma(DmaError::UnknownBuffer)),
             "and a repeat returns nothing more"
         );
@@ -2458,10 +2572,10 @@ mod tests {
 
         // Releasing reclaims exactly the two resident pages and returns
         // the reservation for reuse.
-        assert_eq!(live.release_file_region(base, 4), Ok(2));
+        assert_eq!(live.release_file_region(base, 4, &mut Unpublished), Ok(2));
         assert_eq!(frames.free_frames(), before, "all frames returned");
         assert_eq!(
-            live.release_file_region(base, 4),
+            live.release_file_region(base, 4, &mut Unpublished),
             Err(LiveSpaceError::Anon(AnonError::NotMapped)),
             "a released region is gone"
         );
@@ -2493,10 +2607,10 @@ mod tests {
         // The anonymous release path must not tear down (or even inspect)
         // a file region — wrong syscall, fail closed.
         assert_eq!(
-            live.unmap_anonymous(base, 2),
+            live.unmap_anonymous(base, 2, &mut Unpublished),
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
         );
-        assert_eq!(live.release_file_region(base, 2), Ok(1));
+        assert_eq!(live.release_file_region(base, 2, &mut Unpublished), Ok(1));
     }
 
     #[test]
@@ -2526,6 +2640,7 @@ mod tests {
     ) -> (LiveSpace<HostPageTable, SharedSim>, &'static SimPhysMap) {
         let live = LiveSpace::new(
             AddressSpace::new(HostPageTable::new()),
+            host_tlb(),
             SharedSim(simmap),
             frames,
             VirtAddr::new(MMIO_WINDOW_BASE),
@@ -2553,11 +2668,12 @@ mod tests {
     }
 
     mod ramzip {
-        use super::{SharedSim, ANON_WINDOW_BASE};
+        use super::{host_tlb, SharedSim, ANON_WINDOW_BASE};
         use crate::frame::{FrameAllocator, MemoryClass, PAGE_SIZE};
         use crate::live::{LiveSpace, LiveUserSpace};
         use crate::phys::SimPhysMap;
         use crate::ramzip::{PageCandidate, Ramzip, RamzipCaps, RamzipFaultOutcome};
+        use crate::retire::Unpublished;
         use crate::seal::{EntropySource, SealError};
         use crate::test_fixture::frame_backing;
         use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
@@ -2618,6 +2734,7 @@ mod tests {
             let pressure = MemoryPressure::over(frames);
             let live = LiveSpace::new(
                 AddressSpace::new(HostPageTable::new()),
+                host_tlb(),
                 SharedSim(simmap),
                 frames,
                 VirtAddr::new(0x8000_0000),
@@ -2674,6 +2791,7 @@ mod tests {
                 6,
                 PageCandidate::cold_anonymous(),
                 &sink,
+                &mut Unpublished,
             );
             assert_eq!(summary.scanned, 6);
             assert_eq!(summary.compressed, 6, "every cold page compressed");
@@ -2726,6 +2844,7 @@ mod tests {
                 4,
                 PageCandidate::cold_anonymous(),
                 &sink,
+                &mut Unpublished,
             );
             assert_eq!(summary.scanned, 4);
             assert_eq!(summary.compressed, 0);
@@ -2752,6 +2871,7 @@ mod tests {
                 16,
                 PageCandidate::cold_anonymous(),
                 &sink,
+                &mut Unpublished,
             );
             // Only the three placed pages were ever offered.
             assert_eq!(summary.scanned, 3);
@@ -2795,6 +2915,7 @@ mod tests {
                 3,
                 PageCandidate::cold_anonymous(),
                 &sink,
+                &mut Unpublished,
             );
             assert_eq!(summary.compressed, 3, "budget honoured");
             assert_eq!(entries(&tier), 3);
@@ -2817,6 +2938,7 @@ mod tests {
                 5,
                 PageCandidate::cold_anonymous(),
                 &sink,
+                &mut Unpublished,
             );
             assert_eq!(summary.compressed, 5);
             // Compression returned five frames to the allocator.
@@ -2880,6 +3002,7 @@ mod tests {
                 6,
                 PageCandidate::cold_anonymous(),
                 &sink,
+                &mut Unpublished,
             );
             assert_eq!(summary.compressed, 6);
             assert_eq!(entries(&tier), 6);
@@ -2920,6 +3043,7 @@ mod tests {
                 4,
                 PageCandidate::cold_anonymous(),
                 &sink,
+                &mut Unpublished,
             );
             assert_eq!(summary.compressed, 4);
             assert_eq!(
@@ -2946,7 +3070,8 @@ mod tests {
                     0,
                     6,
                     PageCandidate::cold_anonymous(),
-                    &sink
+                    &sink,
+                    &mut Unpublished
                 )
                 .compressed,
                 6
@@ -2984,7 +3109,8 @@ mod tests {
                     0,
                     4,
                     PageCandidate::cold_anonymous(),
-                    &sink
+                    &sink,
+                    &mut Unpublished
                 )
                 .compressed,
                 4
@@ -3012,6 +3138,374 @@ mod tests {
             );
             assert_eq!(live.ramzip_warm(&tier, &pressure, &sink), 0);
             assert_eq!(entries(&tier), 0);
+        }
+    }
+
+    /// Every release path hands a frame back only once no other CPU and no
+    /// snapshot can still reach it.
+    mod views {
+        use super::{custodian, fill_phys, phys_is_zero, SharedSim};
+        use super::{
+            ANON_WINDOW_BASE, ANON_WINDOW_PAGES, DMA_WINDOW_BASE, DMA_WINDOW_PAGES,
+            FILE_WINDOW_BASE, FILE_WINDOW_PAGES, MMIO_WINDOW_BASE, MMIO_WINDOW_PAGES,
+            SHARED_WINDOW_BASE, SHARED_WINDOW_PAGES, SIM_BASE, SIM_PAGES,
+        };
+        use crate::frame::{Frame, FrameAllocator, PhysAddr, PAGE_SIZE};
+        use crate::live::{LiveSpace, LiveUserSpace};
+        use crate::phys::SimPhysMap;
+        use crate::retire::{ActiveCpus, Retire, SpaceTlb};
+        use crate::test_fixture::{custody, frame_backing};
+        use crate::vmm::{AddressSpace, HostPageTable, MapFlags, Page, VirtAddr};
+        use tairix_arch_api::mmu::{
+            AccessTracking, AddressSpace as HalAddressSpace, MapError, PageFlags,
+        };
+        use tairix_arch_api::tlb::TlbShootdown;
+        use tairix_arch_api::{CpuMask, CrossCpuTlbShootdown};
+
+        extern crate std;
+        use std::cell::{Cell, RefCell};
+        use std::vec::Vec;
+
+        /// What reached a view, in order.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Event {
+            Remote(u64, usize),
+            Retired(u64, u64),
+            Restored(u64),
+        }
+
+        std::thread_local! {
+            static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
+            static LOCAL_FLUSHES: Cell<usize> = const { Cell::new(0) };
+            static WALKS: Cell<usize> = const { Cell::new(0) };
+        }
+
+        fn events() -> Vec<Event> {
+            EVENTS.with(|events| core::mem::take(&mut *events.borrow_mut()))
+        }
+
+        /// The other CPUs' reach: `'static`, as the port's handle is.
+        struct Remote;
+
+        impl CrossCpuTlbShootdown for Remote {
+            fn shootdown_page(&self, vaddr: u64) {
+                self.shootdown_range(vaddr, 1);
+            }
+            fn shootdown_range(&self, start: u64, pages: usize) {
+                EVENTS.with(|events| events.borrow_mut().push(Event::Remote(start, pages)));
+            }
+            fn shootdown_user_range(&self, cpus: CpuMask<'_>, start: u64, pages: usize) {
+                if !cpus.is_empty() {
+                    self.shootdown_range(start, pages);
+                }
+            }
+        }
+
+        static REMOTE: Remote = Remote;
+
+        /// A CPU other than the one each test runs on.
+        const OTHER_CPU: u32 = 1;
+
+        /// A reach whose space runs on another CPU too.
+        fn shared_reach() -> SpaceTlb {
+            let cpus = ActiveCpus::new(2).expect("one word allocates");
+            cpus.enter(OTHER_CPU);
+            SpaceTlb::new(cpus, Some(&REMOTE))
+        }
+
+        /// A snapshot that checks, the moment a page leaves it, that nothing
+        /// that page mapped has been released yet.
+        struct Snapshot<'a> {
+            frames: &'static FrameAllocator,
+            free_before: usize,
+            still_held: &'a dyn Fn() -> bool,
+        }
+
+        impl Retire for Snapshot<'_> {
+            fn retire(&mut self, base: u64, pages: u64) {
+                assert_eq!(
+                    self.frames.free_frames(),
+                    self.free_before,
+                    "no frame went back before the snapshot let go"
+                );
+                assert!((self.still_held)(), "released before the snapshot let go");
+                EVENTS.with(|events| events.borrow_mut().push(Event::Retired(base, pages)));
+            }
+            fn restore(&mut self, page: Page, _frame: Frame, _flags: MapFlags) {
+                EVENTS.with(|events| {
+                    events
+                        .borrow_mut()
+                        .push(Event::Restored(page.start().as_u64()));
+                });
+            }
+        }
+
+        #[test]
+        fn an_unmapped_anonymous_frame_is_freed_only_after_every_view_lets_go() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = shared_live_space!(frames, simmap, shared_reach());
+            let base = 0x7000_0000;
+            live.reserve_anonymous_at(base, 3).expect("reserves");
+            live.map_anonymous(base, 3).expect("maps");
+            fill_phys(simmap, PhysAddr::new(SIM_BASE), SIM_PAGES * PAGE_SIZE, 0x5A);
+            let _ = events();
+
+            let free_before = frames.free_frames();
+            let mut snapshot = Snapshot {
+                frames,
+                free_before,
+                still_held: &|| true,
+            };
+            live.unmap_anonymous(base, 3, &mut snapshot)
+                .expect("unmaps");
+            assert_eq!(
+                events(),
+                [Event::Remote(base, 3), Event::Retired(base, 3)],
+                "the other CPU, then the snapshot, before any frame"
+            );
+            assert_eq!(frames.free_frames(), free_before + 3);
+        }
+
+        #[test]
+        fn a_dma_buffer_is_scrubbed_and_freed_only_after_every_view_lets_go() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = shared_live_space!(frames, simmap, shared_reach());
+            let mapping = live
+                .alloc_dma(PAGE_SIZE, 0, custodian(custody!()))
+                .expect("a free block exists");
+            fill_phys(simmap, PhysAddr::new(mapping.phys_base), PAGE_SIZE, 0xC3);
+            let _ = events();
+
+            let phys = PhysAddr::new(mapping.phys_base);
+            let dirty = || !phys_is_zero(simmap, phys, PAGE_SIZE);
+            let mut snapshot = Snapshot {
+                frames,
+                free_before: frames.free_frames(),
+                still_held: &dirty,
+            };
+            live.free_dma(mapping.cpu_va, &mut snapshot).expect("frees");
+            assert_eq!(
+                events(),
+                [
+                    Event::Remote(mapping.cpu_va, 1),
+                    Event::Retired(mapping.cpu_va, 1)
+                ]
+            );
+            assert!(
+                phys_is_zero(simmap, phys, PAGE_SIZE),
+                "scrubbed on the way out"
+            );
+        }
+
+        #[test]
+        fn a_file_region_frame_is_freed_only_after_every_view_lets_go() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = shared_live_space!(frames, simmap, shared_reach());
+            let base = live.reserve_file_region(4).expect("reserves");
+            live.map_file_page_at(base + PAGE_SIZE as u64, &[7; 16])
+                .expect("backs one page");
+            let _ = events();
+
+            let free_before = frames.free_frames();
+            let mut snapshot = Snapshot {
+                frames,
+                free_before,
+                still_held: &|| true,
+            };
+            assert_eq!(live.release_file_region(base, 4, &mut snapshot), Ok(1));
+            let page = base + PAGE_SIZE as u64;
+            assert_eq!(events(), [Event::Remote(page, 1), Event::Retired(page, 1)]);
+            assert_eq!(frames.free_frames(), free_before + 1);
+        }
+
+        #[test]
+        fn a_map_undone_part_way_reaches_the_other_cpu_before_its_frames_go_back() {
+            // Fewer frames than the map asks for: it maps some, then unwinds.
+            let (frames, simmap) = frame_backing!(SIM_BASE, 8);
+            let mut live = shared_live_space!(frames, simmap, shared_reach());
+            let free_before = frames.free_frames();
+            assert!(live.map_anonymous_placed(64).is_err());
+            let unwound = events();
+            assert_eq!(unwound.len(), 1, "one shootdown for the unwound run");
+            assert!(matches!(unwound[0], Event::Remote(base, _) if base >= ANON_WINDOW_BASE));
+            assert_eq!(frames.free_frames(), free_before, "every frame came back");
+        }
+
+        /// A page table counting every flush its space issues, even past the
+        /// space's drop.
+        struct CountingTable(HostPageTable);
+
+        impl HalAddressSpace for CountingTable {
+            fn map_page(
+                &mut self,
+                vaddr: u64,
+                paddr: u64,
+                flags: PageFlags,
+            ) -> Result<(), MapError> {
+                self.0.map_page(vaddr, paddr, flags)
+            }
+            fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
+                WALKS.with(|walks| walks.set(walks.get() + 1));
+                self.0.translate(vaddr)
+            }
+            fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
+                self.0.unmap(vaddr)
+            }
+            fn root_phys(&self) -> u64 {
+                self.0.root_phys()
+            }
+            fn access_tracking(&self) -> AccessTracking {
+                self.0.access_tracking()
+            }
+            unsafe fn activate(&self) {}
+        }
+
+        impl TlbShootdown for CountingTable {
+            fn flush_page(&mut self, _vaddr: u64) {
+                LOCAL_FLUSHES.with(|flushes| flushes.set(flushes.get() + 1));
+            }
+        }
+
+        fn counting_space(
+            frames: &'static FrameAllocator,
+            simmap: &'static SimPhysMap,
+            tlb: SpaceTlb,
+            file_pages: usize,
+        ) -> LiveSpace<CountingTable, SharedSim> {
+            LiveSpace::new(
+                AddressSpace::new(CountingTable(HostPageTable::new())),
+                tlb,
+                SharedSim(simmap),
+                frames,
+                VirtAddr::new(MMIO_WINDOW_BASE),
+                MMIO_WINDOW_PAGES,
+                VirtAddr::new(ANON_WINDOW_BASE),
+                ANON_WINDOW_PAGES,
+                VirtAddr::new(DMA_WINDOW_BASE),
+                DMA_WINDOW_PAGES,
+                VirtAddr::new(SHARED_WINDOW_BASE),
+                SHARED_WINDOW_PAGES,
+                VirtAddr::new(FILE_WINDOW_BASE),
+                file_pages,
+            )
+            .expect("windows are valid")
+        }
+
+        #[test]
+        fn a_sparse_release_visits_and_retires_only_its_resident_pages() {
+            // Four GiB of file window, two pages of it resident.
+            const SPAN: usize = 1 << 20;
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = counting_space(frames, simmap, shared_reach(), SPAN);
+            let base = live.reserve_file_region(SPAN as u64).expect("reserves");
+            let last = base + (SPAN as u64 - 1) * PAGE_SIZE as u64;
+            live.map_file_page_at(base, &[1])
+                .expect("backs the first page");
+            live.map_file_page_at(last, &[2])
+                .expect("backs the last page");
+            let _ = events();
+
+            let walks = WALKS.with(Cell::get);
+            let mut snapshot = Snapshot {
+                frames,
+                free_before: frames.free_frames(),
+                still_held: &|| true,
+            };
+            assert_eq!(
+                live.release_file_region(base, SPAN as u64, &mut snapshot),
+                Ok(2)
+            );
+            assert_eq!(WALKS.with(Cell::get), walks, "no page of the gap is walked");
+            assert_eq!(
+                events(),
+                [
+                    Event::Remote(base, SPAN),
+                    Event::Retired(base, 1),
+                    Event::Retired(last, 1),
+                ],
+                "one shootdown spans the batch, and the snapshot loses only what was resident"
+            );
+        }
+
+        #[test]
+        fn a_fault_on_a_page_another_cpu_mapped_discards_the_stale_entry_here() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = counting_space(frames, simmap, shared_reach(), FILE_WINDOW_PAGES);
+            let base = 0x7000_0000;
+            live.reserve_anonymous_at(base, 1).expect("reserves");
+            live.map_anonymous(base, 1)
+                .expect("the first fault backs it");
+
+            let (flushes, free, committed) = (
+                LOCAL_FLUSHES.with(Cell::get),
+                frames.free_frames(),
+                frames.committed_frames(),
+            );
+            assert!(
+                live.map_anonymous(base, 1).is_err(),
+                "the second fault lost the race"
+            );
+            assert_eq!(
+                LOCAL_FLUSHES.with(Cell::get),
+                flushes + 1,
+                "this CPU's cached absence is discarded"
+            );
+            assert_eq!(frames.free_frames(), free, "the loser draws no frame");
+            assert_eq!(
+                frames.committed_frames(),
+                committed,
+                "nor moves the commitment"
+            );
+
+            let file = live.reserve_file_region(1).expect("reserves");
+            live.map_file_page_at(file, &[1])
+                .expect("the first fault backs it");
+            let flushes = LOCAL_FLUSHES.with(Cell::get);
+            assert!(live.map_file_page_at(file, &[1]).is_err());
+            assert_eq!(LOCAL_FLUSHES.with(Cell::get), flushes + 1);
+        }
+
+        #[test]
+        fn a_space_active_nowhere_is_torn_down_without_a_single_flush() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let free_before = frames.free_frames();
+            let live = {
+                let cpus = ActiveCpus::new(2).expect("one word allocates");
+                let mut live = counting_space(
+                    frames,
+                    simmap,
+                    SpaceTlb::new(cpus, Some(&REMOTE)),
+                    FILE_WINDOW_PAGES,
+                );
+                let base = 0x7000_0000;
+                live.reserve_anonymous_at(base, 16).expect("reserves");
+                live.map_anonymous(base, 16).expect("maps");
+                live
+            };
+            let _ = events();
+            let flushes = LOCAL_FLUSHES.with(Cell::get);
+            drop(live);
+            assert_eq!(LOCAL_FLUSHES.with(Cell::get), flushes, "no local flush");
+            assert!(events().is_empty(), "no other CPU reached");
+            assert_eq!(frames.free_frames(), free_before, "every frame came back");
+        }
+
+        #[test]
+        fn a_space_still_active_elsewhere_is_shot_down_before_its_frames_go_back() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let base = 0x7000_0000;
+            let mut live = counting_space(frames, simmap, shared_reach(), FILE_WINDOW_PAGES);
+            live.reserve_anonymous_at(base, 4).expect("reserves");
+            live.map_anonymous(base, 4).expect("maps");
+            let _ = events();
+            let flushes = LOCAL_FLUSHES.with(Cell::get);
+            drop(live);
+            assert_eq!(
+                LOCAL_FLUSHES.with(Cell::get),
+                flushes + 4,
+                "each page flushed here"
+            );
+            assert_eq!(events(), [Event::Remote(base, 4)], "and on the other CPU");
         }
     }
 }

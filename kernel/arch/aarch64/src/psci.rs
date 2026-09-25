@@ -5,8 +5,7 @@
 //! `CPU_ON` function, handing it an entry point and an opaque context
 //! value (`plans/WIRING.md` Stage W6). This module is the aarch64
 //! analogue of riscv64's `sbi` module: it exposes only the small,
-//! fixed set of PSCI services the bring-up path needs (
-//! — no bloat).
+//! fixed set of PSCI services the bring-up path needs.
 //!
 //! # Conduit
 //!

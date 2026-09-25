@@ -46,6 +46,7 @@
 //! definition a manually-assembled boot (a QEMU integration kernel) shares,
 //! so the launch path is wired identically everywhere.
 
+use tairix_arch_api::CrossCpuTlbShootdown;
 use tairix_kernel_mem::FrameAllocator;
 use tairix_kernel_sched_api::{CpuId, SchedulerArch};
 use tairix_kernel_sec::CapTable;
@@ -60,8 +61,8 @@ use crate::peerwatch::PeerWatch;
 use crate::procwait::ProcessWait;
 use crate::spawn::ArchImageBuilder;
 
-/// The three architecture-dependent scalar operations the child loading
-/// body needs, type-erased so [`SpawnServices`] stays non-generic.
+/// The architecture-dependent operations the child loading body needs,
+/// type-erased so [`SpawnServices`] stays non-generic.
 ///
 /// The loading body is otherwise arch-neutral; these are the only values
 /// it must read from the concrete architecture port:
@@ -73,6 +74,8 @@ use crate::spawn::ArchImageBuilder;
 ///   child's capability record as its start time.
 /// * [`Self::now_ns`] — the monotonic nanoseconds the bundle-read clock
 ///   (`AppLoader`'s signature-validity check) reads.
+/// * [`Self::tlb_shootdown`] — the cross-CPU invalidation the child's live
+///   address space discards its cleared translations through.
 ///
 /// Implementors must never panic; the production port
 /// ([`ArchSpawnRuntime`]) forwards to the arch HAL, which is total.
@@ -86,6 +89,10 @@ pub trait SpawnRuntime: Sync {
 
     /// The current monotonic time in nanoseconds on the calling CPU.
     fn now_ns(&self) -> u64;
+
+    /// The port's cross-CPU TLB shootdown; [`None`] only on a port with no
+    /// TLB.
+    fn tlb_shootdown(&self) -> Option<&'static (dyn CrossCpuTlbShootdown + Sync)>;
 }
 
 /// The production [`SpawnRuntime`] over a `'static` architecture handle.
@@ -130,6 +137,10 @@ where
         // monotonic read is keyed to must be the one the task occupies now.
         self.arch
             .monotonic_ns(SchedulerArch::current_cpu(self.arch))
+    }
+
+    fn tlb_shootdown(&self) -> Option<&'static (dyn CrossCpuTlbShootdown + Sync)> {
+        A::cross_cpu_tlb_shootdown(self.arch)
     }
 }
 
@@ -424,6 +435,10 @@ mod tests {
 
         fn now_ns(&self) -> u64 {
             self.ns
+        }
+
+        fn tlb_shootdown(&self) -> Option<&'static (dyn CrossCpuTlbShootdown + Sync)> {
+            None
         }
     }
 

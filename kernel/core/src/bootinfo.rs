@@ -366,8 +366,10 @@ pub trait KernelArch: SchedulerArch {
     /// that makes a dead task's page-table reclamation (the live-space
     /// drop at reap) safe on SMP. A paging port returns its
     /// `paging::park_kernel_root` free function (a plain `fn`, so the
-    /// hook captures nothing and is trivially `Send`).
-    fn park_translation(&self) -> Option<fn()> {
+    /// hook captures nothing and is trivially `Send`), which reports
+    /// whether the CPU did leave the user root: one that did not still
+    /// caches its translations.
+    fn park_translation(&self) -> Option<fn() -> bool> {
         None
     }
 
@@ -520,10 +522,10 @@ pub trait KernelArch: SchedulerArch {
         None
     }
 
-    /// This port's cross-CPU TLB shootdown, which the kernel owes after
-    /// tearing down a mapping in a space live on another CPU — another
-    /// process's, when a removed device's windows are revoked from its
-    /// driver. Read once, during [`crate::Phase::Syscall`].
+    /// This port's cross-CPU TLB shootdown, through which every user address
+    /// space discards an entry it clears on the other CPUs it is active on.
+    /// Handed to each space at its creation: PID 1's through the boot
+    /// spawner, every later one's through the spawn runtime.
     ///
     /// # Default
     ///

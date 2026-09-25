@@ -1311,6 +1311,13 @@ where
         // repoints its per-CPU entry stack at this before the switch-in
         // (`plans/PI.md` §X). SAFETY: exclusive dispatcher-side access.
         let stack_top = unsafe { (*ctl).stack.top() };
+        // Recorded before the hook loads the root: an unmap that reads the
+        // set after clearing an entry then either reaches this CPU or this
+        // CPU walks the cleared entry. SAFETY: exclusive dispatcher-side
+        // access to `*ctl`.
+        if let Some(live) = unsafe { (*ctl).live.as_ref() } {
+            live.active_cpus().enter(cpu);
+        }
         // SAFETY: `pre_resume` is `Some`; the field is exclusively ours
         // between switches, so the `&mut` borrow does not alias.
         if let Some(pre) = unsafe { (*ctl).pre_resume.as_mut() } {
@@ -1400,8 +1407,13 @@ where
         // tables. The park is a single root-register write to the
         // permanent boot root; the next user resume reprograms the root
         // anyway, so no extra work lands on the resume path.
-        if let Ok(Some(park)) = PARK_TRANSLATION.get() {
-            park();
+        //
+        // Leaving the root discarded the space's translations here, so the
+        // CPU leaves its set; one still on the root keeps its place.
+        // SAFETY: exclusive dispatcher-side access to `*ctl`.
+        let left = matches!(PARK_TRANSLATION.get(), Ok(Some(park)) if park());
+        if let Some(live) = unsafe { (*ctl).live.as_ref() }.filter(|_| left) {
+            live.active_cpus().leave(cpu);
         }
     }
 
@@ -1430,11 +1442,12 @@ where
 /// [`crate::bootinfo::KernelArch::park_translation`]; absent (the host
 /// test arch, a port with no user address spaces) the dispatcher skips
 /// the park and teardown relies on the port's own defensive re-park.
-static PARK_TRANSLATION: OnceCell<fn()> = OnceCell::new();
+static PARK_TRANSLATION: OnceCell<fn() -> bool> = OnceCell::new();
 
 /// Install the port's park-translation hook (set-once; a later call
-/// changes nothing — one boot installs one hook).
-pub fn install_park_translation(park: fn()) {
+/// changes nothing — one boot installs one hook). It reports whether the
+/// CPU left the user root.
+pub fn install_park_translation(park: fn() -> bool) {
     let _ = PARK_TRANSLATION.set(park);
 }
 
@@ -2513,22 +2526,57 @@ mod tests {
         clear_resume(cpu);
     }
 
+    std::thread_local! {
+        static PARKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    }
+
+    /// The park hook every test installs. The slot is process-global and
+    /// set-once, so whichever test installs first installs this; the count is
+    /// thread-local, so each test sees only its own steps' parks.
+    fn count_park() -> bool {
+        PARKS.with(|parks| parks.set(parks.get() + 1));
+        true
+    }
+
+    #[test]
+    fn a_user_task_holds_its_cpu_in_its_spaces_set_from_before_its_root_loads_until_it_parks() {
+        // A CPU no other test in this crate dispatches on.
+        const CPU: CpuId = 37;
+        install_park_translation(count_park);
+
+        let space = Arc::new(crate::procspace::ProcessSpace::for_test(
+            crate::procspace::host_test_space!(),
+        ));
+        let joined = Arc::new(AtomicBool::new(false));
+        let rec = recorder!();
+        let mut user = user_control_with(
+            RecordingCs(rec),
+            BoxStack::new().expect("stack allocates"),
+            pre_resume_counter!(),
+        );
+        let (seen, watched) = (Arc::clone(&joined), Arc::clone(&space));
+        user.pre_resume = Some(Box::new(move |_stack_top: u64| {
+            seen.store(!watched.active_cpus().is_idle(), Ordering::SeqCst);
+        }));
+        user.live = Some(Arc::clone(&space));
+
+        let _ = dispatch_step(&mut user, CPU);
+        assert!(
+            joined.load(Ordering::SeqCst),
+            "the CPU joined the set before the hook loaded the space's root"
+        );
+        assert!(
+            space.active_cpus().is_idle(),
+            "and left it once parked off that root"
+        );
+    }
+
     #[test]
     fn user_dispatch_step_parks_the_translation_after_switch_back() {
         // The I2 SMP-safety invariant: after a *user* task's step the
         // dispatcher re-parks the CPU's translation (so a dead task's
         // page-table teardown can never free a root a CPU still walks); a
         // kernel kthread's step, which activated no user root, does not.
-        // The hook slot is process-global (set-once) and other tests'
-        // dispatches on sibling threads invoke it too, so the counter is
-        // thread-local: this thread observes only its own steps' parks and
-        // the deltas cannot race a concurrently running test.
-        std::thread_local! {
-            static PARKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
-        }
-        fn count_park() {
-            PARKS.with(|parks| parks.set(parks.get() + 1));
-        }
         install_park_translation(count_park);
 
         let rec = recorder!();

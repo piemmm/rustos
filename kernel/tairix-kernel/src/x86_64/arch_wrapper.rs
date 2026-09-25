@@ -412,7 +412,7 @@ impl KernelArch for BinArch {
         tairix_arch_x86_64::cpuname::boot_cpu_name(&mut buf).and_then(tairix_abi::CpuName::new)
     }
 
-    fn park_translation(&self) -> Option<fn()> {
+    fn park_translation(&self) -> Option<fn() -> bool> {
         // Re-installs the trampoline `CR3` root (published by the boot
         // path's `publish_boot_park_root`) so no user root stays active
         // after its task suspends — the invariant a dead task's
@@ -421,13 +421,7 @@ impl KernelArch for BinArch {
         // park.
         #[cfg(all(freestanding, kernel_isa = "x86_64"))]
         {
-            fn park() {
-                // Fire-and-forget from the dispatcher: with no park root
-                // published yet there is nothing to leave (fail closed),
-                // so the `bool` outcome is deliberately discarded.
-                let _ = tairix_arch_x86_64::paging::park_kernel_root();
-            }
-            Some(park)
+            Some(tairix_arch_x86_64::paging::park_kernel_root)
         }
         #[cfg(not(all(freestanding, kernel_isa = "x86_64")))]
         {

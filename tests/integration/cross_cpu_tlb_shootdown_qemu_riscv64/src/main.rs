@@ -10,12 +10,18 @@
 //! firmware call to every other online hart. This binary proves that path
 //! end to end on a two-hart `virt` board:
 //!
-//! 1. The boot hart starts the other hart via `smp::start_secondary` (the
-//!    SBI HSM `hart_start` call); the secondary signals `READY` and idles.
+//! 1. The boot hart starts the other hart through the HAL's
+//!    `SecondaryBringup::start_secondary`, which first probes the firmware
+//!    for RFENCE (a hart that cannot be fenced is never started) and then
+//!    issues the SBI HSM `hart_start`; the secondary signals `READY` and
+//!    idles.
 //! 2. The boot hart drives `RiscvArch::shootdown_page`, which runs the
 //!    local `sfence.vma` and the SBI `remote_sfence_vma` to the live
 //!    secondary hart — proving the new cross-CPU code path executes on a
-//!    real multi-hart machine without trapping.
+//!    real multi-hart machine without trapping — and then the targeted
+//!    user form, `shootdown_user_range`, at a mask naming the secondary:
+//!    once for a page, once for a range the call cannot express, which
+//!    becomes a whole-space fence of every hart.
 //! 3. To confirm the firmware actually *honours* the remote fence (rather
 //!    than silently no-op'ing an unimplemented extension), the boot hart
 //!    issues the SBI `remote_sfence_vma` directly and checks the returned
@@ -44,9 +50,9 @@
 mod kernel {
     use core::num::NonZeroU16;
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-    use tairix_arch_api::{CpuId, CrossCpuTlbShootdown};
+    use tairix_arch_api::{CpuId, CpuMask, CrossCpuTlbShootdown, SecondaryBringup};
     use tairix_arch_riscv64::fdt::Fdt;
     use tairix_arch_riscv64::{
         halt_current_hart, handle_panic_via_serial, qemu_exit, sbi, smp, RiscvArch,
@@ -154,10 +160,14 @@ mod kernel {
         if SECONDARY_STACKS.register().is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
+        // Two-hart vertical: two per-CPU slots, owned by an allocator-free
+        // `static` backing. Dense CPU ids are the hart ids.
+        static STORAGE: RiscvArchStorage<2> = RiscvArchStorage::new();
+        let arch = RiscvArch::with_harts(&STORAGE, boot_hartid, timebase, &[0, 1]);
         // SAFETY: called on the boot hart after the secondary stack pool
         // was registered (above) and after the secondary entry was
         // installed; `secondary_hartid` is a real, parked, distinct hart.
-        if unsafe { smp::start_secondary(secondary_hartid) }.is_err() {
+        if unsafe { arch.start_secondary(secondary_hartid) }.is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
 
@@ -180,11 +190,12 @@ mod kernel {
         // SBI `remote_sfence_vma` to the secondary hart. Reaching the next
         // line proves the new cross-CPU code path ran on a real two-hart
         // machine without trapping.
-        // Two-hart vertical: two per-CPU slots, owned by an allocator-free
-        // `static` backing.
-        static STORAGE: RiscvArchStorage<2> = RiscvArchStorage::new();
-        let arch = RiscvArch::with_harts(&STORAGE, boot_hartid, timebase, &[0, 1]);
         arch.shootdown_page(SHOOTDOWN_VADDR);
+        let secondary_only = [AtomicU64::new(1 << secondary_hartid)];
+        arch.shootdown_user_range(CpuMask::new(&secondary_only), SHOOTDOWN_VADDR, 1);
+        arch.shootdown_user_range(CpuMask::new(&secondary_only), SHOOTDOWN_VADDR, usize::MAX);
+        let boot_only = [AtomicU64::new(1 << boot_hartid)];
+        arch.shootdown_user_range(CpuMask::new(&boot_only), SHOOTDOWN_VADDR, 1);
 
         // Confirm the firmware *honours* the remote fence (not a silent
         // no-op for an unimplemented extension): issue the SBI call

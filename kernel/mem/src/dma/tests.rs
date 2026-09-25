@@ -14,6 +14,8 @@ use crate::frame::{FrameAllocator, PAGE_SIZE};
 use crate::phys::SimPhysMap;
 use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
 use core::cell::Cell;
+use tairix_arch_api::mmu::{AccessTracking, AddressSpace as HalAddressSpace, MapError, PageFlags};
+use tairix_arch_api::tlb::TlbShootdown;
 
 /// Physical base of the usable RAM region in the synthetic map. Frame
 /// 16 leaves the low frames free for hypothetical reserved regions,
@@ -220,6 +222,86 @@ fn alloc_returns_zero_initialised_bytes() {
     let mut pool = pool_with_capacity(&frames, &sim, 8);
     let buf = pool.alloc(PAGE_SIZE).expect("alloc");
     assert!(pool.bytes(buf).unwrap().iter().all(|&b| b == 0));
+}
+
+/// A page table counting every entry made over a frame that still holds a
+/// previous owner's bytes.
+struct ScrubWitness<'a> {
+    table: HostPageTable,
+    ram: &'a SimPhysMap,
+    dirty_maps: &'a Cell<usize>,
+}
+
+impl HalAddressSpace for ScrubWitness<'_> {
+    fn map_page(&mut self, vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), MapError> {
+        let frame = self
+            .ram
+            .translate(PhysAddr::new(paddr), PAGE_SIZE)
+            .expect("a mapped frame lies in RAM");
+        // SAFETY: the frame lies inside the simulator, which outlives the
+        // pool, and nothing writes it while the pool is mapping it.
+        let bytes = unsafe { core::slice::from_raw_parts(frame.as_ptr(), PAGE_SIZE) };
+        if bytes.iter().any(|&b| b != 0) {
+            self.dirty_maps.set(self.dirty_maps.get() + 1);
+        }
+        self.table.map_page(vaddr, paddr, flags)
+    }
+
+    fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
+        self.table.translate(vaddr)
+    }
+
+    fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
+        self.table.unmap(vaddr)
+    }
+
+    fn root_phys(&self) -> u64 {
+        self.table.root_phys()
+    }
+
+    fn access_tracking(&self) -> AccessTracking {
+        self.table.access_tracking()
+    }
+
+    unsafe fn activate(&self) {}
+}
+
+impl TlbShootdown for ScrubWitness<'_> {
+    fn flush_page(&mut self, vaddr: u64) {
+        self.table.flush_page(vaddr);
+    }
+}
+
+#[test]
+fn a_carve_is_scrubbed_before_any_page_of_it_is_mapped() {
+    const RAM_PAGES: usize = 16;
+    let frames = fresh_frames(RAM_PAGES);
+    let sim = fresh_sim(RAM_PAGES);
+    let ram = sim
+        .translate(PhysAddr::new(RAM_BASE), RAM_PAGES * PAGE_SIZE)
+        .expect("the simulator covers RAM");
+    // SAFETY: the simulator owns these bytes and no pool holds any of them yet.
+    unsafe { core::ptr::write_bytes(ram.as_ptr(), 0xA5, RAM_PAGES * PAGE_SIZE) };
+    let dirty_maps = Cell::new(0);
+    let witness = ScrubWitness {
+        table: HostPageTable::new(),
+        ram: &sim,
+        dirty_maps: &dirty_maps,
+    };
+    let mut pool = DmaPool::new(
+        AddressSpace::new(witness),
+        VirtAddr::new(0x1000_0000),
+        8,
+        &frames,
+        &sim,
+    )
+    .expect("pool constructs");
+    pool.alloc(4 * PAGE_SIZE).expect("alloc");
+    assert_eq!(
+        dirty_maps.get(),
+        0,
+        "a sibling thread could read the block's previous owner through the new entry"
+    );
 }
 
 #[test]
@@ -460,20 +542,32 @@ fn free_at_releases_by_virtual_base_and_fails_closed_on_unknown_va() {
             pool.frames,
             pool.phys,
             VirtAddr::new(virt.as_u64() + PAGE_SIZE as u64),
+            &mut Unpublished,
         ),
         Err(DmaError::UnknownBuffer)
     );
     assert_eq!(pool.live(), 1, "a bad free released nothing");
     // The matching base reclaims the carve.
     pool.window
-        .free_at(&mut pool.address_space, pool.frames, pool.phys, virt)
+        .free_at(
+            &mut pool.address_space,
+            pool.frames,
+            pool.phys,
+            virt,
+            &mut Unpublished,
+        )
         .expect("free by base");
     assert_eq!(pool.live(), 0);
     assert_eq!(frames.free_frames(), initial_free, "frames fully returned");
     // A second free of the same base is now unknown (no double-free).
     assert_eq!(
-        pool.window
-            .free_at(&mut pool.address_space, pool.frames, pool.phys, virt),
+        pool.window.free_at(
+            &mut pool.address_space,
+            pool.frames,
+            pool.phys,
+            virt,
+            &mut Unpublished
+        ),
         Err(DmaError::UnknownBuffer)
     );
 }
@@ -526,7 +620,13 @@ fn allocate_all_dma_then_free_it_all_reclaims_fully_every_round() {
         // Release every carve by its virtual base, exactly as `dma_free` does.
         for buf in live.drain(..) {
             pool.window
-                .free_at(&mut pool.address_space, pool.frames, pool.phys, buf.virt())
+                .free_at(
+                    &mut pool.address_space,
+                    pool.frames,
+                    pool.phys,
+                    buf.virt(),
+                    &mut Unpublished,
+                )
                 .expect("free by base");
         }
         assert_eq!(pool.live(), 0, "round {round} reclaimed every carve");

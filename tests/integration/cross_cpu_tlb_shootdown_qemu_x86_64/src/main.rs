@@ -18,7 +18,10 @@
 //!    its LAPIC, unmasks interrupts, signals `AP_READY`, and waits for work.
 //! 3. **From the ISR.** The BSP drives `X86_64Arch::shootdown_page` with the
 //!    AP interrupt-enabled. The call returns only once the AP's ISR has run
-//!    `invlpg` and decremented the count.
+//!    `invlpg` and decremented the count. The targeted user form
+//!    (`shootdown_user_range`) then reaches the AP through a mask naming it,
+//!    once past the single-page ceiling so the ISR reloads `CR3`, and raises
+//!    no IPI for a mask naming only the BSP.
 //! 4. **From a masked lock-acquire spin.** The BSP takes an
 //!    `IrqSafeSpinLock` — which masks the BSP — and shoots down while the AP
 //!    is spinning to acquire *that same lock*, so the AP has its own
@@ -59,9 +62,9 @@
 #[cfg(itest_x86_64)]
 mod kernel {
     use core::fmt::Write as _;
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-    use tairix_arch_api::{CrossCpuTlbShootdown, SecondaryBringup};
+    use tairix_arch_api::{CpuMask, CrossCpuTlbShootdown, SecondaryBringup};
     use tairix_arch_x86_64::acpi::{self, MadtEntry};
     use tairix_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
     use tairix_arch_x86_64::bootinfo::BootData;
@@ -269,6 +272,18 @@ mod kernel {
         AP_COMMAND.store(command, Ordering::Release);
     }
 
+    /// The user form reaches exactly the CPUs its mask names: the AP (dense
+    /// CPU 1), which must acknowledge before either call returns, the second
+    /// past the single-page ceiling so the AP's ISR reloads `CR3`; and the BSP
+    /// alone, which raises no IPI at all.
+    fn shoot_down_user_ranges(arch: &X86_64Arch) {
+        let ap_only = [AtomicU64::new(1 << 1)];
+        arch.shootdown_user_range(CpuMask::new(&ap_only), SHOOTDOWN_VADDR + 0x5000, 1);
+        arch.shootdown_user_range(CpuMask::new(&ap_only), SHOOTDOWN_VADDR, 64);
+        let bsp_only = [AtomicU64::new(1)];
+        arch.shootdown_user_range(CpuMask::new(&bsp_only), SHOOTDOWN_VADDR, 1);
+    }
+
     /// Mask interrupts and park this CPU forever.
     fn halt_forever() -> ! {
         loop {
@@ -411,6 +426,12 @@ mod kernel {
         // A second shootdown proves the mailbox is correctly released and
         // reusable.
         arch.shootdown_page(SHOOTDOWN_VADDR + 0x1000);
+
+        shoot_down_user_ranges(&arch);
+        let _ = writeln!(
+            com1,
+            "[cross_cpu_tlb_shootdown_qemu_x86_64] targeted user shootdown acknowledged by the AP"
+        );
 
         // Step 4 — acknowledge from a masked lock-acquire spin. The gate is
         // held across the shootdown, so the AP is masked *and* blocked on

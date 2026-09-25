@@ -281,6 +281,41 @@ after a shared mapping is torn down — is a sibling Arch HAL slice,
 `SchedulerArch` handle rather than on the page-table object (see
 [the modularity page](./modularity.md) and `plans/WIRING.md` Stage W13).
 
+**Releasing what an unmap cleared** (`kernel/mem::retire`). Clearing a user
+page's entry does not end every route to its frame: each CPU the space is
+active on may still cache the translation, and the kernel copy path
+translates through the process's registry snapshot. A frame released while
+either still names it can be written after it has gone to its next owner.
+Every path that gives a user frame up — anonymous and file unmaps, a DMA
+free, a thread stack's release, compress-out, a map undone part-way, and the
+space's teardown — therefore clears the entries (flushing this CPU), shuts
+both views, and only then zeroes and frees the frame:
+
+- **The CPUs.** A space's `ActiveCpus` names the CPUs it is the active root
+  of. The dispatcher enters a CPU before the switch-in hook loads the root
+  (fenced, so an unmap that reads the set after clearing an entry either
+  reaches that CPU or that CPU walks the cleared entry) and removes it once
+  the park has left the root. No port tags TLB entries with an address-space
+  id and each flushes the outgoing regime on a root switch, so the set is
+  exact: a single-threaded process's unmaps interrupt no other CPU at all.
+  The remote half is `CrossCpuTlbShootdown::shootdown_user_range` over that
+  set — x86_64 raises the shootdown IPI at those CPUs alone, riscv64 issues
+  one SBI RFENCE call per 64-hart window, and aarch64 owes nothing because its
+  local flush is already the broadcast `tlbi vaae1is`.
+- **The snapshot.** The caller passes the `Retire` view the pages must leave
+  (`SnapshotRetire` in `kernel/core`), which drops them under the registry's
+  write lock; a copy holds the read lock for its whole length, so none is
+  part-way through a released frame. A snapshot that cannot take the removal
+  in place is suspended — it resolves nothing — until it is re-frozen.
+- **Batching.** `Retiring` holds up to 64 frames per step, so one remote
+  shootdown and one snapshot write-lock cover the batch.
+- **Compress-out** takes the page out of both views *before* it reads it, so
+  no sibling write can land after the seal; a seal the tier refuses maps the
+  page back and restores it to the snapshot.
+- **Teardown** of a space active on no CPU issues no TLB maintenance at all
+  (`AddressSpace::clear_lowest`): every CPU that ran it discarded its
+  translations when it switched away.
+
 The façade bridges its own `Page` / `Frame` / `MapFlags` currency to the
 HAL's `u64` / `PageFlags` at the boundary. Each arch crate's `paging`
 `AddressSpace` implements the HAL traits directly. To keep `kernel/mem`
@@ -923,18 +958,22 @@ during which the CPU's dispatch loop makes no progress at all and the session
 appears frozen (observed as a ten-second in-kernel stall inside `mem_unmap`
 while the desktop was live).
 
-Every path that knows *which* pages changed therefore publishes exactly those,
-through the one pair `publish_region_mapping` / `publish_region_teardown`:
+Every path that knows *which* pages changed therefore publishes exactly those:
+a mapping through `publish_region_mapping`, a release through the `Retire`
+view it frees its frames under (*Releasing what an unmap cleared*), and a
+shared region, whose frames outlive the call, through
+`publish_region_teardown`:
 
 | Path | What it publishes |
 |---|---|
 | `mem_map` | nothing — a reservation commits no frame and writes no page-table entry, so the snapshot is already correct |
-| `mem_unmap`, `file_unmap` | the pages of the region it released |
+| `mem_unmap`, `file_unmap`, `dma_free`, a thread stack's release | the resident pages of the region it released, retired before any of their frames is freed |
 | `shm_create`, `shm_create_dma`, `shm_map`, `mmio_map`, `dma_alloc` | the pages of the region it mapped |
-| `shm_unmap`, `dma_free` | the pages of the region it released, as the owning layer reports the extent |
+| `shm_unmap` | the pages of the region it released, before the reference holding their frames is dropped |
 | anonymous / file / compressed-page fault | the one page it backed |
 | stack growth | the pages the walk backed |
-| a compressed-tier batch (a warm/cluster restore, a direct-reclaim sweep) | several pages at once with no list reported, so these — and only these — re-freeze |
+| a direct-reclaim sweep | each page it compresses out, retired before the page is read |
+| a compressed-tier restore (warm or cluster) | several pages at once with no list reported, so these — and only these — re-freeze |
 
 The mapping half matters most where the address space is largest: the desktop
 session maps a frame region for every window an app opens, so a context menu's
@@ -946,8 +985,9 @@ reading an N-page mapping O(N) rather than O(N²).
 Publishing by delta is also what makes a *removal* unconditional: the wholesale
 re-freeze is a no-op for a task with no live space published on the current
 CPU, which would leave freed pages still translating in the snapshot the copy
-path walks. A snapshot that cannot absorb an in-place delta falls back to the
-wholesale re-freeze, so the delta is a cost reduction, never a correctness
+path walks. A snapshot that cannot absorb a mapping's delta falls back to the
+wholesale re-freeze, and one that cannot absorb a release's is suspended until
+it is re-frozen, so the delta is a cost reduction, never a correctness
 dependency.
 
 **Reservation is commit-accounted — TAIRiX does not overcommit anonymous
@@ -1007,11 +1047,10 @@ This is staged (`plans/SPAWN.md` SP5):
   resident and skipping the pages the demand-paging fault path never backed
   (the caller validates the reservation before it reaches here). A frame
   exhaustion part-way through a map unwinds every page it already added, so
-  a failed map leaves the space unchanged (`AGENTS.md` §2.9). The
-  per-page TLB invalidation rides the existing `AddressSpace::map` /
-  `AddressSpace::unmap` flush (the §17.2 `TlbShootdown` slice); the
-  cross-CPU shootdown is part of SP5b-2 when the producer is driven from a
-  live multi-CPU regime. Host-proven over `HostPageTable` + `SimPhysMap`.
+  a failed map leaves the space unchanged (`AGENTS.md` §2.9). Each released
+  frame is zeroed and freed only once no other CPU and no snapshot can reach
+  it (see *Releasing what an unmap cleared* above). Host-proven over
+  `HostPageTable` + `SimPhysMap`.
 - **SP5b-2 (landed).** The aarch64 EL0 `-M virt` vertical
   (`tests/integration/mem_map_qemu_aarch64`) wires the SP5b-1 producer
   through the `kernel/core` `MemMap` seam: it builds one isolated EL0 space

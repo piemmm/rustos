@@ -116,8 +116,8 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // sequencing.
     //
     // Publish the caller-owned per-CPU GDT/IDT/IST arena before the first
-    // `percpu::init`, sized to this single-CPU vertical (
-    // — no baked-in `MAX_CPUS`). `register` is set-once; this `kernel_main`
+    // `percpu::init`, sized to this single-CPU vertical rather than to a
+    // baked-in `MAX_CPUS`. `register` is set-once; this `kernel_main`
     // runs once, so a function-local `static` is sound and needs no
     // allocator.
     static PER_CPU_STORAGE: percpu::PerCpuStorage<1> = percpu::PerCpuStorage::new();

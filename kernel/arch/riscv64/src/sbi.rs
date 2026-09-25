@@ -44,6 +44,12 @@ const SBI_CONSOLE_PUTCHAR: usize = 0x01;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 const SBI_CONSOLE_GETCHAR: usize = 0x02;
 
+/// SBI v0.2 Base extension id.
+pub const SBI_EXT_BASE: usize = 0x10;
+
+/// `probe_extension` function id within the Base extension.
+pub const SBI_FID_PROBE_EXTENSION: usize = 3;
+
 /// SBI v0.2 IPI extension id (ASCII `"sPI"`).
 pub const SBI_EXT_IPI: usize = 0x73_5049;
 
@@ -115,6 +121,36 @@ impl SbiRet {
 pub const fn hart_mask_for(hartid: CpuId) -> (usize, usize) {
     (1, hartid as usize)
 }
+
+/// Fold hart ids into the fewest `(hart_mask, hart_mask_base)` windows the
+/// SBI hart-mask convention can address, so one firmware call fences up to
+/// `usize::BITS` harts instead of one.
+///
+/// A window starts at a hart and takes each following hart that lies within
+/// `usize::BITS` above it; ascending ids pack best, and an id out of order
+/// only opens a new window, never drops a hart.
+pub fn hart_windows<I>(harts: I) -> impl Iterator<Item = (usize, usize)>
+where
+    I: Iterator<Item = CpuId>,
+{
+    let mut harts = harts.peekable();
+    core::iter::from_fn(move || {
+        let base = harts.next()?;
+        let mut mask = 1usize;
+        while let Some(offset) = harts
+            .peek()
+            .and_then(|hart| hart.checked_sub(base))
+            .filter(|offset| *offset < usize::BITS)
+        {
+            mask |= 1 << offset;
+            harts.next();
+        }
+        Some((mask, base as usize))
+    })
+}
+
+/// `hart_mask_base` selecting every available hart, whatever the mask.
+pub const ALL_HARTS: usize = usize::MAX;
 
 /// Program the next supervisor timer interrupt for absolute `time`
 /// (in `time`-CSR ticks).
@@ -238,6 +274,14 @@ pub fn hart_start(hartid: CpuId, start_addr: usize, opaque: usize) -> SbiRet {
     )
 }
 
+/// Whether the firmware implements extension `eid` (Base `probe_extension`).
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+#[must_use]
+pub fn has_extension(eid: usize) -> bool {
+    let probed = sbi_call2(SBI_EXT_BASE, SBI_FID_PROBE_EXTENSION, eid, 0);
+    probed.is_success() && probed.value != 0
+}
+
 /// Instruct every hart selected by `(hart_mask, hart_mask_base)` to
 /// execute an `sfence.vma` covering `[start_addr, start_addr + size)`
 /// via the SBI v0.2 RFENCE extension — the riscv64 cross-CPU TLB
@@ -247,11 +291,10 @@ pub fn hart_start(hartid: CpuId, start_addr: usize, opaque: usize) -> SbiRet {
 /// is delegated to the firmware: `remote_sfence_vma` returns only once
 /// the listed harts have fenced, so the call *is* the remote acknowledge
 /// — no software ack loop is needed (unlike the x86_64 IPI path). Build
-/// the mask for a single hart with [`hart_mask_for`]. The calling hart
-/// is **not** covered by the remote fence and must `sfence.vma` itself
-/// separately. Returns the [`SbiRet`]; an invalid mask is reported
-/// through `error` and dropped by the caller (over-/under-fencing the
-/// *remote* set cannot corrupt the local mapping).
+/// the masks with [`hart_windows`]. The calling hart is **not** covered
+/// by the remote fence and must `sfence.vma` itself separately. Returns the
+/// [`SbiRet`]; a caller that is about to free what the fence covers must act
+/// on a refusal rather than drop it.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 #[must_use]
 pub fn remote_sfence_vma(
@@ -366,6 +409,41 @@ fn sbi_call4(eid: usize, fid: usize, arg0: usize, arg1: usize, arg2: usize, arg3
 mod tests {
     use super::*;
 
+    extern crate std;
+    use std::vec::Vec;
+
+    #[test]
+    fn harts_within_one_window_share_a_call() {
+        let windows: Vec<_> = hart_windows([0u32, 1, 5, 63].into_iter()).collect();
+        assert_eq!(windows, [(1 | 1 << 1 | 1 << 5 | 1 << 63, 0)]);
+    }
+
+    #[test]
+    fn a_hart_past_the_window_opens_the_next_one_at_itself() {
+        // 66 is the last hart a window based at 3 reaches; 67 is past it.
+        let windows: Vec<_> = hart_windows([3u32, 66, 67, 68, 200].into_iter()).collect();
+        assert_eq!(windows, [(1 | 1 << 63, 3), (0b11, 67), (1, 200)]);
+    }
+
+    #[test]
+    fn an_out_of_order_hart_is_never_dropped() {
+        let windows: Vec<_> = hart_windows([10u32, 2, 11].into_iter()).collect();
+        let fenced: Vec<u32> = windows
+            .iter()
+            .flat_map(|&(mask, base)| {
+                (0..usize::BITS)
+                    .filter(move |bit| mask & (1 << bit) != 0)
+                    .map(move |bit| u32::try_from(base).expect("a hart id") + bit)
+            })
+            .collect();
+        assert_eq!(fenced, [10, 2, 11]);
+    }
+
+    #[test]
+    fn no_harts_make_no_calls() {
+        assert_eq!(hart_windows(core::iter::empty()).count(), 0);
+    }
+
     #[test]
     fn extension_ids_match_ascii_encoding() {
         // The SBI specification assigns the IPI, HSM, and RFENCE
@@ -373,6 +451,8 @@ mod tests {
         assert_eq!(SBI_EXT_IPI, 0x73_5049);
         assert_eq!(SBI_EXT_HSM, 0x48_534D);
         assert_eq!(SBI_EXT_RFENCE, 0x5246_4E43);
+        assert_eq!(SBI_EXT_BASE, 0x10);
+        assert_eq!(SBI_FID_PROBE_EXTENSION, 3);
         assert_eq!(SBI_FID_SEND_IPI, 0);
         assert_eq!(SBI_FID_HART_START, 0);
         // `remote_sfence_vma` is function id 1 in the RFENCE extension

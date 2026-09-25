@@ -6,7 +6,7 @@
 //! A process's address space is process-scoped state, but the tasks that
 //! mutate it are threads. [`ProcessSpace`] is therefore refcounted and
 //! internally locked: each thread's kthread control block holds an
-//! [`Arc`](alloc::sync::Arc) clone, and the per-CPU publication the syscall
+//! [`Arc`] clone, and the per-CPU publication the syscall
 //! producers reach through [`crate::kthread::with_current_live_space`] takes
 //! the lock for the duration of one operation. Ownership no longer rests
 //! with a single task, so a second thread of the same process is a matter of
@@ -43,9 +43,10 @@
 //! the live space second.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
-use tairix_arch_api::{EnterUser, UserEntry};
-use tairix_kernel_mem::LiveUserSpace;
+use tairix_arch_api::{CrossCpuTlbShootdown, EnterUser, UserEntry};
+use tairix_kernel_mem::{ActiveCpus, AllocError, LiveUserSpace, SpaceTlb};
 use tairix_sync::SpinLock;
 
 use crate::spawn::{thread_pre_resume, ProcessResume, UserThreadEntry};
@@ -59,6 +60,9 @@ use crate::spawn::{thread_pre_resume, ProcessResume, UserThreadEntry};
 /// stack, anonymous, device and page-table alike — to the allocator.
 pub struct ProcessSpace {
     space: SpinLock<Box<dyn LiveUserSpace + Send>>,
+    /// The CPUs the space is active on, kept outside the lock: the dispatcher
+    /// records every switch in and out, and never takes it.
+    cpus: Arc<ActiveCpus>,
     /// The port's switch-in hook for this process, shared by every thread.
     resume: ProcessResume,
     /// The port's "enter user mode" handle, so a thread created later is
@@ -90,10 +94,17 @@ impl ProcessSpace {
         port: &'static dyn EnterUser,
     ) -> Self {
         Self {
+            cpus: space.active_cpus(),
             space: SpinLock::new(space),
             resume,
             port,
         }
+    }
+
+    /// The CPUs this space is active on.
+    #[must_use]
+    pub fn active_cpus(&self) -> &ActiveCpus {
+        &self.cpus
     }
 
     /// Run `f` against the space under the lock.
@@ -122,15 +133,32 @@ impl ProcessSpace {
     }
 }
 
+/// The reach a new user address space discards its cleared translations
+/// through: `remote`, over a set sized to every CPU discovery found.
+///
+/// # Errors
+///
+/// [`AllocError::OutOfMemory`] when the set cannot be allocated.
+pub fn new_space_tlb(
+    remote: Option<&'static (dyn CrossCpuTlbShootdown + Sync)>,
+) -> Result<SpaceTlb, AllocError> {
+    Ok(SpaceTlb::new(
+        ActiveCpus::new(crate::cpu_state::states().len())?,
+        remote,
+    ))
+}
+
 /// A host [`LiveSpace`](tairix_kernel_mem::LiveSpace) over simulated RAM — the
 /// production space over the host page-table and physical-map doubles, so a
 /// test exercises the real thing rather than a bespoke stub.
 ///
 /// Takes the caller's own frame pool, which the `host_test_space!` macro
-/// declares. Use that macro rather than calling this directly.
+/// declares, and the reach its unmaps shoot other CPUs down through. Use that
+/// macro rather than calling this directly.
 #[cfg(test)]
 pub(crate) fn host_test_space_over(
     pool: &'static tairix_sync::OnceCell<tairix_kernel_mem::FrameAllocator>,
+    remote: Option<&'static (dyn CrossCpuTlbShootdown + Sync)>,
 ) -> Box<dyn LiveUserSpace + Send> {
     use tairix_kernel_mem::{
         AddressSpace, BootMemoryMap, FrameAllocator, HostPageTable, LiveSpace, MemoryRegion,
@@ -151,6 +179,7 @@ pub(crate) fn host_test_space_over(
     let sim = SimPhysMap::new(PhysAddr::new((PAGE_SIZE * 16) as u64), 256 * PAGE_SIZE);
     let live = LiveSpace::new(
         AddressSpace::new(HostPageTable::new()),
+        new_space_tlb(remote).expect("the set allocates"),
         sim,
         frames,
         VirtAddr::new(0x4000_0000),
@@ -176,10 +205,13 @@ pub(crate) fn host_test_space_over(
 /// concurrently-running tests share a frame budget.
 #[cfg(test)]
 macro_rules! host_test_space {
-    () => {{
+    () => {
+        $crate::procspace::host_test_space!(None)
+    };
+    ($remote:expr) => {{
         static POOL: tairix_sync::OnceCell<tairix_kernel_mem::FrameAllocator> =
             tairix_sync::OnceCell::new();
-        $crate::procspace::host_test_space_over(&POOL)
+        $crate::procspace::host_test_space_over(&POOL, $remote)
     }};
 }
 

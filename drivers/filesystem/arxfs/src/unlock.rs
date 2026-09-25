@@ -234,8 +234,7 @@ impl UnlockDescriptor {
     /// ([`DriverError::BadMagic`]); or an iteration count outside
     /// `UNLOCK_MIN_ITERATIONS..=UNLOCK_MAX_ITERATIONS`
     /// ([`DriverError::OutOfRange`]). A blob that is not exactly a
-    /// well-formed descriptor never yields one (
-    /// — validate every field).
+    /// well-formed descriptor never yields one.
     pub fn decode(bytes: &[u8]) -> Result<Self, DriverError> {
         if bytes.len() < UNLOCK_DESCRIPTOR_LEN {
             return Err(DriverError::BufferTooSmall);

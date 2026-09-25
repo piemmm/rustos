@@ -35,8 +35,8 @@ use tairix_abi::{CapabilityId, CapabilityQuery, Errno};
 use tairix_arch_api::{EnterUser, UserEntry};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::{
-    build_process_image, AddressSpace, Frame, FrameAllocator, PageTable, PhysMap, SpawnError,
-    UserAddressSpace, UserStack,
+    build_process_image, AddressSpace, AllocError, Frame, FrameAllocator, PageTable, PhysMap,
+    SpaceTlb, SpawnError, UserAddressSpace, UserStack,
 };
 use tairix_log::{Event, Field, Level, Sink};
 use tairix_util::fmt::format_hex_u64;
@@ -106,6 +106,14 @@ pub trait InitSpawnCtx {
     /// The boot audit sink the build path records `ProcessSpawn*` events
     /// through.
     fn audit(&self) -> &(dyn Sink + Sync);
+
+    /// The reach a freshly built live space discards its cleared
+    /// translations through on the other CPUs it runs on.
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::OutOfMemory`] when its CPU set cannot be allocated.
+    fn space_tlb(&self) -> Result<SpaceTlb, AllocError>;
 
     /// Register the freshly built PID 1 with the scheduler (so
     /// `current_task` resolves the caller on its first syscall) and the
@@ -1026,6 +1034,14 @@ pub trait ImageBuildCtx {
 
     /// The audit sink the build path records `ProcessSpawn*` events through.
     fn audit(&self) -> &(dyn Sink + Sync);
+
+    /// The reach the child's live space discards its cleared translations
+    /// through on the other CPUs it runs on.
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::OutOfMemory`] when its CPU set cannot be allocated.
+    fn space_tlb(&self) -> Result<SpaceTlb, AllocError>;
 }
 
 /// The architecture-specific seam that builds a fresh, hardware-isolated
@@ -1263,6 +1279,7 @@ mod tests {
             // then drop it — the reap-time teardown path.
             let live = LiveSpace::new(
                 space,
+                crate::procspace::new_space_tlb(None).expect("the set allocates"),
                 SharedSim(simmap),
                 frames,
                 VirtAddr::new(0x4000_0000),
@@ -1506,6 +1523,10 @@ mod tests {
         fn audit(&self) -> &(dyn Sink + Sync) {
             self.sink
         }
+
+        fn space_tlb(&self) -> Result<SpaceTlb, AllocError> {
+            crate::procspace::new_space_tlb(None)
+        }
     }
 
     #[test]
@@ -1558,6 +1579,10 @@ mod tests {
 
         fn audit(&self) -> &(dyn Sink + Sync) {
             self.sink
+        }
+
+        fn space_tlb(&self) -> Result<SpaceTlb, AllocError> {
+            crate::procspace::new_space_tlb(None)
         }
 
         unsafe fn admit_init(

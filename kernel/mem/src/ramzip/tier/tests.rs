@@ -12,6 +12,7 @@ use std::vec::Vec;
 use crate::frame::{Frame, MemoryClass};
 use crate::phys::SimPhysMap;
 use crate::ramzip::PageKind;
+use crate::retire::{Retire, Unpublished};
 use crate::test_fixture::frame_backing;
 use crate::vmm::{HostPageTable, VirtAddr};
 
@@ -239,6 +240,7 @@ fn try_compress(
         page,
         task,
         &PageCandidate::cold_anonymous(),
+        &mut Unpublished,
     )
 }
 
@@ -357,6 +359,7 @@ fn handoff_gate_refuses_outside_moderate_and_severe() {
             page,
             TASK,
             &PageCandidate::cold_anonymous(),
+            &mut Unpublished,
         ),
         Err(CompressRefusal::PressurePolicy)
     );
@@ -377,7 +380,15 @@ fn ineligible_candidates_are_refused_with_the_reason() {
         ..PageCandidate::cold_anonymous()
     };
     assert_eq!(
-        ramzip.compress_out(pressure, 0, &mut ctx, page, TASK, &candidate),
+        ramzip.compress_out(
+            pressure,
+            0,
+            &mut ctx,
+            page,
+            TASK,
+            &candidate,
+            &mut Unpublished
+        ),
         Err(CompressRefusal::Ineligible(Ineligible::UnknownKind))
     );
     assert_eq!(ramzip.ledger().counters().rejected_ineligible, 1);
@@ -427,6 +438,119 @@ fn incompressible_page_is_refused_and_stays_mapped() {
     assert!(env.space.translate(page).is_some());
     assert_eq!(ramzip.ledger().counters().rejected_incompressible, 1);
     assert_eq!(ramzip.ledger().footprint(), 0);
+}
+
+/// The copy path's view of a page under compression. At the instant the page
+/// leaves it, a write lands on its frame — one that reached the frame through
+/// the view just before it was shut — and it records what reached it.
+struct LateWriter<'a> {
+    physmap: &'a SimPhysMap,
+    frame: Frame,
+    retired: Vec<u64>,
+    restored: Vec<(Page, Frame, MapFlags)>,
+}
+
+/// The byte [`LateWriter`] lands, and where.
+const LATE_BYTE: u8 = 0xEE;
+const LATE_OFFSET: usize = 100;
+
+impl Retire for LateWriter<'_> {
+    fn retire(&mut self, base: u64, pages: u64) {
+        assert_eq!(pages, 1);
+        let ptr = self
+            .physmap
+            .translate(self.frame.start(), PAGE_SIZE)
+            .expect("frame in window");
+        // SAFETY: `translate` proved the page lies in the window, and the
+        // tests are single-threaded, so nothing else touches it now.
+        unsafe { ptr.as_ptr().add(LATE_OFFSET).write(LATE_BYTE) };
+        self.retired.push(base);
+    }
+
+    fn restore(&mut self, page: Page, frame: Frame, flags: MapFlags) {
+        self.restored.push((page, frame, flags));
+    }
+}
+
+#[test]
+fn a_write_that_lands_as_the_page_leaves_its_views_is_sealed_with_it() {
+    let mut env = env!();
+    let mut ramzip = tier(&env);
+    let page = env.map_page(12, 3);
+    let (frame, _) = env.space.translate(page).expect("mapped");
+    let mut expected = env.page_bytes(page);
+    expected[LATE_OFFSET] = LATE_BYTE;
+    env.press_to(PressureBand::Moderate);
+
+    let pressure = &env.pressure;
+    let mut writer = LateWriter {
+        physmap: &env.physmap,
+        frame,
+        retired: Vec::new(),
+        restored: Vec::new(),
+    };
+    let mut ctx = ctx!(env);
+    let sealed = ramzip.compress_out(
+        pressure,
+        0,
+        &mut ctx,
+        page,
+        TASK,
+        &PageCandidate::cold_anonymous(),
+        &mut writer,
+    );
+    assert_eq!(sealed, Ok(()));
+    assert_eq!(writer.retired, [page.start().as_u64()]);
+    assert!(writer.restored.is_empty());
+
+    try_fault(&mut env, &mut ramzip, page).expect("fault in");
+    assert_eq!(
+        env.page_bytes(page),
+        expected,
+        "a page is sealed only once nothing can change it"
+    );
+}
+
+#[test]
+fn an_incompressible_page_is_put_back_exactly_where_it_was() {
+    let mut env = env!();
+    let mut ramzip = tier(&env);
+    let page = map_incompressible_page(&mut env, 16);
+    let (frame, flags) = env.space.translate(page).expect("mapped");
+    let pressure_band = PressureBand::Moderate;
+    env.press_to(pressure_band);
+
+    let pressure = &env.pressure;
+    let mut writer = LateWriter {
+        physmap: &env.physmap,
+        frame,
+        retired: Vec::new(),
+        restored: Vec::new(),
+    };
+    let mut ctx = ctx!(env);
+    let refused = ramzip.compress_out(
+        pressure,
+        0,
+        &mut ctx,
+        page,
+        TASK,
+        &PageCandidate::cold_anonymous(),
+        &mut writer,
+    );
+    assert_eq!(refused, Err(CompressRefusal::Incompressible));
+    assert_eq!(writer.retired, [page.start().as_u64()]);
+    assert_eq!(
+        writer.restored,
+        [(page, frame, flags)],
+        "the view gets the page back"
+    );
+    assert_eq!(
+        env.space.translate(page),
+        Some((frame, flags)),
+        "mapped to its own frame again"
+    );
+    assert_eq!(env.page_bytes(page)[LATE_OFFSET], LATE_BYTE, "nothing lost");
+    assert!(!ramzip.has_entry(SPACE, page));
 }
 
 #[test]

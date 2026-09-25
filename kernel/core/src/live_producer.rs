@@ -25,7 +25,8 @@ use alloc::vec::Vec;
 use tairix_abi::{Errno, MapFlags};
 use tairix_kernel_mem::{
     page_count_for, AllocError, AnonError, DmaBlock, DmaCustodian, DmaError, Frame, FrameAllocator,
-    LiveSpaceError, MemoryClass, MmioError, PhysAddr, PhysMap, SharedMemory, MAX_ORDER, PAGE_SIZE,
+    LiveSpaceError, MemoryClass, MmioError, PhysAddr, PhysMap, Retire, SharedMemory, MAX_ORDER,
+    PAGE_SIZE,
 };
 use tairix_kernel_sched_api::SchedulerArch;
 
@@ -180,10 +181,10 @@ where
         .map_err(live_errno)
     }
 
-    fn unmap(&self, base: u64, len: usize) -> Result<(), Errno> {
+    fn unmap(&self, base: u64, len: usize, retire: &mut dyn Retire) -> Result<(), Errno> {
         let page_count = page_count_for(len).map_err(anon_errno)?;
         let cpu = self.arch.current_cpu();
-        with_current_live_space(cpu, |space| space.unmap_anonymous(base, page_count))
+        with_current_live_space(cpu, |space| space.unmap_anonymous(base, page_count, retire))
             .ok_or(Errno::NotImplemented)?
             .map_err(live_errno)
     }
@@ -225,12 +226,14 @@ where
             .map_err(live_errno)
     }
 
-    fn release(&self, base: u64, len: u64) -> Result<u64, Errno> {
+    fn release(&self, base: u64, len: u64, retire: &mut dyn Retire) -> Result<u64, Errno> {
         let page_count = file_page_count(len)?;
         let cpu = self.arch.current_cpu();
-        with_current_live_space(cpu, |space| space.release_file_region(base, page_count))
-            .ok_or(Errno::NotImplemented)?
-            .map_err(live_errno)
+        with_current_live_space(cpu, |space| {
+            space.release_file_region(base, page_count, retire)
+        })
+        .ok_or(Errno::NotImplemented)?
+        .map_err(live_errno)
     }
 }
 
@@ -323,9 +326,9 @@ where
             .map_err(live_errno)
     }
 
-    fn free(&self, cpu_va: u64) -> Result<usize, Errno> {
+    fn free(&self, cpu_va: u64, retire: &mut dyn Retire) -> Result<usize, Errno> {
         let cpu = self.arch.current_cpu();
-        with_current_live_space(cpu, |space| space.free_dma(cpu_va))
+        with_current_live_space(cpu, |space| space.free_dma(cpu_va, retire))
             .ok_or(Errno::NotImplemented)?
             .map_err(live_errno)
     }
@@ -542,6 +545,8 @@ mod tests {
     use alloc::sync::Arc;
     use std::boxed::Box;
 
+    use tairix_kernel_mem::Unpublished;
+
     use crate::kthread::publish_live_space_for_test;
     use crate::procspace::ProcessSpace;
     use crate::test_arch::TestArch;
@@ -601,7 +606,7 @@ mod tests {
         let _guard = publish_live_space_for_test(2, fake);
 
         let producer = LiveMemMap::new(arch_at(2));
-        assert_eq!(producer.unmap(0x4000, PAGE), Ok(()));
+        assert_eq!(producer.unmap(0x4000, PAGE, &mut Unpublished), Ok(()));
         // SAFETY: see above.
         let recorded = unsafe { &*ptr };
         assert_eq!(recorded.anon_unmaps, std::vec![(0x4000, 1)]);
@@ -717,7 +722,7 @@ mod tests {
         let producer = LiveMemMap::new(arch_at(13));
         assert_eq!(producer.map_page(FILE_BASE, &[7; 12]), Ok(()));
         assert_eq!(
-            producer.release(FILE_BASE, 4 * PAGE as u64),
+            producer.release(FILE_BASE, 4 * PAGE as u64, &mut Unpublished),
             Ok(FILE_RESIDENT)
         );
         // SAFETY: see above.
@@ -742,7 +747,7 @@ mod tests {
             Err(Errno::NotImplemented)
         );
         assert_eq!(
-            producer.release(0xF000_0000, PAGE as u64),
+            producer.release(0xF000_0000, PAGE as u64, &mut Unpublished),
             Err(Errno::NotImplemented)
         );
         assert_eq!(FileMap::reserve(&producer, 0), Err(Errno::LengthOutOfRange));

@@ -21,6 +21,7 @@
 //! syscalls.
 
 use tairix_abi::{Errno, MapFlags};
+use tairix_kernel_mem::Retire;
 
 /// The kernel-side producer of anonymous user memory.
 ///
@@ -101,14 +102,15 @@ pub trait MemMap: Sync {
     /// A demand-paged region is **sparsely resident** — only the pages that
     /// actually faulted in hold frames — so the release tolerates unbacked
     /// pages in the range, tearing down and zeroing (secret hygiene) only
-    /// the frames that are present. It fails closed when `(base, len)` does
-    /// not name a region the caller reserved.
+    /// the frames that are present, each once `retire` no longer reaches it.
+    /// It fails closed when `(base, len)` does not name a region the caller
+    /// reserved.
     ///
     /// # Errors
     ///
     /// Returns a stable [`Errno`] when the range cannot be unmapped. The
     /// default producer ([`NullMemMap`]) returns [`Errno::NotImplemented`].
-    fn unmap(&self, base: u64, len: usize) -> Result<(), Errno>;
+    fn unmap(&self, base: u64, len: usize, retire: &mut dyn Retire) -> Result<(), Errno>;
 }
 
 /// The anonymous-memory producer installed before any real one exists.
@@ -134,7 +136,7 @@ impl MemMap for NullMemMap {
         Err(Errno::NotImplemented)
     }
 
-    fn unmap(&self, _base: u64, _len: usize) -> Result<(), Errno> {
+    fn unmap(&self, _base: u64, _len: usize, _retire: &mut dyn Retire) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 }
@@ -180,7 +182,7 @@ mod tests {
     #[test]
     fn null_mem_map_unmap_fails_closed() {
         assert_eq!(
-            NULL_MEM_MAP.unmap(0x10_0000, 0x1000),
+            NULL_MEM_MAP.unmap(0x10_0000, 0x1000, &mut tairix_kernel_mem::Unpublished),
             Err(Errno::NotImplemented)
         );
     }

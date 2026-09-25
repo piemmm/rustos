@@ -1,5 +1,4 @@
-//! TLB-shootdown surface of the Arch HAL (
-//! "TLB shootdown").
+//! Local TLB-shootdown surface of the Arch HAL.
 //!
 //! After a page table is edited — a leaf installed, torn down, or its
 //! permissions changed — the CPU may still hold a *stale* cached
@@ -14,16 +13,11 @@
 //! implementations of this one trait are the deliberate shape of
 //! modularity, never collapsed behind `cfg` (carve-out).
 //!
-//! # Scope (the burn-down)
+//! # Scope
 //!
-//! This is the `plans/WIRING.md` **Stage W5b-2** slice: the *local*,
-//! single-CPU invalidation the per-process map/unmap path in `kernel/mem`
-//! consumes through [`TlbShootdown::flush_page`] and
-//! [`TlbShootdown::flush_range`]. The
-//! *cross-CPU* shootdown — interrupting the other CPUs that may cache a
-//! translation and waiting for them to acknowledge the invalidation —
-//! depends on the aarch64 directed IPI landing in Stage W6, so it is a
-//! tracked follow-up, not silently stubbed here.
+//! The calling CPU alone, through [`TlbShootdown::flush_page`] and
+//! [`TlbShootdown::flush_range`]. Reaching every other CPU that may cache the
+//! translation is [`crate::xtlb::CrossCpuTlbShootdown`].
 //!
 //! # Why there is no host `activate`-style asymmetry here
 //!

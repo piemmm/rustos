@@ -84,7 +84,28 @@ use crate::frame::{
 };
 use crate::phys::PhysMap;
 use crate::ptr::slice_within;
+use crate::retire::{Retire, Unpublished};
 use crate::vmm::{AddressSpace, MapFlags, Page, PageTable, PageTableError, VirtAddr};
+
+/// Zero the `pages`-page block at `start` through the direct map and clean
+/// it to memory, so neither the CPU's caches nor a device read it back.
+///
+/// # Errors
+///
+/// [`DmaError::DirectMap`] when the direct map does not reach the block.
+fn scrub_block(phys: &dyn PhysMap, start: Frame, pages: usize) -> Result<(), DmaError> {
+    let len = pages * PAGE_SIZE;
+    let ptr = phys
+        .translate(start.start(), len)
+        .ok_or(DmaError::DirectMap)?;
+    // SAFETY: `translate` returned `len` bytes of the block, which its caller
+    // holds and no mapping, CPU or snapshot can still reach.
+    unsafe { slice_within(ptr.as_ptr(), len, 0, len) }
+        .ok_or(DmaError::DirectMap)?
+        .zeroize();
+    phys.clean_invalidate(start.start(), len);
+    Ok(())
+}
 
 /// Errors specific to [`DmaPool`].
 ///
@@ -444,7 +465,7 @@ impl DmaWindowMap {
         phys: &dyn PhysMap,
         buf: DmaBuffer,
     ) -> Result<(), DmaError> {
-        self.free_inner(space, frames, phys, buf)
+        self.free_inner(space, frames, phys, buf, &mut Unpublished)
     }
 
     /// Free the live allocation whose first data page is at `virt`, zeroing
@@ -457,9 +478,8 @@ impl DmaWindowMap {
     /// so a `virt` that is not the base of a live carve fails closed with
     /// [`DmaError::UnknownBuffer`] (covering a forged, stale, or double free).
     ///
-    /// Reports the byte length released, so the caller can name exactly the
-    /// pages that left its address space without re-deriving an extent only
-    /// this record knows.
+    /// Reports the byte length released. The pages leave `retire`'s view
+    /// before the frames are scrubbed and freed.
     ///
     /// # Errors
     ///
@@ -472,6 +492,7 @@ impl DmaWindowMap {
         frames: &FrameAllocator,
         phys: &dyn PhysMap,
         virt: VirtAddr,
+        retire: &mut dyn Retire,
     ) -> Result<usize, DmaError> {
         let record = self
             .allocations
@@ -483,7 +504,8 @@ impl DmaWindowMap {
             len: record.data_pages * PAGE_SIZE,
         };
         let len = buf.len;
-        self.free_inner(space, frames, phys, buf).map(|()| len)
+        self.free_inner(space, frames, phys, buf, retire)
+            .map(|()| len)
     }
 
     /// Look up `buf`'s live record and return its `(physical base, byte
@@ -538,23 +560,19 @@ impl DmaWindowMap {
         custodian: &DmaCustodian,
     ) {
         for record in self.allocations.values() {
-            let data_len = record.data_pages * PAGE_SIZE;
-            let start = record.start_frame.start();
-            if let Some(ptr) = phys.translate(start, data_len) {
-                // SAFETY: the frames are this space's own carve, still
-                // allocated, and reachable by nothing else but the device; the
-                // direct map translated exactly `data_len` bytes.
-                if let Some(bytes) = unsafe { slice_within(ptr.as_ptr(), data_len, 0, data_len) } {
-                    bytes.zeroize();
-                    phys.clean_invalidate(start, data_len);
-                }
-            }
             let first_data_slot = record.leading_guard_slot + 1;
             for i in 0..record.data_pages {
                 if let Ok(page) = Page::from_addr(self.virt_of_slot(first_data_slot + i)) {
                     let _ = space.unmap(page);
                 }
             }
+            space.shoot_remote(
+                self.virt_of_slot(first_data_slot).as_u64(),
+                record.data_pages as u64,
+            );
+            // Best effort: the custodian's hold keeps the frames from reuse
+            // either way.
+            let _ = scrub_block(phys, record.start_frame, record.data_pages);
             custodian.custody.hold(
                 custodian.node,
                 custodian.generation,
@@ -584,10 +602,14 @@ impl DmaWindowMap {
     /// [`DmaError::PageTable`] from the first page that cannot be mapped. The
     /// pages already mapped are unmapped and the whole block returned to
     /// `frames` before returning, so a partial map never survives.
+    // Each argument is a distinct piece of the carve the rollback needs; a
+    // one-use bundle of them would be the wrapper type the charter forbids.
+    #[allow(clippy::too_many_arguments)]
     fn map_data_pages<P: PageTable>(
         &self,
         space: &mut AddressSpace<P>,
         frames: &FrameAllocator,
+        phys: &dyn PhysMap,
         first_data_slot: usize,
         data_pages: usize,
         start_frame: Frame,
@@ -602,6 +624,7 @@ impl DmaWindowMap {
                     self.rollback_partial_map(
                         space,
                         frames,
+                        phys,
                         first_data_slot,
                         i,
                         start_frame,
@@ -623,7 +646,15 @@ impl DmaWindowMap {
                 // ordinary cacheable RAM.
                 MapFlags::READ | MapFlags::WRITE | MapFlags::USER | MapFlags::DMA_COHERENT,
             ) {
-                self.rollback_partial_map(space, frames, first_data_slot, i, start_frame, order);
+                self.rollback_partial_map(
+                    space,
+                    frames,
+                    phys,
+                    first_data_slot,
+                    i,
+                    start_frame,
+                    order,
+                );
                 return Err(DmaError::PageTable(e));
             }
         }
@@ -673,42 +704,21 @@ impl DmaWindowMap {
         let ceiling = (addr_limit != 0).then_some(PhysAddr::new(addr_limit));
         let start_frame = frames.alloc_order_under(MemoryClass::Dma, order, ceiling)?;
 
+        // Scrubbed before it is mapped: once an entry exists, any thread of
+        // the process can read what the block held for its previous owner.
+        if let Err(err) = scrub_block(phys, start_frame, data_pages) {
+            let _ = frames.free_order(start_frame, order);
+            return Err(err);
+        }
         self.map_data_pages(
             space,
             frames,
+            phys,
             first_data_slot,
             data_pages,
             start_frame,
             order,
         )?;
-
-        // Zero the data region through the direct map so the caller
-        // observes a clean buffer. The frames are mapped above and not
-        // yet reachable by any other allocation, so a failure to reach
-        // them is a platform-config bug: roll back and fail closed.
-        let data_len = data_pages * PAGE_SIZE;
-        // SAFETY: when `translate` succeeds it returns a pointer to
-        // `data_len` bytes of the frames just mapped; no other live
-        // allocation covers them (the slot run was free), so the slice
-        // aliases nothing.
-        let data = phys
-            .translate(start_frame.start(), data_len)
-            .and_then(|ptr| unsafe { slice_within(ptr.as_ptr(), data_len, 0, data_len) });
-        let Some(data) = data else {
-            self.rollback_partial_map(
-                space,
-                frames,
-                first_data_slot,
-                data_pages,
-                start_frame,
-                order,
-            );
-            return Err(DmaError::DirectMap);
-        };
-        for b in data.iter_mut() {
-            *b = 0;
-        }
-        phys.clean_invalidate(start_frame.start(), data_len);
 
         // Mark every slot — guard and data alike — as used so no
         // future allocation can overlap them.
@@ -732,6 +742,7 @@ impl DmaWindowMap {
             self.rollback_partial_map(
                 space,
                 frames,
+                phys,
                 first_data_slot,
                 data_pages,
                 start_frame,
@@ -773,6 +784,7 @@ impl DmaWindowMap {
         frames: &FrameAllocator,
         phys: &dyn PhysMap,
         buf: DmaBuffer,
+        retire: &mut dyn Retire,
     ) -> Result<(), DmaError> {
         let record = self
             .allocations
@@ -782,37 +794,21 @@ impl DmaWindowMap {
         let first_data_slot = record.leading_guard_slot + 1;
         let trailing_guard_slot = record.leading_guard_slot + 1 + data_pages;
 
-        // 1. Zero the data region (zero-on-free) on the real frames,
-        //    before they are unmapped or returned to the allocator.
-        let data_len = data_pages * PAGE_SIZE;
-        let ptr = phys
-            .translate(record.start_frame.start(), data_len)
-            .ok_or(DmaError::DirectMap)?;
-        // SAFETY: the frames are still mapped and reserved (the slot
-        // bitmap is cleared only below), so the pointer is exclusively
-        // owned for `data_len` bytes. `zeroize` performs a volatile
-        // write the compiler cannot elide.
-        unsafe { slice_within(ptr.as_ptr(), data_len, 0, data_len) }
-            .ok_or(DmaError::DirectMap)?
-            .zeroize();
-        phys.clean_invalidate(record.start_frame.start(), data_len);
-
-        // 2. Unmap data pages.
         for i in 0..data_pages {
-            let virt = self.virt_of_slot(first_data_slot + i);
-            let page = Page::from_addr(virt)?;
-            // `unmap` returns the frame that was mapped; we already
-            // know it from `record.start_frame + i` so we discard the
-            // returned value.
+            let page = Page::from_addr(self.virt_of_slot(first_data_slot + i))?;
+            // The frame is `record.start_frame + i`, already known.
             let _ = space.unmap(page)?;
         }
-
-        // 3. Return frames in one buddy-order operation.
+        // Scrubbed only once no CPU and no snapshot can still write it, or a
+        // late store would survive into the next owner.
+        let base = self.virt_of_slot(first_data_slot).as_u64();
+        space.shoot_remote(base, data_pages as u64);
+        retire.retire(base, data_pages as u64);
+        scrub_block(phys, record.start_frame, data_pages)?;
         frames
             .free_order(record.start_frame, record.order)
             .map_err(DmaError::Alloc)?;
 
-        // 4. Mark guard and data slots free again.
         for s in record.leading_guard_slot..=trailing_guard_slot {
             self.slot_used[s] = false;
         }
@@ -863,26 +859,36 @@ impl DmaWindowMap {
         None
     }
 
+    /// Undo a carve whose first `mapped_so_far` pages were mapped: they were
+    /// never published beyond the page table, but a sibling thread may have
+    /// touched them on another CPU, so the block is freed only once no CPU
+    /// can reach it, and scrubbed again. Errors are dropped — this is already
+    /// the failure path — and a block that cannot be scrubbed is kept.
+    // Each argument is a distinct piece of the carve being undone.
+    #[allow(clippy::too_many_arguments)]
     fn rollback_partial_map<P: PageTable>(
         &self,
         space: &mut AddressSpace<P>,
         frames: &FrameAllocator,
+        phys: &dyn PhysMap,
         first_data_slot: usize,
         mapped_so_far: usize,
         start_frame: Frame,
         order: u32,
     ) {
-        // Best-effort: unmap any pages we already mapped. We
-        // deliberately discard inner errors — we're already on the
-        // error path, and the alternative (panicking) is forbidden
-        // by.
         for i in 0..mapped_so_far {
             let virt = self.virt_of_slot(first_data_slot + i);
             if let Ok(page) = Page::from_addr(virt) {
                 let _ = space.unmap(page);
             }
         }
-        let _ = frames.free_order(start_frame, order);
+        space.shoot_remote(
+            self.virt_of_slot(first_data_slot).as_u64(),
+            mapped_so_far as u64,
+        );
+        if scrub_block(phys, start_frame, 1 << order).is_ok() {
+            let _ = frames.free_order(start_frame, order);
+        }
     }
 }
 

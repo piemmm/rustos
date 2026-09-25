@@ -1,7 +1,7 @@
-//! Secondary-CPU bring-up surface of the Arch HAL (
-//! "SMP secondary-core bring-up", `plans/WIRING.md` §2 / Stage W14).
+//! Secondary-CPU bring-up surface of the Arch HAL (`plans/WIRING.md` §2,
+//! Stage W14).
 //!
-//! the charter mandates SMP from day one. Bringing a machine's other
+//! The charter mandates SMP from day one. Bringing a machine's other
 //! logical CPUs online is the one architecture primitive that was still
 //! ad-hoc inside each port after Stage W13: every port owned a `smp`
 //! module — x86_64 INIT-SIPI-SIPI, aarch64 PSCI `CPU_ON`, riscv64 SBI

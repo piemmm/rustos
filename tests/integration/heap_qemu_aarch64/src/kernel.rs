@@ -35,7 +35,7 @@ use tairix_kernel_core::{
 };
 use tairix_kernel_mem::{
     map_anonymous, page_count_for, unmap_anonymous, AddressSpace, AnonError, DirectPhysMap, Frame,
-    PhysAddr, UserStack,
+    PhysAddr, Retire, Unpublished, UserStack,
 };
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -233,7 +233,7 @@ impl AnonProducer {
 
     /// Tear down the pages of `[base, base + len)`, whichever mappings the
     /// heap obtained them in.
-    fn release(&self, base: u64, len: usize) -> Result<(), Errno> {
+    fn release(&self, base: u64, len: usize, retire: &mut dyn Retire) -> Result<(), Errno> {
         let page_count = page_count_for(len).map_err(anon_to_errno)?;
         let live = self.live()?;
         unmap_anonymous(
@@ -241,7 +241,8 @@ impl AnonProducer {
             &live.physmap,
             base,
             page_count,
-            |_frame| {},
+            retire,
+            &mut |_frame| {},
         )
         .map_err(anon_to_errno)
     }
@@ -326,8 +327,8 @@ impl MemMap for AnonProducer {
         Ok(addr_hint)
     }
 
-    fn unmap(&self, base: u64, len: usize) -> Result<(), Errno> {
-        let result = self.release(base, len);
+    fn unmap(&self, base: u64, len: usize, retire: &mut dyn Retire) -> Result<(), Errno> {
+        let result = self.release(base, len, retire);
         let counter = if result.is_ok() {
             &self.unmaps
         } else {
@@ -385,7 +386,8 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         if len == 0 {
             return encode(Err(Errno::LengthOutOfRange));
         }
-        encode(PRODUCER.unmap(base, len).map(|()| 0))
+        // This kernel serves no copy path, so the page table is the only view.
+        encode(PRODUCER.unmap(base, len, &mut Unpublished).map(|()| 0))
     } else if call == Some(SyscallNumber::EXIT) {
         let exit_code = i32_from_register(args[0]);
         if exit_code == 0 {

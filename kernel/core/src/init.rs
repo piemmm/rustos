@@ -390,18 +390,21 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         // path `spawn_init` returns and we halt below, so the leak is
         // immaterial; on success it diverges and the context lives for the
         // running kernel's lifetime, exactly like the state it borrows.
-        let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(KernelInitSpawner::new(
-            state.frame_allocator,
-            audit_sink,
-            &state.scheduler,
-            &state.caps,
-            &state.peer_watch,
-            &state.aspaces,
-            state.arch.as_ref(),
-            process_wait,
-            &state.irq,
-            build_shared_mem_facility(state.arch.as_ref(), state.frame_allocator),
-        )));
+        let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(
+            KernelInitSpawner::new(
+                state.frame_allocator,
+                audit_sink,
+                &state.scheduler,
+                &state.caps,
+                &state.peer_watch,
+                &state.aspaces,
+                state.arch.as_ref(),
+                process_wait,
+                &state.irq,
+                build_shared_mem_facility(state.arch.as_ref(), state.frame_allocator),
+            )
+            .with_tlb_shootdown(A::cross_cpu_tlb_shootdown(state.arch.as_ref())),
+        ));
         init.spawn_init(ctx);
     }
 
@@ -1087,6 +1090,11 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     /// [`crate::devres::NULL_SHARED_MEM_FACILITY`]; PID-1 admission and the
     /// driver-spawn path do not consult it.
     shared_mem_facility: &'static (dyn crate::devres::SharedMemFacility + 'static),
+    /// The cross-CPU invalidation the spaces this spawner builds discard
+    /// their cleared translations through; [`None`] leaves them reaching no
+    /// other CPU, which is right only for a spawner that runs its processes
+    /// on one CPU or on a port whose local flush already broadcasts.
+    tlb_shootdown: Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)>,
 }
 
 impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
@@ -1124,7 +1132,19 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             process_wait,
             irq,
             shared_mem_facility,
+            tlb_shootdown: None,
         }
+    }
+
+    /// Reach the other CPUs through `shootdown` when a space this spawner
+    /// built clears an entry.
+    #[must_use]
+    pub fn with_tlb_shootdown(
+        mut self,
+        shootdown: Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)>,
+    ) -> Self {
+        self.tlb_shootdown = shootdown;
+        self
     }
 }
 
@@ -1557,6 +1577,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
 
     fn audit(&self) -> &(dyn Sink + Sync) {
         self.audit
+    }
+
+    fn space_tlb(&self) -> Result<tairix_kernel_mem::SpaceTlb, tairix_kernel_mem::AllocError> {
+        crate::procspace::new_space_tlb(self.tlb_shootdown)
     }
 
     // Every argument is a distinct piece of the first process's admission
@@ -2604,9 +2628,6 @@ fn run_phases<A: KernelArch>(
             state.frame_allocator,
             hw_tree,
         ))
-        // Revoking a removed device's windows from its driver unmaps another
-        // process's pages, which every CPU must stop translating.
-        .with_tlb_shootdown(A::cross_cpu_tlb_shootdown(state.arch.as_ref()))
         // Serve `signal` through the scheduler-side producer built above
         // (`plans/SPAWN.md` SP7b); the default `NULL_PROCESS_SIGNAL` keeps
         // `signal` fail-closed `NotImplemented` until this is installed.

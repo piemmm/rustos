@@ -35,7 +35,9 @@
 // `Ordering` is live on the bare-metal path too.
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use tairix_arch_api::{CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError};
+use tairix_arch_api::{
+    CpuId, CpuMask, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError,
+};
 
 /// Sentinel stored in a [`RiscvArchStorage::cpu_to_hartid`] slot that no
 /// CPU maps to. A real hart id is a [`CpuId`] (a `u32`), so `u64::MAX`
@@ -396,51 +398,60 @@ impl CrossCpuTlbShootdown for RiscvArch {
         if page_count == 0 {
             return;
         }
-        // Invalidate the calling hart locally first: the SBI remote fence
-        // below covers only the *other* harts, never the caller. Both the
-        // local flush and this share the one sequence.
+        // The SBI remote fence covers only the *other* harts, never the
+        // caller, which shares the one local sequence with the per-page flush.
         crate::paging::invalidate_range_local(start_vaddr, page_count);
+        // Iterate the caller-sized per-CPU map, not a fixed ceiling.
+        let every_cpu = (0..self.cpu_to_hartid.len()).map_while(|cpu| CpuId::try_from(cpu).ok());
+        self.fence_remote(every_cpu, start_vaddr, page_count);
+    }
 
+    fn shootdown_user_range(&self, cpus: CpuMask<'_>, start_vaddr: u64, page_count: usize) {
+        if page_count == 0 {
+            return;
+        }
+        self.fence_remote(cpus.iter(), start_vaddr, page_count);
+    }
+}
+
+impl RiscvArch {
+    /// Fence `page_count` pages from `start_vaddr` on the hart of every CPU
+    /// `cpus` names but the caller, one SBI RFENCE call per hart window.
+    ///
+    /// The firmware returns only once those harts have fenced, so the call is
+    /// the acknowledge. A range the call cannot express, or a call the
+    /// firmware refuses, becomes a whole-address-space fence of every hart:
+    /// a remote fence is never skipped, since the caller frees what it covers.
+    fn fence_remote<I>(&self, cpus: I, start_vaddr: u64, page_count: usize)
+    where
+        I: Iterator<Item = CpuId>,
+    {
         #[cfg(all(target_arch = "riscv64", target_os = "none"))]
         {
-            // Reach every *other* online hart through the SBI RFENCE
-            // firmware call. `remote_sfence_vma` takes a byte *range* and
-            // returns only once those harts have fenced, so one call
-            // covers the whole run and the firmware performs the remote
-            // acknowledge — there is no software ack loop (cf. the x86_64
-            // IPI path). A malformed mask returns an SBI error the caller
-            // cannot act on, so it is dropped (over-/under-fencing the
-            // *remote* set cannot corrupt the local map).
+            // A zero start and size is the SBI spelling of the whole space.
+            const WHOLE_SPACE: (usize, usize) = (0, 0);
             let me = SchedulerArch::current_cpu(self);
-            // `usize::try_from` rather than `as`: an address never exceeds
-            // `usize` on riscv64, so the `Err` arm is unreachable, but the
-            // checked conversion keeps the cast lint-clean without an
-            // `#[allow]`.
-            let Ok(page) = usize::try_from(start_vaddr & !(crate::paging::PAGE_SIZE as u64 - 1))
-            else {
-                return;
-            };
-            let Some(size) = page_count.checked_mul(crate::paging::PAGE_SIZE) else {
-                return;
-            };
-            // Iterate the caller-sized per-CPU map, not a fixed ceiling.
-            for cpu in 0..self.cpu_to_hartid.len() {
-                let Ok(cpu) = u32::try_from(cpu) else { break };
-                if cpu == me {
-                    continue;
-                }
-                if let Some(hartid) = self.hartid_of(cpu) {
-                    let (mask, base) = crate::sbi::hart_mask_for(hartid);
-                    let _ = crate::sbi::remote_sfence_vma(mask, base, page, size);
+            let harts = cpus
+                .filter(|&cpu| cpu != me)
+                .filter_map(|cpu| self.hartid_of(cpu));
+            let (start, size) =
+                usize::try_from(start_vaddr & !(crate::paging::PAGE_SIZE as u64 - 1))
+                    .ok()
+                    .zip(page_count.checked_mul(crate::paging::PAGE_SIZE))
+                    .unwrap_or(WHOLE_SPACE);
+            for (mask, base) in crate::sbi::hart_windows(harts) {
+                if !crate::sbi::remote_sfence_vma(mask, base, start, size).is_success() {
+                    let (start, size) = WHOLE_SPACE;
+                    let _ = crate::sbi::remote_sfence_vma(0, crate::sbi::ALL_HARTS, start, size);
+                    return;
                 }
             }
         }
         #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
         {
-            // Host: the local helper above was a vacuous no-op and there
-            // is no firmware to call; the conformance vertical asserts
-            // only that the call is total and panic-free.
-            let _ = start_vaddr;
+            // Host: no firmware and no second hart; the conformance vertical
+            // asserts only that the call is total and panic-free.
+            let _ = (self, cpus, start_vaddr, page_count);
         }
     }
 }
@@ -462,6 +473,11 @@ impl SecondaryBringup for RiscvArch {
 
         #[cfg(all(target_arch = "riscv64", target_os = "none"))]
         {
+            // A second hart's stale translations can be discarded only
+            // through RFENCE, so firmware without it stays single-hart.
+            if !crate::sbi::has_extension(crate::sbi::SBI_EXT_RFENCE) {
+                return Err(SmpError::NotReady);
+            }
             // SAFETY: the caller of this HAL method guarantees the
             // secondary entry is installed, `.bss` is zeroed, and the
             // target hart is real and parked — exactly the contract

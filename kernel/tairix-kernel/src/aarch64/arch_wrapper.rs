@@ -203,18 +203,12 @@ impl KernelArch for Aarch64BinArch {
         self.arch.ticks_to_ns(ticks)
     }
 
-    fn park_translation(&self) -> Option<fn()> {
+    fn park_translation(&self) -> Option<fn() -> bool> {
         // Re-installs the boot space's `TTBR0_EL1` root (published by the
         // boot `switch()`) so no user root stays active after its task
         // suspends — the invariant a dead task's page-table reclamation
         // relies on.
-        fn park() {
-            // Fire-and-forget from the dispatcher: with no park root
-            // published yet there is nothing to leave (fail closed), so
-            // the `bool` outcome is deliberately discarded.
-            let _ = tairix_arch_aarch64::paging::park_kernel_root();
-        }
-        Some(park)
+        Some(tairix_arch_aarch64::paging::park_kernel_root)
     }
 
     fn wait_for_interrupt(&self) {

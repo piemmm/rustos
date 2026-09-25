@@ -1,5 +1,4 @@
-//! Per-CPU storage surface of the Arch HAL (
-//! "per-CPU storage").
+//! Per-CPU storage surface of the Arch HAL.
 //!
 //! Every CPU needs a private word it can reach with no lock and no
 //! cross-CPU coordination — the anchor the rest of the kernel resolves

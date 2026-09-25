@@ -1133,7 +1133,7 @@ const fn is_kernel_half_slot(index: usize) -> bool {
 /// only whole-address-space local invalidation, shared by the direct map's
 /// widening and the block split — never a second copy of the sequence.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn invalidate_all_local() {
+pub(crate) fn invalidate_all_local() {
     // SAFETY: `mov cr3` with the value already loaded is a pure TLB flush.
     // It changes no translation and touches no memory.
     unsafe {

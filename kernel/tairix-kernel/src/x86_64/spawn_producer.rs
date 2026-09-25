@@ -51,8 +51,8 @@ use tairix_kernel_core::{
     ProcessResume, ProcessSpace, SpawnMode, SpawnRequest, UserThreadEntry,
 };
 use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysAddr, PhysMap,
-    UserAddressSpace, UserStack, VirtAddr,
+    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, PhysAddr, PhysMap,
+    UserAddressSpace, UserStack,
 };
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_sync::Once;
@@ -66,7 +66,7 @@ const BOOT_CPU: usize = 0;
 
 /// A spawned child's four fixed guarded-window bases (`plans/PI.md`
 /// 5d-0-ii (b′)/(c)), derived from the one shared offset set the retained
-/// [`LiveSpace`]'s window allocators are configured with.
+/// [`LiveSpace`](tairix_kernel_mem::LiveSpace)'s window allocators are configured with.
 const WINDOWS: spawn_layout::WindowBases = spawn_layout::window_bases(CHILD_USER_BIAS);
 
 /// The kernel's direct physical map: the higher-half window at
@@ -289,8 +289,8 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
             // child's own kernel stack — the latter is what makes an involuntary
             // LAPIC-timer preemption (P-1c), delivered through the IDT interrupt
             // gate which reads `TSS.RSP0`, land on the child's own stack rather
-            // than corrupt a concurrently parked task's frame (
-            // — one per-task kernel stack for both entry kinds). A rejected
+            // than corrupt a concurrently parked task's frame: one per-task
+            // kernel stack serves both entry kinds. A rejected
             // value (validated canonical/aligned/kernel-half) leaves the slots
             // unchanged and the next entry faults loudly (fail closed).
             let _ = syscall_entry::set_kernel_rsp0(BOOT_CPU, stack_top);
@@ -320,41 +320,21 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         // *same* arch space the snapshot above was frozen from, zeroing
         // anonymous frames through the same direct map the image build used
         // (the child's CR3 carries it). No
-        // `'static` allocator, or a window the allocator rejects, retains none
+        // `'static` allocator, a window the allocator rejects, or a CPU set that
+        // cannot be allocated retains none
         // and the child's `mem_map` / `mmio_map` fail closed.
-        let live: Option<Arc<ProcessSpace>> = match ctx.page_table_allocator() {
-            Some(static_frames) => {
-                let windows = crate::user_windows::user_windows(
-                    static_frames.total_frames() as u64,
-                    WINDOWS.anon,
-                    super::USER_VA_TOP,
-                );
-                LiveSpace::new(
-                    space,
-                    ConfiguredPhysMap,
-                    static_frames,
-                    VirtAddr::new(WINDOWS.mmio),
-                    spawn_layout::MMIO_WINDOW_PAGES,
-                    VirtAddr::new(WINDOWS.anon),
-                    windows.anon_pages,
-                    VirtAddr::new(WINDOWS.dma),
-                    spawn_layout::DMA_WINDOW_PAGES,
-                    VirtAddr::new(WINDOWS.shared),
-                    spawn_layout::SHARED_WINDOW_PAGES,
-                    VirtAddr::new(windows.file_base),
-                    windows.file_pages,
-                )
-                .ok()
-                .map(|live| {
-                    Arc::new(ProcessSpace::new(
-                        Box::new(live),
-                        Arc::clone(&pre_resume),
-                        &USER_MODE,
-                    ))
-                })
-            }
-            None => None,
-        };
+        let live: Option<Arc<ProcessSpace>> = ctx.page_table_allocator().and_then(|frames| {
+            spawn_layout::process_space(
+                space,
+                ctx.space_tlb(),
+                ConfiguredPhysMap,
+                frames,
+                &WINDOWS,
+                super::USER_VA_TOP,
+                &pre_resume,
+                &USER_MODE,
+            )
+        });
 
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 

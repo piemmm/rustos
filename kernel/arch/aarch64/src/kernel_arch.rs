@@ -37,7 +37,7 @@
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use tairix_arch_api::{
-    CoreClass, CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError,
+    CoreClass, CpuId, CpuMask, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError,
 };
 
 use crate::fdt::PsciMethod;
@@ -610,6 +610,12 @@ impl CrossCpuTlbShootdown for Aarch64Arch {
         // The broadcast is per page either way, so the range form's win is
         // one barrier pair for the whole run instead of one per page.
         crate::paging::invalidate_range_inner_shareable(start_vaddr, page_count);
+    }
+
+    fn shootdown_user_range(&self, cpus: CpuMask<'_>, start_vaddr: u64, page_count: usize) {
+        // The space's own flush is `tlbi vaae1is`, which already reached
+        // every PE in the inner-shareable domain.
+        let _ = (cpus, start_vaddr, page_count);
     }
 }
 

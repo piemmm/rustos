@@ -149,8 +149,7 @@ fn unpack_calibration() -> Option<Calibration> {
         // and that runs against the BSP's full calibration. Re-using
         // the packed transport shape would require widening the
         // transport from `u64` to `u128`; documented here as a
-        // deliberate carry-over rather than silently widening (
-        // — no interface creep).
+        // deliberate carry-over rather than silently widening the interface.
         tsc_per_second: 0,
     })
 }

@@ -14,6 +14,7 @@ use super::{
     WARM_RADIUS,
 };
 use crate::frame::MemoryClass;
+use crate::retire::Retire;
 use crate::vmm::MapFlags;
 
 /// Whether opportunistic restores may run at all: normal pressure
@@ -50,11 +51,10 @@ fn frame_page<'a, P: PageTable>(
 ) -> Option<&'a mut [u8; PAGE_SIZE]> {
     let ptr = ctx.physmap.translate(frame.start(), PAGE_SIZE)?;
     // SAFETY: `translate` proved the pointer is valid for `PAGE_SIZE`
-    // bytes inside the kernel direct map. The tier's concurrency
-    // contract (module docs) guarantees the owning task is not running,
-    // and the frame is either still privately mapped in the paused
-    // task's space (compress read) or freshly allocated and not yet
-    // mapped anywhere (restore write), so nothing aliases the window.
+    // bytes inside the kernel direct map. The frame has either left every
+    // view of its space — the page table, each CPU's TLB and the copy
+    // path's snapshot — (compress read), or is freshly allocated and not
+    // yet mapped anywhere (restore write), so nothing aliases the window.
     let slice = unsafe { slice_within(ptr.as_ptr(), PAGE_SIZE, 0, PAGE_SIZE) }?;
     slice.try_into().ok()
 }
@@ -66,9 +66,12 @@ impl Ramzip {
     /// The full gate order (each refusal typed, the page untouched):
     /// pressure handoff → poison check → thrash check → eligibility →
     /// mapping lookup and flag defence → band cap → per-task share →
-    /// decompression floor → compression acceptance. Only after the
-    /// sealed entry is stored and charged is the page unmapped and its
-    /// frame scrubbed (zero-on-free) and returned.
+    /// decompression floor. The page then leaves the page table, every
+    /// other CPU's TLB and `retire`'s view before a byte of it is read, so
+    /// no sibling thread can change it after it is sealed; only then is it
+    /// sealed and charged, and its frame scrubbed (zero-on-free) and
+    /// returned. A seal the tier refuses puts the page back exactly as it
+    /// was, in the page table and in `retire`.
     ///
     /// `reclaimable_residue` is the clean + transform cache bytes still
     /// resident, from the caller's reclaim accounting: compression
@@ -79,6 +82,8 @@ impl Ramzip {
     /// See [`CompressRefusal`]; feed the refusal and the sampled band
     /// to [`escalate_refusal`](crate::escalate_refusal) for the
     /// deterministic next step.
+    // Each argument is a distinct input the gates or the views need.
+    #[allow(clippy::too_many_arguments)]
     pub fn compress_out<P: PageTable>(
         &mut self,
         pressure: &MemoryPressure,
@@ -87,11 +92,48 @@ impl Ramzip {
         page: Page,
         task: u64,
         candidate: &PageCandidate,
+        retire: &mut dyn Retire,
     ) -> Result<(), CompressRefusal> {
         let (frame, flags) =
             self.admit_compress(pressure, reclaimable_residue, ctx, page, task, *candidate)?;
-        let key = (ctx.space_id, page.number());
+        let va = page.start().as_u64();
+        ctx.space.unmap(page).map_err(CompressRefusal::PageTable)?;
+        ctx.space.shoot_remote(va, 1);
+        retire.retire(va, 1);
 
+        if let Err(refusal) = self.seal_entry(ctx, page, frame, flags, task) {
+            // Unmapping freed no table, so the page's walk needs nothing
+            // allocated. Were it refused all the same, the frame is kept
+            // rather than reused with the task's bytes in it.
+            ctx.space
+                .map(page, frame, flags)
+                .map_err(CompressRefusal::PageTable)?;
+            retire.restore(page, frame, flags);
+            return Err(refusal);
+        }
+
+        // Zero-on-free: the frame held user bytes. A scrub or free
+        // failure keeps the entry (the data is safe in the tier) and
+        // surfaces the defect; the frame is deliberately not recycled
+        // unscrubbed.
+        if zero_frame(ctx.physmap, frame).is_err() || ctx.frames.free(frame).is_err() {
+            return Err(CompressRefusal::FrameRelease);
+        }
+        bump(&mut self.ledger.counters_mut().accepted);
+        Ok(())
+    }
+
+    /// Seal `frame`, which backed `page` and is now reachable by nothing
+    /// else, into a charged entry. Nothing is stored on a refusal.
+    fn seal_entry<P: PageTable>(
+        &mut self,
+        ctx: &VmContext<'_, P>,
+        page: Page,
+        frame: crate::frame::Frame,
+        flags: MapFlags,
+        task: u64,
+    ) -> Result<(), CompressRefusal> {
+        let key = (ctx.space_id, page.number());
         let Some(plaintext) = frame_page(ctx, frame) else {
             return Err(CompressRefusal::PhysUnmapped);
         };
@@ -135,32 +177,6 @@ impl Ramzip {
                 blob,
             },
         );
-
-        let freed = match ctx.space.unmap(page) {
-            Ok(freed) => freed,
-            Err(e) => {
-                // Roll the entry back: the page is still mapped and
-                // authoritative, so the tier must not hold a copy.
-                self.entries.remove(&key);
-                if self
-                    .ledger
-                    .release(task, PAGE_SIZE, compressed, stored, ENTRY_METADATA_BYTES)
-                    .is_err()
-                {
-                    self.poisoned = true;
-                }
-                return Err(CompressRefusal::PageTable(e));
-            }
-        };
-
-        // Zero-on-free: the frame held user bytes. A scrub or free
-        // failure keeps the entry (the data is safe in the tier) and
-        // surfaces the defect; the frame is deliberately not recycled
-        // unscrubbed.
-        if zero_frame(ctx.physmap, freed).is_err() || ctx.frames.free(freed).is_err() {
-            return Err(CompressRefusal::FrameRelease);
-        }
-        bump(&mut self.ledger.counters_mut().accepted);
         Ok(())
     }
 

@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 84 open, 191 closed, 275 total.
+**closed**, and a partial fix stays **open**. 83 open, 200 closed, 283 total.
 
-### Open (84)
+### Open (83)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -73,7 +73,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D168 | the shared device-tree walk emits nodes the firmware marked `status = "disabled"` or `"reserved"`, and drivers bind them | noticed against the pinned Pi 4 tree while designing SND5; not absorbed, because changing the rule can unbind a path metal already accepts. See the section |
 | D169 | stable audit event ids collide across components: about thirty are claimed by two or three unrelated emitters | noticed while allocating the D167 ids; not absorbed — the fix is an id registry, a renumbering, and a `ci` uniqueness check. See the section |
 | D170 | direct reclaim allocates on the kernel heap, infallibly, on the path memory pressure triggers | noticed while making `LiveSpace::drop`'s walk allocation-free (D167); not absorbed, because the cold scanner's interface changes. See the section |
-| D171 | a dead address space is torn down with one TLB invalidation per page, broadcast on aarch64 | noticed while making `LiveSpace::drop`'s walk allocation-free (D167); not absorbed, because the fix is an Arch HAL contract on every port. See the section |
 | D172 | `usb_msd` reads the whole hardware tree into a fixed 8 KiB stack buffer to attribute a stall to a resetting ancestor, and no real tree fits it, so the attribution never runs | noticed while widening the node to sixteen resources (`plans/SOUND.md` SND5a), which shrank the buffer's reach from fourteen nodes to nine; not absorbed, because the fix is a kernel-side fold or a shared growing snapshot reader. See the section |
 | D175 | memory below a narrow DMA ceiling has no reserve: ordinary allocations drain it first-come, so a constrained carve late on a busy machine is refused while RAM above the ceiling is free | noticed while making constrained carves deterministic (D173); not absorbed, because the fix is address zones sized from discovery, with a reserve, on every port. See the section |
 | D180 | the three trap-path callback slots are copied into every port's `fault.rs` | noticed while closing D146. The fatal-fault handler, the user-fault resolver and the user-fault terminator are each a set-once `FnCell` slot with its `set_*`/getter pair and `SetFaultHandlerError`, identical in `kernel/arch/{aarch64,riscv64,x86_64}/src/fault.rs` but for the names of the three words. The fix hoists them into one `tairix_arch_api` module — the precedent is `uaccess`'s guarded-copy slot — typed over `fatal::KernelFault`'s neutral triple, and moves every consumer onto it: the three `panic_ctx` bridges, the user-fault wiring, and the verticals that install a handler |
@@ -95,7 +94,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D224 | the tree has two secure-wipe primitives: the `zeroize` crate (a direct dependency of 12 crates) and the first-party `tairix_util::secret` (`wipe`, `Wiped`; used by nine crates, among them `kernel/core`, `lib/rt`, and `netstack`) | noticed while moving `lib/sandbox`'s session queue onto `lib/collections`' `ByteQueue`, which wipes through `zeroize` where the queue it replaced wiped through `lib/util`. Both are volatile stores behind a fence, so neither is weaker; the defect is that one job has two implementations, and their stated reasons contradict each other — `lib/log` and `lib/rng` chose `zeroize` for "no hand-rolled wiping", while `lib/util` is exactly a hand-rolled wipe. Needs a decision on which is canonical before a sweep: `zeroize` stays in the graph either way, because `lib/crypto`'s audited cipher crates depend on it, and the charter otherwise prefers the first-party one. Then every consumer moves to the one, and the other is deleted. **Re-check trigger:** the next crate that needs to wipe a secret |
 | D228 | a grab does not hand the seat back as it found it | a key pressed before a menu chain, the lock or the screensaver takes the keys is released into the grab, so the application that saw the press keeps it held; and the lock and the screensaver move only the cursor, never the shell's tracked pointer (nor the window manager's), so a press after either ends with no motion first is hit-tested where the pointer was when the grab began — a press carries no position. Needs the grab-entry and grab-exit contract decided first: what the focused surface is told when the seat is taken mid-press, and when the shell adopts the pointer the lock tracked (the lock may not route motion while engaged, and it fades out). The seat's modifier state already crosses a grab: every keyboard drain goes through `DesktopShell::poll_key`. Noticed fixing `plans/NEW-MENUS.md` D34 |
 | D229 | the seat's pointer and keyboard channels carry no shared order or time | two independent rings in `kernel/core/src/seat.rs`, no per-seat sequence or arrival stamp: the desktop cannot restore their interleaving, so under load keys typed into one window before a click on another reach the window the click focused, and every timed gesture (hold, double-click, key-repeat start) is measured when the desktop processes it — a stalled desktop reads a tap as a hold. Fix: a sequence and arrival stamp per record on the `pointer_read`/`keyboard_read` drain, merged in order by the session. Noticed fixing `plans/NEW-MENUS.md` D34 |
-| D234 | a user-space unmap on x86_64 or riscv64 invalidates only the calling CPU, so a sibling thread elsewhere keeps a translation to the freed frame | noticed revoking D230's device windows, which shoot down every CPU themselves; not absorbed — the fix is a gather-then-free unmap across every `LiveSpace` path. See the section |
 | D237 | the EMMC2 bring-up re-polls `ACMD41` back to back, with no interval, up to a million rounds | noticed with D227's card-state check; not absorbed — the fix is a timed park in the SDHCI host seam. See the section |
 | D241 | an orderly removal leaves its driver's DMA memory quarantined for the boot | noticed revoking D230's grants; not absorbed — needs an orderly-removal protocol that stops the driver first, or a parent-attested quiesce. See the section |
 | D242 | the kernel binary keeps `static mut` state (the boot heap in each port, x86_64's boot stacks) | noticed sweeping citation residue; not absorbed — linker-reserved memory for all three ports at once. See the section |
@@ -112,6 +110,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D271 | the driver-store unload's immediate path tears a driver down through its own inline copy of the process teardown, which omits half of it | noticed fixing D269; not absorbed, because routing it through the shared landing needs the landing seam in `KernelInitSpawner`, whose constructor a dozen QEMU test kernels call. `terminate_driver_process` retires each quiesced thread and then reclaims shared memory, endpoints, wait-sets, IRQ lines, the address space and the record itself; the exit teardown (`reclaim_process_resources`) additionally cancels the calls the driver posted on other endpoints, tears down its async ports, releases its futex keys, cpufreq role, seats and console foreground, prunes its wait rows, and audits the DMA memory it leaves to the quarantine. A driver still running when unloaded takes the full path through its deferred landing, so one unload reclaims different state depending on timing, and the immediate path leaves a USB class driver's queued transfer on its controller's endpoint and its ports bound. What it leaves is keyed by the driver's number, so a successor drawing that number would own the ports, reap the replies to the calls the driver posted, and hold its cpufreq role; since D269 the immediate path therefore never returns the number to the draw, a containment that costs one held id per such unload until this is fixed. The seam's own rustdoc already names the driver unload as one of the deaths `land_thread_down` serves |
 | D272 | a hand-over the instance's mailbox refuses after the session relayed its document leaves the onward delegation pending in the instance's table | noticed fixing D133; not absorbed, because the fix is a kernel mechanism a grantor withdraws an unredeemed delegation through. `DeskReach::queue_open_target` redeems the session's grant and mints the instance its own before `hand_over` queues the entry; a refused queue answers `false`, which the launch contract reads as "nothing delegated", yet the instance's handle stays pending until it or the session exits. D133's per-grantor bound caps the residue at 64 per instance, charged to the session. The fix is either a withdraw operation on a delegation the caller minted, or a desk that reserves its slot before the relay mints |
 | D273 | a signal intake a non-leader thread opts into is never used: the opt-in, the take and the wait-set readiness are keyed by the calling thread, while delivery and its targeted wake are keyed by the process | noticed fixing D270; not absorbed, because keying the intake by process needs a wake that reaches whichever thread waits, not the leader's task id. `signal_intake` and `WaitSourceKind::Signal` use `caller.task_id`, `try_intake` and `signal_intake_wake` the target `ProcessId`, and `threads::retire` clears the retiring thread's own entry; so only a leader can observe a termination request, and a request aimed at a process whose worker opted in terminates it instead. The docs already describe one intake per process |
+| D284 | riscv64's remote fence has no fail-closed outcome when the firmware refuses the last resort | noticed fixing D281; not absorbed, because either answer changes a contract the charter guards. `fence_remote` answers a refused fence with a whole-space fence of every hart, the most permissive call the SBI has, and drops that call's status: `CrossCpuTlbShootdown` is infallible, so an `SBI_ERR_FAILED` there returns as though every hart had fenced, and the caller frees frames a stale translation may still reach. The fix is either a fallible shootdown whose failure keeps the batch's frames out of the allocator (`Retiring` already withholds a frame it cannot scrub), which widens the Arch HAL on every port for a failure only one can produce, or a stop-the-world fatal report stating the reason, which halts on a production path |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -138,7 +137,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (191)
+### Closed (200)
 
 | ID | Subject |
 |---|---|
@@ -298,6 +297,15 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D275 | a process's number returned to the draw before its death's trailing steps — a node release and the exit record, both keyed by it — and while its parent's unreaped row still stood, so a successor drawn at it could lose its node claim, be reported exited, or have its row overwritten; the number is now returned last (`retire_number`), after the exit is recorded, and a zombie's row holds it until the reap or the parent's death drops the row — pinned by `a_zombie_holds_its_number_until_its_row_is_gone`, `an_admitted_childs_number_is_held_until_its_teardown_withdraws_its_records`, `an_exit_reports_whether_a_reap_is_owed` and `parent_exited_drops_unreaped_zombies` |
 | D276 | the held-id set hashed task ids under a predictable key, although which ids are held is shaped by what an unprivileged user spawns and keeps, so one could pile its threads into one bucket of a table probed while the scheduler holds its task table; it is now keyed under the per-boot hash key, falling back to unkeyed only on a boot that never got one, as the futex table does |
 | D277 | `fd_grant` resolved its recipient's instance and minted into that number's table under separate holds, so a mint could land in a successor's table, unredeemable yet charged to the grantor; it now resolves and mints under one hold (`for_instance`), as every other delegated mint does |
+| D171 | a dead address space was torn down with one TLB invalidation per page, broadcast on aarch64; a space its `ActiveCpus` shows active nowhere is now cleared with no invalidation at all (`AddressSpace::clear_lowest`), since every CPU that ran it discarded its translations when it switched away — pinned by `a_space_active_nowhere_is_torn_down_without_a_single_flush` and `a_space_still_active_elsewhere_is_shot_down_before_its_frames_go_back` |
+| D234 | a user-space unmap on x86_64 or riscv64 invalidated only the calling CPU, so a sibling thread elsewhere kept a translation to the freed frame; every path that releases a user frame now clears its entries, shoots down the CPUs the space is active on (`ActiveCpus`, kept by the dispatcher, through `CrossCpuTlbShootdown::shootdown_user_range`), and only then zeroes and frees it — pinned by the `live::tests::views` and `retire::tests` suites and `a_user_task_holds_its_cpu_in_its_spaces_set_from_before_its_root_loads_until_it_parks`. See the section |
+| D278 | every user release — `mem_unmap`, `dma_free`, `file_unmap`, a thread stack's release, direct reclaim — freed its frames before dropping them from the copy path's snapshot, so on aarch64 SMP a sibling thread's `read(2)` into the region could write a frame already handed to another process; the pages now leave the snapshot inside the release, before any frame goes (`SnapshotRetire`), and a snapshot that cannot take the removal is suspended until re-frozen — pinned by `an_unmapped_anonymous_frame_is_freed_only_after_every_view_lets_go`, `a_file_region_frame_is_freed_only_after_every_view_lets_go`, `a_dma_buffer_is_scrubbed_and_freed_only_after_every_view_lets_go` and `a_snapshot_that_cannot_drop_a_retired_page_resolves_nothing_until_replaced` |
+| D279 | compress-out sealed a cold page while it was still mapped and in the snapshot, so a sibling thread's write between the seal and the unmap was lost when the stale copy was restored — and the tier's `&mut` over a page another CPU could write was a data race, its concurrency contract predating threads; the page now leaves every view before it is read, and a refused seal maps it back and restores it to the snapshot — pinned by `a_write_that_lands_as_the_page_leaves_its_views_is_sealed_with_it` and `an_incompressible_page_is_put_back_exactly_where_it_was` |
+| D280 | a DMA carve was mapped before it was scrubbed, so a sibling thread could read the block's previous owner's bytes through the fresh mapping; its free scrubbed it while still mapped, and an undone carve was freed without a second scrub; a carve is now scrubbed before it is mapped, and freed or undone only after its entries are gone on every CPU and in the snapshot — pinned by `a_dma_buffer_is_scrubbed_and_freed_only_after_every_view_lets_go` and `a_carve_is_scrubbed_before_any_page_of_it_is_mapped` |
+| D281 | riscv64's remote fence dropped a refused SBI call, skipped the fence outright for a range it could not express, and called the firmware once per hart; the harts now fold into one call per 64-hart window (`hart_windows`), a refusal or an unrepresentable range becomes a whole-space fence of every hart, and a secondary hart is not started on firmware without RFENCE — pinned by the `sbi::tests` window tests |
+| D282 | a riscv64 hart that walked a page before another hart mapped it could re-fault on its cached absence indefinitely, because a fault that found its page already resident returned without a fence; the fault path now discards the faulting CPU's stale entry on that race — pinned by `a_fault_on_a_page_another_cpu_mapped_discards_the_stale_entry_here` |
+| D283 | a sparse release cost time proportional to its whole range rather than to its resident pages: the unmap translated every page and the snapshot retirement walked every page of each batch's span; the release now visits only the space's live pages (`AddressSpace::next_live`) and retires each resident run, not the span — pinned by `a_sparse_release_visits_and_retires_only_its_resident_pages` |
+| D285 | the charter-citation strip's residue survived where a stripped citation had ended its line: a parenthesis left open there, opening on its gloss's dash (`needs (` / `— no bloat).`) or holding nothing but the title of the section it named (`Arch HAL (` / `"TLB shootdown").`), in fourteen comments D236's forms could not see, since `charter-cite` joins a paragraph's lines with a space; each now reads as prose, a restated rule dropped, and the check refuses both forms — pinned by `a_parenthesis_a_stripped_citation_left_open_at_a_line_end_is_refused` and `a_parenthetical_whose_citation_was_stripped_is_refused` |
 | D213 | the session defined the Settings bundle identifier beside `tairix_taskbar::system::SETTINGS_BUNDLE`; its copy is gone and every consumer takes the taskbar's, still checked against the Settings manifest by `the_settings_bundle_is_the_one_its_manifest_declares` |
 | D215 | `activate_for_test`'s rustdoc sat inside `choose_for_test`'s, leaving one helper both texts and the other none; each now carries its own |
 | D218 | `lib/input`'s click tests declared the pairing interval twice, in two units; the nanosecond form is now derived from the one `Duration64` |
@@ -8511,25 +8519,15 @@ finds it, bounded by `want`, so reclaim allocates nothing. Its regression test
 is a reclaim that completes against a heap refusing every allocation, beside
 the scanner's existing second-chance tests.
 
-## D171 — a dead address space is torn down with one TLB invalidation per page (OPEN)
+## D171 — a dead address space was torn down with one TLB invalidation per page — FIXED
 
-`LiveSpace::drop` (`kernel/mem/src/live.rs`) unmaps each page through
-`AddressSpace::unmap_lowest`, and every unmap flushes that page: on aarch64
-`flush_page` is `TLBI VAAE1IS`, broadcast to every core in the inner-shareable
-domain, so tearing down a 1 GiB process issues about 262 000 broadcast
-invalidations, each with its barrier, and stalls every other core's
-translation while it runs. The flushes buy nothing: the space is active on no
-CPU when it is dropped, so nothing can walk its tables and create a new entry,
-and one address-space-wide invalidation before the first frame is freed
-purges every stale one.
-
-The fix is an Arch HAL teardown contract: `AddressSpace` gains an unmap that
-does not flush, valid only once the space can be active nowhere, and the
-teardown issues the port's whole-space invalidate once before it frees any
-frame — per port, since x86_64's `invlpg` is local and riscv64's `sfence.vma`
-needs its own shootdown. Its regression test is a teardown that asserts the
-flush count stays one whatever the page count, beside a port conformance
-check that a dropped space leaves no reachable stale translation.
+`LiveSpace::drop` reads the space's `ActiveCpus`: a space active on no CPU — the
+normal case, since the last handle a thread could run it through is gone — is
+cleared with `AddressSpace::clear_lowest`, which flushes nothing, because every
+CPU that ran it discarded its translations when it switched away (D234). A space
+still active somewhere, which only a defect elsewhere could produce, is torn
+down with a local flush per page and a remote shootdown per batch before any
+frame is freed.
 
 ## D172 — `usb_msd`'s ancestor attribution reads the tree into a buffer no real tree fits (OPEN)
 
@@ -9197,23 +9195,40 @@ which asserts the port reset, and
 `a_transaction_fault_on_a_descriptor_read_behind_a_hub_re_drives_after_a_port_reset`,
 over a mock that now models device addresses.
 
-## D234 — a user-space unmap on x86_64 or riscv64 invalidates only the calling CPU (OPEN)
+## D234 — a user-space unmap on x86_64 or riscv64 invalidated only the calling CPU — FIXED
 
-`AddressSpace::unmap` flushes the page on the CPU that edits the table
-(`invlpg` on x86_64, a local `sfence.vma` on riscv64; aarch64's `TLBI VAAE1IS`
-broadcasts), and every `LiveSpace` unmap path — anonymous memory, a file
-region, a shared mapping, a DMA buffer, a compressed page, a thread stack —
-then frees or reuses the frame. A sibling thread of the same process running
-on another CPU can still hold the old translation and write the frame after it
-has been handed to another process; nothing confines a process's threads to
-one CPU (`plans/THREADS.md`). The revocation of a removed device's access
-(D230) shoots down every CPU itself, so it does not depend on this. Not
-absorbed: the fix is a gather-then-free unmap — clear the entries, shoot down
-the CPUs the space may be cached on, then free — across every unmap path in
-`kernel/mem`, with that CPU set tracked at switch-in and its cost measured on
-multi-threaded workloads against a plain broadcast. Its regression test is a
-two-CPU vertical on x86_64 and riscv64 in which one thread unmaps a page
-another keeps touching.
+Every path that gives a user frame up clears the entries, shuts every view that
+can still reach the frame, and only then zeroes and frees it
+(`kernel/mem::retire`; `docs/src/architecture/memory.md`, *Releasing what an
+unmap cleared*):
+
+- **The CPUs.** A space's `ActiveCpus` names the CPUs it is the active root of:
+  the dispatcher enters a CPU before the switch-in hook loads the root, fenced,
+  and removes it once the park hook reports it left the root. No port tags TLB
+  entries with an address-space id and each flushes the outgoing regime on a
+  root switch, so the set is exact and a single-threaded process's unmaps reach
+  no other CPU. The remote half is the new HAL method
+  `CrossCpuTlbShootdown::shootdown_user_range(CpuMask, …)`: x86_64 IPIs those
+  LAPICs alone (`tlb_shootdown::shootdown_remote`, reloading `CR3` past 33
+  pages), riscv64 folds their harts into one RFENCE call per window (D281), and
+  aarch64 owes nothing because its local flush is already `tlbi vaae1is`. The
+  space holds its reach (`SpaceTlb`) from construction, through
+  `spawn_layout::process_space`, so no helper that unmaps through it — anonymous,
+  file, DMA, device and shared windows, compress-out, the unwind of a partial
+  map — can skip the shootdown. The revocation path (D230) now relies on it
+  instead of its own all-CPU shootdown, which is gone.
+- **The snapshot.** The release takes the `Retire` view the pages must leave;
+  `kernel/core`'s `SnapshotRetire` drops them under the registry's write lock.
+  Doing so *before* any frame is freed is D278.
+- **Batching.** `Retiring` holds up to 64 frames, so one remote shootdown and one
+  snapshot write-lock cover the batch.
+
+The two-user-thread vertical the defect named is still not writable: no
+x86_64 or riscv64 image runs user threads on more than one CPU, and no SMP
+user-program chassis exists (the D103 gap). The targeted shootdown itself is
+driven on live secondaries by the `cross_cpu_tlb_shootdown_qemu_x86_64` and
+`_riscv64` verticals; the ordering is pinned on the host by the
+`live::tests::views` and `retire::tests` suites.
 
 ## D235 — a control transfer that did not complete left the device's EP0 unusable — FIXED
 

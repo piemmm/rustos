@@ -519,6 +519,7 @@ fn a_dead_space_surrenders_to_the_quarantine_and_its_successor_frees_it() {
     {
         let mut live = LiveSpace::new(
             AddressSpace::new(HostPageTable::new()),
+            crate::procspace::new_space_tlb(None).expect("the set allocates"),
             SharedSim(f.sim),
             f.frames,
             VirtAddr::new(0x4000_0000),

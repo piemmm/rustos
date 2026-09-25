@@ -1,5 +1,4 @@
-//! MMU / page-table surface of the Arch HAL (
-//! "MMU/page-table primitives").
+//! MMU / page-table surface of the Arch HAL.
 //!
 //! Mapping a virtual page to a physical frame, switching the active
 //! translation regime, and reading the root-table physical address are

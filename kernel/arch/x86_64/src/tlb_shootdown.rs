@@ -21,13 +21,17 @@
 //! 3. stores the target range and the outstanding-acknowledge count, then
 //!    publishes the bitmap **last** — the bitmap is the "go" signal,
 //! 4. raises a [`TLB_SHOOTDOWN_VECTOR`] IPI at each CPU in the bitmap,
-//! 5. invalidates the range on *itself* with `invlpg`,
+//! 5. invalidates the range on *itself* with `invlpg` — unless it asked for
+//!    the remote half only (`shootdown_remote`, a user unmap that already
+//!    flushed each page as it cleared it),
 //! 6. spins until every target has acknowledged (the count reaches zero),
 //!    then releases the lock.
 //!
 //! With no target at all — the single-CPU case — there is nothing to publish
-//! and nobody to wait for, so the call is just the local `invlpg` sweep and
-//! never touches the descriptor.
+//! and nobody to wait for, so the call is just the local `invlpg` sweep (or
+//! nothing, for the remote half) and never touches the descriptor. A range
+//! past `SINGLE_PAGE_FLUSH_CEILING` pages reloads `CR3` instead of issuing an
+//! `invlpg` per page, on the initiator and on every target alike.
 //!
 //! The spin in step 6 is a genuine, bounded synchronisation, not a "retry
 //! until it works" bring-up hack: under-invalidating (returning before a CPU
@@ -183,6 +187,25 @@ pub fn shootdown<I>(vaddr: u64, pages: usize, targets: I)
 where
     I: Iterator<Item = u8>,
 {
+    run(vaddr, pages, targets, true);
+}
+
+/// [`shootdown`] for a caller that has already invalidated the range on
+/// itself: only the CPUs `targets` yields are reached, and an empty or
+/// self-only target set costs nothing at all.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub fn shootdown_remote<I>(vaddr: u64, pages: usize, targets: I)
+where
+    I: Iterator<Item = u8>,
+{
+    run(vaddr, pages, targets, false);
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn run<I>(vaddr: u64, pages: usize, targets: I, flush_self: bool)
+where
+    I: Iterator<Item = u8>,
+{
     if pages == 0 {
         return;
     }
@@ -191,7 +214,9 @@ where
     // round-trip alone.
     let (map, owed) = target_map(targets, crate::preempt::local_lapic_id());
     if owed == 0 {
-        invlpg_range(vaddr, pages);
+        if flush_self {
+            invlpg_range(vaddr, pages);
+        }
         return;
     }
 
@@ -235,7 +260,9 @@ where
     });
 
     // Invalidate locally while the targets are flushing in parallel.
-    invlpg_range(vaddr, pages);
+    if flush_self {
+        invlpg_range(vaddr, pages);
+    }
 
     // Wait for every interrupted CPU to acknowledge. `Acquire` pairs with the
     // acknowledge's `Release` decrement so the remote `invlpg`s are ordered
@@ -285,11 +312,28 @@ pub fn serve_pending() {
     SHOOTDOWN.pending.fetch_sub(1, Ordering::Release);
 }
 
+/// Past this many pages one `CR3` reload is cheaper than an `invlpg` each:
+/// Linux's measured `tlb_single_page_flush_ceiling`
+/// (`Documentation/arch/x86/tlb.rst`). It also bounds a sparse unmap's span,
+/// which would otherwise cost an `invlpg` per page of its gaps.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+const SINGLE_PAGE_FLUSH_CEILING: usize = 33;
+
+/// Whether invalidating `pages` pages should reload `CR3` instead.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+const fn flushes_whole_tlb(pages: usize) -> bool {
+    pages > SINGLE_PAGE_FLUSH_CEILING
+}
+
 /// Invalidate the calling CPU's TLB entries for `pages` consecutive 4 KiB
 /// pages from the page containing `vaddr`.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn invlpg_range(vaddr: u64, pages: usize) {
     const PAGE_BYTES: u64 = 4096;
+    if flushes_whole_tlb(pages) {
+        crate::paging::invalidate_all_local();
+        return;
+    }
     let mut page = vaddr & !(PAGE_BYTES - 1);
     for _ in 0..pages {
         invlpg(page);
@@ -383,7 +427,10 @@ pub unsafe fn init_local_tlb_shootdown(cpu_index: usize) -> Result<(), crate::pe
 
 #[cfg(test)]
 mod tests {
-    use super::{for_each_target, target_map, target_slot, TARGET_BYTES, TLB_SHOOTDOWN_VECTOR};
+    use super::{
+        flushes_whole_tlb, for_each_target, target_map, target_slot, SINGLE_PAGE_FLUSH_CEILING,
+        TARGET_BYTES, TLB_SHOOTDOWN_VECTOR,
+    };
 
     /// Every LAPIC id lands in the map, and no two share a bit.
     #[test]
@@ -441,6 +488,14 @@ mod tests {
             assert_eq!(yielded[id as usize], 1, "id {id} not yielded once");
         }
         assert_eq!(yielded.iter().sum::<usize>(), owed);
+    }
+
+    #[test]
+    fn a_range_past_the_ceiling_reloads_cr3_and_one_at_it_does_not() {
+        assert!(!flushes_whole_tlb(0));
+        assert!(!flushes_whole_tlb(SINGLE_PAGE_FLUSH_CEILING));
+        assert!(flushes_whole_tlb(SINGLE_PAGE_FLUSH_CEILING + 1));
+        assert!(flushes_whole_tlb(usize::MAX));
     }
 
     #[test]

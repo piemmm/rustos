@@ -28,7 +28,6 @@ use alloc::sync::Arc;
 
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::{Errno, IrqHandle, Signal};
-use tairix_arch_api::CrossCpuTlbShootdown;
 use tairix_kernel_irq::IrqTable;
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::RwLock;
@@ -59,8 +58,6 @@ pub struct Revoker<'a> {
     pub irq: &'a IrqTable,
     /// What frees a shared region's frames at its last reference.
     pub shared: &'a dyn SharedMemFacility,
-    /// [`None`] only where there is no TLB to shoot down.
-    pub shootdown: Option<&'a (dyn CrossCpuTlbShootdown + Sync)>,
     /// What kills a holder whose access cannot be withdrawn in place.
     pub signal: &'a dyn ProcessSignal,
 }
@@ -200,8 +197,9 @@ impl Revoker<'_> {
     }
 
     /// Withdraw `holder`'s mapping of shared region `region` at `base` from
-    /// `space`: its entries and snapshot pages under the space's lock, then
-    /// every CPU's TLB, and only then the reference that may free the frames.
+    /// `space`: its entries — and with them every CPU's cached translation —
+    /// and its snapshot pages under the space's lock, and only then the
+    /// reference that may free the frames.
     ///
     /// # Errors
     ///
@@ -226,7 +224,6 @@ impl Revoker<'_> {
         if !absorbed {
             self.refreeze(holder, space);
         }
-        self.shoot_down(base, pages_spanning(unmapped.len() as u64));
         drop(unmapped);
         Ok(())
     }
@@ -246,10 +243,7 @@ impl Revoker<'_> {
         let swept = space.with(|live| {
             live.retain_device_windows(
                 &mut |phys, len| self.aspaces.read().maps_window(holder, phys, len),
-                &mut |base, pages| {
-                    absorbed &= self.forget_snapshot(holder, base, pages);
-                    self.shoot_down(base, pages);
-                },
+                &mut |base, pages| absorbed &= self.forget_snapshot(holder, base, pages),
             )
         });
         if !absorbed {
@@ -275,12 +269,6 @@ impl Revoker<'_> {
             .forget_region_pages(holder, base, pages)
     }
 
-    fn shoot_down(&self, base: u64, pages: u64) {
-        if let Some(shootdown) = self.shootdown {
-            shootdown.shootdown_range(base, usize::try_from(pages).unwrap_or(usize::MAX));
-        }
-    }
-
     /// Rebuild `holder`'s snapshot from its own live space, never the
     /// caller's.
     fn refreeze(&self, holder: ProcessId, space: &ProcessSpace) {
@@ -299,10 +287,12 @@ mod tests {
 
     use alloc::sync::Arc;
     use alloc::vec::Vec;
+    use core::cell::RefCell;
     use core::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
     use tairix_abi::hwtree::HwResource;
+    use tairix_arch_api::{CpuMask, CrossCpuTlbShootdown};
     use tairix_kernel_irq::WaitStep;
     use tairix_kernel_mem::{
         LiveSpaceError, LiveUserSpace, MmioError, Page, PhysAddr, PhysMap, SharedMemory,
@@ -318,46 +308,59 @@ mod tests {
         Freed(u64),
     }
 
-    #[derive(Default)]
-    struct Log(Mutex<Vec<Event>>);
-
-    impl Log {
-        fn events(&self) -> Vec<Event> {
-            self.0.lock().unwrap().clone()
-        }
-        fn push(&self, event: Event) {
-            self.0.lock().unwrap().push(event);
-        }
+    std::thread_local! {
+        static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
     }
 
-    impl CrossCpuTlbShootdown for Log {
+    /// The events of the test on this thread. Thread-local because the
+    /// shootdown reach a space holds is `'static`, as the port's is.
+    fn events() -> Vec<Event> {
+        EVENTS.with(|events| events.borrow().clone())
+    }
+
+    fn record(event: Event) {
+        EVENTS.with(|events| events.borrow_mut().push(event));
+    }
+
+    struct Remote;
+
+    impl CrossCpuTlbShootdown for Remote {
         fn shootdown_page(&self, vaddr: u64) {
-            self.push(Event::Shootdown(vaddr, 1));
+            record(Event::Shootdown(vaddr, 1));
         }
         fn shootdown_range(&self, start_vaddr: u64, page_count: usize) {
-            self.push(Event::Shootdown(start_vaddr, page_count));
+            record(Event::Shootdown(start_vaddr, page_count));
+        }
+        fn shootdown_user_range(&self, cpus: CpuMask<'_>, start_vaddr: u64, page_count: usize) {
+            if !cpus.is_empty() {
+                self.shootdown_range(start_vaddr, page_count);
+            }
         }
     }
+
+    /// The reach every test space shoots other CPUs down through.
+    static REMOTE: Remote = Remote;
+
+    /// A CPU other than the one each test runs on.
+    const OTHER_CPU: u32 = 1;
 
     /// A shared-memory facility that maps every region into one space, as
     /// the production one maps into the caller's, and logs each free.
-    struct IntoSpace<'a> {
+    struct IntoSpace {
         space: Arc<ProcessSpace>,
-        log: &'a Log,
         next_phys: AtomicU64,
     }
 
-    impl<'a> IntoSpace<'a> {
-        fn new(space: &Arc<ProcessSpace>, log: &'a Log) -> Self {
+    impl IntoSpace {
+        fn new(space: &Arc<ProcessSpace>) -> Self {
             Self {
                 space: Arc::clone(space),
-                log,
                 next_phys: AtomicU64::new(0x2000_0000),
             }
         }
     }
 
-    impl SharedMemFacility for IntoSpace<'_> {
+    impl SharedMemFacility for IntoSpace {
         fn alloc_region(&self, pages: u64) -> Result<Vec<SharedChunk>, Errno> {
             let phys_base = self
                 .next_phys
@@ -381,7 +384,7 @@ mod tests {
         }
         fn free_region(&self, chunks: &[SharedChunk], _memory: SharedMemory) {
             for chunk in chunks {
-                self.log.push(Event::Freed(chunk.phys_base));
+                record(Event::Freed(chunk.phys_base));
             }
         }
     }
@@ -403,16 +406,15 @@ mod tests {
     struct Fixture {
         aspaces: RwLock<AddressSpaceRegistry>,
         irq: IrqTable,
-        log: Log,
         kills: Kills,
     }
 
     impl Fixture {
         fn new() -> Self {
+            EVENTS.with(|events| events.borrow_mut().clear());
             Self {
                 aspaces: RwLock::new(AddressSpaceRegistry::new()),
                 irq: IrqTable::new(63),
-                log: Log::default(),
                 kills: Kills::default(),
             }
         }
@@ -422,7 +424,6 @@ mod tests {
                 aspaces: &self.aspaces,
                 irq: &self.irq,
                 shared,
-                shootdown: Some(&self.log),
                 signal: &self.kills,
             }
         }
@@ -475,7 +476,8 @@ mod tests {
         let fx = Fixture::new();
         let shared = crate::devres::NULL_SHARED_MEM_FACILITY;
         let (driver, delegate, other) = (task(0x7_0001), task(0x7_0002), task(0x7_0003));
-        let _delegate_space = fx.with_space(delegate, crate::procspace::host_test_space!());
+        let _delegate_space =
+            fx.with_space(delegate, crate::procspace::host_test_space!(Some(&REMOTE)));
         let kinds = [
             HwResource::mmio(0xFE00_0000, 0x1000),
             HwResource::irq(40, 1),
@@ -530,7 +532,7 @@ mod tests {
             .write()
             .mint_node_grant(task(0x7_0010), HwResource::irq(3, 1), 8);
         assert_eq!(fx.revoker(&shared).revoke(&[7]), Revoked::default());
-        assert!(fx.log.events().is_empty());
+        assert!(events().is_empty());
     }
 
     #[test]
@@ -538,7 +540,8 @@ mod tests {
         let fx = Fixture::new();
         let shared = crate::devres::NULL_SHARED_MEM_FACILITY;
         let driver = task(0x7_0020);
-        let space = fx.with_space(driver, crate::procspace::host_test_space!());
+        let space = fx.with_space(driver, crate::procspace::host_test_space!(Some(&REMOTE)));
+        space.active_cpus().enter(OTHER_CPU);
         let (revoked_window, kept_window) = (
             HwResource::mmio(0xFE00_0040, 0x40),
             HwResource::mmio(0xFE20_0000, 0x1000),
@@ -565,32 +568,29 @@ mod tests {
             !fx.snapshot_maps(driver, revoked_va),
             "no kernel copy reaches it"
         );
-        assert_eq!(fx.log.events(), [Event::Shootdown(page, 1)]);
+        assert_eq!(events(), [Event::Shootdown(page, 1)]);
         assert!(translates(&space, kept_va), "another node's window stays");
         assert!(fx.snapshot_maps(driver, kept_va));
     }
 
     /// An owner's region `holder` maps under a grant from node 7.
-    struct Mapped<'a> {
+    struct Mapped {
         owner: ProcessId,
         holder: ProcessId,
         holder_space: Arc<ProcessSpace>,
-        owner_fac: IntoSpace<'a>,
-        holder_fac: IntoSpace<'a>,
+        owner_fac: IntoSpace,
+        holder_fac: IntoSpace,
         owner_va: u64,
         holder_va: u64,
         region: u64,
     }
 
-    fn map_through_node_7(fx: &Fixture) -> Mapped<'_> {
+    fn map_through_node_7(fx: &Fixture) -> Mapped {
         let owner = task(crate::test_boot::claim_task());
         let holder = task(crate::test_boot::claim_peer_task());
-        let owner_space = fx.with_space(owner, crate::procspace::host_test_space!());
-        let holder_space = fx.with_space(holder, crate::procspace::host_test_space!());
-        let (owner_fac, holder_fac) = (
-            IntoSpace::new(&owner_space, &fx.log),
-            IntoSpace::new(&holder_space, &fx.log),
-        );
+        let owner_space = fx.with_space(owner, crate::procspace::host_test_space!(Some(&REMOTE)));
+        let holder_space = fx.with_space(holder, crate::procspace::host_test_space!(Some(&REMOTE)));
+        let (owner_fac, holder_fac) = (IntoSpace::new(&owner_space), IntoSpace::new(&holder_space));
         let (owner_va, region) = crate::sharedreg::create(&owner_fac, owner, 1).expect("created");
         let (holder_va, _) = crate::sharedreg::map(&holder_fac, holder, region).expect("mapped");
         fx.aspaces
@@ -634,29 +634,27 @@ mod tests {
             Some(Errno::PermissionDenied),
             "nothing new reaches it"
         );
-        assert!(fx.log.events().is_empty());
+        assert!(events().is_empty());
         assert!(fx.kills.0.lock().unwrap().is_empty());
 
         drop(
             crate::sharedreg::unmap(&m.holder_fac, m.holder, m.holder_va).expect("holder lets go"),
         );
         drop(crate::sharedreg::unmap(&m.owner_fac, m.owner, m.owner_va).expect("owner lets go"));
-        assert_eq!(fx.log.events(), [Event::Freed(0x2000_0000)]);
+        assert_eq!(events(), [Event::Freed(0x2000_0000)]);
     }
 
     #[test]
     fn a_region_a_live_node_still_confers_is_withdrawn_before_its_frames_are_freed() {
         let fx = Fixture::new();
         let m = map_through_node_7(&fx);
+        m.holder_space.active_cpus().enter(OTHER_CPU);
         let parent_driver = task(0x7_0030);
         fx.aspaces
             .write()
             .mint_node_grant(parent_driver, HwResource::shared(m.region), 8);
         drop(crate::sharedreg::unmap(&m.owner_fac, m.owner, m.owner_va).expect("owner lets go"));
-        assert!(
-            fx.log.events().is_empty(),
-            "the holder's reference keeps it"
-        );
+        assert!(events().is_empty(), "the holder's reference keeps it");
 
         let revoked = fx.revoker(&m.holder_fac).revoke(&[7]);
         assert_eq!(
@@ -671,7 +669,7 @@ mod tests {
         assert!(!translates(&m.holder_space, m.holder_va));
         assert!(!fx.snapshot_maps(m.holder, m.holder_va));
         assert_eq!(
-            fx.log.events(),
+            events(),
             [Event::Shootdown(m.holder_va, 1), Event::Freed(0x2000_0000)],
             "every CPU stops translating the page before its frame is freed"
         );
@@ -707,7 +705,7 @@ mod tests {
             Some(m.holder_va)
         );
         assert!(translates(&m.holder_space, m.holder_va));
-        assert!(fx.log.events().is_empty());
+        assert!(events().is_empty());
 
         drop(
             crate::sharedreg::unmap(&m.holder_fac, m.holder, m.holder_va).expect("holder lets go"),
@@ -720,11 +718,11 @@ mod tests {
         let fx = Fixture::new();
         let shared = crate::devres::NULL_SHARED_MEM_FACILITY;
         let holder = task(0x7_0032);
-        let torn_down = fx.with_space(holder, crate::procspace::host_test_space!());
+        let torn_down = fx.with_space(holder, crate::procspace::host_test_space!(Some(&REMOTE)));
         let revoker = fx.revoker(&shared);
         assert!(!revoker.kill(holder, None), "no space, nothing reachable");
         fx.aspaces.write().withdraw(holder);
-        let _successor = fx.with_space(holder, crate::procspace::host_test_space!());
+        let _successor = fx.with_space(holder, crate::procspace::host_test_space!(Some(&REMOTE)));
         assert!(
             !revoker.kill(holder, Some(&torn_down)),
             "its id now names another task"

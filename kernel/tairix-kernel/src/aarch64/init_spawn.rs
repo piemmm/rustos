@@ -36,7 +36,7 @@ use tairix_arch_aarch64::userentry::USER_MODE;
 use tairix_kernel_core::{
     spawn_image, InitSpawn, InitSpawnCtx, ProcessResume, ProcessSpace, SpawnMode, UserThreadEntry,
 };
-use tairix_kernel_mem::{AddressSpace, LiveSpace, PhysMap, UserAddressSpace, VirtAddr};
+use tairix_kernel_mem::{AddressSpace, PhysMap, UserAddressSpace};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
 use super::spawn_producer::ConfiguredPhysMap;
@@ -46,7 +46,7 @@ use crate::spawn_layout;
 include!(concat!(env!("OUT_DIR"), "/init_rxe.rs"));
 
 /// PID 1's four fixed guarded-window bases (`plans/PI.md` 5d-0-ii (b′)/(c)),
-/// derived from the one shared offset set the retained [`LiveSpace`]'s
+/// derived from the one shared offset set the retained [`LiveSpace`](tairix_kernel_mem::LiveSpace)'s
 /// window allocators are configured with.
 const WINDOWS: spawn_layout::WindowBases = spawn_layout::window_bases(INIT_USER_BIAS);
 
@@ -209,8 +209,8 @@ impl InitSpawn for Aarch64InitSpawn {
         // PID 1's process address space (`plans/PI.md` 5d-0-ii (b′)): the
         // *same* arch space the snapshot above was frozen from, so its
         // `mem_map` / `mmio_map` mutate exactly the mappings the snapshot
-        // describes. No `'static` allocator, or a window the allocator
-        // rejects, retains none and those syscalls fail closed.
+        // describes. No `'static` allocator, a window the allocator
+        // rejects, or a CPU set that cannot be allocated retains none and those syscalls fail closed.
         //
         // The `PhysMap` must be [`ConfiguredPhysMap`]: a `dma_alloc`
         // carve is mapped Normal-Non-Cacheable for the caller while the
@@ -218,39 +218,18 @@ impl InitSpawn for Aarch64InitSpawn {
         // post-zero `clean_invalidate` must be the real dcache
         // clean+invalidate — a no-op physmap leaves dirty zero lines the
         // cache later writes back over device-visible rings.
-        let live: Option<Arc<ProcessSpace>> = match ctx.static_frames() {
-            Some(static_frames) => {
-                let windows = crate::user_windows::user_windows(
-                    static_frames.total_frames() as u64,
-                    WINDOWS.anon,
-                    super::USER_VA_TOP,
-                );
-                LiveSpace::new(
-                    space,
-                    ConfiguredPhysMap,
-                    static_frames,
-                    VirtAddr::new(WINDOWS.mmio),
-                    spawn_layout::MMIO_WINDOW_PAGES,
-                    VirtAddr::new(WINDOWS.anon),
-                    windows.anon_pages,
-                    VirtAddr::new(WINDOWS.dma),
-                    spawn_layout::DMA_WINDOW_PAGES,
-                    VirtAddr::new(WINDOWS.shared),
-                    spawn_layout::SHARED_WINDOW_PAGES,
-                    VirtAddr::new(windows.file_base),
-                    windows.file_pages,
-                )
-                .ok()
-                .map(|live| {
-                    Arc::new(ProcessSpace::new(
-                        Box::new(live),
-                        Arc::clone(&pre_resume),
-                        &USER_MODE,
-                    ))
-                })
-            }
-            None => None,
-        };
+        let live: Option<Arc<ProcessSpace>> = ctx.static_frames().and_then(|frames| {
+            spawn_layout::process_space(
+                space,
+                ctx.space_tlb(),
+                ConfiguredPhysMap,
+                frames,
+                &WINDOWS,
+                super::USER_VA_TOP,
+                &pre_resume,
+                &USER_MODE,
+            )
+        });
 
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 

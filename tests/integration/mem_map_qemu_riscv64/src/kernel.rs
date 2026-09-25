@@ -24,7 +24,7 @@ use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use tairix_kernel_core::{spawn_image, MemMap, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{
     map_anonymous, page_count_for, unmap_anonymous, AddressSpace, AnonError, DirectPhysMap, Frame,
-    PhysAddr, UserStack,
+    PhysAddr, Retire, Unpublished, UserStack,
 };
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level};
@@ -255,7 +255,7 @@ impl MemMap for AnonProducer {
         Ok(addr_hint)
     }
 
-    fn unmap(&self, base: u64, len: usize) -> Result<(), Errno> {
+    fn unmap(&self, base: u64, len: usize, retire: &mut dyn Retire) -> Result<(), Errno> {
         let page_count = page_count_for(len).map_err(anon_to_errno)?;
         let live = self.live()?;
         unmap_anonymous(
@@ -263,7 +263,8 @@ impl MemMap for AnonProducer {
             &live.physmap,
             base,
             page_count,
-            |_frame| {},
+            retire,
+            &mut |_frame| {},
         )
         .map_err(anon_to_errno)
     }
@@ -320,7 +321,8 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         if len == 0 {
             return encode(Err(Errno::LengthOutOfRange));
         }
-        let result = PRODUCER.unmap(base, len).map(|()| 0);
+        // This kernel serves no copy path, so the page table is the only view.
+        let result = PRODUCER.unmap(base, len, &mut Unpublished).map(|()| 0);
         if result.is_ok() {
             UNMAP_OK.store(true, Ordering::SeqCst);
         }

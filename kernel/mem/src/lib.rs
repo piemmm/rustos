@@ -68,6 +68,7 @@ pub mod pressure;
 pub mod ptr;
 pub mod ramtest;
 pub mod ramzip;
+pub mod retire;
 pub mod seal;
 pub mod sensitive;
 pub mod slab;
@@ -111,6 +112,7 @@ pub use ramzip::{
     PageKind, Ramzip, RamzipCaps, RamzipCounters, RamzipFaultOutcome, RamzipLedger,
     RamzipReclaimSummary, VmContext, WarmOutcome,
 };
+pub use retire::{ActiveCpus, Retire, SpaceTlb, Unpublished};
 pub use seal::{EntropySource, NonceSequence, SealError, SealKey};
 pub use sensitive::SensitiveBuffer;
 pub use slab::{Slab, SlabError, SlabHandle, SoftwareTagCheck};

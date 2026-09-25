@@ -32,6 +32,7 @@
 use crate::frame::{Frame, PAGE_SIZE};
 use crate::phys::PhysMap;
 use crate::ptr::slice_within;
+use crate::retire::{Retire, Retiring, Unpublished};
 use crate::vmm::{AddressSpace, MapFlags, Page, PageTable, PageTableError, VirtAddr};
 
 /// The single permission set anonymous user memory is mapped with:
@@ -106,9 +107,10 @@ pub(crate) fn zero_frame(physmap: &dyn PhysMap, frame: Frame) -> Result<(), Anon
     // SAFETY: `physmap.translate` proved `ptr` is valid for `PAGE_SIZE` bytes
     // inside the kernel's direct map. On the map path the frame was just
     // handed out by the allocator and is not yet mapped into any address
-    // space, so nothing aliases it; on the free path it has already been
-    // unmapped from the (single, caller-owned) space, so likewise nothing
-    // aliases it. `slice_within` bounds the window to exactly one page.
+    // space, so nothing aliases it; on the free path `Retiring` zeroes it
+    // only after it has left the page table, every CPU's TLB and the copy
+    // path's snapshot, so likewise nothing aliases it. `slice_within` bounds
+    // the window to exactly one page.
     let page = unsafe {
         slice_within(ptr.as_ptr(), PAGE_SIZE, 0, PAGE_SIZE).ok_or(AnonError::PhysUnmapped)?
     };
@@ -121,31 +123,31 @@ pub(crate) fn zero_frame(physmap: &dyn PhysMap, frame: Frame) -> Result<(), Anon
 }
 
 /// Tear down the first `mapped` pages of the region based at `base_va`,
-/// unmapping each, zeroing its frame, and returning it to `free_frame`.
+/// unmapping each and releasing its frame to `free_frame` once no CPU can
+/// reach it.
 ///
 /// Used to unwind a partially built region when a later page fails to map,
 /// so a failed [`map_anonymous`] leaves the address space exactly as it found
-/// it (fail-closed reclaim). Each page in `0..mapped` was
-/// just mapped by this call, so an unmap of it cannot fail; a defensive
-/// `Err` is swallowed here because there is no better recovery than freeing
-/// every frame we still hold.
-fn reclaim<P, F>(
+/// it (fail-closed reclaim). The pages were never published beyond the page
+/// table, but a sibling thread may already have touched them on another CPU.
+/// Each page in `0..mapped` was just mapped by this call, so an unmap of it
+/// cannot fail; a defensive `Err` is swallowed here because there is no better
+/// recovery than releasing every frame we still hold.
+fn reclaim<P: PageTable>(
     space: &mut AddressSpace<P>,
     physmap: &dyn PhysMap,
     base_va: u64,
     mapped: u64,
-    free_frame: &mut F,
-) where
-    P: PageTable,
-    F: FnMut(Frame),
-{
+    free_frame: &mut dyn FnMut(Frame),
+) {
+    let mut unpublished = Unpublished;
+    let mut retiring = Retiring::new(space.tlb().cloned(), &mut unpublished, physmap, free_frame);
     for page_index in 0..mapped {
         let Ok(page) = page_at(base_va, page_index) else {
             continue;
         };
         if let Ok(frame) = space.unmap(page) {
-            let _ = zero_frame(physmap, frame);
-            free_frame(frame);
+            retiring.hold(page.start().as_u64(), frame);
         }
     }
 }
@@ -199,6 +201,11 @@ where
                 return Err(err);
             }
         };
+        // A fault that lost the race to another CPU draws no frame for it.
+        if space.is_mapped(page) {
+            reclaim(space, physmap, base_va, page_index, &mut free_frame);
+            return Err(AnonError::Map(PageTableError::AlreadyMapped));
+        }
         let Some(frame) = alloc_frame() else {
             reclaim(space, physmap, base_va, page_index, &mut free_frame);
             return Err(AnonError::OutOfMemory);
@@ -222,8 +229,9 @@ where
 }
 
 /// Release the `page_count`-page **demand-paged** region based at `base_va`
-/// from the caller's own live `space`, zeroing every resident frame before
-/// returning it to `free_frame` (zero on free).
+/// from the caller's own live `space`, handing every resident frame to
+/// `release` once no CPU and no `retire` view can reach it, zeroed (zero on
+/// free).
 ///
 /// Anonymous regions are reserved by address space and backed one zeroed
 /// page at a time by the fault path, so a region is **sparsely resident**:
@@ -240,55 +248,42 @@ where
 /// * [`AnonError::Unaligned`] if `base_va` is not page-aligned.
 /// * [`AnonError::Overflow`] if a page address overflows the address space.
 /// * [`AnonError::PhysUnmapped`] if a reclaimed frame cannot be reached to
-///   zero it (the frame is still freed; the error is reported).
-pub fn unmap_anonymous<P, F>(
+///   zero it; it is kept rather than released unscrubbed.
+pub fn unmap_anonymous<P: PageTable>(
     space: &mut AddressSpace<P>,
     physmap: &dyn PhysMap,
     base_va: u64,
     page_count: u64,
-    mut free_frame: F,
-) -> Result<(), AnonError>
-where
-    P: PageTable,
-    F: FnMut(Frame),
-{
+    retire: &mut dyn Retire,
+    release: &mut dyn FnMut(Frame),
+) -> Result<(), AnonError> {
     if page_count == 0 {
         return Err(AnonError::ZeroLength);
     }
     if !base_va.is_multiple_of(PAGE_SIZE as u64) {
         return Err(AnonError::Unaligned);
     }
+    let last = page_at(base_va, page_count - 1)?;
 
-    // A demand-paged region is sparsely resident: only the pages that
-    // actually faulted in hold a frame. Tear down every page that *is*
-    // resident (zeroing its reclaimed frame — secret hygiene) and skip the
-    // ones that never faulted; the caller has already validated that
-    // `(base_va, page_count)` names a region it reserved, so an unbacked
-    // page here is an untouched reservation page, not an error. A
-    // `PhysUnmapped` scrub failure is recorded but never leaks a frame (it
-    // is freed regardless).
+    let mut retiring = Retiring::new(space.tlb().cloned(), retire, physmap, release);
     let mut first_err = None;
-    for page_index in 0..page_count {
-        let page = page_at(base_va, page_index)?;
-        if space.translate(page).is_none() {
-            // Never faulted in — nothing to reclaim for this page.
-            continue;
-        }
+    let mut from = page_at(base_va, 0)?;
+    while let Some(page) = space.next_live(from, last) {
         match space.unmap(page) {
-            Ok(frame) => {
-                if let Err(err) = zero_frame(physmap, frame) {
-                    first_err.get_or_insert(err);
-                }
-                free_frame(frame);
-            }
+            Ok(frame) => retiring.hold(page.start().as_u64(), frame),
             Err(err) => {
                 first_err.get_or_insert(map_errno(err));
             }
         }
+        let Ok(next) = page_at(page.start().as_u64(), 1) else {
+            break;
+        };
+        from = next;
     }
+    let released = retiring.finish();
     match first_err {
         Some(err) => Err(err),
-        None => Ok(()),
+        None => released,
     }
 }
 
@@ -306,6 +301,7 @@ mod tests {
     use super::{map_anonymous, page_count_for, unmap_anonymous, AnonError, ANON_FLAGS, PAGE_SIZE};
     use crate::frame::{Frame, PhysAddr};
     use crate::phys::{PhysMap, SimPhysMap};
+    use crate::retire::Unpublished;
     use crate::uaccess::copy_in;
     use crate::vmm::{AddressSpace, HostPageTable, MapFlags, Page, VirtAddr};
 
@@ -450,7 +446,10 @@ mod tests {
             unsafe { core::ptr::copy_nonoverlapping(dirty.as_ptr(), ptr.as_ptr(), PAGE_SIZE) };
         }
 
-        unmap_anonymous(&mut space, &sim, base, 2, |f| frames.free(f)).expect("unmap");
+        unmap_anonymous(&mut space, &sim, base, 2, &mut Unpublished, &mut |f| {
+            frames.free(f);
+        })
+        .expect("unmap");
 
         assert_eq!(space.mapped_pages(), 0);
         assert_eq!(frames.freed_len(), 2);
@@ -517,9 +516,10 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, AnonError::Map(_)));
-        // The original two pages are still mapped; the failed call left none.
+        // The original two pages are still mapped; the failed call left none,
+        // and drew no frame for a page already there.
         assert_eq!(space.mapped_pages(), 2);
-        assert_eq!(frames.freed_len(), freed_before + 1);
+        assert_eq!(frames.freed_len(), freed_before);
     }
 
     #[test]
@@ -541,7 +541,10 @@ mod tests {
         )
         .expect("map");
 
-        unmap_anonymous(&mut space, &sim, base, 2, |f| frames.free(f)).expect("sparse unmap");
+        unmap_anonymous(&mut space, &sim, base, 2, &mut Unpublished, &mut |f| {
+            frames.free(f);
+        })
+        .expect("sparse unmap");
         // The one resident page was torn down and its frame reclaimed; the
         // unbacked page was skipped without error.
         assert_eq!(space.mapped_pages(), 0);
@@ -562,7 +565,7 @@ mod tests {
             Err(AnonError::Unaligned)
         );
         assert_eq!(
-            unmap_anonymous(&mut space, &sim, 0x4001, 1, |_| {}),
+            unmap_anonymous(&mut space, &sim, 0x4001, 1, &mut Unpublished, &mut |_| {}),
             Err(AnonError::Unaligned)
         );
     }

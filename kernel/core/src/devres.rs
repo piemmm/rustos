@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::hwtree::{FramebufferMemory, HwResource, HwResourceKind};
 use tairix_abi::{Errno, MsiAllocation, PortValue, PortWidth};
-use tairix_kernel_mem::{DmaBlock, DmaCustodian, DmaCustody, DmaError, SharedMemory};
+use tairix_kernel_mem::{DmaBlock, DmaCustodian, DmaCustody, DmaError, Retire, SharedMemory};
 
 /// The memory type a mapped device window is given.
 ///
@@ -185,9 +185,8 @@ pub trait DmaAllocFacility: Sync {
     /// allocator's authoritative record, so a `cpu_va` that is not the base of
     /// a live carve fails closed without releasing anything.
     ///
-    /// Reports the byte length released, so the handler can drop exactly the
-    /// buffer's pages from the caller's address-space snapshot rather than
-    /// rebuilding the whole snapshot.
+    /// Reports the byte length released. The buffer's pages leave `retire`'s
+    /// view before its frames are scrubbed and freed.
     ///
     /// # Errors
     ///
@@ -195,7 +194,7 @@ pub trait DmaAllocFacility: Sync {
     /// the base of a live DMA carve of the caller's space (covering a forged,
     /// stale, or double free). The default producer
     /// ([`NullDmaAllocFacility`]) returns [`Errno::NotImplemented`].
-    fn free(&self, cpu_va: u64) -> Result<usize, Errno>;
+    fn free(&self, cpu_va: u64, retire: &mut dyn Retire) -> Result<usize, Errno>;
 }
 
 /// The DMA-alloc facility installed before any real one exists.
@@ -215,7 +214,7 @@ impl DmaAllocFacility for NullDmaAllocFacility {
         Err(Errno::NotImplemented)
     }
 
-    fn free(&self, _cpu_va: u64) -> Result<usize, Errno> {
+    fn free(&self, _cpu_va: u64, _retire: &mut dyn Retire) -> Result<usize, Errno> {
         Err(Errno::NotImplemented)
     }
 }

@@ -1,5 +1,4 @@
-//! Cross-CPU TLB-shootdown surface of the Arch HAL (
-//! "TLB shootdown").
+//! Cross-CPU TLB-shootdown surface of the Arch HAL.
 //!
 //! [`crate::tlb::TlbShootdown`] invalidates a stale cached translation on
 //! the **calling** CPU. On an SMP system (SMP from day
@@ -62,6 +61,13 @@
 //!   honest absence, never a faked no-op). wasm32 therefore implements no
 //!   [`CrossCpuTlbShootdown`].
 //!
+//! # The targeted user form
+//!
+//! [`CrossCpuTlbShootdown::shootdown_user_range`] reaches only the CPUs a
+//! [`CpuMask`] names, so an unmap in a process live on one CPU interrupts no
+//! other: x86_64 IPIs those CPUs alone, riscv64 fences their harts alone, and
+//! aarch64's broadcast local flush already covers them.
+//!
 //! # Why the host conformance vertical proves only the observable half
 //!
 //! Exactly as for [`crate::tlb`] and [`crate::mmu::AddressSpace::activate`],
@@ -74,6 +80,67 @@
 //! never refuse) — while the real cross-CPU round-trip is exercised
 //! end-to-end by the multi-core `cross_cpu_tlb_shootdown_qemu_*` QEMU
 //! verticals.
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use crate::CpuId;
+
+/// Bits in one [`CpuMask`] word.
+const MASK_WORD_BITS: usize = 64;
+
+/// A read-only view of a set of CPUs, one bit per dense [`CpuId`], over
+/// storage the caller owns: the HAL allocates nothing.
+///
+/// Word `w` bit `b` is CPU `w * 64 + b`. Members are read with `Acquire`, so a
+/// CPU observed here is observed with everything it published before joining.
+#[derive(Clone, Copy)]
+pub struct CpuMask<'a> {
+    words: &'a [AtomicU64],
+}
+
+impl<'a> CpuMask<'a> {
+    /// The mask over `words`.
+    #[must_use]
+    pub const fn new(words: &'a [AtomicU64]) -> Self {
+        Self { words }
+    }
+
+    /// Whether `cpu` is a member.
+    #[must_use]
+    pub fn contains(self, cpu: CpuId) -> bool {
+        let index = cpu as usize;
+        self.words
+            .get(index / MASK_WORD_BITS)
+            .is_some_and(|word| word.load(Ordering::Acquire) & (1 << (index % MASK_WORD_BITS)) != 0)
+    }
+
+    /// Whether no CPU is a member.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.words
+            .iter()
+            .all(|word| word.load(Ordering::Acquire) == 0)
+    }
+
+    /// Every member, ascending, each word read once.
+    pub fn iter(self) -> impl Iterator<Item = CpuId> + 'a {
+        self.words
+            .iter()
+            .enumerate()
+            .flat_map(|(index, word)| {
+                let mut bits = word.load(Ordering::Acquire);
+                core::iter::from_fn(move || {
+                    if bits == 0 {
+                        return None;
+                    }
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    Some(index * MASK_WORD_BITS + bit)
+                })
+            })
+            .map_while(|cpu| CpuId::try_from(cpu).ok())
+    }
+}
 
 /// System-wide TLB maintenance: invalidate the calling CPU's cached
 /// translation for a single virtual page **and** that of every other
@@ -145,6 +212,21 @@ pub trait CrossCpuTlbShootdown {
         }
     }
 
+    /// The remote half of a user unmap: invalidate `page_count` user pages
+    /// from `start_vaddr` on every CPU in `cpus` other than the caller,
+    /// returning once none of them can translate through a stale entry.
+    ///
+    /// The caller has already flushed its own TLB through the space's
+    /// [`crate::tlb::TlbShootdown`], and `cpus` holds every other CPU the
+    /// space can be cached on, so a CPU outside it is never interrupted. A
+    /// port whose local flush already reaches every CPU owes nothing here.
+    /// The default reaches every online CPU, which over-invalidates and is
+    /// always correct.
+    fn shootdown_user_range(&self, cpus: CpuMask<'_>, start_vaddr: u64, page_count: usize) {
+        let _ = cpus;
+        self.shootdown_range(start_vaddr, page_count);
+    }
+
     /// Whether a freshly *installed* leaf must be published to the other
     /// CPUs as well as ordered locally
     /// ([`crate::tlb::TlbShootdown::publish_mappings`]).
@@ -184,7 +266,9 @@ pub trait CrossCpuTlbShootdown {
 /// The real multi-core round-trip is proven by the
 /// `cross_cpu_tlb_shootdown_qemu_*` verticals.
 pub mod conformance {
-    use super::CrossCpuTlbShootdown;
+    use core::sync::atomic::AtomicU64;
+
+    use super::{CpuMask, CrossCpuTlbShootdown};
 
     /// Run the [`CrossCpuTlbShootdown`] conformance suite against `xtlb`,
     /// using `vaddr` as a representative mapped page address.
@@ -192,7 +276,8 @@ pub mod conformance {
     /// Shoots down `vaddr`, a misaligned address in the same page, the
     /// zero page, and the top page — proving the port accepts any address
     /// and never panics — then the range form over an empty and a
-    /// multi-page span.
+    /// multi-page span, and the user form over an empty set and over a set
+    /// naming CPUs the machine may not have.
     pub fn run_all<T: CrossCpuTlbShootdown + ?Sized>(xtlb: &T, vaddr: u64) {
         xtlb.shootdown_page(vaddr);
         xtlb.shootdown_page(vaddr | 0xFFF);
@@ -200,6 +285,9 @@ pub mod conformance {
         xtlb.shootdown_page(0xFFFF_FFFF_FFFF_F000);
         xtlb.shootdown_range(vaddr, 0);
         xtlb.shootdown_range(vaddr | 0xFFF, 3);
+        xtlb.shootdown_user_range(CpuMask::new(&[]), vaddr, 2);
+        let absent = [AtomicU64::new(0), AtomicU64::new(1 << 63)];
+        xtlb.shootdown_user_range(CpuMask::new(&absent), vaddr | 0xFFF, 2);
         // A declaration, not an action: what the suite can prove is that
         // the port answers it without panicking and answers it the same
         // way twice (it is a property of the ISA, never of a call site).
@@ -212,9 +300,12 @@ pub mod conformance {
 
     #[cfg(test)]
     mod tests {
-        use super::super::CrossCpuTlbShootdown;
+        use super::super::{CpuMask, CrossCpuTlbShootdown};
         use super::run_all;
-        use core::sync::atomic::{AtomicUsize, Ordering};
+        use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+        extern crate std;
+        use std::vec::Vec;
 
         /// A faithful host double: it records how many pages were shot
         /// down so the suite has something observable to assert. The
@@ -238,15 +329,55 @@ pub mod conformance {
             run_all(&xtlb, 0x10_0000_0000);
             assert_eq!(
                 xtlb.shootdowns.load(Ordering::Relaxed),
-                7,
-                "four single pages plus the default range's three"
+                11,
+                "four single pages, the default range's three, and the default \
+                 user form's two twice over"
             );
 
             // And over the object-safe erasure the kernel holds it behind.
             let dynamic = CountingXtlb::default();
             let erased: &dyn CrossCpuTlbShootdown = &dynamic;
             run_all(erased, 0x10_0000_0000);
-            assert_eq!(dynamic.shootdowns.load(Ordering::Relaxed), 7);
+            assert_eq!(dynamic.shootdowns.load(Ordering::Relaxed), 11);
+        }
+
+        #[test]
+        fn the_default_user_form_reaches_every_cpu_whatever_the_set() {
+            // A port that does not target falls back to the broadcast, which
+            // over-invalidates: an empty set must still be a full shootdown,
+            // since the default cannot know its own local flush reached
+            // anywhere else.
+            let xtlb = CountingXtlb::default();
+            xtlb.shootdown_user_range(CpuMask::new(&[]), 0x4000_0000, 4);
+            assert_eq!(xtlb.shootdowns.load(Ordering::Relaxed), 4);
+        }
+
+        #[test]
+        fn a_mask_yields_its_members_across_word_boundaries_in_order() {
+            let words = [
+                AtomicU64::new(1 | (1 << 63)),
+                AtomicU64::new(0),
+                AtomicU64::new(1 << 5),
+            ];
+            let mask = CpuMask::new(&words);
+            let members: Vec<u32> = mask.iter().collect();
+            assert_eq!(members, [0, 63, 133]);
+            assert!(mask.contains(63) && mask.contains(133));
+            assert!(!mask.contains(1) && !mask.contains(64));
+            assert!(
+                !mask.contains(10_000),
+                "a CPU past the storage is no member"
+            );
+            assert!(!mask.is_empty());
+        }
+
+        #[test]
+        fn an_empty_mask_has_no_members() {
+            let words = [AtomicU64::new(0), AtomicU64::new(0)];
+            assert!(CpuMask::new(&words).is_empty());
+            assert_eq!(CpuMask::new(&words).iter().count(), 0);
+            assert!(CpuMask::new(&[]).is_empty());
+            assert_eq!(CpuMask::new(&[]).iter().count(), 0);
         }
 
         #[test]

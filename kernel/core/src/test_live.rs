@@ -4,9 +4,11 @@
 extern crate std;
 use std::vec::Vec;
 
+use alloc::sync::Arc;
+
 use tairix_kernel_mem::{
-    AddressSpace, DmaCustodian, DmaMapping, FrozenAddressSpace, HostPageTable, LiveSpaceError,
-    LiveUserSpace, SharedMemory,
+    ActiveCpus, AddressSpace, DmaCustodian, DmaMapping, FrozenAddressSpace, HostPageTable,
+    LiveSpaceError, LiveUserSpace, Retire, SharedMemory,
 };
 
 /// A recording [`LiveUserSpace`] double: it logs each call and returns a
@@ -50,6 +52,10 @@ pub(crate) const FILE_BASE: u64 = 0xF000_0000;
 pub(crate) const FILE_RESIDENT: u64 = 3;
 
 impl LiveUserSpace for FakeLive {
+    fn active_cpus(&self) -> Arc<ActiveCpus> {
+        Arc::new(ActiveCpus::new(0).expect("an empty set needs no storage"))
+    }
+
     fn map_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<u64, LiveSpaceError> {
         self.anon_maps.push((base_va, page_count));
         match self.next.take() {
@@ -102,7 +108,12 @@ impl LiveUserSpace for FakeLive {
         }
     }
 
-    fn unmap_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<(), LiveSpaceError> {
+    fn unmap_anonymous(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+        _retire: &mut dyn Retire,
+    ) -> Result<(), LiveSpaceError> {
         self.anon_unmaps.push((base_va, page_count));
         match self.next.take() {
             Some(err) => Err(err),
@@ -130,6 +141,7 @@ impl LiveUserSpace for FakeLive {
         &mut self,
         base_va: u64,
         page_count: u64,
+        _retire: &mut dyn Retire,
     ) -> Result<u64, LiveSpaceError> {
         self.file_releases.push((base_va, page_count));
         match self.next.take() {
@@ -206,7 +218,7 @@ impl LiveUserSpace for FakeLive {
         }
     }
 
-    fn free_dma(&mut self, cpu_va: u64) -> Result<usize, LiveSpaceError> {
+    fn free_dma(&mut self, cpu_va: u64, _retire: &mut dyn Retire) -> Result<usize, LiveSpaceError> {
         self.dma_frees.push(cpu_va);
         match self.next.take() {
             Some(err) => Err(err),
@@ -262,6 +274,7 @@ impl LiveUserSpace for FakeLive {
         _want: usize,
         _template: tairix_kernel_mem::PageCandidate,
         _sink: &dyn tairix_log::Sink,
+        _retire: &mut dyn Retire,
     ) -> tairix_kernel_mem::RamzipReclaimSummary {
         // No candidates in the routing double; reclaim is exercised
         // against the real `LiveSpace`.

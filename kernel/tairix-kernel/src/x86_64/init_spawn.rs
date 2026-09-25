@@ -58,7 +58,7 @@ use tairix_arch_x86_64::userentry::{set_user_thread_pointer, USER_MODE};
 use tairix_kernel_core::{
     spawn_image, InitSpawn, InitSpawnCtx, ProcessResume, ProcessSpace, SpawnMode, UserThreadEntry,
 };
-use tairix_kernel_mem::{AddressSpace, LiveSpace, PhysMap, UserAddressSpace, VirtAddr};
+use tairix_kernel_mem::{AddressSpace, PhysMap, UserAddressSpace};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
 use crate::spawn_layout;
@@ -72,7 +72,7 @@ include!(concat!(env!("OUT_DIR"), "/init_rxe.rs"));
 const BOOT_CPU: usize = 0;
 
 /// PID 1's four fixed guarded-window bases (`plans/PI.md` 5d-0-ii (b′)/(c)),
-/// derived from the one shared offset set the retained [`LiveSpace`]'s
+/// derived from the one shared offset set the retained [`LiveSpace`](tairix_kernel_mem::LiveSpace)'s
 /// window allocators are configured with.
 const WINDOWS: spawn_layout::WindowBases = spawn_layout::window_bases(INIT_USER_BIAS);
 
@@ -228,38 +228,18 @@ impl InitSpawn for X86_64InitSpawn {
         // PID 1's process address space (`plans/PI.md` 5d-0-ii (b′)): the
         // *same* arch space the snapshot above was frozen from, zeroing
         // anonymous frames through the same identity direct map the image
-        // build used (PID 1's CR3 carries it). A window the allocator rejects
-        // retains none and PID 1's `mem_map` / `mmio_map` fail closed.
-        let live: Option<Arc<ProcessSpace>> = {
-            let windows = crate::user_windows::user_windows(
-                static_frames.total_frames() as u64,
-                WINDOWS.anon,
-                super::USER_VA_TOP,
-            );
-            LiveSpace::new(
-                space,
-                ConfiguredPhysMap,
-                static_frames,
-                VirtAddr::new(WINDOWS.mmio),
-                spawn_layout::MMIO_WINDOW_PAGES,
-                VirtAddr::new(WINDOWS.anon),
-                windows.anon_pages,
-                VirtAddr::new(WINDOWS.dma),
-                spawn_layout::DMA_WINDOW_PAGES,
-                VirtAddr::new(WINDOWS.shared),
-                spawn_layout::SHARED_WINDOW_PAGES,
-                VirtAddr::new(windows.file_base),
-                windows.file_pages,
-            )
-            .ok()
-            .map(|live| {
-                Arc::new(ProcessSpace::new(
-                    Box::new(live),
-                    Arc::clone(&pre_resume),
-                    &USER_MODE,
-                ))
-            })
-        };
+        // build used (PID 1's CR3 carries it). A window the allocator rejects,
+        // or a CPU set that cannot be allocated, retains none and PID 1's `mem_map` / `mmio_map` fail closed.
+        let live: Option<Arc<ProcessSpace>> = spawn_layout::process_space(
+            space,
+            ctx.space_tlb(),
+            ConfiguredPhysMap,
+            static_frames,
+            &WINDOWS,
+            super::USER_VA_TOP,
+            &pre_resume,
+            &USER_MODE,
+        );
 
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 

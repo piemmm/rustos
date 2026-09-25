@@ -4779,8 +4779,9 @@ fn health_classifies_healthy_degraded_then_failing_as_signals_accumulate() {
 #[test]
 fn health_triggers_a_scrub_when_the_device_reports_new_unsafe_shutdowns() {
     // An unsafe-shutdown delta since the last clean baseline schedules a
-    // metadata scrub, run through the Stage-8 machinery (— no parallel verifier). Once the baseline advances, a pass with no
-    // further delta does not re-scrub.
+    // metadata scrub, run through the Stage-8 machinery rather than a parallel
+    // verifier. Once the baseline advances, a pass with no further delta does
+    // not re-scrub.
     let mut fs = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
     fs.health(&GrantAll, &NullSink).expect("establish baseline");
     let bytes = fs.into_block().expect("the volume closes").bytes();

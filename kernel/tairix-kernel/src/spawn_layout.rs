@@ -25,12 +25,19 @@
 //! glue) are the deliberate trait carve-out and stay beside each port;
 //! the values they *consume* live here once.
 
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+
 use tairix_abi::{CapabilityId, CapabilityQuery, LoadImage, MemoryClass};
+use tairix_arch_api::EnterUser;
 use tairix_caps::CapabilitySet;
 #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
 use tairix_kernel_core::EmbeddedProgram;
-use tairix_kernel_core::{ProgramRegistry, SpawnRequest, StackSpan};
-use tairix_kernel_mem::{derive_user_layout, UserLayout, UserStack};
+use tairix_kernel_core::{ProcessResume, ProcessSpace, ProgramRegistry, SpawnRequest, StackSpan};
+use tairix_kernel_mem::{
+    derive_user_layout, AddressSpace, AllocError, FrameAllocator, LiveSpace, PageTable, PhysMap,
+    SpaceTlb, UserLayout, UserStack, VirtAddr,
+};
 
 use crate::program_manifests::INIT_MANIFEST;
 #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
@@ -601,6 +608,57 @@ pub const fn window_bases(bias: u64) -> WindowBases {
         shared: bias + SHARED_WINDOW_OFFSET,
         anon: bias + ANON_WINDOW_OFFSET,
     }
+}
+
+/// Retain a freshly built `space` as its process's live address space, laid
+/// out over `windows` below `user_va_top`, with the switch-in hook `resume`
+/// and the port's enter-user handle: the one construction every port's spawn
+/// paths share.
+///
+/// [`None`] when the space's CPU set could not be allocated or a window is
+/// refused; the process's `mem_map` / `mmio_map` then fail closed.
+// Each argument is a distinct piece of the process the port built; a one-use
+// bundle of them would be the wrapper type the charter forbids.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn process_space<P, M>(
+    space: AddressSpace<P>,
+    tlb: Result<SpaceTlb, AllocError>,
+    physmap: M,
+    frames: &'static FrameAllocator,
+    windows: &WindowBases,
+    user_va_top: u64,
+    resume: &ProcessResume,
+    port: &'static dyn EnterUser,
+) -> Option<Arc<ProcessSpace>>
+where
+    P: PageTable + Send + 'static,
+    M: PhysMap + Send + 'static,
+{
+    let dynamic =
+        crate::user_windows::user_windows(frames.total_frames() as u64, windows.anon, user_va_top);
+    let live = LiveSpace::new(
+        space,
+        tlb.ok()?,
+        physmap,
+        frames,
+        VirtAddr::new(windows.mmio),
+        MMIO_WINDOW_PAGES,
+        VirtAddr::new(windows.anon),
+        dynamic.anon_pages,
+        VirtAddr::new(windows.dma),
+        DMA_WINDOW_PAGES,
+        VirtAddr::new(windows.shared),
+        SHARED_WINDOW_PAGES,
+        VirtAddr::new(dynamic.file_base),
+        dynamic.file_pages,
+    )
+    .ok()?;
+    Some(Arc::new(ProcessSpace::new(
+        Box::new(live),
+        Arc::clone(resume),
+        port,
+    )))
 }
 
 /// Per-process stack-canary seed handed to PID 1 `init`. Any value; the kernel RNG-seeded canary is a later stage.

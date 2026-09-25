@@ -611,11 +611,17 @@ impl MmioWindowMap {
         let (leading_guard_slot, data_pages) = self.locate(virt).ok_or(MmioError::UnknownRegion)?;
         let first_data_slot = leading_guard_slot + 1;
 
-        for i in 0..data_pages {
-            let virt = self.virt_of_slot(first_data_slot + i);
-            let page = Page::from_addr(virt)?;
-            let _ = space.unmap(page)?;
-        }
+        let cleared = (0..data_pages).try_for_each(|i| {
+            let page = Page::from_addr(self.virt_of_slot(first_data_slot + i))?;
+            space.unmap(page).map(|_| ())
+        });
+        // Even after a failed page: those before it are gone here but may
+        // still be cached on another CPU.
+        space.shoot_remote(
+            self.virt_of_slot(first_data_slot).as_u64(),
+            data_pages as u64,
+        );
+        cleared?;
 
         // The run's record leaves last: every slot it held, guards included,
         // becomes free space the next placement can use.
@@ -738,6 +744,12 @@ impl MmioWindowMap {
                 let _ = space.unmap(page);
             }
         }
+        // A sibling may have touched the run on another CPU before it was
+        // undone; its slots must not be reused while that CPU can reach them.
+        space.shoot_remote(
+            self.virt_of_slot(first_data_slot).as_u64(),
+            mapped_so_far as u64,
+        );
         self.regions.remove(leading_guard_slot);
     }
 }

@@ -625,8 +625,8 @@ pub struct ConsoleDevice {
 
 impl ConsoleDevice {
     /// Pair `write` and `read` as one installed console that accepts no
-    /// injected input, with terminal echo on by default (
-    /// — interactive consoles echo).
+    /// injected input, with terminal echo on by default, as an interactive
+    /// console echoes.
     ///
     /// The console's `input` half is [`NULL_CONSOLE_INPUT`], so a
     /// `console_input` targeting it fails closed — the right default for

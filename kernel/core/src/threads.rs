@@ -31,6 +31,7 @@
 //! returned id, and only then is it unparked — so no CPU can dispatch a thread
 //! before the kernel knows what it is.
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use tairix_abi::{Errno, RLIMIT_INFINITY};
@@ -41,7 +42,7 @@ use tairix_kernel_sec::{CapTable, ProcessId, TaskId as SecTaskId, ThreadRegister
 use tairix_kernel_syscall::{CallerContext, SyscallResult};
 use tairix_sync::RwLock;
 
-use crate::aspace::{AddressSpaceRegistry, OwnedThreadStack, StackSpan};
+use crate::aspace::{AddressSpaceRegistry, OwnedThreadStack, SnapshotRetire, StackSpan};
 use crate::bootinfo::KernelArch;
 use crate::peerwatch::PeerWatch;
 use crate::procspace::ProcessSpace;
@@ -439,17 +440,14 @@ fn notify_thread_death<A>(
 }
 
 /// Release a `[guard | stack]` reservation, unmapping whatever pages the thread
-/// made resident (each frame zeroed on the way out), returning the range to the
-/// process's anonymous window, and dropping those pages from the process's
-/// registry snapshot.
+/// made resident and returning the range to the process's anonymous window.
 ///
-/// The snapshot half is not bookkeeping: a translation left behind there is
+/// Each page leaves the process's registry snapshot before its frame is zeroed
+/// and freed. That is not bookkeeping: a translation left behind there is
 /// memory the process no longer owns that its **surviving** threads' syscall
 /// buffers would still resolve through, so a freed frame handed to another
-/// principal would be readable and writable across the isolation boundary. Only
-/// published on a successful unmap — a refused one left the pages mapped, and
-/// dropping live translations would fail the copy path closed for memory the
-/// process does hold.
+/// principal would be readable and writable across the isolation boundary. A
+/// refused unmap retires nothing, since it tears nothing down.
 fn release_reservation<A>(
     handlers: &KernelSyscallHandlers<'_, A>,
     space: &Arc<ProcessSpace>,
@@ -459,11 +457,14 @@ fn release_reservation<A>(
 ) where
     A: KernelArch + 'static,
 {
-    if space
-        .with(|live| live.unmap_anonymous(reserve_base, reserve_pages))
-        .is_ok()
-    {
-        handlers.publish_region_teardown(process, reserve_base, reserve_pages);
+    let mut retire = SnapshotRetire::new(handlers.aspaces, process);
+    let _ = space.with(|live| live.unmap_anonymous(reserve_base, reserve_pages, &mut retire));
+    if retire.suspended() {
+        let frozen = space.with(|live| live.freeze());
+        handlers
+            .aspaces
+            .write()
+            .reregister_space(process, Box::new(frozen));
     }
 }
 
