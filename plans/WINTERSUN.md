@@ -46,6 +46,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS9 | Combat: melee, ranged ballistics, traps, the archetypes | planned |
 | WS10 | Magic: casts, channels, spell shapes, the effect vocabulary, visual effects | planned |
 | WS11 | Skills, levelling, items, equipment slots, the configurable action bar | planned |
+| WS20 | Settlements: place names, layouts, and the people who live in them and keep their day | planned |
 | WS12 | The economy: the faucet/sink ledger and the bounded price controller | planned |
 | WS13 | Weather and sky: fronts, precipitation, fog, lightning, wind, the day/night cycle | planned |
 | WS14 | Audio: the game's voice bed over `audio-v1` | planned |
@@ -53,10 +54,12 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS16 | The in-game console, `wintersunctl`, and the admin surface | planned |
 | WS17 | The character designer | planned |
 | WS18 | Accessibility, localisation, and the settings pane, including the detail-level control | planned |
+| WS21 | NPC conversation: understanding typed speech, what an NPC knows, the rule base that answers, and voiced lines per locale | planned |
 | WS19 | GPU offload behind `lib/gpu` | planned |
 
-Items are built in ledger order. An item is complete — tests, docs, and a green
-whole-project gate — before the next begins.
+Items are built in row order. An id names an item and does not place it: an
+item added later takes the next id and sits where it is built. An item is
+complete — tests, docs, and a green whole-project gate — before the next begins.
 
 ### Milestones
 
@@ -72,7 +75,7 @@ milestone whose exit criterion is unmet.
 | **M1 — a world you can walk in** *(the vertical slice)* | WS2, WS3, WS4, WS5, WS6 | One character walks over generated terrain, in a window and in exclusive fullscreen, inside the §3 frame budget, with the state hash identical on all four Tier-1 targets. This is the milestone that proves or kills the software renderer. |
 | **M2 — a world you share** | WS7, WS8 | Two clients on one realm see each other move, characters persist across a restart, a zone handover works, and an uncleanly disconnected client leaves the realm intact at the last committed state. |
 | **M3 — a game** | WS9, WS10, WS11 | The core loop is playable end to end — fight, win, level, equip, spend — and the §5 game-feel budget is met at a simulated 100 ms round trip. |
-| **M4 — a world worth being in** | WS12, WS13, WS14, WS15, WS16, WS17, WS18 | Economy stable over the shock set; weather, audio, chat, admin, designer and accessibility all live. |
+| **M4 — a world worth being in** | WS20, WS12, WS13, WS14, WS15, WS16, WS17, WS18, WS21 | Settlements inhabited and keeping their day; economy stable over the shock set; weather, audio, chat, admin, designer and accessibility all live; an inhabitant answers a typed question truthfully and in character. |
 | **M5 — acceleration** | WS19 | The accelerated path draws the same picture as the software path within tolerance, with the gain measured rather than claimed. |
 
 M1 is deliberately the riskiest milestone and deliberately early: if a
@@ -221,6 +224,7 @@ userland/games/wintersun/
 ├── figure/   # rigs, sockets, pose clips, blending, motion layers, the designer
 ├── net/      # the realm wire protocol and session handshake
 ├── rules/    # the authoritative simulation and the game rules
+├── talk/     # NPC conversation: understanding, the rule base, voiced lines
 └── world/    # the seed-pure procedural world generator
 ```
 
@@ -278,7 +282,7 @@ path, so the single-player and multiplayer code paths are the same code —
 there is no offline mode to keep in sync). `wintersund` is the dedicated form
 for a machine that serves only.
 
-## 2. WS2 — the world
+## 2. WS2/WS20 — the world, and who lives in it
 
 A realm is a `u64` seed and a small parameter document. Generation is a
 pipeline of pure stages over a chunk grid; each stage reads its inputs at a
@@ -386,6 +390,66 @@ nothing from this crate that it does not already have.
 
 The *simulation's* determinism vertical is a different claim over a different
 subject and lives with the code that ticks (§5).
+
+### WS20 — settlements, and the people who live in them
+
+A site is a kind, a position and a levelled radius. This item makes it a
+place: a name, streets and buildings, and people who keep a day there.
+
+- **A name is world data, generated as sounds and spelled per locale.** A new
+  stage names every settlement, landmark, river of note and mountain range.
+  Each continental plate names in its own voice — a phonotactic model of
+  sounds, syllable shapes, and the elements that mean ford, hill or harbour —
+  so names sound as though they belong where they are, and a place can be
+  named for what is there: a ford town takes its river's name. The sounds are
+  what the world digest folds. Each shipped locale spells them in its own
+  script through a table compiled into the crate, so a player reads and can
+  type every name in the script they play in, and `world` still decodes no
+  bytes. Names are public: the seed decides them and a signpost shows them.
+- **A settlement is laid out, not stamped.** Also seed-pure and public: the
+  roads entering a site become its streets, plots line them, and the site's
+  kind decides what stands on them — a hamlet's houses and barns, a village's
+  market and inn, a town's wall, gates and watch, a port's quay. A layout is
+  solved once per settlement and then stamped into chunks, so a building on a
+  chunk seam is the same from either side by construction, as the realm field
+  is. A building is an exterior: a footprint the collision field treats as
+  solid, and a door. Someone inside is neither drawn nor addressable until
+  they come out; enterable interiors are not part of this plan. Buildings draw
+  parametrically from footprint and kind in the scenery pass, through
+  `lib/raster`'s one scan converter and inside that pass's budget.
+- **People are the server's.** A settlement's households are generated from
+  its kind, its layout, and what its ground and water offer — trappers in the
+  boreal north, fishers at a port — each person with a name in their plate's
+  voice, a trade, a home, a post, kin, a body (a WS6 preset varied through
+  `plausible::figure`) and a timetable. They come from the realm's secret seed
+  (§8), never the public one, so a client can no more place a town's people
+  from the seed than see a player outside its interest (decision 3). A
+  person's name travels as its sounds and is spelled by the client that
+  receives it.
+- **A day is a timetable, so a town costs nothing until someone is in it.** A
+  timetable runs over the hour of the realm's day — the tick counter against
+  `RealmParameters::day_length_seconds` — along lanes routed once per
+  settlement between home, post, market and inn. Where an undisturbed person
+  stands is therefore a pure function of the clock: a settlement nobody can
+  see is not simulated at all, its people are placed where their timetables
+  say when someone arrives, and the zone ticks only the people inside someone's
+  interest. A departure from the timetable — talking, fleeing, sheltering —
+  lives in the zone while it lasts and is never stored; unobserved, a person
+  resumes their timetable.
+- **A settlement is a refuge.** Players cannot harm its people: in a shared
+  realm, one player killing the only smith breaks a town for everyone. Harm a
+  player would deal an inhabitant is refused with its reason, like any refused
+  action; a person endangered by anything else flees home and recovers. None
+  is ever lost, so a settlement never needs repopulating, and its people cost
+  the store nothing — they are regenerated from the key, and what happens to
+  them belongs to other records: a vendor's stock to WS12, what they remember
+  of you to WS21.
+- **WS12's vendors are these people**, at their posts: the smith at the forge,
+  the trader in the market.
+- **Scale.** Population follows a site's kind and extent, a rule and not a
+  capacity (§24.1). Layouts and people are cached like chunks under
+  `lib/reclaim`, regenerated when dropped, and generated off the frame on the
+  client and off the tick on the zone.
 
 ## 3. WS4/WS5 — what it looks like
 
@@ -760,7 +824,7 @@ Equipment is parts, not paint: a helm, a pauldron, a cloak, a blade are parts
 attached to named sockets in the rig with their own palette, so a character's
 gear is visible, mixable, and costs no new art path.
 
-## 5. WS3/WS9/WS10/WS11 — the simulation and the rules
+## 5. WS3/WS9/WS10/WS11/WS21 — the simulation and the rules
 
 ### The tick
 
@@ -913,6 +977,153 @@ equipment slots. The action bar is a configurable set of slots bound to items,
 spells, or abilities, per character, with keyboard and pointer activation and a
 binding editor; bindings resolve through `lib/keymap` so they respect the
 user's layout. Slot count and layout are the player's, stored per character.
+
+### NPC conversation (WS21)
+
+A player can type anything to an inhabitant, and it answers in character, from
+what it truly knows, with the effects the rules allow. There is no language
+model (§14): understanding is classification into a closed set, knowledge is a
+query over the realm, and speech is authored grammar. A turn's budget is well
+under a millisecond and a locale's model a few megabytes, both measured like
+the frame's.
+
+- **Talking is its own message.** `Chat` stays never interpreted (§10). A
+  `Talk` names the NPC, the locale it is written in, and either free text
+  under its own byte bound or one of the choices the NPC's last line offered;
+  a choice not offered is refused, as is an NPC out of earshot and a rate over
+  the account's limit. The tick a `Talk` is applied in is recorded in the
+  intent log, so a conversation replays line for line and effect for effect
+  (§12). A player's words are never relayed: chat stays the only path by which
+  one player's text reaches another. The NPC you are talking to joins §7's
+  crowding priority beside an engaged combatant.
+- **A speaker is a WS20 person plus a temperament** — warmth, formality,
+  verbosity, humour, candour, patience — generated from the secret seed like
+  the rest of them, with the knowledge scope and the secrets its trade and
+  household imply.
+- **Understanding maps free text to a closed set, never to meaning, and runs
+  in a sandbox.** Reading a player's text is parsing untrusted input, so it
+  happens in a §19.5 worker holding the trained models and the realm's names,
+  with one endpoint to the zone and nothing else. It answers with an act, a
+  confidence, and the names and pointing words it found; the zone keeps the
+  names the speaker could mean. A `Talk` is understood off the tick and
+  applied at the tick its answer arrives. The zone validates that answer like
+  any input — an act outside the set or a name it does not know is refused —
+  so a subverted worker can spoil a conversation and reach nothing else; a
+  fault costs one conversation rather than a region's live state, and the
+  worker is replaced and the fault logged. The understander is total over any
+  bytes, bounded, panic-free and fuzzed, as are the `Talk` and `Speech`
+  decoders.
+  - *Normalisation* is Unicode's `NFKC_Casefold` plus a locale's own folding
+    (the optional vowel marks of Arabic and Hebrew). The tree has neither.
+    Both are compiled from the vendored Unicode Character Database, as
+    `tools/tzcompile` compiles IANA's rules, and live in `talk` until an OS
+    consumer wants them.
+  - *Names* — places and people (WS20), items, kin — match as the player's
+    locale spells them, within a small edit distance, through an index built
+    at load rather than a scan. Pointing words ("here", "you", "the river")
+    resolve against the scene and a pronoun against the last subject named; a
+    name that fits more than one thing is asked about, in character.
+  - *The act* — greet, ask the way, trade, haggle, flatter, insult, threaten,
+    agree, refuse, "why?", farewell and the rest — comes from character
+    n-grams hashed into a linear model with integer weights. Character
+    n-grams need no word segmenter, which is what makes Japanese and Chinese
+    tractable without one, and a typo disturbs only the few that overlap it.
+    The act set is content: each act is a phrase set per locale, en-US
+    canonical and required. A worker trains when the content loads, by
+    integer averaged perceptron, so every worker on every target derives the
+    same weights from the same documents, the phrases are the only source,
+    and a content reload retrains. The margin between the best act and the
+    next is the confidence; under the content's threshold the act is
+    `unclear`.
+- **Knowing is a closed vocabulary of queries over the realm.** An NPC answers
+  from what is true: the world (names, roads and their distances, rivers and
+  fords, landmarks), its region's weather (WS13), its own trade and prices
+  (WS12), its household and neighbours, what it remembers of the character,
+  what anyone can see of the character, and the tidings its settlement has
+  heard. Its scope follows trade and home — a trader knows the roads between
+  towns, a farmer its valley.
+  - No query reads a concealed fact (decision 3) or another player's live
+    state, so a leak cannot even be phrased. An NPC tells one of its own
+    secrets only through a rule that names the telling as its effect. A secret
+    written into a shipped document is readable by anyone holding the bundle;
+    one that must hold is generated from the secret seed.
+  - **Tidings** are notable events — a named beast killed, a caravan robbed, a
+    landmark opened — recorded once, with where and when. News travels the
+    road network at a stated speed, so whether a settlement has heard it is a
+    pure function of the event, the roads and the clock: rumour costs
+    O(tidings), not O(tidings × people). It fades with distance and age, and
+    each road it travels may distort one detail, deterministically — NPCs that
+    misremember, after Ryan et al., "Toward Characters Who Observe, Tell,
+    Misremember, and Lie" (2015). Whether a given NPC repeats it is its
+    temperament.
+  - **A tiding never locates a player.** One about a character is only ever of
+    a public deed, is placed at the nearest settlement rather than a position,
+    travels at road speed, and names the character only if its player allows
+    it — otherwise it is told of a stranger. Asking around must not reopen the
+    radar interest management closes.
+  - **Acquaintance** is per NPC and character: a disposition, a few remembered
+    facts, and when they last met — bounded, fading, stored (§8). The only
+    name an NPC can learn is the character's own, which is already a validated
+    identity: it never stores or repeats anything a player typed.
+- **Deciding is a rule base where the most specific match wins** — Valve's
+  response rules (Ruskin, GDC 2012). The facts are the act and its subjects,
+  the speaker's trade, temperament, mood and disposition, the hour, the place,
+  the weather, and the conversation's state: the last line, the topic, the
+  choices on offer. The rule matching the most facts answers, so layering
+  falls out of specificity — common rules, then a trade's, then a
+  temperament's, then any written for one person. Rules are indexed by act,
+  so a turn weighs only those that answer it. An NPC may speak first — a
+  greeting to a character who comes near — through the same rules, with the
+  approach as the act.
+  - Equally specific variants of one response are drawn by a stream keyed on
+    the secret seed, the speaker and the tick, so replay repeats the draw. Two
+    rules with different effects that could match the same facts at equal
+    specificity are refused at load, as an unbroken bind tie is (§18.3). Rules
+    can co-match only where every fact both constrain has overlapping
+    constraints, so the test is sound: it may refuse a pair that could never
+    meet, and never passes one that can.
+  - A line declares the replies it expects — "why?", "how far?", "yes" — which
+    match only while it is the last line. Most of a conversation's apparent
+    coherence is these short replies resolved against what was just said.
+  - Effects are decision 5's closed vocabulary: shift disposition, remember,
+    mark a place discovered on the character's map (§8), open trade (WS12),
+    give or take an item (WS11), pay or charge — a faucet or sink typed in the
+    ledger and bounded like any other (§6) — refuse service for a while, and
+    end the conversation. A shift per exchange is bounded and repeats
+    diminish, so flattery on a loop earns nothing. There is no quest verb
+    until an item builds quests (§16).
+  - A character holds one conversation at a time, kept in the zone while it
+    lasts, so conversation state is bounded by the zone's population. It ends
+    on farewell, distance or idleness.
+- **Saying keeps voice apart from content.** A response is a line and its slot
+  values — places, people, items, numbers — and leaves the server as that
+  structure, the choices it offers, and a render seed. Each receiving client
+  words it in its own locale, so onlookers in different locales each read it
+  in theirs.
+  - Wording is tagged grammar expansion: the expansion whose tags best fit the
+    speaker's voice — its warmth, formality, verbosity and humour, and the
+    region it is from — wins, so a boreal trapper and a saltmarsh fisher state
+    one fact differently. A voice is public, since anyone near can hear it,
+    and joins the speaker's entity on the wire; candour, patience and secrets
+    never leave the server.
+  - Grammars are acyclic, so every expansion is finite, and the longest is
+    computed at load and held to the line bound. Slots go through WS18's one
+    per-locale formatter; a line missing in a locale falls back as every string
+    does.
+  - Nothing a player typed is ever echoed. Every word an NPC says is composed
+    from reviewed parts.
+- **Staying in character is the design, not the fallback.** `unclear` is
+  answered by the speaker's own deflections, which steer back to what it can
+  talk about: a misparse played as character reads as personality, which is
+  Façade's lesson (Mateas and Stern, 2005). Every line offers the topics it
+  mentioned as choices, which need no understanding, so all a conversation can
+  reach stays reachable when a parse fails, and a locale with no phrase sets
+  is carried by choices alone. Shared rules supply facts and the speaker
+  supplies the voice; shared lines in one shared voice turn NPCs into
+  encyclopedias.
+- **The conversation panel obeys §28.** Typing edits the field and nothing
+  else, a line is sent once, on submit, and the reply is painted when it
+  arrives — the panel never waits for it.
 
 ## 6. WS12 — the self-balancing economy
 
@@ -1146,7 +1357,14 @@ The engine is `plans/RECDB.md` (P5); the realm's schemas are the game's:
 - **World delta** — sparse, keyed by chunk: terrain and material edits,
   structures, depleted or respawning resource nodes, container contents.
 - **Economy** — the transaction ledger and the per-class controller state.
-- **Realm** — seed, parameters, content digest, the last committed tick.
+- **Acquaintance** — per NPC and character: disposition, remembered facts,
+  when they last met (WS21).
+- **Tidings** — notable events with where and when, kept while any settlement
+  can still hear them (WS21).
+- **Realm** — seed, the secret seed, parameters, content digest, the last
+  committed tick. The secret seed is drawn from the platform's randomness when
+  the realm is created and keys everything the server generates that a client
+  must not derive (decision 3); it is never sent, printed or logged.
 - **Audit** — moderation actions and administrative commands, which also go to
   the system log's hash-chained trail (§19.4), because a realm administrator
   must not be able to erase their own record.
@@ -1236,10 +1454,10 @@ decoration, and the server never trusts one.
 
 Channels: say (local radius), party, guild, whisper, and realm. Every message
 is length-bounded, stripped of control characters, rate-limited per account,
-and rendered as data — never interpreted, never a command path, never able to
-inject a control sequence into a terminal or a console. Per-account mute and
-block lists are honoured server-side so a blocked message is never sent, not
-merely hidden.
+and rendered as data — never interpreted, never a command path, never read by
+an NPC (speaking to one is WS21's own message), never able to inject a control
+sequence into a terminal or a console. Per-account mute and block lists are
+honoured server-side so a blocked message is never sent, not merely hidden.
 
 ### Admin and moderation (WS16, WS15)
 
@@ -1294,7 +1512,9 @@ information (§15 of the controls spec). Full input remapping, keyboard-only
 play, and pointer-only play. Subtitles and captions for audio cues, which a
 player with no audio device needs anyway. UI scale independent of window size.
 All strings and the help tree are per-locale with the deterministic fallback to
-`en-US` that `lib/help` already defines.
+`en-US` that `lib/help` already defines. A string that carries a value is
+formatted by one per-locale formatter — plural category, and the gender and
+case a noun takes — which WS21's NPC speech uses too.
 
 ### The detail-level control (WS18)
 
@@ -1405,6 +1625,7 @@ the criterion for abandoning the approach rather than sinking more into it.
 | **The audio stack (P1) slips** | Medium | WS14 sits late deliberately, so M1–M3 do not block on it. The game ships silent and says so; it does not grow a private audio path (§14). |
 | **The `cinder` migration regresses a shipped feature** | Medium | `cinder`'s existing shape, paint, gait and roam tests plus its QEMU vertical are the acceptance gate. If its pixels cannot be preserved, that is surfaced (§15.7), not absorbed. |
 | **The thousand-player target is unmet** | Medium | Interest management, the per-client cap and zone splitting are the levers, and each degrades gracefully: the realm serves fewer players per zone rather than failing. The number is a measured property (§15), so a shortfall is reported with the figure reached. |
+| **NPC understanding misses its floor, or its content outgrows its authors across the shipped locales** | Medium | Held-out accuracy is an exact figure per act and locale, because training is deterministic, so a shortfall is measured rather than felt. Layering keeps authoring proportional to what differs, phrases drafted offline widen coverage once a person has reviewed them, and choices carry any locale without phrase sets. Kill criterion: if en-US cannot reach its floor, free text is withdrawn and choices ship alone — the rule base, the knowledge and the voices are unchanged, and nothing half-working is kept. |
 | **Scope** — the whole body of work is multi-year | High | The milestone structure exists for this: every milestone exits with a playable or measured artefact, so the work is steerable and cancellable at each boundary rather than all-or-nothing. |
 | **The economy is gamed in a way the shock set did not model** | Low | The ledger makes exploitation observable after the fact, the clamps bound the damage while it is happening, and the admin surface can retune within them. A new exploit becomes a new shock case in the test set. |
 
@@ -1415,6 +1636,12 @@ Stating these once stops each being re-proposed.
 - **A scripting VM for content** (Lua or otherwise) — untrusted code execution,
   a JIT surface, and a C dependency. Content is data over a closed vocabulary
   (decision 5).
+- **A language model generating NPC speech at runtime.** The player would
+  write its prompt — decision 1's hostile client, arriving as text — and it
+  invents places the world does not have, cannot be replayed (decision 4), says
+  things nobody reviewed, and costs more than the thousand-player floor can
+  pay. Drafting phrases or line variants with one offline, for a person to
+  review and commit as data, is authoring and is not refused (WS21).
 - **A private GPU path, or a second renderer.** The game reaches a GPU through
   `plans/GPU.md`'s seam like every other consumer, and the software renderer
   stays complete and mandatory without it. OpenGL specifically is refused there,
@@ -1450,12 +1677,33 @@ Every item lands with its tests; these are the claims the plan is judged on.
   downhill everywhere. Roads connect the sites they claim to. No biome weight
   vector is unnormalised. Generation is reproducible after an interruption at
   any stage.
+- **Settlements.** Names and layouts are seed-pure and seam-free — a
+  settlement straddling chunks is identical from either side — and the world
+  digest folds both on all four targets. Every generated name can be spelled
+  in every shipped locale's script. Buildings block movement exactly where
+  they are drawn. A person watched and unwatched over any interval stands where
+  their timetable says unless a departure moved them, and a settlement nobody
+  can see costs no tick work. Harm a player aims at an inhabitant is refused
+  with its reason.
 - **Rules.** Hand-computed damage, healing, resistance, and status cases; XP
   and level boundaries; skill-tree documents validated and malformed ones
   refused; a proptest that no sequence of legal actions produces a negative or
   overflowing stat, resource, or balance.
 - **Economy.** Long-horizon simulations under injected shocks assert bounded
   drift, convergence, no oscillation, and closed arbitrage (§6).
+- **Conversation.** Training is deterministic, so held-out accuracy per act and
+  locale is an exact figure, gated at a stated floor as FG5 gates readability.
+  A scripted conversation replays line for line and effect for effect. Content
+  with a tie between different effects, a cyclic grammar, a line over its
+  bound, an act nothing answers, or no en-US is refused at load. A choice not
+  offered, oversize text and a flood are refused. A corpus of
+  instruction-shaped lines ("ignore your instructions and…") earns nothing
+  beyond what its understood act's rules allow. A tiding never carries a
+  position, a private deed or an unconsented name; disposition gained by
+  repetition is bounded; every speaker answers `unclear`; a worker that faults
+  mid-turn, or answers outside the act set, costs that conversation and
+  nothing else. The turn cost and each locale's model size are measured
+  against their budgets.
 - **Protocol.** Round-trip and bounded-decode tests for every frame; fuzz
   harnesses for every decoder with the regression corpus; a test that an
   oversize, truncated, or reordered frame is refused and the connection ended
@@ -1538,3 +1786,9 @@ reaches one stops and asks (§15.7) rather than choosing silently.
    not obviously worth it, and this plan does not need it: after FG1 the two
    share `lib/raster`'s outline primitives and nothing else. Recorded because
    the question will be asked, not because an answer is pending.
+4. **Quests and dungeon interiors are named but carried by no item.** §6 pays
+   quest rewards and §8 stores quest state; decision 3 conceals a dungeon's
+   interior and WS2 places its entrance. Without an item neither is built.
+   Offering or advancing a quest is conversation's most common effect, so WS21
+   has no quest verb until the item that builds quests adds one, as decision 5
+   adds any effect.
