@@ -100,30 +100,50 @@ Every figure read from configuration space is hostile input:
   driver demand an arbitrarily large DMA region at bring-up;
 - an unrecognised algorithm bit is ignored;
 - a device that reports itself not ready, offers no cipher service, offers no
-  algorithm the driver implements, or advertises no data queue is refused at
-  bring-up rather than driven.
+  algorithm the driver implements, advertises no data queue, or has a queue
+  too shallow for the longest chain it carries is refused at bring-up rather
+  than driven — the shallow queue before the device is given it.
 
 Both the control and the data path decode their reply through one
 `status_to_result`, so neither can classify an outcome the other would read
 differently, and a status byte the ABI does not define fails closed rather
-than reading as success.
+than reading as success. The reply staging is reused, so every request first
+stages a status no device writes (`STATUS_UNANSWERED`): a completion that
+wrote no reply is refused rather than read as the last request's — a stale
+session reply would otherwise name the previous, destroyed session. A job's
+output is handed back only when its completion reports writing the output
+and the status behind it. A destroy answered "no such session" has done its
+job.
 
 ### Two bounds on an unwell device
 
 A job that is submitted and never answered releases its caller, because the
 two failure shapes are different and neither bound catches the other:
 
-- **Silence** — a per-job deadline, so a device whose completion interrupt is
-  lost, coalesced or never raised fails the job `DeviceOffline` rather than
-  parking the caller inside it for ever.
-- **Noise** — a wake-count bound, so a stuck or mis-routed shared interrupt
-  delivering wakes with no matching completion fails the job `DeviceFault`
-  rather than spinning. No deadline would catch this, because each wake resets
-  the wait.
+- **Silence** — a per-job deadline, measured on the host's clock across every
+  wait of the job, so a device whose completion interrupt is lost, coalesced
+  or never raised — or one that keeps waking the driver without answering —
+  fails the job `DeviceOffline` rather than parking the caller inside it. A
+  wait that could not be made at all fails the job the same way, at once.
+- **Noise** — a wake-count bound, so a storm of wakes with no matching
+  completion fails the job `DeviceFault` well before the deadline would.
 
 A failed job still destroys its session, so a device is never left holding the
 caller's key schedule, and the job's own error is what surfaces rather than
-the cleanup's.
+the cleanup's. A destroy the device refuses, or never answers and later
+refuses, is issued again before the next job runs; a device that will not let
+a session go gets no further key.
+
+A chain the device never answers stays the device's, with every staging
+buffer it names — and the control and data queues share that staging, so no
+job is published on either while the device holds a chain on one. The next job
+first takes back what the device has since answered: a key or payload it held
+is scrubbed then rather than while the device may still be reading it, and a
+session an abandoned create, job or destroy left behind is destroyed before
+the job runs. Until the device answers, every job fails `DeviceOffline` without
+publishing anything, so a late completion is never taken for a later job's
+output. Dropping the driver resets the device, and a confirmed reset takes
+back whatever it still held, so the key and payload staging are scrubbed then.
 
 ## Tests
 

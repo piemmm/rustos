@@ -55,6 +55,10 @@ Reserved `EventId` range `13000..14000`:
   `priority` (Warn).
 - `13004 NODE_LOAD_FAILED` — load gate refused the winner; fields
   `path`, `errno` (Warn).
+- `13020 NODE_LOAD_RACED_REMOVAL` — the node left the tree before its
+  driver was admitted; field `errno` (Info).
+- `13021 NODE_ALREADY_DRIVEN` — another live driver already holds the
+  node; field `errno` (Info).
 
 ## Layering & safety
 
@@ -70,7 +74,7 @@ Tier: `experimental` (`AGENTS.md` §6). The wire formats consumed
 
 ## Test surface
 
-`cargo test -p tairix-devmgr` (16 unit tests): exact compatible and
+`cargo test -p tairix-devmgr`: exact compatible and
 numeric-key matching, multi-match priority resolution and order
 independence, unbroken-tie rejection (and a tie broken by a higher
 priority), no-match → unbound, root-node skip, capability-denied load

@@ -125,13 +125,12 @@ verticals + registry deletion remain, gated on the A1 image builder —
 staged exactly as the riscv64 parity port was: production composition
 host-gate-green first, then boot-confirmed). Done-state:
 
-- `boot_x86_64::seed_hardware_tree` returns the leaked `&'static [HwNode]`
-  tree it publishes to `HW_TREE`; `try_boot` resolves the bootstrap root
-  block binding from it through the shared `root_storage::
-  resolve_root_block_driver` gate and stashes it with
-  `unlock_service::record_boot(binding, /* dtb */ 0, tree)` — dtb is `0`
-  because the x86_64 bring-up re-resolves the transport from PCI config
-  space, not a firmware device tree.
+- `boot_x86_64::seed_hardware_tree` returns the collected tree by value;
+  `try_boot` hands it to `unlock_service::record_boot(/* dtb */ 0, tree, log)`,
+  which resolves the bootstrap root block binding through
+  `root_storage::resolve_root_block_driver`, stashes it, and moves the tree
+  into `HW_TREE` — dtb is `0` because the x86_64 bring-up re-resolves the
+  transport from PCI config space, not a firmware device tree.
 - `try_boot` composes the shared pipeline exactly as the aarch64/riscv64
   boots do: `with_app_store` / `with_users_db` / `with_users_admin` /
   `with_filesystem` / `with_volumes` / `with_volume_service`.

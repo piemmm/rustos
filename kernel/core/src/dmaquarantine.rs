@@ -1,23 +1,29 @@
 //! Custody of DMA memory a dead driver's device may still master
-//! (`plans/OPEN-DEFECTS.md` D167).
+//! (`plans/OPEN-DEFECTS.md` D167, D225).
 //!
 //! With no IOMMU a device keeps whatever bus addresses it was handed, whatever
-//! became of the driver that handed them over. A torn-down space therefore
+//! became of the driver that handed them over. A torn-down owner therefore
 //! surrenders its DMA carves here instead of to the allocator, and they return
 //! to the allocator only once the device is proven quiet: a later driver
 //! instance for the same hardware-tree node has reset it and says so, or the
-//! node is retired because its device is gone.
+//! node was surprise-removed because its device is gone.
 //!
 //! Every block remembers the admission generation of the driver that carved
-//! it, and quieting a node frees the blocks below a generation bound, whether
-//! they are held already or surrendered later — the space that carved them may
-//! be dropped after its successor has started. The bound is sound because a
-//! successor is admitted only once its predecessor's last thread is down, so a
-//! reset by any later instance postdates every transfer an earlier one could
-//! have programmed. Retiring a node bounds at the generation high-water mark
-//! rather than freeing everything for good, because a node id is reused once
-//! the node holding the highest one is removed, and a driver for the new
-//! device is always admitted above the mark.
+//! it, and a reset frees the blocks of every earlier generation, whether they
+//! are held already or surrendered later — the space that carved them may be
+//! dropped after its successor has started. Three kernel-enforced facts make
+//! the proofs sound. A node has at most one live driver, so a reset by the
+//! live one postdates every transfer an earlier one programmed. A node id is
+//! never reissued within a boot, so a reset or a removal speaks only for the
+//! device the memory was handed to. And the quarantine learns every removal
+//! and opens a record only for a node the tree still holds, so no carve is
+//! taken for a node the tree has dropped.
+//!
+//! A node's record lives while the node is in the tree, so a driver carving
+//! and freeing one buffer at a time never rebuilds it; once the node has left
+//! the tree the record goes as soon as nothing is held or reserved for it.
+//! Each carve reserves room for its own surrender, so recording a block at
+//! teardown never allocates.
 
 use alloc::vec::Vec;
 
@@ -28,6 +34,7 @@ use tairix_kernel_mem::{AllocError, DmaBlock, DmaCustody, DmaError, FrameAllocat
 use tairix_sync::SpinLock;
 
 use crate::devres::DmaQuarantineFacility;
+use crate::hwtree::HwNodeLiveness;
 
 /// One surrendered block and the generation of the driver that carved it.
 #[derive(Clone, Copy)]
@@ -36,27 +43,50 @@ struct Held {
     block: DmaBlock,
 }
 
+/// Where a node stands in the hardware tree. Only ever advances.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Standing {
+    /// In the tree: carves are taken.
+    Present,
+    /// Removed in order while its device may still run: no carve is taken,
+    /// and what is held waits for a reset.
+    Detached,
+    /// Surprise-removed: the device can master nothing, so everything is
+    /// freeable and no carve is taken.
+    Gone,
+}
+
 /// What the quarantine knows about one node.
-#[derive(Default)]
 struct NodeCustody {
-    /// Surrendered blocks not yet freed.
+    /// Surrendered blocks not yet freed. Its spare capacity always covers
+    /// `reserved`, so a surrender never grows it.
     held: Vec<Held>,
-    /// Spaces bound to the node that have not yet surrendered.
-    bound: usize,
-    /// Blocks carved by a generation below this are freeable; `None` until
-    /// the node is first quieted.
-    quiet_below: Option<u64>,
+    /// Blocks carved for the node and neither surrendered nor freed yet.
+    reserved: usize,
+    /// Blocks carved by a generation below this are freeable: a driver
+    /// admitted as it reset the device. Generations start at one, so the
+    /// initial zero frees nothing.
+    reset_below: u64,
+    standing: Standing,
 }
 
 impl NodeCustody {
-    fn freeable(&self, generation: u64) -> bool {
-        self.quiet_below.is_some_and(|bound| generation < bound)
+    const fn new() -> Self {
+        Self {
+            held: Vec::new(),
+            reserved: 0,
+            reset_below: 0,
+            standing: Standing::Present,
+        }
     }
 
-    /// No space can surrender into the record any more and it holds nothing,
-    /// so it can go: a later binding starts a fresh one.
-    fn is_idle(&self) -> bool {
-        self.bound == 0 && self.held.is_empty()
+    fn frees(&self, generation: u64) -> bool {
+        self.standing == Standing::Gone || generation < self.reset_below
+    }
+
+    /// Nothing can reach the record any more and no carve may reopen it.
+    fn is_spent(&self) -> bool {
+        self.standing != Standing::Present && self.reserved == 0 && self.held.is_empty()
     }
 }
 
@@ -64,17 +94,24 @@ impl NodeCustody {
 pub struct DmaQuarantine {
     frames: &'static FrameAllocator,
     physmap: &'static (dyn PhysMap + Sync),
+    devices: &'static dyn HwNodeLiveness,
     nodes: SpinLock<HashMap<u32, NodeCustody, BuildFastHash>>,
 }
 
 impl DmaQuarantine {
     /// A quarantine returning blocks to `frames`, scrubbing them through the
-    /// kernel direct map `physmap` first.
+    /// kernel direct map `physmap` first, and opening custody only for nodes
+    /// `devices` reports live.
     #[must_use]
-    pub fn new(frames: &'static FrameAllocator, physmap: &'static (dyn PhysMap + Sync)) -> Self {
+    pub fn new(
+        frames: &'static FrameAllocator,
+        physmap: &'static (dyn PhysMap + Sync),
+        devices: &'static dyn HwNodeLiveness,
+    ) -> Self {
         Self {
             frames,
             physmap,
+            devices,
             nodes: SpinLock::new(HashMap::with_hasher(BuildFastHash::new())),
         }
     }
@@ -93,36 +130,36 @@ impl DmaQuarantine {
 
     /// Nodes the quarantine keeps a record for.
     #[cfg(test)]
-    fn tracked_nodes(&self) -> usize {
+    pub(crate) fn tracked_nodes(&self) -> usize {
         self.nodes.lock().len()
     }
 
-    /// Scrub `block` and return it to the allocator; a block the direct map
-    /// cannot reach stays allocated, since nothing unscrubbed is ever freed.
-    fn free(&self, block: DmaBlock) {
+    /// Scrub `block` and return it to the allocator, reporting whether it
+    /// went back. A block the direct map cannot reach, or the allocator
+    /// refuses, stays allocated: nothing unscrubbed is ever freed, and frames
+    /// kept from reuse are as safe as held ones.
+    fn free(&self, block: DmaBlock) -> bool {
         let len = block.len();
         let start = block.frame.start();
         let Some(ptr) = self.physmap.translate(start, len) else {
-            return;
+            return false;
         };
         // SAFETY: the direct map translated exactly `len` bytes of the block's
         // own frames, which no process maps and no device may still master —
         // the caller established that before choosing to free.
         unsafe { core::ptr::write_bytes(ptr.as_ptr(), 0, len) };
         self.physmap.clean_invalidate(start, len);
-        // A refused free leaves the frames allocated, which keeps them from
-        // reuse just as holding them would.
-        let _ = self.frames.free_order(block.frame, block.order);
+        self.frames.free_order(block.frame, block.order).is_ok()
     }
 
-    /// Raise `node`'s quiet bound to at least `below` and free what it now
-    /// covers, returning the bytes freed.
+    /// Apply `advance` to `node`'s record and free what it now covers,
+    /// returning the bytes returned to the allocator.
     ///
     /// Each block leaves the record under the lock and is scrubbed outside it,
     /// so a large release never stalls another driver's carve or teardown.
     /// Freeable blocks are sought from the tail, where `hold` appends, so the
     /// search is constant per block when, as usual, all of them are freeable.
-    fn quiet(&self, node: u32, below: u64) -> u64 {
+    fn quiet(&self, node: u32, advance: impl Fn(&mut NodeCustody)) -> u64 {
         let mut freed = 0;
         loop {
             let block = {
@@ -130,97 +167,111 @@ impl DmaQuarantine {
                 let Some(custody) = nodes.get_mut(&node) else {
                     return freed;
                 };
-                let bound = custody.quiet_below.map_or(below, |q| q.max(below));
-                custody.quiet_below = Some(bound);
+                advance(custody);
                 let Some(index) = custody
                     .held
                     .iter()
-                    .rposition(|held| held.generation < bound)
+                    .rposition(|held| custody.frees(held.generation))
                 else {
-                    if custody.is_idle() {
+                    if custody.is_spent() {
                         nodes.remove(&node);
                     }
                     return freed;
                 };
                 custody.held.swap_remove(index).block
             };
-            freed += block.len() as u64;
-            self.free(block);
+            if self.free(block) {
+                freed += block.len() as u64;
+            }
         }
     }
-}
 
-/// What becomes of a block surrendered to a node.
-enum Arrival {
-    /// Recorded until the node is quieted.
-    Held,
-    /// Already covered by the node's quiet bound.
-    Freeable,
-    /// Could not be recorded: its frames stay allocated for good.
-    Unrecorded,
+    /// Mark `node` as having left the tree with `standing`.
+    fn remove(&self, node: u32, standing: Standing) -> u64 {
+        self.quiet(node, |custody| {
+            custody.standing = custody.standing.max(standing);
+        })
+    }
 }
 
 impl DmaCustody for DmaQuarantine {
-    fn bind(&self, node: u32) -> Result<(), DmaError> {
+    fn reserve(&self, node: u32) -> Result<(), DmaError> {
         let mut nodes = self.nodes.lock();
-        if let Some(custody) = nodes.get_mut(&node) {
-            custody.bound += 1;
-            return Ok(());
-        }
-        nodes
-            .try_insert(
-                node,
-                NodeCustody {
-                    bound: 1,
-                    ..NodeCustody::default()
-                },
-            )
-            .map(|_| ())
-            .map_err(|_| DmaError::Alloc(AllocError::OutOfMemory))
-    }
-
-    fn hold(&self, node: u32, generation: u64, block: DmaBlock) {
-        let arrival = {
-            let mut nodes = self.nodes.lock();
-            // A space surrenders only to a node it bound, so a missing record
-            // is a broken invariant: keep the block from reuse regardless.
-            match nodes.get_mut(&node) {
-                None => Arrival::Unrecorded,
-                Some(custody) if custody.freeable(generation) => Arrival::Freeable,
-                Some(custody) => {
-                    if custody.held.try_reserve(1).is_ok() {
-                        custody.held.push(Held { generation, block });
-                        Arrival::Held
-                    } else {
-                        Arrival::Unrecorded
-                    }
-                }
+        if !nodes.contains_key(&node) {
+            // A live node's record outlives its idle spells and a removal
+            // marks the one it finds, so only a record's first carve consults
+            // the tree — under the lock a removal's own update takes, so a
+            // removal either precedes this check or finds the record it opens.
+            if !self.devices.is_live(node) {
+                return Err(DmaError::DeviceGone);
             }
-        };
-        if matches!(arrival, Arrival::Freeable) {
-            self.free(block);
+            nodes
+                .try_insert(node, NodeCustody::new())
+                .map_err(|_| DmaError::Alloc(AllocError::OutOfMemory))?;
         }
+        let Some(custody) = nodes.get_mut(&node) else {
+            return Err(DmaError::Alloc(AllocError::OutOfMemory));
+        };
+        if custody.standing != Standing::Present {
+            return Err(DmaError::DeviceGone);
+        }
+        custody
+            .held
+            .try_reserve(custody.reserved + 1)
+            .map_err(|_| DmaError::Alloc(AllocError::OutOfMemory))?;
+        custody.reserved += 1;
+        Ok(())
     }
 
-    fn unbind(&self, node: u32) {
+    fn unreserve(&self, node: u32) {
         let mut nodes = self.nodes.lock();
         let Some(custody) = nodes.get_mut(&node) else {
             return;
         };
-        custody.bound = custody.bound.saturating_sub(1);
-        if custody.is_idle() {
+        custody.reserved = custody.reserved.saturating_sub(1);
+        if custody.is_spent() {
             nodes.remove(&node);
+        }
+    }
+
+    fn hold(&self, node: u32, generation: u64, block: DmaBlock) {
+        let freeable = {
+            let mut nodes = self.nodes.lock();
+            // A block no reservation stands behind is a broken invariant, and
+            // one the reservation left no room for could only be recorded by
+            // allocating: either way it stays allocated for good.
+            let Some(custody) = nodes.get_mut(&node).filter(|custody| custody.reserved > 0) else {
+                return;
+            };
+            custody.reserved -= 1;
+            let freeable = custody.frees(generation);
+            if !freeable && custody.held.len() < custody.held.capacity() {
+                custody.held.push(Held { generation, block });
+            }
+            if custody.is_spent() {
+                nodes.remove(&node);
+            }
+            freeable
+        };
+        if freeable {
+            self.free(block);
         }
     }
 }
 
 impl DmaQuarantineFacility for DmaQuarantine {
     fn release(&self, node: u32, generation: u64) -> Result<u64, Errno> {
-        Ok(self.quiet(node, generation))
+        Ok(self.quiet(node, |custody| {
+            custody.reset_below = custody.reset_below.max(generation);
+        }))
     }
 
-    fn retire(&self, node: u32, through_generation: u64) -> Result<u64, Errno> {
-        Ok(self.quiet(node, through_generation.saturating_add(1)))
+    fn retire(&self, node: u32) -> Result<u64, Errno> {
+        Ok(self.remove(node, Standing::Gone))
+    }
+
+    fn detach(&self, node: u32) {
+        self.remove(node, Standing::Detached);
     }
 }
 

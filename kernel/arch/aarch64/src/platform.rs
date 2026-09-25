@@ -483,12 +483,17 @@ mod tests {
         );
 
         // The VideoCore mailbox carries the discovered (translated)
-        // doorbell window plus the DMA property-buffer carve request
-        // bounded by the 30-bit aperture (`plans/PI.md` P7).
+        // doorbell window, the inbox interrupt its service parks on as a
+        // global INTID, and the DMA property-buffer carve request bounded by
+        // the 30-bit aperture (`plans/PI.md` P7).
         let mailbox = by_key(&nodes, b"brcm,bcm2835-mbox");
         assert_eq!(mailbox.class(), Some(HwDeviceClass::Other));
         assert_eq!(mmio_windows(mailbox), [(0xfe00_b880, 0x40)]);
-        let dma = mailbox.resources().get(1).expect("dma carve request");
+        assert_eq!(
+            irq_lines(mailbox),
+            [u64::from(MIN_SPI_INTID + fixture::MAILBOX_SPI)]
+        );
+        let dma = mailbox.resources().get(2).expect("dma carve request");
         assert_eq!(dma.kind(), Some(HwResourceKind::Dma));
         assert_eq!(dma.base(), 0x4000_0000, "VC aperture limit");
         assert_eq!(dma.length(), 4096, "one-page property carve");

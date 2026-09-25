@@ -174,6 +174,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 128 | `shm_grant_peer` | `Handle` (region), `IpcEndpoint`, `Handle` (ticket) | `u64` (handle) | `CAP_SHM`    | yes     |
 | 129 | `call_peer_holds` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (resource) | `errno` | —              | no      |
 | 130 | `peer_watch`   | `u32 op`, `user_ptr` (instance), `len`  | `errno`       | —                       | no      |
+| 131 | `call_peer_node` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (node out), `len` | `u64` (bytes) | —            | no      |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -538,10 +539,17 @@ device issues the bus address the bridge translates back to the carved RAM.
 When the task's live space is dropped on exit (`LiveSpace::drop`) each carve
 it still holds is zeroed, unmapped, and **surrendered to its node's DMA
 quarantine** rather than freed, because the device may still be mastering it;
-see `dma_quiesced` below. It is gated on **`CAP_MEM_DMA`** and **audited** (a low-volume, security-relevant
-grant of hardware-reachable memory); the carve mechanism defaults to a
-fail-closed NULL producer (`NULL_DMA_ALLOC_FACILITY` → `NotImplemented`),
-so a kernel without the `kernel/mem` live producer denies rather than
+see `dma_quiesced` below. Each carve reserves room in that quarantine first, so
+the surrender never allocates. Only a driver loaded for a node may carve
+(`PermissionDenied` otherwise), and not once that node has left the hardware
+tree, by either kind of removal (`DeviceOffline`); a quarantine that cannot
+make room refuses the carve (`OutOfMemory`). A carve the grant's translating
+window cannot name is released before anything is written, and refused
+(`OutOfRange`). It is gated on **`CAP_MEM_DMA`** and **audited** (a low-volume, security-relevant
+grant of hardware-reachable memory); the carve mechanism and the quarantine
+default to fail-closed NULL producers (`NULL_DMA_ALLOC_FACILITY`,
+`NULL_DMA_QUARANTINE` → `NotImplemented`), so a kernel without the
+`kernel/mem` live producer or a direct physical map denies rather than
 carving (`AGENTS.md` §2.9). The first-party Rust wrapper is
 `tairix_rt::dma_alloc`.
 
@@ -559,15 +567,19 @@ snapshot so the released window leaves the copy path's view. Only `cpu_va` cross
 the buffer's extent is the allocator's authoritative per-task record, so a
 `cpu_va` that is not the base of a live carve in *this task's* DMA window
 fails closed (covering a stale, double, or cross-task free) without releasing
-anything (§5.4 — fail closed). Like `dma_alloc` it is gated on
+anything (§5.4 — fail closed). Past that check the buffer's record is gone, so
+its quarantine reservation is returned even if the release fails part-way; a
+block the allocator does not take back stays allocated. Like `dma_alloc` it is gated on
 **`CAP_MEM_DMA`** and audited, and the mechanism defaults to the fail-closed
 NULL producer (`NotImplemented`). The first-party Rust wrapper is
 `tairix_rt::dma_free`; the user-space driver host (`tairix_drvrt`) mints each
 carve's `DmaSlab` so its `Drop` issues `dma_free` automatically — a driver's
 per-request slabs reclaim themselves at scope end, never leaking. A driver
-frees a buffer only once its device can no longer reach it; a carve it never
-frees is quarantined when it exits, as below. `dma_free` is what keeps a
-*running* driver's footprint bounded.
+frees a buffer only once its device can no longer reach it: a device type
+resets its device when it is dropped, and a slab it cannot prove released is
+withheld (`DmaSlab::withhold`) and never freed, so it is quarantined when the
+driver exits, as below. `dma_free` is what keeps a *running* driver's footprint
+bounded.
 
 `dma_quiesced` (no. 126) releases a node's **DMA quarantine**
 (`kernel/core::dmaquarantine`, `plans/OPEN-DEFECTS.md` D167). A driver that
@@ -586,17 +598,25 @@ caller's own) and records `DMA_QUARANTINE_RELEASED` (4092, `cause=reset`).
 Generations, not the order of exit and respawn, make this safe: a dead
 driver's space may be dropped after its successor has already released, and a
 block surrendered that late is freed on arrival because its generation is
-already below the node's quiet bound. A **surprise** hot-removal
-(`hw_remove_node` without the orderly flag) retires the removed nodes at the
-admission high-water mark, so a vanished device's memory is freed and a
-reused node id never inherits the bound; an orderly removal leaves the
-quarantine to the next instance's reset. The caller is kernel-identified (its
-own loaded node and generation, never an argument), the syscall takes no
-arguments, is gated on **`CAP_MEM_DMA`**, and returns the bytes freed (`0`
-when nothing was held). A caller with no load record gets `NotFound`; with no
-quarantine wired (a kernel without a direct physical map) it gets
-`NotImplemented` and nothing is ever freed early. The first-party wrapper is
-`tairix_rt::dma_quiesced`; drivers reach it through
+already below the node's quiet bound. The kernel admits at most one driver per
+node whose threads may still run — a second load for a node whose driver still
+has a thread running is refused (`Busy`), and the node is freed once that
+driver's last thread is down, before its exit is recorded — so no earlier
+instance can still be programming the device the caller reset. A **surprise**
+hot-removal (`hw_remove_node` without the orderly flag) retires every removed
+node for good: everything held for it is freed now and on arrival. That is
+sound because a node id is never reissued within a boot, so no later device
+can be named by it. An **orderly** removal proves nothing about a device that
+may still run, so what its drivers left stays held until a reset by a driver
+of that node — in practice for the boot, since the driver store loads a driver
+only for a node the live tree still holds. Either way no carve is taken for a
+removed node again. The
+caller is kernel-identified (its own loaded node and generation, never an
+argument), the syscall takes no arguments, is gated on **`CAP_MEM_DMA`**, and
+returns the bytes freed (`0` when nothing was held). A caller with no load
+record gets `NotFound`; with no quarantine wired (a kernel without a direct
+physical map) it gets `NotImplemented` and nothing is ever freed early. The
+first-party wrapper is `tairix_rt::dma_quiesced`; drivers reach it through
 `DmaHost::device_quiesced`, which the user-space host forwards only for a
 DMA-capable driver.
 
@@ -669,11 +689,21 @@ authority; §2.9). The kernel also **owns the published node's identity**: it
 resolves the caller's *own* matched node (the kernel-side task→node record
 made when the driver was loaded) as the child's parent — a caller with no
 matched node may publish nothing and fails closed with `PermissionDenied` —
-and the store assigns the node a fresh id one past the largest live node id,
-so an emitter-chosen id can never collide with an existing node. This is
-load-bearing, not cosmetic: the driver-store load path resolves a matched node
-by its id, so a collision would mint the wrong driver's grants (`AGENTS.md`
-§4 / §5.4 — identity is kernel-provided, never caller-supplied). On success
+and the store assigns the node an id no node has held before in this boot
+(the store is seeded once with the boot discovery ids and issues every later
+id above all of them), so an emitter-chosen id can never collide with a node,
+and an id names one device for the whole boot. This is load-bearing, not
+cosmetic: the driver-store load path resolves a matched node by its id, so a
+collision would mint the wrong driver's grants, and the DMA quarantine's reset
+and removal proofs speak for the device an id named, so a reissued id would
+let one device's proof free another's memory (`AGENTS.md` §4 / §5.4 —
+identity is kernel-provided, never caller-supplied). Once every id has been
+issued a publish fails with `NoSpace` rather than reusing one. A caller whose
+own node has left the tree — a driver whose device was removed, running until
+the device manager unloads it — publishes nothing (`NotFound`): the store
+checks the parent atomically with the append, since a child under an absent
+node could never be removed and its driver would outlive its device's
+quarantine. On success
 the node is appended to the live tree under that parent, bumping the
 generation that wakes every parked `hw_tree_wait` caller (the reactive
 autoload above). It is gated on **`CAP_HW_EMIT`** — held only by an
@@ -695,7 +725,8 @@ manager unloads the driver bound to the vanished node. It is gated on the
 kernel bounds it exactly like publication (`AGENTS.md` §4 — no ambient
 authority): it resolves the caller's *own* matched node (the same kernel-side
 task→node record `hw_emit_node` uses) and removes the target **only** when
-its parent is that node — a child the caller itself published — together
+its parent is that node — a direct child of the caller's node, whether the
+caller published it or the boot seed placed it there — together
 with its whole subtree, so a driver can never retire a node it does not own
 and no stale descendant outlives its parent. An unknown id, or a node the
 caller does not own, fails closed (`NotFound` / `PermissionDenied`,
@@ -723,6 +754,42 @@ one acquisition of the same registry lock an attach registers under, so the
 decision is atomic. A refusal is audited alongside the removal itself, and a
 reserved flag bit fails closed (`OutOfRange`) before the caller's authority is
 even resolved.
+
+Either removal revokes the removed nodes' authority before it returns. Every
+device-resource grant records the node whose device it reaches: the resources
+a driver was admitted with for its node, a vector `msi_alloc` allocated for
+its device, and whatever was delegated from either (`shm_grant`,
+`shm_grant_peer` and `call_grant` pass on the origin of the grant that
+covers the delegation). All of them stop authorising at once, and then each
+holder's standing reach into the devices is torn down: its bindings of the
+nodes' lines are released, so a parked `irq_wait` returns `NotFound` and a wait
+set holding one fails `NotFound`; and its windows onto the nodes' registers are
+unmapped, so its next access faults. Every CPU stops translating an unmapped
+page before the removal returns.
+
+Shared RAM is not the device, so a region granted through a removed node stays
+mapped wherever it is mapped: no holder is killed, or handed fabricated
+contents in place of a reply that already landed, because a device went away.
+The region is **retired** instead: it takes no new `shm_map`, no `shm_grant` or
+`shm_grant_peer`, and `hw_emit_node` refuses (`PermissionDenied`) a child
+carrying it, so it can never carry another device's data. A server that
+publishes a transport on a new node therefore gives it a fresh region. The one
+region that outlives the removed session is one a node still in the tree also
+confers (a transport its parent republished on the removed child): a holder's
+mappings of it are withdrawn, shot down on every CPU before its frames can be
+freed, and the holder is killed, since its pointers into the region could
+otherwise alias whatever is mapped there next. A holder whose access cannot be
+torn down is killed too.
+
+A driver admitted while its node is being removed checks the tree after its
+grants are minted and is refused (`DeviceOffline`) if the node is gone;
+otherwise the removal, which revokes only after it removes, finds its grants.
+`msi_alloc` checks the same way around its mint. A holder that maps or binds as
+the revocation lands re-checks its grant afterwards and undoes what it made,
+and a port access runs under the grant it was checked against. Calls posted
+before the revocation stay queued for their server, which drains a transport
+before it publishes a new node on it. The revocation is audited
+(`HW_NODE_GRANTS_REVOKED`, 4093).
 
 `ipc_call` (no. 31), `call_create` (no. 32), `call_recv` (no. 33), and
 `call_reply` (no. 34) are the two halves of the **synchronous** request/reply
@@ -924,7 +991,11 @@ is resolved from the endpoint at grant time — never a caller-supplied
 (recyclable) PID — and the handle resolves only for the recipient task,
 so the number is useless to a bystander. Every mint is audited, exactly
 as `shm_create`. This is how the desktop session hands its composed frame
-buffer to the display service with zero frame bytes crossing the IPC.
+buffer to the display service with zero frame bytes crossing the IPC. The
+donor must be allowed to post to the endpoint (its send capabilities, and the
+per-endpoint grant a restricted one demands), so no bystander can grow the
+server's grant table; a donor that may not is refused (`PermissionDenied`),
+as is a region retired by a node's removal, here and at `shm_map`.
 `shm_map` (no. 41) itself takes the grant handle plus a `len_out` user
 pointer and, alongside the mapped base it returns, writes the region's
 byte length — the kernel's own record of the region, never the granting
@@ -945,8 +1016,9 @@ caller's own grant is checked **before** any endpoint state is read, so a
 grant the caller does not hold and an unknown recipient endpoint are the
 same `NotFound` with nothing minted, and the reply is no existence oracle.
 As with `shm_grant`, the recipient is resolved from the endpoint at grant
-time — never a caller-supplied (recyclable) PID — the handle resolves only
-for the recipient task, and every mint is audited. Wrapper
+time — never a caller-supplied (recyclable) PID — the donor must be allowed
+to post to it (`PermissionDenied` otherwise), the handle resolves only for
+the recipient task, and every mint is audited. Wrapper
 `tairix_rt::call_grant`; C stub `tairix_sys_call_grant`.
 
 A per-endpoint grant is authority over an endpoint **id**, and endpoint ids
@@ -979,8 +1051,9 @@ line the device never sees — and writes out the region id and the block's
 **device** address, translated through the grant's bus window. A block the
 window cannot name is released before anything is written. The dispatcher
 demands `CAP_MEM_DMA` and the handler `CAP_SHM`, and only a driver loaded for a
-hardware node may carve, because the region binds that node's DMA quarantine
-(D167). The creator's own unmap is its word that its device is done with the
+hardware node may carve, and not once that node's device is gone
+(`DeviceOffline`), because the region reserves room in that node's DMA
+quarantine (D167). The creator's own unmap is its word that its device is done with the
 region, as `dma_free` is for a carve. Should the creator end still mapping
 it — killed, faulted, exiting, or unloaded — the region is orphaned: when its
 last mapping goes its frames join the quarantine rather than the allocator,
@@ -1011,6 +1084,20 @@ register window it asks a channel to feed, so a client can aim a channel only
 at a FIFO it could map itself. Not audited: the decision it feeds is the
 server's to record. Wrapper `tairix_rt::call_peer_holds`; C stub
 `tairix_sys_call_peer_holds`.
+
+`call_peer_node(endpoint, ticket, node, node_cap)` (no. 131) is the node twin
+of `call_peer_origin`: it copies out the wire-encoded `HwNode` the served
+caller was admitted for, under the same gate, so a server can require that a
+request comes from the driver of a particular kind of device and names that
+device's own declared resources. The caller is resolved by its process
+instance, never its reusable pid, and the instance is read again once the node
+is known, so a poster that has exited — or left its pid to another driver —
+names nothing. A caller that is no driver loaded for a node, and a node that
+has left the tree, are both `NotFound`. The RAID composer admits a member offer
+only from the driver of a `tairix,raid-member` or `tairix,raid-candidate` node
+naming that node's endpoint and window (`docs/src/lib/raid.md`). Not audited:
+the decision it feeds is the server's to record. Wrapper
+`tairix_rt::call_peer_node`; C stub `tairix_sys_call_peer_node`.
 
 `fd_grant` (no. 90) and `fd_redeem` (no. 91) are the one-shot,
 user-mediated **file** delegation (`plans/CAPABILITY_USE.md` CU6,
@@ -2040,7 +2127,7 @@ re-validates arguments — the dispatcher does that first.
 | `cap_delegate`  | `CapabilitySet` copied in through `copy_from_user`, then `CapTable::narrow(caller, target, set, audit)`: the caller itself or a live child of it, any other process only with `CAP_USER_ADMIN` | Faulting `set_ptr` / no registered address space → `BadAddress`. A target the caller has no authority over, known or not → `PermissionDenied`. Unknown `target` named by an administrator → `NotFound`. A widening request → `DelegationWiden`. |
 | `cap_revoke`    | `CapTable::caps_for_mut(target).revoke(cap, audit)`                                                           | Unknown `target` → `NotFound`.                                            |
 | `clock_get`     | `KernelArch::monotonic_ns(arch.current_cpu())`, coarsened unless the caller holds `CAP_TIME_HIRES`            | —                                                                         |
-| `irq_bind`      | `IrqTable::bind(line, caller.task_id)`                                                                        | `LineOutOfRange` / `LineAlreadyBound` → `OutOfRange`; `ArchUnsupported` → `NotImplemented`. |
+| `irq_bind`      | `IrqTable::bind(line, caller.task_id)`, once a live `Irq` grant of the caller names `line`                    | No grant naming `line` → `PermissionDenied`; `LineOutOfRange` / `LineAlreadyBound` → `OutOfRange`; `ArchUnsupported` → `NotImplemented`. |
 | `irq_wait`      | `IrqTable::try_wait_step` polled against `KernelArch::monotonic_ns`, **parking** the caller off the run queue between iterations (`reschedule_current`, never a yield that leaves it runnable) | `Ready` → `Ok(0)`; `TimedOut` → `TimedOut`; `NotFound` → `NotFound`; a caller that cannot be parked → `NotImplemented`. |
 | `random_get`    | draws CSPRNG output from `KernelState.rng` (the `tairix_rng::OutputReserve`, see [the RNG page](../lib/rng.md)) into a fixed kernel staging buffer, each chunk copied out through `copy_to_user` | `len > RANDOM_REQUEST_MAX_BYTES` → `LengthOutOfRange`. `len == 0` → `Ok(0)`. Unseeded reserve / entropy shortage → `EntropyNotReady`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(len)`. |
 | `stream_write` | routes **any** descriptor the caller holds — a file, resource, pipe end, or pty end, at a standard number (a spawn attach block wired it, `plans/SPAWN.md` SP10) or an ordinary one an open/create call minted — to its open entry first, through the *same* `descriptor_write` path `fs_write` uses (the two traps differ only in `StreamPos`: an explicit offset vs the shared cursor), so their direction gate, capability checks, and copy boundary cannot drift. The entry's own `OpenFlags` gate the direction, a path-backed stream writes at the shared open-file-description cursor (honouring `APPEND`), a pipe end parks while full with a live reader and fails closed with `BrokenPipe` once none remains, and **no console capability applies**. Otherwise — only a standard number with no open entry can reach here — it resolves `fd` against the caller's per-process descriptor table (`AddressSpaceRegistry::streams`, established at spawn, `AGENTS.md` §20) — direction first, then the in-handler `CAP_CONSOLE_WRITE` check, then the descriptor's console index against the installed console list (`with_consoles`) — then copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to that console's output line discipline (`ConsoleDevice::write_output`), which cooks a bare line feed to CR-LF (the ONLCR output translation, the counterpart to the input echo half) so a program that writes `\n` has the cursor return to column zero as it drops a line, then writes to the `ConsoleWrite` device | An **unattached** `stdinfo` (fd 3 `Closed`) → `Ok(len)` with the bytes discarded (advisory best-effort, `AGENTS.md` §20.1 — never a device fallback). Any other `fd` not a writable inherited stream → `NotFound`. Console-backed without `CAP_CONSOLE_WRITE` → `PermissionDenied`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(input_bytes_consumed)` — the input count, not the larger device count a cooked newline expands to. |
@@ -2063,8 +2150,9 @@ re-validates arguments — the dispatcher does that first.
 | `dma_free`      | the symmetric free for `dma_alloc`: resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), then releases the buffer based at `cpu_va` from the caller's own address space through the same `DmaAllocFacility` (`free`), zeroing every backing byte (zero-on-free, `AGENTS.md` §4) before its frames return to the allocator, and drops the buffer's own pages from the caller's address-space snapshot (the allocator reports the extent it released, so the drop costs the buffer, not the whole space). Only `cpu_va` is taken from the caller; the buffer's extent is the allocator's authoritative record. A long-running driver reclaims each transfer's bounce buffers through this rather than leaking DMA frames until it exits (`plans/PI.md` P10) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `cpu_va` not the base of a live carve in the caller's DMA window (covers a stale, double, or cross-task free) → `OutOfRange`. No DMA facility wired → `NotImplemented`. Otherwise `Ok(0)`. |
 | `dma_quiesced`  | reads the caller's own load record (hardware-tree node and admission generation, kernel-attested; no argument crosses the trap) and has the installed `DmaQuarantineFacility` (`with_dma_quarantine`; default `NULL_DMA_QUARANTINE`) free, scrubbed, every block the node's quarantine holds from an earlier generation, auditing `DMA_QUARANTINE_RELEASED` with `cause=reset` (D167) | No load record → `NotFound`. No quarantine wired → `NotImplemented`. Otherwise `Ok(bytes freed)`. |
 | `shm_create_dma` | demands `CAP_SHM` in the handler, resolves `handle` against the caller (owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`) and `len` against it, requires the caller's load record, then has `sharedreg::create_dma` bind the node's quarantine and the installed `SharedMemFacility` carve one block below the grant's `addr_limit` (`alloc_dma_region`, `FrameAllocator::alloc_order_under`) and map it `DmaCoherent`; translates the block through `devres::translate_device_addr`, publishes the mapping, copies the id and device address out, and mints the caller the region's `Shared` grant | No `CAP_SHM`, or no load record → `PermissionDenied`. Unknown / non-owned handle → `NotFound`. Non-DMA grant, over-the-grant-maximum `len`, a limit no RAM lies below, or a block the window cannot name → `OutOfRange`. `len == 0`, or past the largest contiguous block → `LengthOutOfRange`. No quarantine or no DMA-capable facility wired → `NotImplemented`. No free block below the limit → `OutOfMemory`. Faulting out pointer → `BadAddress` (the region released). Otherwise `Ok(base)`. |
-| `shm_grant_peer` | checks the caller's own `Shared` grant for the region, resolves the endpoint and gates the caller against its `recv_caps` and owner, resolves the ticket to the kernel-recorded poster (`CallEndpoint::peer_origin`), and mints the poster the region grant only while it lives (`AddressSpaceRegistry::mint_grant_live`) | Unheld region, unknown endpoint or ticket, or an ended recipient → `NotFound`. Not the endpoint's server → `PermissionDenied`. Otherwise `Ok(handle)`. |
+| `shm_grant_peer` | checks the caller's own `Shared` grant for the region, resolves the endpoint and gates the caller against its `recv_caps` and owner, resolves the ticket to the kernel-recorded poster (`CallEndpoint::peer_origin`), and mints the poster the region grant only while it lives (`AddressSpaceRegistry::delegate_grant`, which carries the covering grant's origin) | Unheld region, unknown endpoint or ticket, or an ended recipient → `NotFound`. Not the endpoint's server, or a retired region → `PermissionDenied`. Otherwise `Ok(handle)`. |
 | `call_peer_holds` | resolves the endpoint and gates the caller against its `recv_caps` and owner, resolves the ticket to the kernel-recorded poster, copies the `HwResource` record in and decodes it canonically, then tests the poster's grants (`AddressSpaceRegistry::grant_covers`) | Unknown endpoint or ticket → `NotFound`. Not the endpoint's server, or no covering grant → `PermissionDenied`. Faulting pointer → `BadAddress`. Undecodable record → its decode error. Otherwise `Ok(0)`. |
+| `call_peer_node` | resolves the endpoint and gates the caller against its `recv_caps` and owner, checks the buffer holds a whole node, resolves the ticket to the kernel-recorded poster, then the poster's instance to its live process (`CapTable::process_of_instance`), that process's loaded node (`AddressSpaceRegistry::loaded_node`), and the instance again, and finds the node in the live tree | Not the endpoint's server → `PermissionDenied`. Buffer short of one record → `BufferTooSmall`. Unknown endpoint or ticket, a poster no longer live or loaded for no node, or a node gone from the tree → `NotFound`. Faulting pointer → `BadAddress`. Otherwise the record's length. |
 
 `spawn` also carries the **parser-sandbox mode**
 (`docs/src/security/sandbox.md`): an attach block whose `flags` word

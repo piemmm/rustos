@@ -81,14 +81,14 @@ pub trait DmaHost {
 ///
 /// The driver code is opaque to pool internals; the identifier
 /// exists so a [`DmaSlab`] can be tied to the pool that minted it.
-/// [`PoolId::MOCK`] is reserved for the in-process mock host shipped
-/// by the virtio bus crate's test harness.
+/// [`PoolId::MOCK`] is reserved for the in-process test host `lib/virtio`
+/// ships behind its `mock` feature.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
 pub struct PoolId(u64);
 
 impl PoolId {
-    /// Reserved identifier for the in-process mock host shipped by
-    /// `drivers/bus/virtio::MockHost`.
+    /// Reserved identifier for the in-process test host, `lib/virtio`'s
+    /// `MockHost`.
     pub const MOCK: Self = Self(0);
 
     /// Construct an identifier from its raw `u64`.
@@ -161,8 +161,10 @@ pub type SlabFreeFn = unsafe fn(pool: *const (), cpu: NonNull<u8>, slot: usize, 
 ///   one slab).
 /// * If `free_fn` is `Some`, dropping the slab calls
 ///   `free_fn(pool_ptr, slot, len)` exactly once; the pool reclaims
-///   the slot. If `free_fn` is `None` (the mock-host case), drop is
-///   a no-op and the bytes leak (the leak contract).
+///   the slot. If `free_fn` is `None` (a leaked or [withheld] slab), drop
+///   is a no-op and the bytes leak (the leak contract).
+///
+/// [withheld]: Self::withhold
 #[derive(Debug)]
 pub struct DmaSlab {
     phys: u64,
@@ -302,6 +304,13 @@ impl DmaSlab {
         maintain(base, len);
     }
 
+    /// Whether the device does not snoop the CPU caches for this region, so
+    /// every publish and consume must be bracketed by [`Self::sync_range`].
+    #[must_use]
+    pub fn needs_cache_maintenance(&self) -> bool {
+        self.coherency.is_some()
+    }
+
     /// Device-visible base address of this region.
     #[must_use]
     pub fn phys(&self) -> u64 {
@@ -324,6 +333,16 @@ impl DmaSlab {
     #[must_use]
     pub fn pool_id(&self) -> PoolId {
         self.pool_id
+    }
+
+    /// Never return this region to its pool: the device it was handed to may
+    /// still master it, and nothing has proven otherwise.
+    ///
+    /// Dropping the slab afterwards frees nothing. In a user-space driver the
+    /// region stays mapped until the process ends, when the kernel takes it
+    /// into the DMA quarantine that frees it once the device is proven quiet.
+    pub fn withhold(&mut self) {
+        self.free_fn = None;
     }
 
     /// Slot index within the originating pool.

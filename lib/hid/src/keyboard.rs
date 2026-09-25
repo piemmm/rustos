@@ -108,7 +108,8 @@ impl ReportDecode<MAX_EVENTS> for KeyboardState {
     /// rollover or POST failure), the array is unknown for this report:
     /// the modifier bitmap (still valid per §B.1) is diffed, the held
     /// key set is left untouched, and no key edges are fabricated
-    /// (never guess).
+    /// (never guess). A modifier usage in the array is the bitmap's to
+    /// report, and is not a key.
     fn decode(
         &mut self,
         report: &[u8],
@@ -121,14 +122,23 @@ impl ReportDecode<MAX_EVENTS> for KeyboardState {
         let present = (report.len() - BOOT_KEYBOARD_REPORT_MIN).min(KEY_SLOTS);
         let mut keys = [USAGE_NONE; KEY_SLOTS];
         keys[..present].copy_from_slice(&report[2..2 + present]);
+        // The bitmap alone says which modifiers are held: a modifier usage
+        // in the array would press a key the bitmap reports too.
+        for key in &mut keys {
+            if (MODIFIER_USAGE_BASE..MODIFIER_USAGE_BASE + 8).contains(&u16::from(*key)) {
+                *key = USAGE_NONE;
+            }
+        }
         let array_valid = !keys
             .iter()
             .any(|&k| k != USAGE_NONE && k <= ERROR_USAGE_MAX);
 
         if array_valid {
-            // Releases first: keys held before but absent now.
-            for &old in &self.keys {
-                if old != USAGE_NONE && !keys.contains(&old) {
+            // Releases first: keys held before but absent now. The held
+            // array keeps a hostile report's repeats, so a usage is released
+            // once however many slots it filled.
+            for (slot, &old) in self.keys.iter().enumerate() {
+                if old != USAGE_NONE && !keys.contains(&old) && !self.keys[..slot].contains(&old) {
                     Self::push_key(pending, u16::from(old), false)?;
                 }
             }

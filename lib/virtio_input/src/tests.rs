@@ -8,7 +8,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use core::cell::RefCell;
-use tairix_virtio::{ChainView, CompletionSignal, DmaHost, DmaSlab, MockHost, MockTransport};
+use tairix_virtio::{ChainView, MockHost, MockTransport, MockWait};
 
 /// A queued raw `virtio_input_event` the mock device will deliver:
 /// `(type, code, value)`.
@@ -20,9 +20,14 @@ type EventQueue = Rc<RefCell<VecDeque<RawEvent>>>;
 /// events the device will deliver when the driver posts a device-write
 /// buffer on the eventq.
 fn build_device() -> (MockTransport, EventQueue) {
-    // Two queues (eventq = 0, statusq = 1), eight descriptors each, no
-    // feature bits, no device-config window.
-    let mut t = MockTransport::new(2, 8, 0, 0);
+    build_device_with_queue_max(8)
+}
+
+/// [`build_device`] whose queues hold at most `queue_max` descriptors.
+fn build_device_with_queue_max(queue_max: u16) -> (MockTransport, EventQueue) {
+    // Two queues (eventq = 0, statusq = 1), no feature bits, no device-config
+    // window.
+    let mut t = MockTransport::new(2, queue_max, 0, 0);
     let events: EventQueue = Rc::new(RefCell::new(VecDeque::new()));
     // Eventq shim (queue 0): on each posted device-write buffer, pop one
     // queued event and write its 8 little-endian bytes into the buffer.
@@ -51,63 +56,20 @@ fn build_device() -> (MockTransport, EventQueue) {
     (t, events)
 }
 
-/// `VirtioHost` that drains the eventq through its shim when the driver
-/// waits, mirroring the IRQ-driven completion of a real device.
-struct AutoDrainHost {
-    inner: MockHost,
-    transport: core::cell::UnsafeCell<*mut MockTransport>,
+/// The mock device, shared by the driver under test and the host playing it.
+type Device = Rc<RefCell<MockTransport>>;
+
+fn auto_host() -> &'static MockHost {
+    Box::leak(Box::new(MockHost::new()))
 }
 
-impl AutoDrainHost {
-    fn new() -> Self {
-        Self {
-            inner: MockHost::new(),
-            transport: core::cell::UnsafeCell::new(core::ptr::null_mut()),
-        }
-    }
-    fn install_transport(&self, t: *mut MockTransport) {
-        // SAFETY: `auto_host()` leaks a fresh instance per call, so no
-        // aliasing borrow of `self.transport` exists when this write runs.
-        unsafe {
-            *self.transport.get() = t;
-        }
-    }
-}
-
-impl DmaHost for AutoDrainHost {
-    fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
-        self.inner.alloc_dma_zeroed(size)
-    }
-
-    fn device_quiesced(&self) {
-        self.inner.device_quiesced();
-    }
-}
-
-impl VirtioHost for AutoDrainHost {
-    fn notify_wait(&self, queue_index: u16, timeout_ns: u64) -> CompletionSignal {
-        // SAFETY: the driver releases its `&mut self.transport` borrow
-        // between `kick` and `notify_wait`; the pointer was installed
-        // while no live borrow existed and is unique here for the
-        // duration of `drain_queue`.
-        let t_ptr = unsafe { *self.transport.get() };
-        if !t_ptr.is_null() {
-            let t = unsafe { &mut *t_ptr };
-            let _ = t.drain_queue(queue_index);
-        }
-        self.inner.notify_wait(queue_index, timeout_ns)
-    }
-}
-
-fn auto_host() -> &'static AutoDrainHost {
-    Box::leak(Box::new(AutoDrainHost::new()))
-}
-
-fn open_input(t: MockTransport) -> Box<VirtioInput<'static, MockTransport>> {
+/// Open a driver on `t`, whose waits a host answers by playing the device.
+fn open_input(t: MockTransport) -> (Box<VirtioInput<'static, Device>>, Device) {
     let host = auto_host();
-    let mut dev = Box::new(VirtioInput::open(t, host).expect("open"));
-    host.install_transport(core::ptr::from_mut::<MockTransport>(dev.transport_mut()));
-    dev
+    let device = t.into_shared();
+    host.attach(&device);
+    let dev = Box::new(VirtioInput::open(Rc::clone(&device), host).expect("open"));
+    (dev, device)
 }
 
 /// Scancode-neutral keycode for the `A` key (Linux `KEY_A`).
@@ -152,7 +114,7 @@ fn decode_discards_frame_markers_and_unmodelled_events() {
 #[test]
 fn poll_returns_queued_key_press() {
     let (t, events) = build_device();
-    let mut dev = open_input(t);
+    let (mut dev, _device) = open_input(t);
     events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 1));
     let mut buf = [InputEvent {
         kind: InputEventKind::Key,
@@ -169,7 +131,7 @@ fn poll_returns_queued_key_press() {
 #[test]
 fn poll_drains_press_then_release_in_order() {
     let (t, events) = build_device();
-    let mut dev = open_input(t);
+    let (mut dev, _device) = open_input(t);
     events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 1));
     events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 0));
     let mut buf = [InputEvent {
@@ -187,7 +149,7 @@ fn poll_drains_press_then_release_in_order() {
 #[test]
 fn poll_skips_frame_marker_as_no_event() {
     let (t, events) = build_device();
-    let mut dev = open_input(t);
+    let (mut dev, _device) = open_input(t);
     // An EV_SYN completion is consumed but surfaces no event.
     events.borrow_mut().push_back((wire::EV_SYN, 0, 0));
     let mut buf = [InputEvent {
@@ -202,7 +164,7 @@ fn poll_skips_frame_marker_as_no_event() {
 #[test]
 fn poll_with_no_pending_event_returns_zero() {
     let (t, _events) = build_device();
-    let mut dev = open_input(t);
+    let (mut dev, _device) = open_input(t);
     let mut buf = [InputEvent {
         kind: InputEventKind::Key,
         reserved0: 0,
@@ -219,7 +181,7 @@ fn poll_acknowledges_the_device_interrupt_each_cycle() {
     // asserted and every subsequent wait wakes immediately — the busy loop
     // that pegged a core under the curses login screen.
     let (t, events) = build_device();
-    let mut dev = open_input(t);
+    let (mut dev, device) = open_input(t);
     let mut buf = [InputEvent {
         kind: InputEventKind::Key,
         reserved0: 0,
@@ -229,17 +191,101 @@ fn poll_acknowledges_the_device_interrupt_each_cycle() {
     // Delivered-event path: one poll, one acknowledge.
     events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 1));
     assert_eq!(dev.poll(&mut buf), Ok(1));
-    assert_eq!(dev.transport_mut().ack_interrupts, 1);
+    assert_eq!(device.borrow_mut().ack_interrupts, 1);
     // Empty wait path (a spurious wake): still exactly one acknowledge,
     // so a faulted or empty drain never leaves the line asserted.
     assert_eq!(dev.poll(&mut buf), Ok(0));
-    assert_eq!(dev.transport_mut().ack_interrupts, 2);
+    assert_eq!(device.borrow_mut().ack_interrupts, 2);
+}
+
+#[test]
+fn a_device_capping_its_queue_below_a_power_of_two_comes_up_on_the_next_one_down() {
+    // Pre-clamped to the device's 12, the request was no ring size at all.
+    let (t, events) = build_device_with_queue_max(12);
+    let (mut dev, device) = open_input(t);
+    assert_eq!(
+        device
+            .borrow_mut()
+            .drain_queue(wire::EVENT_QUEUE)
+            .expect("posted buffers"),
+        8
+    );
+    events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 1));
+    let mut buf = [InputEvent {
+        kind: InputEventKind::Key,
+        reserved0: 0,
+        code: 0,
+        value: 0,
+    }; 4];
+    assert!(dev.poll(&mut buf).is_ok());
+}
+
+/// An empty poll batch of `N` events.
+fn batch<const N: usize>() -> [InputEvent; N] {
+    [InputEvent {
+        kind: InputEventKind::Key,
+        reserved0: 0,
+        code: 0,
+        value: 0,
+    }; N]
+}
+
+#[test]
+fn one_drain_takes_no_more_than_a_ring_of_completions() {
+    // Frame separators decode to nothing, and each buffer goes straight back,
+    // so a device completing them as fast as they are reposted would hold
+    // the drain for ever.
+    let (t, _events) = build_device();
+    let (mut dev, device) = open_input(t);
+    let ring = dev.eventq.size();
+    // Head 0 is reposted under head 0 each time it comes back.
+    for _ in 0..2 * ring {
+        device
+            .borrow_mut()
+            .publish_raw_used(wire::EVENT_QUEUE, 0, wire::EVENT_LEN)
+            .expect("in the ring");
+    }
+    assert_eq!(dev.drain_ready(&mut batch::<4>()), Ok(0));
+    assert!(
+        dev.eventq.poll_used().is_ok(),
+        "a ring's worth is still waiting"
+    );
+}
+
+#[test]
+fn an_event_slot_completed_without_a_write_is_not_decoded_again() {
+    // Decoded again, a stale key press is a keystroke nobody typed.
+    let (t, events) = build_device();
+    let (mut dev, device) = open_input(t);
+    events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 1));
+    let mut buf = batch::<4>();
+    assert_eq!(dev.poll(&mut buf), Ok(1));
+    // The press landed in head 0's slot, reposted under head 0.
+    device
+        .borrow_mut()
+        .publish_raw_used(wire::EVENT_QUEUE, 0, wire::EVENT_LEN)
+        .expect("in the ring");
+    assert_eq!(dev.drain_ready(&mut buf), Ok(0));
+}
+
+#[test]
+fn a_wait_that_cannot_be_made_fails_the_poll_rather_than_spinning() {
+    // A revoked binding times every wait out at once: returning no events
+    // would have the caller poll again at once, for ever.
+    let (t, _events) = build_device();
+    let host = auto_host();
+    host.script_waits([MockWait::Refused]);
+    let device = t.into_shared();
+    host.attach(&device);
+    let mut dev = VirtioInput::open(Rc::clone(&device), host).expect("open");
+    assert_eq!(dev.poll(&mut batch::<4>()), Err(DriverError::DeviceOffline));
+    assert_eq!(host.notify_log().len(), 1);
 }
 
 #[test]
 fn poll_rejects_empty_buffer() {
     let (t, _events) = build_device();
-    let mut dev = open_input(t);
+    let (mut dev, _device) = open_input(t);
     let mut empty: [InputEvent; 0] = [];
     assert_eq!(dev.poll(&mut empty), Err(DriverError::BufferTooSmall));
 }
@@ -266,22 +312,25 @@ fn a_device_whose_reset_never_confirms_is_refused_before_it_is_given_memory() {
 }
 
 #[test]
-fn a_confirmed_close_releases_every_region() {
+fn a_dropped_device_that_confirms_its_reset_releases_every_region() {
     let (t, _events) = build_device();
     let host = MockHost::new();
-    VirtioInput::open(t, &host).expect("open").close();
+    drop(VirtioInput::open(t, &host).expect("open"));
     assert_eq!(host.slabs_outstanding(), 0);
 }
 
 #[test]
-fn a_close_whose_reset_never_confirms_releases_nothing() {
+fn a_dropped_device_whose_reset_never_confirms_releases_nothing() {
+    // The keyboard driver's event loop returns on a device fault with the
+    // event pool still posted.
     let (t, _events) = build_device();
     let host = MockHost::new();
-    let mut dev = VirtioInput::open(t, &host).expect("open");
+    let device = t.into_shared();
+    let dev = VirtioInput::open(Rc::clone(&device), &host).expect("open");
     let held = host.slabs_outstanding();
     assert!(held > 0);
-    dev.transport_mut().refuse_resets_after(0);
-    dev.close();
+    device.borrow_mut().refuse_resets_after(0);
+    drop(dev);
     assert_eq!(host.slabs_outstanding(), held);
 }
 
@@ -295,12 +344,13 @@ fn open_armed_arms_only_after_the_event_queue_is_live() {
     // vertical's lost keypress.
     let (t, events) = build_device();
     let host = auto_host();
+    let device = t.into_shared();
     // A keystroke is already pending at the device when the arm step runs.
     events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 1));
     let armed = core::cell::Cell::new(0u32);
-    let mut dev = VirtioInput::open_armed(t, host, |dev| {
+    let mut dev = VirtioInput::open_armed(Rc::clone(&device), host, |_| {
         armed.set(armed.get() + 1);
-        let t = dev.transport_mut();
+        let mut t = device.borrow_mut();
         // The device is live before the arm step runs...
         assert!(t.status().contains(Status::DRIVER_OK));
         // ...with every event buffer already posted and device-visible:

@@ -79,7 +79,10 @@ impl HostError {
             | Self::KernelKindForbidden
             | Self::LoadCapabilityMissing => Errno::PermissionDenied,
             Self::UnknownDriver | Self::HandleNotFound => Errno::NotFound,
-            Self::DriverRegisterFailed(_) => Errno::NotImplemented,
+            // At the load gate a busy node is one another live driver holds,
+            // which no retry clears while that driver runs.
+            Self::DriverRegisterFailed(DriverError::Busy) => Errno::Busy,
+            Self::DriverRegisterFailed(cause) => cause.as_errno(),
             Self::SourceFailed(e) => e,
         }
     }
@@ -154,11 +157,33 @@ mod tests {
         assert_eq!(HostError::HandleNotFound.as_errno(), Errno::NotFound);
         assert_eq!(
             HostError::DriverRegisterFailed(DriverError::DeviceFault).as_errno(),
-            Errno::NotImplemented
+            Errno::DeviceFault
         );
         assert_eq!(
             HostError::SourceFailed(Errno::NotFound).as_errno(),
             Errno::NotFound
+        );
+    }
+
+    #[test]
+    fn a_register_failure_keeps_its_cause() {
+        // A spawn that lost its node to a removal, or found it held by a live
+        // driver, must not read as an unimplemented driver.
+        assert_eq!(
+            HostError::DriverRegisterFailed(DriverError::DeviceOffline).as_errno(),
+            Errno::DeviceOffline
+        );
+        assert_eq!(
+            HostError::DriverRegisterFailed(DriverError::Busy).as_errno(),
+            Errno::Busy
+        );
+        assert_eq!(
+            HostError::DriverRegisterFailed(DriverError::PermissionDenied).as_errno(),
+            Errno::PermissionDenied
+        );
+        assert_eq!(
+            HostError::DriverRegisterFailed(DriverError::Unsupported).as_errno(),
+            Errno::NotImplemented
         );
     }
 

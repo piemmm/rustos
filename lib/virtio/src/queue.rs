@@ -7,19 +7,19 @@
 //! [`SplitQueue::kick`] to notify the device, and
 //! [`SplitQueue::poll_used`] to drain a completion.
 //!
-//! Packed queues (virtio 1.1 §2.7) are intentionally absent; see the
-//! crate root for the deferral note.
+//! The packed layout (virtio 1.1 §2.7) is its sibling, [`crate::PackedQueue`].
 
 use crate::dma::DmaSlab;
 use crate::host::VirtioHost;
 use crate::transport::{Direction, Transport, VirtioError};
+use alloc::vec::Vec;
 use core::mem::size_of;
 use tairix_abi::DriverError;
 use tairix_dma_barrier::{dma_rmb, dma_wmb};
 
 /// Wire layout of a virtio split-queue descriptor (virtio 1.1 §2.6.5).
 #[repr(C, align(16))]
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug)]
 pub(crate) struct Descriptor {
     pub addr: u64,
     pub len: u32,
@@ -64,17 +64,31 @@ pub struct ChainSegment {
 ///
 /// The descriptor table, avail ring, and used ring each live in
 /// host-allocated [`DmaSlab`]s carried inside this struct.
+///
+/// The free list and every chain's links live in driver memory; the
+/// device-visible table is written from them and never read back, so a device
+/// that writes over it cannot corrupt the free list, and a completion is
+/// accepted only for a chain actually with the device. Descriptors are
+/// reissued oldest-returned first, so a completion the device repeats for a
+/// chain it already returned names free descriptors for as long as possible,
+/// and is refused.
 pub struct SplitQueue {
     queue_index: u16,
     queue_size: u16,
     desc: DmaSlab,
     avail: DmaSlab,
     used: DmaSlab,
-    /// Index of the first free descriptor in the free-list. Each
-    /// free entry's `next` field points to the following free one;
-    /// the tail's `next` field is `queue_size` (an out-of-range
-    /// sentinel).
+    /// Each descriptor's successor: on the free list while it is free, in its
+    /// chain while it is with the device. The free list's tail links to
+    /// `queue_size`, an out-of-range sentinel.
+    links: Vec<u16>,
+    /// The length of the chain each descriptor heads while that chain is with
+    /// the device, and 0 for every other descriptor.
+    in_flight: Vec<u16>,
+    /// Index of the first free descriptor.
     free_head: u16,
+    /// Index of the last free descriptor, where returned chains join.
+    free_tail: u16,
     /// Number of free descriptors.
     free_count: u16,
     /// Last used-ring `idx` we observed.
@@ -91,6 +105,37 @@ const USED_TAIL_BYTES: usize = 2; // avail_event
 /// Avail-ring flag asking the device not to raise a used-ring interrupt
 /// (virtio 1.3 §2.7.7). Advisory: the device may interrupt regardless.
 const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
+
+/// Select `queue_index` and settle how many descriptors it is programmed
+/// with: `requested`, capped at the device's maximum.
+///
+/// A queue that could not hold `needed` descriptors at once is refused here,
+/// before anything is allocated or handed to the device: a request that did
+/// not fit would otherwise fail only once the driver had begun it.
+pub(crate) fn negotiate_size<T: Transport>(
+    transport: &mut T,
+    queue_index: u16,
+    requested: u16,
+    needed: u16,
+) -> Result<u16, VirtioError> {
+    transport.queue_select(queue_index)?;
+    // A request that is not a power of two is the caller's bug, and virtio
+    // admits no such queue.
+    if !requested.is_power_of_two() {
+        return Err(VirtioError::QueueSizeTooLarge);
+    }
+    // The device's maximum is its claim, and a non-conformant device may
+    // advertise one that is not a power of two: where it binds, take the
+    // largest conformant size below it. A maximum of zero is no queue.
+    let Some(top_bit) = requested.min(transport.queue_max_size()).checked_ilog2() else {
+        return Err(VirtioError::QueueSizeTooLarge);
+    };
+    let size = 1 << top_bit;
+    if size < needed {
+        return Err(VirtioError::QueueTooShallow);
+    }
+    Ok(size)
+}
 
 impl SplitQueue {
     /// Required descriptor-table byte size for `queue_size`.
@@ -112,38 +157,23 @@ impl SplitQueue {
     /// Bring `queue_index` online: allocate the rings via `host`,
     /// program `transport`, and initialise the free-descriptor pool.
     ///
+    /// The queue is `requested_size` descriptors deep, or as deep as the
+    /// device allows below that, but never shallower than `needed`: the most
+    /// descriptors the driver keeps on it at once.
+    ///
     /// # Errors
     ///
-    /// Propagates allocation and transport errors.
+    /// [`VirtioError::QueueTooShallow`] for a device that cannot hold
+    /// `needed` descriptors, refused before it is given any ring; otherwise
+    /// the allocation and transport errors.
     pub fn new<T: Transport>(
         transport: &mut T,
         host: &dyn VirtioHost,
         queue_index: u16,
         requested_size: u16,
+        needed: u16,
     ) -> Result<Self, VirtioError> {
-        transport.queue_select(queue_index)?;
-        let max = transport.queue_max_size();
-        if max == 0 {
-            return Err(VirtioError::QueueSizeTooLarge);
-        }
-        // A request that is not a power of two is the caller's bug, and
-        // virtio §2.6 admits no such queue: refuse it.
-        if requested_size == 0 || !requested_size.is_power_of_two() {
-            return Err(VirtioError::QueueSizeTooLarge);
-        }
-        // The device's own maximum, however, is its claim, and a
-        // non-conformant device may advertise one that is not a power of
-        // two. Where that cap binds, take the largest conformant size at or
-        // below it rather than refusing to bring the queue up at all.
-        let size = core::cmp::min(requested_size, max);
-        let size = if size.is_power_of_two() {
-            size
-        } else {
-            1 << (u16::BITS - 1 - size.leading_zeros())
-        };
-        if size == 0 {
-            return Err(VirtioError::QueueSizeTooLarge);
-        }
+        let size = negotiate_size(transport, queue_index, requested_size, needed)?;
         let desc = host
             .alloc_dma_zeroed(Self::desc_table_size(size))
             .map_err(|_| VirtioError::DeviceFault)?;
@@ -153,6 +183,8 @@ impl SplitQueue {
         let used = host
             .alloc_dma_zeroed(Self::used_ring_size(size))
             .map_err(|_| VirtioError::DeviceFault)?;
+        let links = zeroed_table(size)?;
+        let in_flight = zeroed_table(size)?;
         transport.queue_set(size, desc.phys(), avail.phys(), used.phys())?;
         let mut q = Self {
             queue_index,
@@ -160,7 +192,10 @@ impl SplitQueue {
             desc,
             avail,
             used,
+            links,
+            in_flight,
             free_head: 0,
+            free_tail: 0,
             free_count: size,
             last_used_idx: 0,
             next_avail_idx: 0,
@@ -187,23 +222,19 @@ impl SplitQueue {
 
     fn init_free_list(&mut self) {
         for i in 0..self.queue_size {
-            let next = if i + 1 == self.queue_size {
-                self.queue_size
-            } else {
-                i + 1
-            };
-            self.write_desc(
-                i,
-                Descriptor {
-                    addr: 0,
-                    len: 0,
-                    flags: 0,
-                    next,
-                },
-            );
+            self.links[usize::from(i)] = i + 1;
         }
         self.free_head = 0;
+        self.free_tail = self.queue_size - 1;
         self.free_count = self.queue_size;
+    }
+
+    /// Never return the rings to their pool: the device may still be reading
+    /// or writing them, and nothing has proven otherwise.
+    pub fn withhold(&mut self) {
+        self.desc.withhold();
+        self.avail.withhold();
+        self.used.withhold();
     }
 
     fn write_desc(&mut self, idx: u16, d: Descriptor) {
@@ -213,33 +244,6 @@ impl SplitQueue {
         bytes[offset + 8..offset + 12].copy_from_slice(&d.len.to_le_bytes());
         bytes[offset + 12..offset + 14].copy_from_slice(&d.flags.to_le_bytes());
         bytes[offset + 14..offset + 16].copy_from_slice(&d.next.to_le_bytes());
-    }
-
-    fn read_desc(&self, idx: u16) -> Descriptor {
-        let offset = (idx as usize) * size_of::<Descriptor>();
-        let bytes = self.desc.as_bytes();
-        let addr = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap_or_default());
-        let len = u32::from_le_bytes(
-            bytes[offset + 8..offset + 12]
-                .try_into()
-                .unwrap_or_default(),
-        );
-        let flags = u16::from_le_bytes(
-            bytes[offset + 12..offset + 14]
-                .try_into()
-                .unwrap_or_default(),
-        );
-        let next = u16::from_le_bytes(
-            bytes[offset + 14..offset + 16]
-                .try_into()
-                .unwrap_or_default(),
-        );
-        Descriptor {
-            addr,
-            len,
-            flags,
-            next,
-        }
     }
 
     /// Publish `segments` as a single descriptor chain.
@@ -265,20 +269,15 @@ impl SplitQueue {
         }
         let head = self.free_head;
         let mut cur = head;
-        // Free-list successor of the chain's tail. Captured inside
-        // the loop because each iteration overwrites the descriptor
-        // whose `next` field still encodes the free-list link.
-        let mut after_tail: u16 = self.queue_size;
         for (i, seg) in segments.iter().enumerate() {
+            let is_last = i + 1 == segments.len();
             let mut flags: u16 = 0;
             if matches!(seg.direction, Direction::DeviceWrite) {
                 flags |= VRING_DESC_F_WRITE;
             }
-            let is_last = i + 1 == segments.len();
-            let prev = self.read_desc(cur);
-            let next_free = prev.next;
-            after_tail = next_free;
-            let next_chain = if is_last { 0 } else { next_free };
+            // The chain is built in free-list order, so an interior
+            // descriptor's free-list successor is its chain successor too.
+            let next = self.links[usize::from(cur)];
             if !is_last {
                 flags |= VRING_DESC_F_NEXT;
             }
@@ -288,32 +287,25 @@ impl SplitQueue {
                     addr: seg.phys,
                     len: seg.len,
                     flags,
-                    next: next_chain,
+                    next: if is_last { 0 } else { next },
                 },
             );
             if !is_last {
-                cur = next_free;
+                cur = next;
             }
         }
-        self.free_head = after_tail;
+        self.free_head = self.links[usize::from(cur)];
         self.free_count -= segments_len;
+        self.in_flight[usize::from(head)] = segments_len;
         // Publish into avail ring.
         let slot = self.next_avail_idx % self.queue_size;
         let avail_bytes = self.avail.as_bytes_mut();
         let off = AVAIL_HEADER_BYTES + (slot as usize) * 2;
         avail_bytes[off..off + 2].copy_from_slice(&head.to_le_bytes());
         self.next_avail_idx = self.next_avail_idx.wrapping_add(1);
-        // Publish barrier (virtio 1.1 §2.7.13.3.1): the descriptor-table and
-        // avail-ring *entry* stores above must be visible to the device
-        // **before** the avail-`idx` store that exposes them, or a device that
-        // observes the new index could read a not-yet-written descriptor. A
-        // synchronous backend (virtio-blk, drained on the same `notify` the
-        // guest issues) tolerates the omission; an *asynchronous* device
-        // (virtio-input, which pops a buffer when an input event arrives out
-        // of band) does not — it reads the ring from a different context and
-        // must see a consistent snapshot (no races). The
-        // The outer-shareable DMA barrier orders the entry stores before
-        // the index store for both coherent and non-coherent devices.
+        // The descriptor and avail-entry stores must be visible before the
+        // index that exposes them, or a device reading the ring from its own
+        // context sees a descriptor not yet written (virtio 1.1 §2.7.13.3.1).
         dma_wmb();
         // Update the avail.idx field (offset 2, little-endian u16).
         avail_bytes[2..4].copy_from_slice(&self.next_avail_idx.to_le_bytes());
@@ -363,10 +355,9 @@ impl SplitQueue {
     /// * [`VirtioError::NoCompletion`] if no new completion is
     ///   available.
     /// * [`VirtioError::MalformedCompletion`] if the device-written
-    ///   completion names a descriptor head outside the granted
-    ///   descriptor table (CWE-1257 / Thunderclap).
-    ///   The bogus entry is skipped (the queue still makes progress) and
-    ///   no chain is reclaimed — fail closed.
+    ///   completion names anything but the head of a chain it holds
+    ///   (CWE-1257 / Thunderclap). The bogus entry is skipped (the queue
+    ///   still makes progress) and no chain is reclaimed — fail closed.
     pub fn poll_used(&mut self) -> Result<UsedToken, VirtioError> {
         let used_bytes = self.used.as_bytes();
         let used_idx = u16::from_le_bytes(used_bytes[2..4].try_into().unwrap_or_default());
@@ -391,79 +382,44 @@ impl SplitQueue {
                 .try_into()
                 .unwrap_or_default(),
         );
-        let head = (id & 0xFFFF) as u16;
-        // The completion id is **device-written**, hence untrusted: a
-        // buggy or hostile device (CWE-1257 / Thunderclap) can name a
-        // head outside the descriptor table the driver granted it.
-        // Walking such a head would index `desc` storage outside the
-        // granted region, so reject it fail-closed. The bogus used entry is still consumed so the queue
-        // makes forward progress, but no chain is reclaimed on its word.
-        if head >= self.queue_size {
-            self.last_used_idx = self.last_used_idx.wrapping_add(1);
-            return Err(VirtioError::MalformedCompletion);
-        }
-        // Reclaim chain into free list.
-        self.reclaim_chain(head);
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
+        // The completion id is **device-written**, hence untrusted: a buggy or
+        // hostile device (CWE-1257 / Thunderclap) can name a head outside the
+        // table, or one that heads no chain it was given. Either is consumed
+        // so the queue makes progress, but nothing is reclaimed on its word.
+        let head = u16::try_from(id)
+            .ok()
+            .filter(|&head| {
+                self.in_flight
+                    .get(usize::from(head))
+                    .is_some_and(|&n| n != 0)
+            })
+            .ok_or(VirtioError::MalformedCompletion)?;
+        self.reclaim_chain(head);
         Ok(UsedToken { head, written })
     }
 
+    /// Return the chain `head` heads, which the device has handed back, to
+    /// the end of the free list.
+    ///
+    /// The device-visible table is left as the chain wrote it: nothing reads
+    /// it back, [`Self::add_chain`] rewrites every field of a descriptor it
+    /// reissues, and clearing it would hide no address the device was not
+    /// already given.
     fn reclaim_chain(&mut self, head: u16) {
-        // Walk the chain to the tail, clearing addr/len/flags but
-        // **preserving the chain-order `next` field on interior
-        // descriptors** — those next pointers are valid free-list
-        // links because we built the chain in free-list order.
-        // Finally re-link the tail to the previous `free_head`.
-        let mut len = 1u16;
-        let mut cur = head;
-        loop {
-            // A chain `next` link is descriptor-table data and may have
-            // been corrupted (CWE-1257 / Thunderclap DMA write). Never
-            // read a descriptor outside the granted table: bail rather
-            // than index out of region. The
-            // caller validated `head`; this guards every followed `next`.
-            if cur >= self.queue_size {
-                return;
-            }
-            let d = self.read_desc(cur);
-            if (d.flags & VRING_DESC_F_NEXT) == 0 {
-                // Tail: stitch into free list.
-                self.write_desc(
-                    cur,
-                    Descriptor {
-                        addr: 0,
-                        len: 0,
-                        flags: 0,
-                        next: self.free_head,
-                    },
-                );
-                break;
-            }
-            // Interior: preserve `next`, clear everything else.
-            let next = d.next;
-            self.write_desc(
-                cur,
-                Descriptor {
-                    addr: 0,
-                    len: 0,
-                    flags: 0,
-                    next,
-                },
-            );
-            cur = next;
-            len += 1;
-            if len > self.queue_size {
-                // Cycle detected — corrupt chain; bail without
-                // updating free_head to avoid losing more slots.
-                return;
-            }
+        let len = core::mem::take(&mut self.in_flight[usize::from(head)]);
+        let mut tail = head;
+        for _ in 1..len {
+            tail = self.links[usize::from(tail)];
         }
-        self.free_head = head;
-        self.free_count = self.free_count.saturating_add(len);
-        // Clamp in case of double-free in a corrupt scenario.
-        if self.free_count > self.queue_size {
-            self.free_count = self.queue_size;
+        self.links[usize::from(tail)] = self.queue_size;
+        if self.free_count == 0 {
+            self.free_head = head;
+        } else {
+            self.links[usize::from(self.free_tail)] = head;
         }
+        self.free_tail = tail;
+        self.free_count += len;
     }
 
     /// Map a [`VirtioError`] from queue operations into a
@@ -474,11 +430,22 @@ impl SplitQueue {
     }
 }
 
+/// A driver-private table of `size` zeroed entries.
+fn zeroed_table(size: u16) -> Result<Vec<u16>, VirtioError> {
+    let mut table = Vec::new();
+    table
+        .try_reserve_exact(usize::from(size))
+        .map_err(|_| VirtioError::DeviceFault)?;
+    table.resize(usize::from(size), 0);
+    Ok(table)
+}
+
 /// Mock-peer-only view that allows a [`crate::transport::MockTransport`]
 /// to read the avail ring, collect a chain by descriptor head, and
 /// publish into the used ring without owning the underlying
 /// allocations. The implementation reconstructs the ring layouts from
 /// the `phys` addresses planted by the driver.
+#[cfg(any(test, feature = "mock"))]
 pub(crate) mod ring_view {
     use super::{
         Descriptor, UsedElem, AVAIL_HEADER_BYTES, USED_HEADER_BYTES, VRING_DESC_F_NEXT,
@@ -593,38 +560,60 @@ pub(crate) mod ring_view {
             }
         }
 
+        /// Visit, in order, the index and contents of each descriptor of the
+        /// chain rooted at `head`.
+        ///
+        /// Every index is checked against the table before it is read, and a
+        /// chain is at most the table long, so one that leaves the table or
+        /// loops is refused rather than followed.
+        fn walk_chain(
+            &self,
+            head: u16,
+            mut visit: impl FnMut(u16, Descriptor),
+        ) -> Result<(), VirtioError> {
+            let mut cur = head;
+            for _ in 0..self.queue_size {
+                if cur >= self.queue_size {
+                    return Err(VirtioError::DescriptorTableOverflow);
+                }
+                let d = self.read_desc(cur);
+                visit(cur, d);
+                if (d.flags & VRING_DESC_F_NEXT) == 0 {
+                    return Ok(());
+                }
+                cur = d.next;
+            }
+            Err(VirtioError::DescriptorTableOverflow)
+        }
+
+        /// The descriptor indices of the chain rooted at `head`, in order.
+        pub(crate) fn chain_indices(&self, head: u16) -> Result<Vec<u16>, VirtioError> {
+            let mut indices = Vec::new();
+            self.walk_chain(head, |index, _| indices.push(index))?;
+            Ok(indices)
+        }
+
         /// Walk the chain rooted at `head` and produce a
         /// [`ChainView`] borrowing the descriptor segments.
         pub(crate) fn collect_chain<'a>(&self, head: u16) -> Result<ChainView<'a>, VirtioError> {
             let mut device_read: Vec<&'a [u8]> = Vec::new();
             let mut device_write: Vec<&'a mut [u8]> = Vec::new();
-            let mut cur = head;
-            let mut hops = 0u16;
-            loop {
-                if hops > self.queue_size {
-                    return Err(VirtioError::DescriptorTableOverflow);
-                }
-                let d = self.read_desc(cur);
-                // SAFETY: `d.addr` was programmed by the driver from
-                // a `DmaSlab` whose backing storage it still owns; the
-                // mock peer reconstructs a `&[u8]` of length `d.len`
-                // for the duration of one `drain_queue` call.
+            self.walk_chain(head, |_, d| {
                 if (d.flags & VRING_DESC_F_WRITE) != 0 {
-                    let s: &'a mut [u8] = unsafe {
+                    // SAFETY: the driver published `d` over a `DmaSlab` it
+                    // still owns, `d.len` bytes long, and no table this peer
+                    // drains was scribbled over; the slice lives for one
+                    // `drain_queue` call.
+                    device_write.push(unsafe {
                         core::slice::from_raw_parts_mut(d.addr as *mut u8, d.len as usize)
-                    };
-                    device_write.push(s);
+                    });
                 } else {
-                    let s: &'a [u8] =
-                        unsafe { core::slice::from_raw_parts(d.addr as *const u8, d.len as usize) };
-                    device_read.push(s);
+                    // SAFETY: as above.
+                    device_read.push(unsafe {
+                        core::slice::from_raw_parts(d.addr as *const u8, d.len as usize)
+                    });
                 }
-                if (d.flags & VRING_DESC_F_NEXT) == 0 {
-                    break;
-                }
-                cur = d.next;
-                hops += 1;
-            }
+            })?;
             Ok(ChainView {
                 device_read,
                 device_write,

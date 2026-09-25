@@ -18,7 +18,12 @@ crate owns that protocol once:
   `arm_physical_to_bus`, `DEFAULT_BUS_ALIAS`) over the 30-bit `VideoCore`
   SDRAM aperture, failing closed on anything outside it.
 - the **transport seam**: `MailboxTransport` with `MmioMailbox` as the metal
-  doorbell implementation over two capability-gated `RegisterWindow`s. QEMU
+  doorbell implementation over two capability-gated `RegisterWindow`s, whose
+  reply waits spin within a poll budget each (the pre-MMU boot path has no
+  scheduler to park on), and `DmaMailbox` as the same over a carved property
+  buffer it owns, which it withholds rather than frees while the firmware owes
+  it a reply, and whose reply waits park on the inbox interrupt
+  (`InboxInterrupt`) until a deadline of their own. QEMU
   does not model the firmware, so host tests drive the seam with a
   protocol-faithful mock and the doorbell is the on-metal acceptance item
   (`AGENTS.md` §2.1).
@@ -46,12 +51,12 @@ belongs in `lib/*` (`AGENTS.md` §2.22 / §6 / §2.2); a driver crate may not be
 a kernel dependency (`AGENTS.md` §17.4). By contrast the VL805 / PCIe device
 logic had only a `drivers/*` consumer (its illegitimate second consumer was a
 removed in-kernel scaffold), so it has no `lib/*` home. This crate depends
-only on `lib/abi` (the `DisplayFormat` / `RegisterWindow` / `DriverError`
-vocabulary).
+only on `lib/abi` (the `DisplayFormat` / `RegisterWindow` / `DmaSlab` /
+`DriverError` vocabulary).
 
 ## Stability tier
 
 `experimental` — the Raspberry Pi bring-up firmware seam. It is `no_std`,
-contains no `unsafe` (`#![forbid(unsafe_op_in_unsafe_fn)]`, no `unsafe`
-blocks), and no `unwrap`/`expect`/`panic!` in production paths
-(`AGENTS.md` §2.9).
+with no `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
+one `unsafe` block builds the window `DmaMailbox` holds over its own slab, and
+the crate runs under `cargo xtask miri`.

@@ -137,7 +137,7 @@ impl<'dtb, T: MmioRead> Mmio<'dtb, T> {
     /// it. The driver never synthesises a pointer — the kernel
     /// allocates and validates the mapping. The
     /// returned window is what the bus driver hands to the virtio
-    /// transport's `MmioBackend`.
+    /// `MmioTransport`.
     ///
     /// # Errors
     ///

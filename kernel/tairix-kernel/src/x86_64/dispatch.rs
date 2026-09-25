@@ -84,8 +84,7 @@ pub static DISPATCH_SLOT: DispatchCallbackSlot = DispatchCallbackSlot::new();
 // expects (no invented APIs). The callback is
 // only ever invoked from the syscall trampoline, which carries the
 // SAFETY contract documented on `SyscallDispatchFn` and re-asserted
-// on the [`read_raw_args`] call site. — every
-// `#[allow]` carries a justifying comment.
+// on the [`read_raw_args`] call site.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[must_use = "the dispatch callback's return value is sent back to user space as a syscall result"]
 pub extern "C" fn production_dispatch(
@@ -123,7 +122,7 @@ pub extern "C" fn production_dispatch(
 // The callback must stay a bare safe `extern "C" fn` to match the arch
 // port's `UserFaultResolveFn` type; the raw-pointer deref happens only
 // inside the guarded `unsafe` block below, whose SAFETY note carries the
-// trap-handler-upheld contract. — the deref is contained and justified.
+// trap-handler-upheld contract.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn production_user_fault(
     faulting_addr: u64,
@@ -197,9 +196,8 @@ const _USER_FAULT_TERMINATE_SIGNATURE_PINNED: tairix_arch_x86_64::fault::UserFau
 /// Wrapped behind a non-test indirection so host tests can replace
 /// the production halt (which would unwind under `catch_unwind` via
 /// the test harness, see `kernel/core::test_arch`) with a panic that
-/// the test scaffolding can observe. — production
-/// halts are bottom-typed; the test variant carries the same `!`
-/// return type.
+/// the test scaffolding can observe. Production halts are bottom-typed; the
+/// test variant carries the same `!` return type.
 #[cfg(freestanding)]
 fn halt_fail_closed() -> ! {
     tairix_arch_x86_64::kernel_arch::halt()

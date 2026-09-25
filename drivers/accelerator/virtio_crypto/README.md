@@ -42,11 +42,16 @@ consumer that needs them.
   it, on either side of the device boundary. A consumer that needs the
   throughput needs a caller-owned session handle on the class trait — a
   different interface, arriving with that consumer.
+- **A queue too shallow for its longest chain is refused at open** (five
+  descriptors for a job, three for a session create), before the device is
+  given it, rather than failing every request it carries.
 - **No device memory reported.** A virtio-crypto device works out of the
   driver's DMA staging, which is system RAM, so it owns none of its own and
   the report says `0` rather than inventing a figure.
-- **Runtime unload** is supported: `close` resets the device, and the driver
-  holds no state outside its own DMA staging.
+- **Runtime unload** is supported: dropping the driver resets the device,
+  which also destroys every session it holds, and then scrubs the key and
+  payload staging; the driver holds no state outside that staging, and a
+  device that will not reset keeps it for the kernel's DMA quarantine.
 
 ## Required capabilities
 
@@ -65,7 +70,9 @@ algorithm bit is ignored; and a device that reports itself not ready, offers no
 cipher service, offers no algorithm the driver implements, or advertises no
 data queue is refused at bring-up rather than driven. Both the control and the
 data path decode their reply through one `status_to_result`, and a status byte
-this ABI does not define fails closed rather than reading as success.
+this ABI does not define fails closed rather than reading as success. A job's
+output is handed back only when its completion reports writing the output and
+the status behind it.
 
 ## Tests
 

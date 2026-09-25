@@ -32,8 +32,6 @@ mod kernel {
     /// `static mut` because the bump allocator hands out disjoint
     /// slices via an `AtomicUsize` cursor; the storage itself is
     /// otherwise immutable from any other call site.
-    /// — the *one* `static mut` the binary needs, justified in
-    /// `README.md` as the boot-heap arena.
     static mut HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].

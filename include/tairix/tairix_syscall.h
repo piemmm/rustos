@@ -154,6 +154,7 @@ extern "C" {
 #define TAIRIX_SYS_SHM_GRANT_PEER 128u
 #define TAIRIX_SYS_CALL_PEER_HOLDS 129u
 #define TAIRIX_SYS_PEER_WATCH 130u
+#define TAIRIX_SYS_CALL_PEER_NODE 131u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -548,6 +549,7 @@ uint64_t tairix_sys_shm_create_dma(uint64_t a0, uintptr_t a1, void * a2, void * 
 uint64_t tairix_sys_shm_grant_peer(uint64_t a0, uint64_t a1, uint64_t a2);
 int32_t tairix_sys_call_peer_holds(uint64_t a0, uint64_t a1, void * a2);
 int32_t tairix_sys_peer_watch(uint32_t a0, void * a1, uintptr_t a2);
+uint64_t tairix_sys_call_peer_node(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 
 #ifdef __cplusplus
 } /* extern "C" */

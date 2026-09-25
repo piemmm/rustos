@@ -294,7 +294,7 @@ pub fn observe_virtio_mmio_input_devices(
 /// probed device id and the emitted node class differing; both go through
 /// the shared `observe_virtio_mmio_interrupt_devices` core.
 /// Node ids are drawn from a base disjoint from the block- and
-/// input-probe bases so the leaked tree's node origins stay unambiguous.
+/// input-probe bases so the tree's node origins stay unambiguous.
 ///
 /// # Errors
 ///

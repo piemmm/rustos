@@ -80,7 +80,7 @@ impl CapabilityId {
     /// capability does not let a driver synthesise an arbitrary
     /// pointer: the kernel is the sole minter of a `RegisterWindow`,
     /// so a driver can only reach memory the kernel chose to map for
-    /// it (no ambient authority; — capability
+    /// it (no ambient authority; capability
     /// checks before state touches).
     pub const MMIO_MAP: Self = Self(12);
     /// Query system information beyond the caller's own principal.
@@ -124,8 +124,8 @@ impl CapabilityId {
     ///
     /// Spawning a program is a privileged operation — it materialises a
     /// new principal's address space and hands it the CPU — so it is
-    /// gated rather than ambient (no ambient authority;
-    /// — capability checks before state touches). The kernel-side
+    /// gated rather than ambient (no ambient authority; capability checks
+    /// before state touches). The kernel-side
     /// spawn caller (`kernel/core`) verifies this capability and audits
     /// the decision before building the image; the memory mechanism in
     /// `kernel/mem` stays capability-agnostic. The hosted
@@ -143,7 +143,7 @@ impl CapabilityId {
     /// the principal may use a *console-backed* output stream at all.
     /// Only the early bring-up principals (PID 1 `init`, login, getty,
     /// the shell) are granted it, so an ordinary app cannot scribble on
-    /// the system console (no ambient authority; —
+    /// the system console (no ambient authority;
     /// capability checks before state touches).
     pub const CONSOLE_WRITE: Self = Self(18);
     /// Use a console-backed standard *input* stream.
@@ -155,7 +155,7 @@ impl CapabilityId {
     /// [`CONSOLE_WRITE`](Self::CONSOLE_WRITE); the fine, per-fd authority
     /// is the inherited descriptor table ([`crate::DescriptorTable`]). Only the early bring-up principals (PID 1 `init`, login,
     /// getty, the shell) are granted it, so an ordinary app cannot read
-    /// the system console (no ambient authority; —
+    /// the system console (no ambient authority;
     /// capability checks before state touches).
     pub const CONSOLE_READ: Self = Self(19);
     /// Raise a hard resource limit above its inherited ceiling.
@@ -168,14 +168,14 @@ impl CapabilityId {
     /// rule). The `rlimit_set` syscall (`abi-v1` number 18) refuses such a
     /// request with [`Errno::PermissionDenied`] unless the caller holds this
     /// capability (capability checks before state
-    /// touches; — no ambient authority).
+    /// touches; no ambient authority).
     pub const RLIMIT_RAISE: Self = Self(20);
     /// Read the system user database (`/System/Security/Users`) through the `users_db_read` syscall
     /// (`abi-v1` number 19).
     ///
     /// The database carries every account's identity and salted password
     /// record, so reading it is privileged rather than ambient
-    /// (no ambient authority; — the on-disk record
+    /// (no ambient authority; the on-disk record
     /// is itself permission-checked). Only the authentication principal
     /// (login) is granted it: login verifies offered credentials against
     /// the delivered records and drops them immediately (secret hygiene). An ordinary app can neither enumerate accounts
@@ -250,7 +250,7 @@ impl CapabilityId {
     /// `vcmailbox` service creates the endpoint with it as the required
     /// sender capability. The mailbox reconfigures hardware (framebuffer,
     /// clocks, PCIe firmware), so reaching it is privileged rather than
-    /// ambient (no ambient authority; — capability
+    /// ambient (no ambient authority; capability
     /// checks before state touches): an ordinary task cannot drive the
     /// firmware mailbox.
     pub const MAILBOX: Self = Self(25);
@@ -287,8 +287,8 @@ impl CapabilityId {
     /// when every [`crate::hwtree::HwResource`] it requests is wholly
     /// contained within a device-resource grant the emitting driver already
     /// holds, so a bus driver can never mint a child more authority than it
-    /// was granted (no ambient authority; — capability
-    /// and bound checks before state touches; — a driver receives only
+    /// was granted (no ambient authority; capability
+    /// and bound checks before state touches; a driver receives only
     /// its matched node's resources). Publishing into the global hardware
     /// inventory is privileged rather than ambient: only an autoloaded bus
     /// driver is granted it, never an ordinary task.
@@ -313,7 +313,7 @@ impl CapabilityId {
     /// a grant-restricted endpoint only if it *also* holds the per-endpoint
     /// grant, so two class drivers behind one controller cannot reach each
     /// other's endpoint even though both hold the class capability (capability
-    /// and per-endpoint grant checks before state touches; — a driver
+    /// and per-endpoint grant checks before state touches; a driver
     /// receives only its matched node's resources).
     pub const IPC_ENDPOINT: Self = Self(28);
     /// Participate in cross-process shared memory: create a shared-memory
@@ -338,7 +338,7 @@ impl CapabilityId {
     /// against the calling task, so two class drivers behind one controller
     /// cannot reach each other's buffer even though both hold the class
     /// capability (capability and per-region grant checks before state
-    /// touches; — a driver receives only its matched node's resources).
+    /// touches; a driver receives only its matched node's resources).
     /// Creating a region is gated by this capability so a region is never
     /// minted ambiently.
     pub const SHM: Self = Self(29);

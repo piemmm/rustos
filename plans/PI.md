@@ -1934,8 +1934,10 @@ recorded acceptance artefact. **Metal-pending (`plans/OPEN-DEFECTS.md`
 D167):** a driver restart that recovers its predecessor's quarantined DMA —
 `vcmailbox`'s firmware-revision probe, which rests on the VideoCore answering
 property requests in posting order, the VL805's `HCRST` before
-`UsbDevice::start`, and GENET's `DMA_DISABLED` wait — each observed as a
-`DMA_QUARANTINE_RELEASED` record after killing the driver mid-traffic.
+`UsbDevice::start`, and GENET's `DMA_DISABLED` wait — each observed, after
+killing the driver mid-traffic, as the successor's `DMA_QUARANTINE_RELEASED`
+record carrying non-zero `bytes` (every bring-up records one, so the record
+alone proves nothing).
 **Remaining for P10:** run
 `userland/gui/{wm,taskbar,session}` on the HVS path so
 `userland/session/login` offers the launchable graphical session when the
@@ -2770,8 +2772,9 @@ keyboard service kthread**:
     context, so the VL805 never scheduled the full-speed keyboard's split
     transactions (Address Device still succeeds, hence `4128` passed). Fix:
     `enumerate_downstream_hid` now calls `configure_hub_slot` before addressing
-    the device — it reads the hub descriptor (`read_hub_topology`: `bNbrPorts`
-    + `wHubCharacteristics` TT Think Time), copies the hub's live output slot
+    the device — it reads the hub descriptor (`read_hub_topology`, validated by
+    `HubDescriptor::decode`: `bNbrPorts` + `wHubCharacteristics` TT Think
+    Time), copies the hub's live output slot
     context (`read_ctx`), sets the **Hub** bit + **Number of Ports** + **TT
     Think Time** (single-TT, MTT clear), and issues an `A0`-only Configure
     Endpoint over the hub's slot (xHCI §6.2.2). The mock now requires the Hub
@@ -3555,9 +3558,9 @@ table, so a new board is match **data**, not new code. Sub-increments
         (`InitSpawn::spawn_init` takes `&'static (dyn InitSpawnCtx + Sync)`,
         `kernel_main` leaks the ctx, forwarded through the three arch
         `init_spawn` seams to `unlock_service::spawn_if_present`); the
-        discovered-hardware-tree stash (`audit_root_storage_binding` leaks the
-        full `&'static [HwNode]` tree — virtio-MMIO block child probed in —
-        and `unlock_service::record_boot` stashes it beside the binding); and
+        discovered-hardware-tree stash (`audit_root_storage_binding` collects
+        the full tree — virtio-MMIO block child probed in — and `record_boot`
+        resolves the root binding from it and moves it into `HW_TREE`); and
         the unlock-kthread tail call (`aarch64::root_unlock::run_unlock` builds
         an arch-neutral `unlock_service::AutoloadHook` over the stashed tree +
         the leaked `'static` ctx and hands it to

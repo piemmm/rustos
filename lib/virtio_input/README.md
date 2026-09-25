@@ -14,9 +14,14 @@ See `docs/src/drivers/input.md` for the full description and test surface.
 ## Public surface
 
 - `VirtioInput` — the device over a `lib/virtio` `Transport`: `open` (the
-  virtio-1.1 §3.1 init sequence + event-buffer pool), `poll`
+  virtio-1.1 §3.1 init sequence + event-buffer pool) and `poll`
   (`tairix_abi::driver::input::Input`, interrupt-driven drain, never a busy
-  spin), `close`, and `transport_mut` (in-process software-peer drive).
+  spin: a wait that cannot be made fails the poll `DeviceOffline` rather than
+  returning nothing to be polled again). A drain takes at most a ring's worth
+  of completions, and each slot is zeroed before it is reposted, so a
+  completion that wrote nothing surfaces no event. Dropping it resets the
+  device, and withholds the event pool from a device whose reset does not
+  confirm.
 - `VIRTIO_INPUT_DEVICE_ID` — the virtio device id (18) the driver crate's
   `BIND_KEYS` match key is built from (the single source of truth, §2.2).
 - `VirtioKeyboardConsole` (`console` module) — the keyboard producer half:

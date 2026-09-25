@@ -599,7 +599,7 @@ mod tests {
         c.write_u16(common::QUEUE_NOTIFY_OFF, 1).unwrap();
         let mut t = dev.transport();
         let host: &'static MockHost = Box::leak(Box::new(MockHost::new()));
-        let q = SplitQueue::new(&mut t, host, 0, 8).expect("queue setup");
+        let q = SplitQueue::new(&mut t, host, 0, 8, 1).expect("queue setup");
         assert_eq!(q.size(), 8);
         // The queue allocated its descriptor table through the host
         // and programmed its phys into the device's QUEUE_DESC

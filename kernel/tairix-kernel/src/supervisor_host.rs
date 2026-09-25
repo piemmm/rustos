@@ -194,7 +194,10 @@ impl<B: Block + 'static> SupervisorHost for KernelSupervisorHost<'_, B> {
     }
 
     fn hardware(&mut self, out: &mut dyn Report) {
-        let nodes = crate::hwtree_store::HW_TREE.snapshot();
+        let Ok(nodes) = crate::hwtree_store::HW_TREE.snapshot() else {
+            out.line("hardware tree: unavailable (out of memory)");
+            return;
+        };
         if nodes.is_empty() {
             out.line("hardware tree: empty (no nodes discovered)");
             return;

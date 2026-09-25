@@ -106,7 +106,7 @@ pub enum HealthState {
 }
 
 /// The explicit, documented thresholds that classify a volume's health
-/// (`docs/src/filesystem/arxfs-spec.md` §11; — no magic
+/// (`docs/src/filesystem/arxfs-spec.md` §11: no magic
 /// numbers buried in code). [`ARXFS::health`] classifies against
 /// [`HealthThresholds::DEFAULT`]; the type is public so the chosen values are
 /// inspectable and testable. The thresholds are a fixed, non-tunable part of

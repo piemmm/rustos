@@ -4,6 +4,10 @@
 //! not emulable, so its protocol semantics are modelled here and the
 //! doorbell against a RAM-backed register window).
 
+use core::cell::Cell;
+
+use tairix_abi::driver::dma::PoolId;
+
 use super::*;
 use crate::mock::MockFirmware;
 
@@ -570,6 +574,563 @@ fn mmio_exchange_drains_a_stale_property_completion_rather_than_taking_it_for_it
     assert_eq!(stats.stale_reads, 8, "every read was the stale completion");
     assert_eq!(stats.foreign_channel_reads, 0);
     assert_eq!(message, request, "no reply was read back");
+}
+
+/// Two windows over one RAM block, both carved from the same raw pointer so
+/// the test's pokes and the mailbox's accesses never invalidate each other.
+fn shared_windows(buf: &mut [u8]) -> (RegisterWindow, RegisterWindow) {
+    let len = buf.len();
+    let base = core::ptr::NonNull::new(buf.as_mut_ptr()).expect("buffer is non-null");
+    // SAFETY: both windows cover exactly the `len` bytes of the mutably
+    // borrowed block, which outlives them inside the test, and share one raw
+    // pointer's provenance; the test accesses the block only through them.
+    unsafe {
+        (
+            RegisterWindow::from_mapping(0, base, len),
+            RegisterWindow::from_mapping(0, base, len),
+        )
+    }
+}
+
+#[test]
+fn an_unanswered_request_keeps_the_buffer_until_its_reply_lands() {
+    // A request the firmware left unanswered may still be read, and answered
+    // into the buffer, at any time: nothing may be staged over it, and its
+    // late reply must not pose as a later request's.
+    let mut regs = ready_regs();
+    let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let (regs_window, pokes) = shared_windows(&mut regs.0);
+    let (buffer_window, staged) = shared_windows(&mut buffer.0);
+    pokes
+        .write_u32(REG_MBOX0_STATUS, STATUS_EMPTY)
+        .expect("in the block");
+    let mut mailbox =
+        MmioMailbox::new(regs_window, buffer_window, TEST_BUFFER_BUS, 8).expect("construct");
+    let first = request().encode().expect("encode");
+    let mut message = first;
+    assert_eq!(mailbox.exchange(&mut message), Err(MailboxError::Timeout));
+    assert!(mailbox.request_outstanding());
+
+    // Still silent: the next request is refused before it touches anything.
+    pokes.write_u32(REG_MBOX1_WRITE, 0).expect("in the block");
+    let mut second = encode_firmware_revision_query();
+    assert_eq!(mailbox.exchange(&mut second), Err(MailboxError::Timeout));
+    assert_eq!(
+        mailbox.last_exchange_stats().timeout_stage,
+        TimeoutStage::Unanswered
+    );
+    assert_eq!(pokes.read_u32(REG_MBOX1_WRITE), Ok(0), "nothing was posted");
+    // Word 2 is each message's first tag, where the two requests differ.
+    assert_ne!(first[2], encode_firmware_revision_query()[2]);
+    assert_eq!(
+        staged.read_u32(8),
+        Ok(first[2]),
+        "nor staged over the unanswered request"
+    );
+    assert!(mailbox.request_outstanding());
+
+    // The firmware answers: its reply retires the old request, and the next
+    // exchange is posted and answered for itself.
+    pokes.write_u32(REG_MBOX0_STATUS, 0).expect("in the block");
+    let mut third = encode_firmware_revision_query();
+    mailbox.exchange(&mut third).expect("answered");
+    assert!(!mailbox.request_outstanding());
+    assert_eq!(mailbox.last_exchange_stats().response_reads, 2);
+}
+
+#[test]
+fn draining_a_late_reply_leaves_the_next_request_its_whole_budget() {
+    // A budget of one read per wait: the late reply takes the drain's read. A
+    // drain spending the next request's budget would time that request out
+    // too, and every one after it, each discarding a reply that had arrived.
+    let mut regs = ready_regs();
+    let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let (regs_window, pokes) = shared_windows(&mut regs.0);
+    pokes
+        .write_u32(REG_MBOX0_STATUS, STATUS_EMPTY)
+        .expect("in the block");
+    let mut mailbox = MmioMailbox::new(
+        regs_window,
+        window_over(&mut buffer.0, 0),
+        TEST_BUFFER_BUS,
+        1,
+    )
+    .expect("construct");
+    let mut late = encode_firmware_revision_query();
+    assert_eq!(mailbox.exchange(&mut late), Err(MailboxError::Timeout));
+    assert!(mailbox.request_outstanding());
+
+    pokes.write_u32(REG_MBOX0_STATUS, 0).expect("in the block");
+    let mut next = encode_firmware_revision_query();
+    mailbox
+        .exchange(&mut next)
+        .expect("answered within its own budget");
+    assert_eq!(mailbox.last_exchange_stats().response_reads, 2);
+    for _ in 0..2 {
+        let mut later = encode_firmware_revision_query();
+        mailbox.exchange(&mut later).expect("answered");
+        assert_eq!(mailbox.last_exchange_stats().response_reads, 1);
+    }
+    assert!(!mailbox.request_outstanding());
+}
+
+/// The looks [`Chatter`]'s spinning wait is allowed, and how often another
+/// channel's post lands in its inbox.
+const CHATTER_LOOKS: u32 = 8;
+
+/// The boot path's spinning wait, with another channel's post landing in the
+/// inbox on the last look each allowance has, as if the firmware set out to
+/// stretch the wait.
+struct Chatter {
+    spin: SpinWait,
+    doorbell: RegisterWindow,
+    looks: u32,
+}
+
+impl ReplyWait for Chatter {
+    fn start(&mut self) {
+        self.spin.start();
+    }
+
+    fn next_look(&mut self, inbox_empty: bool) -> bool {
+        let looking = self.spin.next_look(inbox_empty);
+        if looking {
+            self.looks += 1;
+            let status = if self.looks.is_multiple_of(CHATTER_LOOKS) {
+                0
+            } else {
+                STATUS_EMPTY
+            };
+            self.doorbell
+                .write_u32(REG_MBOX0_STATUS, status)
+                .expect("in the block");
+        }
+        looking
+    }
+}
+
+#[test]
+fn a_spinning_wait_takes_one_budget_of_looks_however_the_inbox_chatters() {
+    // A post for another channel just before the budget runs out must not buy
+    // the wait a fresh budget, or the wait is bounded only by its square.
+    let mut regs = ready_regs();
+    set_reg_word(&mut regs, REG_MBOX0_READ, TEST_BUFFER_BUS | 0x3);
+    let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let (regs_window, chatter_view) = shared_windows(&mut regs.0);
+    let chatter = Chatter {
+        spin: SpinWait {
+            looks: CHATTER_LOOKS,
+            left: 0,
+        },
+        doorbell: chatter_view,
+        looks: 0,
+    };
+    let mut doorbell = Doorbell::new(
+        regs_window,
+        window_over(&mut buffer.0, 0),
+        TEST_BUFFER_BUS,
+        CHATTER_LOOKS,
+        BufferCoherency::none(),
+        chatter,
+    )
+    .expect("construct");
+    let mut message = encode_firmware_revision_query();
+    assert_eq!(doorbell.exchange(&mut message), Err(MailboxError::Timeout));
+    assert_eq!(doorbell.last_exchange.timeout_stage, TimeoutStage::Response);
+    assert_eq!(doorbell.replies.looks, CHATTER_LOOKS);
+    assert_eq!(doorbell.last_exchange.foreign_channel_reads, 1);
+}
+
+/// Counts a freed slab into the `Cell<usize>` its pool pointer names.
+///
+/// # Safety
+///
+/// `pool` must point at a live `Cell<usize>`.
+unsafe fn count_free(pool: *const (), _cpu: NonNull<u8>, _slot: usize, _len: usize) {
+    // SAFETY: per the function contract.
+    let frees = unsafe { &*pool.cast::<Cell<usize>>() };
+    frees.set(frees.get() + 1);
+}
+
+/// A slab over `storage` at device-visible `phys` whose free is counted into
+/// `frees`.
+fn counted_slab(storage: &mut [u8], phys: u64, frees: &Cell<usize>) -> DmaSlab {
+    let len = storage.len();
+    let base = NonNull::from(storage).cast::<u8>();
+    // SAFETY: `base` covers exactly `len` bytes the test owns, declares before
+    // the slab (so outlives it), and reaches only through the slab; `frees`
+    // likewise outlives it.
+    unsafe {
+        DmaSlab::from_pool(
+            phys,
+            base,
+            len,
+            PoolId::MOCK,
+            0,
+            core::ptr::from_ref(frees).cast(),
+            count_free,
+        )
+    }
+}
+
+/// What each clock reading costs [`ScriptedFirmware`], so a wait that never
+/// parks still reaches its deadline.
+const LOOK_NS: u64 = 1_000;
+
+/// The window the owned-mailbox tests give each reply wait.
+const REPLY_WINDOW_NS: u64 = 1_000_000;
+
+/// Clock readings past which a wait has outrun every deadline: the tests fail
+/// on it rather than hang.
+const RUNAWAY_READINGS: u64 = 100 * REPLY_WINDOW_NS / LOOK_NS;
+
+/// The inbox interrupt and clock of a firmware that answers each post after a
+/// scripted delay, over the RAM doorbell `doorbell` aliases.
+///
+/// RAM cannot pop a word on read, so the model leans on the transport's
+/// order: a post follows a drained inbox, so seeing one empties it, and a
+/// reply lands at the park its delay falls within.
+struct ScriptedFirmware {
+    doorbell: RegisterWindow,
+    now_ns: Cell<u64>,
+    readings: Cell<u64>,
+    /// One reply delay per post, in posting order; `None` is never answered.
+    replies: &'static [Option<u64>],
+    posts: Cell<usize>,
+    due_ns: Cell<Option<u64>>,
+    parks: usize,
+    /// Refuse every park, as the kernel does a released or quarantined line.
+    refuses_parks: bool,
+}
+
+impl ScriptedFirmware {
+    fn new(doorbell: RegisterWindow, replies: &'static [Option<u64>]) -> Self {
+        Self {
+            doorbell,
+            now_ns: Cell::new(0),
+            readings: Cell::new(0),
+            replies,
+            posts: Cell::new(0),
+            due_ns: Cell::new(None),
+            parks: 0,
+            refuses_parks: false,
+        }
+    }
+
+    /// Take the post the transport made since the last reading, if any.
+    fn take_post(&self) {
+        if self.doorbell.read_u32(REG_MBOX1_WRITE) == Ok(0) {
+            return;
+        }
+        self.poke(REG_MBOX1_WRITE, 0);
+        self.poke(REG_MBOX0_STATUS, STATUS_EMPTY);
+        let post = self.posts.get();
+        self.posts.set(post + 1);
+        let delay = self.replies.get(post).copied().flatten();
+        self.due_ns.set(delay.map(|d| self.now_ns.get() + d));
+    }
+
+    /// Keep the inbox full of `word`, which is never the awaited reply.
+    fn flood(&self, word: u32) {
+        self.poke(REG_MBOX0_READ, word);
+        self.poke(REG_MBOX0_STATUS, 0);
+    }
+
+    fn poke(&self, register: usize, value: u32) {
+        self.doorbell
+            .write_u32(register, value)
+            .expect("in the block");
+    }
+}
+
+impl MonotonicClock for ScriptedFirmware {
+    fn now_ns(&self) -> u64 {
+        let readings = self.readings.get() + 1;
+        assert!(readings < RUNAWAY_READINGS, "a wait outran its deadline");
+        self.readings.set(readings);
+        self.take_post();
+        let now = self.now_ns.get() + LOOK_NS;
+        self.now_ns.set(now);
+        now
+    }
+}
+
+impl InboxInterrupt for ScriptedFirmware {
+    fn park(&mut self, timeout_ns: u64) -> bool {
+        self.parks += 1;
+        if self.refuses_parks {
+            return false;
+        }
+        let now = self.now_ns.get();
+        match self.due_ns.get() {
+            Some(due) if due <= now + timeout_ns => {
+                self.now_ns.set(due.max(now));
+                self.due_ns.set(None);
+                self.poke(REG_MBOX0_READ, TEST_BUFFER_BUS | CHANNEL_PROPERTY);
+                self.poke(REG_MBOX0_STATUS, 0);
+                true
+            }
+            _ => {
+                self.now_ns.set(now + timeout_ns);
+                false
+            }
+        }
+    }
+}
+
+impl<I> DmaMailbox<I> {
+    fn inbox(&self) -> &I {
+        &self.doorbell.replies.inbox
+    }
+
+    fn stats(&self) -> ExchangeStats {
+        self.doorbell.last_exchange
+    }
+}
+
+/// A doorbell block with nothing in the inbox and room to post.
+fn empty_regs() -> Aligned<MAILBOX_REGS_LEN_BYTES> {
+    let mut regs = Aligned([0u8; MAILBOX_REGS_LEN_BYTES]);
+    set_reg_word(&mut regs, REG_MBOX0_STATUS, STATUS_EMPTY);
+    regs
+}
+
+/// An owned mailbox over `regs` and a slab over `storage` counted into
+/// `frees`, whose firmware answers its posts after `replies`.
+fn owned_mailbox(
+    regs: &mut Aligned<MAILBOX_REGS_LEN_BYTES>,
+    storage: &mut Aligned<PROPERTY_LEN_BYTES>,
+    frees: &Cell<usize>,
+    replies: &'static [Option<u64>],
+) -> DmaMailbox<ScriptedFirmware> {
+    let (regs_window, firmware_view) = shared_windows(&mut regs.0);
+    DmaMailbox::new(
+        regs_window,
+        counted_slab(&mut storage.0, u64::from(TEST_BUFFER_BUS), frees),
+        ScriptedFirmware::new(firmware_view, replies),
+        REPLY_WINDOW_NS,
+    )
+    .expect("construct")
+}
+
+#[test]
+fn an_owned_buffer_the_firmware_has_answered_for_is_freed_with_the_mailbox() {
+    let mut regs = empty_regs();
+    let mut storage = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let frees = Cell::new(0);
+    let mut mailbox = owned_mailbox(&mut regs, &mut storage, &frees, &[Some(0)]);
+    let mut probe = encode_firmware_revision_query();
+    mailbox.exchange(&mut probe).expect("answered");
+    drop(mailbox);
+    assert_eq!(frees.get(), 1);
+}
+
+#[test]
+fn an_owned_buffer_the_firmware_still_owes_a_reply_outlives_the_mailbox() {
+    let mut regs = empty_regs();
+    let mut storage = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let frees = Cell::new(0);
+    let mut mailbox = owned_mailbox(&mut regs, &mut storage, &frees, &[None]);
+    let mut probe = encode_firmware_revision_query();
+    assert_eq!(mailbox.exchange(&mut probe), Err(MailboxError::Timeout));
+    drop(mailbox);
+    assert_eq!(frees.get(), 0, "the firmware may still write its reply");
+}
+
+#[test]
+fn an_owned_buffer_the_firmware_cannot_address_is_refused_and_freed() {
+    let mut regs = empty_regs();
+    let (regs_window, firmware_view) = shared_windows(&mut regs.0);
+    let mut storage = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let frees = Cell::new(0);
+    assert_eq!(
+        DmaMailbox::new(
+            regs_window,
+            counted_slab(&mut storage.0, 1 << 32, &frees),
+            ScriptedFirmware::new(firmware_view, &[]),
+            REPLY_WINDOW_NS,
+        )
+        .err(),
+        Some(MailboxError::BadAperture)
+    );
+    assert_eq!(frees.get(), 1, "nothing was ever posted from it");
+}
+
+#[test]
+fn an_owned_buffer_that_needs_cache_maintenance_is_refused_and_freed() {
+    fn maintain(_base: *const u8, _len: usize) {}
+    let mut regs = empty_regs();
+    let (regs_window, firmware_view) = shared_windows(&mut regs.0);
+    let mut storage = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let frees = Cell::new(0);
+    let buffer =
+        counted_slab(&mut storage.0, u64::from(TEST_BUFFER_BUS), &frees).with_coherency(maintain);
+    assert_eq!(
+        DmaMailbox::new(
+            regs_window,
+            buffer,
+            ScriptedFirmware::new(firmware_view, &[]),
+            REPLY_WINDOW_NS,
+        )
+        .err(),
+        Some(MailboxError::Window)
+    );
+    assert_eq!(frees.get(), 1);
+}
+
+#[test]
+fn an_owned_buffer_that_is_not_word_aligned_is_refused_and_freed() {
+    let mut regs = empty_regs();
+    let (regs_window, firmware_view) = shared_windows(&mut regs.0);
+    let mut storage = Aligned([0u8; PROPERTY_LEN_BYTES + 1]);
+    let frees = Cell::new(0);
+    assert_eq!(
+        DmaMailbox::new(
+            regs_window,
+            counted_slab(&mut storage.0[1..], u64::from(TEST_BUFFER_BUS), &frees),
+            ScriptedFirmware::new(firmware_view, &[]),
+            REPLY_WINDOW_NS,
+        )
+        .err(),
+        Some(MailboxError::Window)
+    );
+    assert_eq!(frees.get(), 1);
+}
+
+#[test]
+fn the_owned_mailbox_turns_the_inbox_interrupt_on_and_the_boot_transport_leaves_it_off() {
+    let mut regs = empty_regs();
+    let mut storage = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let frees = Cell::new(0);
+    drop(owned_mailbox(&mut regs, &mut storage, &frees, &[]));
+    assert_eq!(reg_word(&regs, REG_MBOX0_CONFIG), CONFIG_DATA_IRQ);
+
+    let mut regs = empty_regs();
+    let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    MmioMailbox::new(
+        window_over(&mut regs.0, 0),
+        window_over(&mut buffer.0, 0),
+        TEST_BUFFER_BUS,
+        8,
+    )
+    .expect("construct");
+    assert_eq!(
+        reg_word(&regs, REG_MBOX0_CONFIG),
+        0,
+        "the pre-MMU boot path has nothing to take the interrupt"
+    );
+}
+
+#[test]
+fn an_owned_mailboxs_reply_wait_parks_until_the_inbox_interrupt_fires() {
+    // The reply reaches the inbox only across a park, so a wait that polled
+    // the doorbell instead would never see it.
+    let mut regs = empty_regs();
+    let mut storage = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let frees = Cell::new(0);
+    let mut mailbox = owned_mailbox(
+        &mut regs,
+        &mut storage,
+        &frees,
+        &[Some(REPLY_WINDOW_NS / 2)],
+    );
+    let mut probe = encode_firmware_revision_query();
+    mailbox
+        .exchange(&mut probe)
+        .expect("answered once the interrupt fires");
+    assert_eq!(mailbox.inbox().parks, 1);
+    assert_eq!(mailbox.stats().response_reads, 1);
+}
+
+#[test]
+fn each_reply_wait_of_an_owned_mailbox_has_a_deadline_of_its_own() {
+    // The first reply lands half a window late, while the next exchange drains
+    // it; the next exchange's own reply takes most of a window. Were the drain
+    // and the wait after it to share one deadline, that reply would be timed
+    // out too, and every one after it.
+    let mut regs = empty_regs();
+    let mut storage = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let frees = Cell::new(0);
+    let mut mailbox = owned_mailbox(
+        &mut regs,
+        &mut storage,
+        &frees,
+        &[
+            Some(REPLY_WINDOW_NS * 3 / 2),
+            Some(REPLY_WINDOW_NS * 4 / 5),
+            Some(REPLY_WINDOW_NS * 9 / 10),
+        ],
+    );
+    let mut late = encode_firmware_revision_query();
+    assert_eq!(mailbox.exchange(&mut late), Err(MailboxError::Timeout));
+    assert_eq!(mailbox.stats().timeout_stage, TimeoutStage::Response);
+
+    let mut next = encode_firmware_revision_query();
+    mailbox
+        .exchange(&mut next)
+        .expect("answered within its own window");
+    assert_eq!(
+        mailbox.stats().response_reads,
+        2,
+        "the late reply, then its own"
+    );
+
+    let mut after = encode_firmware_revision_query();
+    mailbox.exchange(&mut after).expect("answered");
+    assert_eq!(mailbox.inbox().parks, 4, "every wait parked");
+}
+
+#[test]
+fn an_owned_mailboxs_wait_ends_at_its_deadline_however_the_inbox_floods() {
+    // Another channel's posts keep the inbox full: there is nothing to park
+    // for, and every look still spends the one deadline.
+    let mut regs = empty_regs();
+    let mut storage = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let frees = Cell::new(0);
+    let mut mailbox = owned_mailbox(&mut regs, &mut storage, &frees, &[None]);
+    let mut unanswered = encode_firmware_revision_query();
+    assert_eq!(
+        mailbox.exchange(&mut unanswered),
+        Err(MailboxError::Timeout)
+    );
+    let parks = mailbox.inbox().parks;
+
+    mailbox.inbox().flood(TEST_BUFFER_BUS | 0x3);
+    let mut next = encode_firmware_revision_query();
+    assert_eq!(mailbox.exchange(&mut next), Err(MailboxError::Timeout));
+    let stats = mailbox.stats();
+    assert_eq!(stats.timeout_stage, TimeoutStage::Unanswered);
+    assert_eq!(
+        mailbox.inbox().parks,
+        parks,
+        "a full inbox is never parked on"
+    );
+    assert!(stats.foreign_channel_reads > 0);
+    assert!(u64::from(stats.foreign_channel_reads) < REPLY_WINDOW_NS / LOOK_NS);
+}
+
+#[test]
+fn a_park_the_kernel_refuses_ends_the_owned_mailboxs_wait_at_once() {
+    // A released or quarantined line answers every park at once; waiting on
+    // would spin until the deadline, so the wait fails closed instead.
+    let mut regs = empty_regs();
+    let (regs_window, firmware_view) = shared_windows(&mut regs.0);
+    let mut storage = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let frees = Cell::new(0);
+    let firmware = ScriptedFirmware {
+        refuses_parks: true,
+        ..ScriptedFirmware::new(firmware_view, &[Some(0)])
+    };
+    let mut mailbox = DmaMailbox::new(
+        regs_window,
+        counted_slab(&mut storage.0, u64::from(TEST_BUFFER_BUS), &frees),
+        firmware,
+        REPLY_WINDOW_NS,
+    )
+    .expect("construct");
+    let mut probe = encode_firmware_revision_query();
+    assert_eq!(mailbox.exchange(&mut probe), Err(MailboxError::Timeout));
+    assert_eq!(mailbox.inbox().parks, 1);
 }
 
 // --- Display-size query ----------------------------------------------------

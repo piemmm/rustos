@@ -5,10 +5,9 @@
 //! Each such step — every bootstrap-floor virtio-MMIO class probe
 //! ([`crate::hwdiscovery`]) and the boot-display publication shim
 //! ([`crate::boot_display`]) — numbers its emitted nodes from a distinct
-//! high base so their ids stay obviously disjoint: two nodes discovered on
-//! the same bus must never share an id, or one would silently overwrite the
-//! other in the leaked hardware tree (a display world with a NIC hits
-//! exactly this).
+//! high base so their ids stay disjoint: two nodes discovered in one boot
+//! must never share an id, or the inventory refuses the whole boot tree and
+//! no device autoloads.
 //!
 //! Those bases used to be hand-picked literals kept apart only by prose,
 //! and a base once collided with the boot-display id in production. This
@@ -23,9 +22,10 @@
 
 use tairix_kernel_virtio::MAX_SLOTS;
 
-/// First id of the reserved synthetic node-id space. Chosen far above the
-/// firmware discovery ids (which start at `1`) so a synthetic id is always
-/// recognisable as such.
+/// First id of the reserved synthetic node-id space, far above the firmware
+/// discovery ids (which start at `1`) so the two never meet. Ids the store
+/// issues at runtime start above the highest seeded one, so they can fall
+/// inside these regions.
 pub const HW_NODE_PROBE_ORIGIN: u32 = 0x8000_0000;
 
 /// Width of each reserved node-id region. A probe walk emits one id per

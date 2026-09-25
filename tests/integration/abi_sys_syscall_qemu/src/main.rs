@@ -53,7 +53,7 @@
 //! The test body only compiles under `#[cfg(feature = "test-hooks")]`.
 //! The feature is on by default for this crate; release builds that
 //! enable it are rejected by the `compile_error!` guard below
-//! (no hacks; — fail closed), mirroring
+//! (no hacks; fail closed), mirroring
 //! `tairix-test-syscall-dispatch-qemu`.
 
 #![cfg_attr(itest_x86_64, no_std)]
@@ -127,7 +127,6 @@ mod kernel {
     /// Set once the round-trip has been driven so a stray duplicate
     /// `BootCompleted` (which the audit catalogue disallows but the
     /// pipeline cannot statically prove) never re-enters the test logic.
-    /// — fail closed.
     static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
     // --- Dispatch callback ---------------------------------------

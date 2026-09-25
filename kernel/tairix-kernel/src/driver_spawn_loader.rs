@@ -10,7 +10,7 @@
 //! gate, the syscall-table-hash match, and bind-table validation — and then
 //! **spawned into its own hardware-isolated process** rather than run in the
 //! kernel's domain (drivers in user space wherever
-//! feasible; — leaf drivers live in the discovered tier).
+//! feasible; leaf drivers live in the discovered tier).
 //!
 //! The crucial security property this module realises is: *a loaded
 //! driver receives only the resource capabilities its matched node
@@ -50,7 +50,7 @@ use tairix_devmgr::DriverLoader;
 use tairix_drvhost::{
     DriverSpawner, Host, HostConfig, HostError, ImageSource, Sink, SpawnContext, SpawnRegisterError,
 };
-use tairix_kernel_core::InitSpawnCtx;
+use tairix_kernel_core::{DriverNode, InitSpawnCtx};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
 /// Spawn a verified user-space driver image into its own process.
@@ -74,10 +74,11 @@ pub trait DriverProcessSpawn {
     /// exhaustion, `BadMagic` on an `rxe` that fails the CFI-tag re-parse,
     /// `AlreadyExists` on a registration conflict) — never a panic.
     ///
-    /// `node_id` is the discovered hardware-tree node the driver was matched
-    /// for; the kernel records it against the child so a
-    /// later `hw_emit_node` parents the published child under exactly that
-    /// node and the emitter cannot forge its tree position.
+    /// `node` is the discovered hardware-tree node the driver was matched for,
+    /// with the tree it was matched in: the kernel records it against the
+    /// child so a later `hw_emit_node` parents the published child under
+    /// exactly that node, and admits the driver only while that tree still
+    /// holds it.
     ///
     /// `path` is the kernel-resolved driver-store path the signed load gate
     /// verified `rxe` from; the kernel attests the child's process name from
@@ -91,7 +92,7 @@ pub trait DriverProcessSpawn {
         granted: CapabilitySet,
         grants: &[HwResource],
         args: &[&[u8]],
-        node_id: Option<u32>,
+        node: Option<DriverNode<'_>>,
     ) -> Result<u64, Errno>;
 
     /// Tear down a previously [`spawn_driver`](Self::spawn_driver)ed driver
@@ -152,10 +153,10 @@ impl DriverProcessSpawn for InitCtxDriverProcessSpawn<'_> {
         granted: CapabilitySet,
         grants: &[HwResource],
         args: &[&[u8]],
-        node_id: Option<u32>,
+        node: Option<DriverNode<'_>>,
     ) -> Result<u64, Errno> {
         self.init_ctx
-            .spawn_driver_process(path, rxe, granted, grants, args, node_id)
+            .spawn_driver_process(path, rxe, granted, grants, args, node)
     }
 
     fn terminate_driver(&self, handle: u64) -> Result<(), Errno> {
@@ -167,10 +168,9 @@ impl DriverProcessSpawn for InitCtxDriverProcessSpawn<'_> {
 /// [`DriverSpawner`] contract carries.
 ///
 /// The [`Host`] surfaces a register/spawn failure to the device manager as
-/// [`HostError::DriverRegisterFailed`] (→ [`Errno::NotImplemented`]); the
-/// inner [`DriverError`] is what reaches the drvhost audit record, so it is
-/// mapped to the nearest typed cause rather than collapsed. An unexpected
-/// code maps to [`DriverError::DeviceFault`] — fail closed, never silently
+/// [`HostError::DriverRegisterFailed`], whose errno keeps this cause, so it is
+/// mapped to the nearest typed one rather than collapsed. An unexpected code
+/// maps to [`DriverError::DeviceFault`] — fail closed, never silently
 /// succeed.
 fn spawn_errno_as_driver_error(errno: Errno) -> DriverError {
     match errno {
@@ -179,6 +179,8 @@ fn spawn_errno_as_driver_error(errno: Errno) -> DriverError {
         Errno::PermissionDenied => DriverError::PermissionDenied,
         Errno::NotImplemented => DriverError::NotImplemented,
         Errno::AlreadyExists => DriverError::AlreadyExists,
+        Errno::Busy => DriverError::Busy,
+        Errno::DeviceOffline => DriverError::DeviceOffline,
         _ => DriverError::DeviceFault,
     }
 }
@@ -202,10 +204,9 @@ struct SpawningDriverSpawner<'a> {
     /// (`tairix_rt::arg`) — e.g. the reply-endpoint id it announces
     /// readiness over.
     args: &'a [&'a [u8]],
-    /// The matched hardware-tree node the driver was loaded for; recorded against the child so its `hw_emit_node`
-    /// children are parented under it. [`None`] when the load is not
-    /// node-matched.
-    node_id: Option<u32>,
+    /// The matched hardware-tree node the driver is loaded for, and the tree
+    /// it was matched in. [`None`] when the load is not node-matched.
+    node: Option<DriverNode<'a>>,
     /// The spawned driver's process id, captured on a successful
     /// registration so the load mechanism can report it as the driver's
     /// lifecycle handle. The kernel teardown resolves the handle as a PID,
@@ -233,7 +234,7 @@ impl DriverSpawner for SpawningDriverSpawner<'_> {
                 ctx.granted,
                 self.grants,
                 self.args,
-                self.node_id,
+                self.node,
             )
             .map_err(|e| SpawnRegisterError::Register(spawn_errno_as_driver_error(e)))?;
         // Record the spawned PID so the load mechanism reports it as the
@@ -273,10 +274,9 @@ pub struct SpawnDriverLoader<'a> {
     /// Startup-argument vector handed to every spawned driver — e.g. the
     /// reply-endpoint id it announces readiness over.
     args: &'a [&'a [u8]],
-    /// The matched hardware-tree node id the driver is loaded for, recorded against the spawned child so its
-    /// `hw_emit_node` children are parented under it. [`None`] when the load
-    /// is not node-matched.
-    node_id: Option<u32>,
+    /// The matched hardware-tree node the driver is loaded for, and the tree
+    /// it was matched in. [`None`] when the load is not node-matched.
+    node: Option<DriverNode<'a>>,
 }
 
 impl<'a> SpawnDriverLoader<'a> {
@@ -290,7 +290,7 @@ impl<'a> SpawnDriverLoader<'a> {
         sink: &'a dyn Sink,
         spawn: &'a dyn DriverProcessSpawn,
         args: &'a [&'a [u8]],
-        node_id: Option<u32>,
+        node: Option<DriverNode<'a>>,
     ) -> Self {
         Self {
             trusted,
@@ -298,7 +298,7 @@ impl<'a> SpawnDriverLoader<'a> {
             sink,
             spawn,
             args,
-            node_id,
+            node,
         }
     }
 }
@@ -319,7 +319,7 @@ impl DriverLoader for SpawnDriverLoader<'_> {
             path,
             grants: resources,
             args: self.args,
-            node_id: self.node_id,
+            node: self.node,
             spawned_pid: Cell::new(0),
         };
         let mut host = Host::new(HostConfig {
@@ -351,6 +351,15 @@ impl DriverLoader for SpawnDriverLoader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tree holding exactly one node.
+    struct OnlyNode(u32);
+
+    impl tairix_kernel_core::hwtree::HwNodeLiveness for OnlyNode {
+        fn is_live(&self, node_id: u32) -> bool {
+            node_id == self.0
+        }
+    }
 
     use core::cell::RefCell;
 
@@ -398,7 +407,7 @@ mod tests {
             granted: CapabilitySet,
             grants: &[HwResource],
             _args: &[&[u8]],
-            _node_id: Option<u32>,
+            _node: Option<DriverNode<'_>>,
         ) -> Result<u64, Errno> {
             self.calls.borrow_mut().push((
                 alloc::string::String::from(path),
@@ -466,7 +475,10 @@ mod tests {
             path: "/System/Drivers/input/usb_kbd",
             grants: &grants,
             args: &args,
-            node_id: Some(0x42),
+            node: Some(DriverNode {
+                id: 0x42,
+                tree: &OnlyNode(0x42),
+            }),
             spawned_pid: Cell::new(0),
         };
         let manifest = stub_manifest();
@@ -494,14 +506,14 @@ mod tests {
     #[test]
     fn a_spawn_failure_is_reported_as_a_register_error_not_a_panic() {
         // Fail closed: a spawn-mechanism error becomes a typed register
-        // failure the host maps to `Errno::NotImplemented`, never a panic.
+        // failure whose errno keeps its cause, never a panic.
         let spawn = RecordingSpawn::failing(Errno::NoSpace);
         let spawner = SpawningDriverSpawner {
             spawn: &spawn,
             path: "/System/Drivers/input/usb_kbd",
             grants: &[],
             args: &[],
-            node_id: None,
+            node: None,
             spawned_pid: Cell::new(0),
         };
         let manifest = stub_manifest();
@@ -532,6 +544,16 @@ mod tests {
         assert_eq!(
             spawn_errno_as_driver_error(Errno::PermissionDenied),
             DriverError::PermissionDenied
+        );
+        assert_eq!(
+            spawn_errno_as_driver_error(Errno::Busy),
+            DriverError::Busy,
+            "a node that already has a live driver"
+        );
+        assert_eq!(
+            spawn_errno_as_driver_error(Errno::DeviceOffline),
+            DriverError::DeviceOffline,
+            "a node that left the tree while its driver was admitted"
         );
         // An unexpected code never maps to a success-adjacent value.
         assert_eq!(
@@ -578,15 +600,20 @@ mod tests {
         frames: FrameAllocator,
         sink: NullSink,
         recorded: RefCell<Option<RecordedDriverProcess>>,
+        /// The forwarded node's id, and whether its tree holds that id and
+        /// the next.
+        node: RefCell<Option<(u32, bool, bool)>>,
         pid: u64,
     }
 
     impl RecordingInitCtx {
         fn new(pid: u64) -> Self {
-            static mut REGION: [u8; PAGE_SIZE * 4] = [0u8; PAGE_SIZE * 4];
+            #[repr(C, align(4096))]
+            struct Region([u8; PAGE_SIZE * 4]);
+            let region: &'static Region = Box::leak(Box::new(Region([0; PAGE_SIZE * 4])));
             let mut map = BootMemoryMap::new();
             map.push(MemoryRegion {
-                start: PhysAddr::new(core::ptr::addr_of!(REGION) as u64),
+                start: PhysAddr::new(core::ptr::from_ref(region) as u64),
                 length: (PAGE_SIZE * 4) as u64,
                 kind: RegionKind::Usable,
             });
@@ -594,6 +621,7 @@ mod tests {
                 frames: FrameAllocator::new(&map).expect("one-region allocator"),
                 sink: NullSink,
                 recorded: RefCell::new(None),
+                node: RefCell::new(None),
                 pid,
             }
         }
@@ -629,7 +657,7 @@ mod tests {
             caps: CapabilitySet,
             grants: &[HwResource],
             args: &[&[u8]],
-            _node_id: Option<u32>,
+            node: Option<DriverNode<'_>>,
         ) -> Result<u64, Errno> {
             *self.recorded.borrow_mut() = Some((
                 alloc::string::String::from(path),
@@ -638,6 +666,13 @@ mod tests {
                 grants.to_vec(),
                 args.len(),
             ));
+            *self.node.borrow_mut() = node.map(|node| {
+                (
+                    node.id,
+                    node.tree.is_live(node.id),
+                    node.tree.is_live(node.id + 1),
+                )
+            });
             Ok(self.pid)
         }
     }
@@ -666,7 +701,10 @@ mod tests {
                 granted,
                 &grants,
                 &args,
-                Some(3),
+                Some(DriverNode {
+                    id: 3,
+                    tree: &OnlyNode(3),
+                }),
             )
             .expect("the recording seam admits the driver");
         assert_eq!(pid, 0x7fff);
@@ -682,5 +720,10 @@ mod tests {
         );
         assert_eq!(grants_seen.as_slice(), &[window, dma]);
         assert_eq!(*arg_count, 1);
+        assert_eq!(
+            *init_ctx.node.borrow(),
+            Some((3, true, false)),
+            "the matched node is forwarded with the tree it was matched in"
+        );
     }
 }

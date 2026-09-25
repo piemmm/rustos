@@ -10,9 +10,10 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
 use super::device::{
-    hub_port_connected, hub_port_enabled, hub_port_speed, interrupt_interval, pointer_min_interval,
-    route_for_child, AttachOutcome, BulkDirection, BulkPipe, DeviceDescriptor, DmaBank, EnumStage,
-    EventWait, HubEvent, InterfaceInfo, UsbDevice, BULK_BUF_LEN, BULK_SLOTS, CAPTURE_LEN,
+    first_langid, hub_port_connected, hub_port_enabled, hub_port_speed, interrupt_interval,
+    pointer_min_interval, route_for_child, AttachOutcome, BulkDirection, BulkPipe,
+    DeviceDescriptor, DeviceIdentity, DmaBank, EnumStage, EventWait, HubDescriptor, HubEvent,
+    InterfaceInfo, SerialNumber, StringHeader, UsbDevice, BULK_BUF_LEN, BULK_SLOTS, CAPTURE_LEN,
     EVENT_RING_SEGMENT_MIN_TRBS, INT_ARM_DEPTH, MAX_HUB_DEPTH, PORT_RESET_POLLS,
     PORT_RESET_POLL_US, PORT_RESET_SETTLE_US, REPORT_LEN, REPORT_QUEUE_CAP, RING_TRBS, SPEED_HIGH,
 };
@@ -76,6 +77,13 @@ struct MockDma {
     phys: u64,
     /// Live chunks as `(base, len)`, ascending by base.
     chunks: Vec<(usize, usize)>,
+    /// Chunks taken out of service and not yet returned, as `(base, len)`.
+    withheld: Vec<(usize, usize)>,
+    /// Whether every chunk is to be kept for good, shared so a test can read
+    /// it after the bank is dropped with its engine.
+    withheld_for_good: Rc<Cell<bool>>,
+    /// Where releases and the bank's own drop are recorded, when attached.
+    teardown_log: Option<TeardownLog>,
     /// The next chunk's base offset; monotonic, 4096-aligned.
     next_base: usize,
     /// Bytes read out of the region, so a cost-budget regression can hold the
@@ -95,6 +103,9 @@ impl MockDma {
             mem,
             phys,
             chunks: Vec::new(),
+            withheld: Vec::new(),
+            withheld_for_good: Rc::new(Cell::new(false)),
+            teardown_log: None,
             next_base: 0,
             read_bytes: 0,
             read_calls: 0,
@@ -106,6 +117,20 @@ impl MockDma {
     /// release-on-detach tests assert on.
     fn live_chunks(&self) -> usize {
         self.chunks.len()
+    }
+
+    /// Chunks taken out of service that the controller may still reach.
+    fn withheld_chunks(&self) -> usize {
+        self.withheld.len()
+    }
+
+    /// Whether `offset` lies in memory the bank still holds, live or
+    /// withheld.
+    fn holds(&self, offset: usize) -> bool {
+        self.chunks
+            .iter()
+            .chain(&self.withheld)
+            .any(|&(base, len)| (base..base + len).contains(&offset))
     }
 
     /// The live chunk containing `[offset, offset + len)` wholly (and
@@ -144,7 +169,38 @@ impl DmaBank for MockDma {
             .position(|&(chunk_base, _)| chunk_base == base)
             .ok_or(DriverError::NotFound)?;
         self.chunks.remove(index);
+        record_teardown(self.teardown_log.as_ref(), Teardown::Released(base));
         Ok(())
+    }
+
+    fn withhold(&mut self, base: usize) -> Result<(), DriverError> {
+        let index = self
+            .chunks
+            .iter()
+            .position(|&(chunk_base, _)| chunk_base == base)
+            .ok_or(DriverError::NotFound)?;
+        let chunk = self.chunks.remove(index);
+        self.withheld.push(chunk);
+        Ok(())
+    }
+
+    fn release_withheld_chunk(&mut self, base: usize) -> Result<(), DriverError> {
+        let index = self
+            .withheld
+            .iter()
+            .position(|&(chunk_base, _)| chunk_base == base)
+            .ok_or(DriverError::NotFound)?;
+        self.withheld.remove(index);
+        record_teardown(self.teardown_log.as_ref(), Teardown::Released(base));
+        Ok(())
+    }
+
+    fn release_withheld(&mut self) {
+        self.withheld.clear();
+    }
+
+    fn withhold_all(&mut self) {
+        self.withheld_for_good.set(true);
     }
 
     fn phys_of(&self, offset: usize) -> Result<u64, DriverError> {
@@ -170,6 +226,36 @@ impl DmaBank for MockDma {
 
     fn device_quiesced(&self) {
         self.quiesced.set(self.quiesced.get() + 1);
+    }
+}
+
+impl Drop for MockDma {
+    fn drop(&mut self) {
+        record_teardown(self.teardown_log.as_ref(), Teardown::BankDropped);
+    }
+}
+
+/// One step of letting memory go, recorded in order by the mock controller
+/// and bank, so a test can read the order after both are consumed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Teardown {
+    /// A Host Controller Reset written after the controller was run.
+    ResetAfterRun,
+    /// A Disable Slot the controller executed and confirmed.
+    SlotDisabled(u8),
+    /// A chunk returned to the bank, by base.
+    Released(usize),
+    /// The bank dropped, freeing every chunk it did not withhold.
+    BankDropped,
+}
+
+/// A [`Teardown`] log shared by the mock controller and bank.
+type TeardownLog = Rc<RefCell<Vec<Teardown>>>;
+
+/// Append `step` to `log`, when one is attached.
+fn record_teardown(log: Option<&TeardownLog>, step: Teardown) {
+    if let Some(log) = log {
+        log.borrow_mut().push(step);
     }
 }
 
@@ -394,6 +480,20 @@ const MOCK_DESCRIPTOR: [u8; 18] = [
     0x00, 0x01,
 ];
 
+/// The string the serial-number fixtures name as `iSerialNumber`.
+const SERIAL_INDEX: u8 = 3;
+
+/// As [`MOCK_DESCRIPTOR`], but `iSerialNumber` names string [`SERIAL_INDEX`].
+const MOCK_SERIAL_DESCRIPTOR: [u8; 18] = {
+    let mut bytes = MOCK_DESCRIPTOR;
+    bytes[16] = SERIAL_INDEX;
+    bytes
+};
+
+/// The LANGIDs of US English and of German.
+const LANGID_EN_US: u16 = 0x0409;
+const LANGID_DE_DE: u16 = 0x0407;
+
 /// The configuration descriptor fixture the model answers
 /// `GET_DESCRIPTOR(configuration)` with: a 9-byte configuration header
 /// (`bConfigurationValue` = 1) followed by one 9-byte interface
@@ -466,6 +566,42 @@ const MOCK_HUB_CONFIG_DESCRIPTOR: [u8; 25] = [
     0x07, 0x05, 0x82, 0x03, 0x01, 0x00, 0x0C,
 ];
 
+/// As [`MOCK_HUB_CONFIG_DESCRIPTOR`], but the hub reports no status-change
+/// endpoint at all.
+const MOCK_HUB_WITHOUT_WATCH_CONFIG_DESCRIPTOR: [u8; 18] = [
+    // Configuration: wTotalLength=18, 1 interface.
+    0x09, 0x02, 0x12, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    // Interface: class=0x09 (hub), no endpoint.
+    0x09, 0x04, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
+];
+
+/// As [`MOCK_HUB_CONFIG_DESCRIPTOR`], but the hub's configuration also
+/// claims a HID boot-keyboard interface with its own interrupt-IN endpoint.
+const MOCK_HUB_WITH_HID_CONFIG_DESCRIPTOR: [u8; 41] = [
+    // Configuration: wTotalLength=41, 2 interfaces.
+    0x09, 0x02, 0x29, 0x00, 0x02, 0x01, 0x00, 0xA0, 0x32, //
+    // Interface 0: class=0x09 (hub), 1 endpoint.
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x09, 0x00, 0x00, 0x00, //
+    0x07, 0x05, 0x82, 0x03, 0x01, 0x00, 0x0C, //
+    // Interface 1: class=0x03 (HID), sub=0x01 (boot), protocol=0x01
+    // (keyboard), 1 endpoint.
+    0x09, 0x04, 0x01, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00, //
+    // Endpoint: 0x81 interrupt IN, wMaxPacketSize=8, bInterval=10.
+    0x07, 0x05, 0x81, 0x03, 0x08, 0x00, 0x0A,
+];
+
+/// The configuration descriptor of a unidirectional printer: one interface
+/// of class `07:01:01` whose only endpoint is bulk-OUT, so nothing on it is
+/// servable.
+const MOCK_PRINTER_CONFIG_DESCRIPTOR: [u8; 25] = [
+    // Configuration: wTotalLength=25, 1 interface.
+    0x09, 0x02, 0x19, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    // Interface: class=0x07 (printer), sub=0x01, protocol=0x01, 1 endpoint.
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x07, 0x01, 0x01, 0x00, //
+    // Endpoint: 0x01 bulk OUT, wMaxPacketSize=64.
+    0x07, 0x05, 0x01, 0x02, 0x40, 0x00, 0x00,
+];
+
 /// The device descriptor fixture for a mass-storage device (class in the
 /// interface descriptor, vendor `0x0781` product `0x5567` — a generic
 /// flash-disk identity).
@@ -473,6 +609,14 @@ const MOCK_MSD_DESCRIPTOR: [u8; 18] = [
     18, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40, 0x81, 0x07, 0x67, 0x55, 0x00, 0x01, 0x00, 0x00,
     0x00, 0x01,
 ];
+
+/// As [`MOCK_MSD_DESCRIPTOR`], but `iSerialNumber` names string
+/// [`SERIAL_INDEX`].
+const MOCK_MSD_SERIAL_DESCRIPTOR: [u8; 18] = {
+    let mut bytes = MOCK_MSD_DESCRIPTOR;
+    bytes[16] = SERIAL_INDEX;
+    bytes
+};
 
 /// The configuration descriptor fixture for the mass-storage device: one
 /// interface of class `08:06:50` (mass storage, SCSI transparent, bulk-only
@@ -594,6 +738,14 @@ const MOCK_COMPOSITE_DESCRIPTOR: [u8; 18] = [
     0x00, 0x01,
 ];
 
+/// As [`MOCK_COMPOSITE_DESCRIPTOR`], but `iSerialNumber` names string
+/// [`SERIAL_INDEX`].
+const MOCK_COMPOSITE_SERIAL_DESCRIPTOR: [u8; 18] = {
+    let mut bytes = MOCK_COMPOSITE_DESCRIPTOR;
+    bytes[16] = SERIAL_INDEX;
+    bytes
+};
+
 /// As [`MOCK_COMPOSITE_DESCRIPTOR`], but forging `bMaxPacketSize0` = 7 —
 /// a value no full-speed device may report (USB 2.0 §5.5.3 allows only
 /// 8/16/32/64) — so the driver must reject the device fail-closed rather
@@ -633,6 +785,21 @@ const MOCK_COMPOSITE_CONFIG_DESCRIPTOR: [u8; 75] = [
     0x07, 0x05, 0x83, 0x03, 0x08, 0x00, 0x0A,
 ];
 
+/// The configuration of a keyboard with a card reader: interface 0 a boot
+/// keyboard (EP1 IN → DCI 3), interface 1 a bulk-only mass-storage interface
+/// (EP2 IN → DCI 5, EP3 OUT → DCI 6).
+const MOCK_KEYBOARD_CARD_READER_CONFIG_DESCRIPTOR: [u8; 48] = [
+    // Configuration: wTotalLength=48, 2 interfaces.
+    0x09, 0x02, 0x30, 0x00, 0x02, 0x01, 0x00, 0xA0, 0x32, //
+    // Interface 0: HID boot keyboard, 1 endpoint.
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00, //
+    0x07, 0x05, 0x81, 0x03, 0x08, 0x00, 0x0A, //
+    // Interface 1: mass storage, SCSI, bulk-only, 2 endpoints.
+    0x09, 0x04, 0x01, 0x00, 0x02, 0x08, 0x06, 0x50, 0x00, //
+    0x07, 0x05, 0x82, 0x02, 0x00, 0x02, 0x00, //
+    0x07, 0x05, 0x03, 0x02, 0x00, 0x02, 0x00,
+];
+
 /// Register-level xHCI model: the capability block, `USBCMD`/`USBSTS`
 /// halt/reset behaviour, four `PORTSC` ports, a doorbell write log,
 /// and — when a shared DMA buffer is attached — an in-memory device
@@ -666,6 +833,14 @@ struct MockXhci {
     hcrst_stuck: bool,
     /// When set, `USBSTS` reports Controller Not Ready forever.
     cnr_stuck: bool,
+    /// When set, the controller never leaves the halted state once `RUN` is
+    /// written: `USBSTS.HCH` stays set.
+    never_runs: bool,
+    /// When set, a Host Controller Reset requested after `RUN` was ever
+    /// written never self-clears: a controller that wedges once it has run.
+    reset_sticks_once_run: bool,
+    /// Whether `RUN` has ever been written.
+    ran: bool,
     /// When set, `USBSTS` reports a latched Host System Error until a
     /// host-controller reset clears it.
     hse_latched: bool,
@@ -838,6 +1013,36 @@ struct MockXhci {
     /// best-effort teardown must still free the slot locally so a re-plug
     /// re-enumerates.
     suppress_disable_completion: bool,
+    /// When set, a `DisableSlot` command is answered only once the test calls
+    /// [`Self::complete_deferred_disables`]: the metal hot-removal whose
+    /// confirmation arrives after the engine gave up waiting for it.
+    defer_disable_completion: bool,
+    /// The deferred Disable Slots as `(command TRB, slot)`.
+    deferred_disables: Vec<(u64, u8)>,
+    /// When set, a Disable Slot first delivers the pending interrupt reports:
+    /// a report landing while the teardown awaits its completion.
+    report_on_disable_slot: bool,
+    /// Slots Enable Slot handed out that no confirmed Disable Slot has since
+    /// returned.
+    enabled_slots: Vec<u8>,
+    /// Positions `(root port, Route String)` of the devices holding the
+    /// address an Address Device gave them. Only a port reset, a disconnect
+    /// or a controller reset returns a device to Default state, and a device
+    /// out of it no longer answers the `SET_ADDRESS` of a fresh slot.
+    device_addresses: Vec<(u8, u32)>,
+    /// When set, the next control TD with an IN data stage is left
+    /// unanswered: the controller keeps retrying it, so it times out and its
+    /// endpoint runs nothing more until stopped. These bytes are what the
+    /// device answers as the stop lands, empty for a device that never does.
+    stall_next_control_in: Option<Vec<u8>>,
+    /// The control TD the controller is stuck retrying, when one is.
+    ep0_unanswered: Option<UnansweredControl>,
+    /// One-shot: the stuck TD fails with this code just before a Stop
+    /// Endpoint lands, halting the endpoint so the stop is refused.
+    unanswered_halts_at_stop: Option<CompletionCode>,
+    /// Where confirmed Disable Slots and resets after `RUN` are recorded,
+    /// when attached.
+    teardown_log: Option<TeardownLog>,
     /// A root-hub port (0-based) whose device only reports Current
     /// Connect Status once software writes Port Power — modelling a
     /// port-power-controlled controller (the VL805, `HCCPARAMS1`
@@ -893,12 +1098,12 @@ struct MockXhci {
     /// test pins that an SS hub is told its tier depth before its ports
     /// are descended. `None` until the request arrives.
     hub_depth_set: Option<u8>,
-    /// Whether the default control endpoint is halted. A control
-    /// transfer that STALLs halts EP0 in xHCI (§4.8.3 / §4.10.2.4): the
-    /// controller runs no further TRBs on it until software resets the
-    /// endpoint, so a subsequent control transfer faults. This models
-    /// that, catching code that reuses EP0 after a tolerated STALL.
-    ep0_halted: bool,
+    /// Each slot's default control endpoint state, indexed by slot id. Any
+    /// error completion halts it (xHCI §4.8.3): a doorbell then runs nothing
+    /// until software resets the endpoint, so code that reuses EP0 after a
+    /// failed transfer without taking it back finds its next transfer never
+    /// answered.
+    ep0_state: [MockEp0; 33],
     /// Command blocks delivered over the class ADSC control-OUT data
     /// stage (the CBI command channel).
     adsc_blocks: Vec<Vec<u8>>,
@@ -973,6 +1178,31 @@ struct MockXhci {
     /// interrupt endpoint is not endpoint 1 to prove the driver reads
     /// the endpoint's real DCI rather than assuming it.
     keyboard_config: &'static [u8],
+    /// Whether the keyboard and composite fixtures name string
+    /// [`SERIAL_INDEX`] as their serial number.
+    names_serial: bool,
+    /// The string descriptors the addressed device serves, as `(index,
+    /// LANGID, descriptor)`; a request for any other STALLs.
+    string_descriptors: Vec<(u8, u16, Vec<u8>)>,
+    /// A header a 2-byte read of string `.0` answers in place of the
+    /// descriptor's own: a device whose second answer contradicts its first.
+    string_header_override: Option<(u8, [u8; 2])>,
+    /// One-shot: the next standard `GET_DESCRIPTOR` of type `.0` completes
+    /// with `.1` and delivers nothing.
+    fault_next_descriptor_read: Option<(u8, CompletionCode)>,
+    /// One-shot: the next standard `GET_DESCRIPTOR` of this type is never
+    /// answered — the device NAKs it for ever.
+    withhold_next_descriptor_read: Option<u8>,
+    /// One-shot: the next control TD's SETUP stage fails with this code,
+    /// its event naming the SETUP TRB.
+    fault_next_setup_stage: Option<CompletionCode>,
+    /// Root-port resets requested, so a test can see a re-drive reset its
+    /// port.
+    root_port_resets: u32,
+    /// Every SETUP packet a control TD delivered to the device, in order.
+    control_requests: Vec<[u8; 8]>,
+    /// The configuration-descriptor fixture answered for a hub.
+    hub_config: &'static [u8],
     /// The Report Descriptor the model answers `GET_DESCRIPTOR(Report)` with
     /// (`None` = the model STALLs the request, so enumeration falls back to
     /// boot protocol — the default, matching a device that serves no report
@@ -1078,6 +1308,34 @@ struct MockXhci {
     bulk_in_responses: VecDeque<Vec<u8>>,
     /// Bytes each completed bulk-OUT TD delivered to the device.
     bulk_out_received: Vec<Vec<u8>>,
+}
+
+/// One slot's default control endpoint as the controller holds it (xHCI
+/// §4.8.3).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+enum MockEp0 {
+    /// Running whatever its ring holds.
+    #[default]
+    Running,
+    /// Stopped by an error completion: a doorbell runs nothing until a
+    /// Reset Endpoint.
+    Halted,
+    /// Stopped by a Stop or Reset Endpoint: the next doorbell runs it.
+    Stopped,
+}
+
+/// A control TD the device leaves unanswered, which the controller keeps
+/// retrying until its endpoint is stopped.
+struct UnansweredControl {
+    slot: u8,
+    /// The data stage TRB the controller is stuck on.
+    data_trb: u64,
+    /// The TD's status stage TRB.
+    status_trb: u64,
+    /// Where its IN data stage lands.
+    buffer: u64,
+    /// What the device answers as the stop lands; empty when it never does.
+    late: Vec<u8>,
 }
 
 /// One direction of the mock's bulk endpoint model: the transfer ring's
@@ -1218,6 +1476,9 @@ impl MockXhci {
             hcrst_reads: 0,
             hcrst_stuck: false,
             cnr_stuck: false,
+            never_runs: false,
+            reset_sticks_once_run: false,
+            ran: false,
             hse_latched: false,
             eint_latched: false,
             pcd_latched: false,
@@ -1278,6 +1539,15 @@ impl MockXhci {
             device_gone: false,
             inject_int_fault_on_clear: None,
             suppress_disable_completion: false,
+            defer_disable_completion: false,
+            deferred_disables: Vec::new(),
+            report_on_disable_slot: false,
+            enabled_slots: Vec::new(),
+            device_addresses: Vec::new(),
+            stall_next_control_in: None,
+            ep0_unanswered: None,
+            unanswered_halts_at_stop: None,
+            teardown_log: None,
             latent_device_port: None,
             hcsparams2: 0,
             pagesize: 0,
@@ -1289,7 +1559,7 @@ impl MockXhci {
             garble_hub_descriptor_replies: 0,
             superspeed_hub: false,
             hub_depth_set: None,
-            ep0_halted: false,
+            ep0_state: [MockEp0::Running; 33],
             adsc_blocks: Vec::new(),
             fault_hub_port_status: false,
             fault_hub_port_status_raw: 0,
@@ -1304,6 +1574,15 @@ impl MockXhci {
             int_interval: 0,
             int_armed_len: 0,
             keyboard_config: &MOCK_CONFIG_DESCRIPTOR,
+            names_serial: false,
+            string_descriptors: Vec::new(),
+            string_header_override: None,
+            fault_next_descriptor_read: None,
+            withhold_next_descriptor_read: None,
+            fault_next_setup_stage: None,
+            root_port_resets: 0,
+            control_requests: Vec::new(),
+            hub_config: &MOCK_HUB_CONFIG_DESCRIPTOR,
             report_descriptor: None,
             int_dci: 3,
             msd_device: false,
@@ -1480,6 +1759,30 @@ impl MockXhci {
         mock.keyboard_config = &MOCK_FAST_MOUSE_REPORT_CONFIG_DESCRIPTOR;
         mock.report_descriptor = Some(&MOCK_MOUSE_REPORT_DESCRIPTOR);
         mock
+    }
+
+    /// As [`Self::with_device`], but the keyboard names string
+    /// [`SERIAL_INDEX`] as its serial number and serves `strings`.
+    fn with_serial_keyboard(mem: &SharedMem, strings: Vec<(u8, u16, Vec<u8>)>) -> Self {
+        let mut mock = Self::with_device(mem);
+        mock.names_serial = true;
+        mock.string_descriptors = strings;
+        mock
+    }
+
+    /// As [`Self::with_msd_device`], but the storage device names string
+    /// [`SERIAL_INDEX`] as its serial number and serves `strings`.
+    fn with_serial_storage(mem: &SharedMem, strings: Vec<(u8, u16, Vec<u8>)>) -> Self {
+        let mut mock = Self::with_msd_device(mem);
+        mock.names_serial = true;
+        mock.string_descriptors = strings;
+        mock
+    }
+
+    /// The output-context pointer `DCBAA[slot]` holds.
+    fn dcbaa_entry(&self, slot: u8) -> u64 {
+        let entry = self.read_dwords(Self::qword(self.dcbaap) + u64::from(slot) * 8, 2);
+        (u64::from(entry[1]) << 32) | u64::from(entry[0])
     }
 
     /// `true` while a scratchpad-requiring controller's `DCBAA[0]` (the
@@ -1705,6 +2008,20 @@ impl MockXhci {
         } else {
             self.active_slot
         };
+        // Every error but a stop halts the control endpoint (xHCI §4.8.3).
+        let halts = !matches!(
+            CompletionCode::from_raw(u32::from(code)),
+            Ok(CompletionCode::Success
+                | CompletionCode::ShortPacket
+                | CompletionCode::Stopped
+                | CompletionCode::StoppedLengthInvalid
+                | CompletionCode::StoppedShortPacket)
+        );
+        if dci == 1 && halts {
+            if let Some(state) = self.ep0_state.get_mut(usize::from(slot)) {
+                *state = MockEp0::Halted;
+            }
+        }
         self.post_event(Trb {
             parameter: trb_addr,
             status: (u32::from(code) << 24) | residual,
@@ -1781,24 +2098,14 @@ impl MockXhci {
                     let slot = self.next_slot;
                     self.next_slot += 1;
                     self.active_slot = slot;
+                    self.enabled_slots.push(slot);
                     self.post_command_completion(addr, CompletionCode::Success, slot);
                 }
                 Ok(TrbType::AddressDevice) => {
                     let code = self.handle_address_device(trb.parameter);
                     self.post_command_completion(addr, code, trb.slot_id());
                 }
-                Ok(TrbType::DisableSlot) => {
-                    // Free a device slot on hot-removal (xHCI §6.4.3.3); the
-                    // mock just acknowledges it (the engine clears its own
-                    // per-device state and DCBAA entry). When
-                    // `suppress_disable_completion` is set the controller posts
-                    // no completion at all, modelling the metal hot-removal
-                    // where the gone device's hub never lets the Disable Slot
-                    // be acknowledged.
-                    if !self.suppress_disable_completion {
-                        self.post_command_completion(addr, CompletionCode::Success, trb.slot_id());
-                    }
-                }
+                Ok(TrbType::DisableSlot) => self.handle_disable_slot(addr, trb.slot_id()),
                 Ok(TrbType::ConfigureEndpoint) => {
                     let code = self.handle_configure_endpoint(trb.parameter, trb.slot_id());
                     self.post_command_completion(addr, code, trb.slot_id());
@@ -1808,70 +2115,16 @@ impl MockXhci {
                     self.post_command_completion(addr, code, trb.slot_id());
                 }
                 Ok(TrbType::ResetEndpoint) => {
-                    // Clears the controller-side halt (§4.6.8): the first
-                    // step of the required recovery order. A halted default
-                    // control endpoint resumes here too (§4.10.2.4).
-                    let dci = trb.endpoint_id();
-                    if dci == 1 && trb.slot_id() == self.ep0_slot {
-                        self.ep0_halted = false;
-                    }
-                    if dci == self.bulk_in.dci && self.bulk_in.halt == 1 {
-                        self.bulk_in.halt = 2;
-                    }
-                    if dci == self.bulk_out.dci && self.bulk_out.halt == 1 {
-                        self.bulk_out.halt = 2;
-                    }
-                    if dci == self.int_dci && self.int_halt == 1 {
-                        self.int_halt = 2;
-                    }
-                    self.post_command_completion(addr, CompletionCode::Success, trb.slot_id());
+                    let code = self.reset_endpoint(trb.slot_id(), trb.endpoint_id());
+                    self.post_command_completion(addr, code, trb.slot_id());
+                }
+                Ok(TrbType::StopEndpoint) => {
+                    let code = self.stop_endpoint(trb.slot_id(), trb.endpoint_id());
+                    self.post_command_completion(addr, code, trb.slot_id());
                 }
                 Ok(TrbType::SetTrDequeuePointer) => {
-                    // Repositions the endpoint's ring (§4.6.10): honoured
-                    // only after a Reset Endpoint cleared the halt.
-                    let dci = trb.endpoint_id();
-                    let base = trb.parameter & !0xF;
-                    let cycle = trb.parameter & 1 != 0;
-                    if dci == 1 {
-                        // The default control endpoint: the engine's EP0
-                        // stall recovery rebuilds the ring at its base and
-                        // repoints the dequeue; follow it like hardware so
-                        // later control transfers stay in step.
-                        let slot = trb.slot_id();
-                        if slot == self.ep0_slot {
-                            self.ep0_base = base;
-                            self.ep0_index = 0;
-                            self.ep0_cycle = cycle;
-                        } else if usize::from(slot) < self.ep0_saved.len() {
-                            self.ep0_saved[usize::from(slot)] = (base, 0, cycle);
-                        }
-                    }
-                    if dci == self.bulk_in.dci {
-                        self.bulk_in.base = base;
-                        self.bulk_in.index = 0;
-                        self.bulk_in.cycle = cycle;
-                        if self.bulk_in.halt == 2 {
-                            self.bulk_in.halt = 3;
-                        }
-                    }
-                    if dci == self.bulk_out.dci {
-                        self.bulk_out.base = base;
-                        self.bulk_out.index = 0;
-                        self.bulk_out.cycle = cycle;
-                        if self.bulk_out.halt == 2 {
-                            self.bulk_out.halt = 3;
-                        }
-                    }
-                    // The primary interrupt endpoint repoints its consumer to
-                    // the rebuilt ring only as part of the halt recovery (Reset
-                    // Endpoint must have run first).
-                    if dci == self.int_dci && self.int_halt == 2 {
-                        self.int_base = base;
-                        self.int_index = 0;
-                        self.int_cycle = cycle;
-                        self.int_halt = 3;
-                    }
-                    self.post_command_completion(addr, CompletionCode::Success, trb.slot_id());
+                    let code = self.set_tr_dequeue(trb);
+                    self.post_command_completion(addr, code, trb.slot_id());
                 }
                 Ok(TrbType::NoOpCommand) => {
                     self.post_command_completion(addr, CompletionCode::Success, 0);
@@ -1883,6 +2136,193 @@ impl MockXhci {
         }
     }
 
+    /// Free `slot` on a Disable Slot command at `addr` (xHCI §6.4.3.3); the
+    /// engine clears its own per-device state and DCBAA entry. When
+    /// `suppress_disable_completion` is set the controller neither frees the
+    /// slot nor posts a completion, modelling the metal hot-removal where the
+    /// gone device's hub never lets the Disable Slot be acknowledged; when
+    /// `defer_disable_completion` is, it does both only when the test says.
+    fn handle_disable_slot(&mut self, addr: u64, slot: u8) {
+        if self.report_on_disable_slot {
+            self.report_on_disable_slot = false;
+            self.process_int_ring();
+        }
+        if self.suppress_disable_completion {
+            return;
+        }
+        if self.defer_disable_completion {
+            self.deferred_disables.push((addr, slot));
+            return;
+        }
+        self.confirm_disable_slot(addr, slot);
+    }
+
+    /// Free `slot` and post the Success its Disable Slot at `addr` earns.
+    fn confirm_disable_slot(&mut self, addr: u64, slot: u8) {
+        self.enabled_slots.retain(|&enabled| enabled != slot);
+        record_teardown(self.teardown_log.as_ref(), Teardown::SlotDisabled(slot));
+        self.post_command_completion(addr, CompletionCode::Success, slot);
+    }
+
+    /// Answer every deferred Disable Slot, late, with `code`: only a Success
+    /// frees the slot.
+    fn complete_deferred_disables(&mut self, code: CompletionCode) {
+        for (addr, slot) in core::mem::take(&mut self.deferred_disables) {
+            if code == CompletionCode::Success {
+                self.confirm_disable_slot(addr, slot);
+            } else {
+                self.post_command_completion(addr, code, slot);
+            }
+        }
+    }
+
+    /// Reset Endpoint on `slot`'s endpoint `dci`: it clears the
+    /// controller-side halt (§4.6.8), the first step of the recovery order
+    /// the silicon requires. A control endpoint goes from Halted to Stopped,
+    /// and refuses it in any other state.
+    fn reset_endpoint(&mut self, slot: u8, dci: u8) -> CompletionCode {
+        if dci == 1 {
+            return match self.ep0_state.get_mut(usize::from(slot)) {
+                Some(state @ MockEp0::Halted) => {
+                    *state = MockEp0::Stopped;
+                    CompletionCode::Success
+                }
+                Some(_) => CompletionCode::ContextStateError,
+                None => CompletionCode::TrbError,
+            };
+        }
+        if dci == self.bulk_in.dci && self.bulk_in.halt == 1 {
+            self.bulk_in.halt = 2;
+        }
+        if dci == self.bulk_out.dci && self.bulk_out.halt == 1 {
+            self.bulk_out.halt = 2;
+        }
+        if dci == self.int_dci && self.int_halt == 1 {
+            self.int_halt = 2;
+        }
+        CompletionCode::Success
+    }
+
+    /// Set TR Dequeue Pointer (§4.6.10): repoint an endpoint's ring, which a
+    /// control endpoint allows only while stopped and the other endpoints
+    /// only once a Reset Endpoint cleared their halt.
+    fn set_tr_dequeue(&mut self, trb: Trb) -> CompletionCode {
+        let (slot, dci) = (trb.slot_id(), trb.endpoint_id());
+        let base = trb.parameter & !0xF;
+        let cycle = trb.parameter & 1 != 0;
+        if dci == 1 {
+            if self.ep0_state.get(usize::from(slot)) != Some(&MockEp0::Stopped) {
+                return CompletionCode::ContextStateError;
+            }
+            // The engine's EP0 recovery rebuilds the ring at its base and
+            // repoints the dequeue; follow it like hardware so later control
+            // transfers stay in step.
+            if slot == self.ep0_slot {
+                self.ep0_base = base;
+                self.ep0_index = 0;
+                self.ep0_cycle = cycle;
+            } else if usize::from(slot) < self.ep0_saved.len() {
+                self.ep0_saved[usize::from(slot)] = (base, 0, cycle);
+            }
+        }
+        if dci == self.bulk_in.dci {
+            self.bulk_in.base = base;
+            self.bulk_in.index = 0;
+            self.bulk_in.cycle = cycle;
+            if self.bulk_in.halt == 2 {
+                self.bulk_in.halt = 3;
+            }
+        }
+        if dci == self.bulk_out.dci {
+            self.bulk_out.base = base;
+            self.bulk_out.index = 0;
+            self.bulk_out.cycle = cycle;
+            if self.bulk_out.halt == 2 {
+                self.bulk_out.halt = 3;
+            }
+        }
+        // The primary interrupt endpoint repoints its consumer to the rebuilt
+        // ring only as part of the halt recovery (Reset Endpoint must have run
+        // first).
+        if dci == self.int_dci && self.int_halt == 2 {
+            self.int_base = base;
+            self.int_index = 0;
+            self.int_cycle = cycle;
+            self.int_halt = 3;
+        }
+        CompletionCode::Success
+    }
+
+    /// Stop Endpoint on `slot`'s endpoint `dci`, only the control endpoint
+    /// modelled: it takes a running endpoint to Stopped (§4.6.9) and is
+    /// refused on any other. A TD it was stuck on is abandoned with a Stopped
+    /// event, or completes when the device answers it as the stop lands.
+    fn stop_endpoint(&mut self, slot: u8, dci: u8) -> CompletionCode {
+        let index = usize::from(slot);
+        if dci != 1 || index >= self.ep0_state.len() {
+            return CompletionCode::TrbError;
+        }
+        if self.ep0_state[index] != MockEp0::Running {
+            return CompletionCode::ContextStateError;
+        }
+        if let Some(stuck) = self.ep0_unanswered.take_if(|stuck| stuck.slot == slot) {
+            if let Some(code) = self.unanswered_halts_at_stop.take() {
+                self.post_transfer_event_for_slot(stuck.data_trb, code, 1, 0, slot);
+                self.ep0_state[index] = MockEp0::Halted;
+                return CompletionCode::ContextStateError;
+            }
+            if stuck.late.is_empty() {
+                self.post_transfer_event_for_slot(
+                    stuck.data_trb,
+                    CompletionCode::Stopped,
+                    1,
+                    0,
+                    slot,
+                );
+            } else {
+                self.write_mem(stuck.buffer, &stuck.late);
+                self.post_transfer_event_for_slot(
+                    stuck.status_trb,
+                    CompletionCode::Success,
+                    1,
+                    0,
+                    slot,
+                );
+            }
+        }
+        self.ep0_state[index] = MockEp0::Stopped;
+        CompletionCode::Success
+    }
+
+    /// Whether any slot's control endpoint is halted.
+    fn ep0_halted(&self) -> bool {
+        self.ep0_state.contains(&MockEp0::Halted)
+    }
+
+    /// Whether the live control endpoint runs nothing: it is not running, or
+    /// the controller is stuck retrying a TD its device leaves unanswered.
+    fn ep0_blocked(&self) -> bool {
+        self.ep0_state.get(usize::from(self.ep0_slot)) != Some(&MockEp0::Running)
+            || self
+                .ep0_unanswered
+                .as_ref()
+                .is_some_and(|stuck| stuck.slot == self.ep0_slot)
+    }
+
+    /// Forget the address of the device at `root_port` / `route` and of every
+    /// device behind it: a reset or a disconnect returns them to Default
+    /// state.
+    fn forget_addresses(&mut self, root_port: u8, route: u32) {
+        let tiers = (u32::BITS - route.leading_zeros()).div_ceil(4);
+        let mask = if tiers == 0 {
+            0
+        } else {
+            u32::MAX >> (u32::BITS - 4 * tiers)
+        };
+        self.device_addresses
+            .retain(|&(port, addressed)| port != root_port || addressed & mask != route);
+    }
+
     /// Read a transfer-ring dequeue pointer out of the endpoint context
     /// at `ctx_addr` (dwords 2/3, DCS masked off).
     fn ep_ctx_dequeue(&self, ctx_addr: u64) -> u64 {
@@ -1891,22 +2331,22 @@ impl MockXhci {
     }
 
     fn handle_address_device(&mut self, input_ctx: u64) -> CompletionCode {
-        // A one-shot transaction/split fault on the *downstream* device (a
-        // full/low-speed device behind the hub's transaction translator, the
-        // only place a Split Transaction Error occurs): the device never
-        // receives the Set Address, so it stays in Default state and none of
-        // the slot's context is touched — modelling a device disturbed by
-        // input during bring-up (a keyboard hammered before USB bring-up).
-        // The driver's bounded enumeration retry re-drives a fresh slot.
-        let addressing_downstream = {
-            let slot_ctx = self.read_dwords(input_ctx + MOCK_CTX_SIZE as u64, 1);
-            slot_ctx[0] & 0x000F_FFFF != 0
+        // Slot context (the context after the input control context):
+        // dword 0 Route String (bits 0:19) + Speed (bits 20:23), dword 2
+        // TT Hub Slot ID (bits 0:7) + TT Port Number (bits 8:15).
+        let slot_ctx = self.read_dwords(input_ctx + MOCK_CTX_SIZE as u64, 3);
+        let route_string = slot_ctx[0] & 0x000F_FFFF;
+        // A one-shot fault leaves the device in Default state and none of the
+        // slot's context touched: on the *downstream* device a
+        // transaction/split fault (a full/low-speed device behind the hub's
+        // transaction translator, a keyboard hammered before USB bring-up),
+        // on a root one the controller's own refusal.
+        let fault = if route_string != 0 {
+            self.fault_next_address_device.take()
+        } else {
+            self.fault_next_root_address_device.take()
         };
-        if addressing_downstream {
-            if let Some(code) = self.fault_next_address_device.take() {
-                return code;
-            }
-        } else if let Some(code) = self.fault_next_root_address_device.take() {
+        if let Some(code) = fault {
             return code;
         }
         let control = self.read_dwords(input_ctx, 2);
@@ -1914,74 +2354,19 @@ impl MockXhci {
         if control[1] & 0b11 != 0b11 {
             return CompletionCode::TrbError;
         }
-        // Slot context (the context after the input control context):
-        // dword 0 Route String (bits 0:19) + Speed (bits 20:23), dword 2
-        // TT Hub Slot ID (bits 0:7) + TT Port Number (bits 8:15).
-        let slot_ctx = self.read_dwords(input_ctx + MOCK_CTX_SIZE as u64, 3);
-        let route_string = slot_ctx[0] & 0x000F_FFFF;
         let speed = (slot_ctx[0] >> 20) & 0xF;
-        let tt_hub_slot = (slot_ctx[2] & 0xFF) as u8;
-        let tt_port = ((slot_ctx[2] >> 8) & 0xFF) as u8;
+        let position = (((slot_ctx[1] >> 16) & 0xFF) as u8, route_string);
+        if let Some(code) = self.unanswered_set_address(position, speed) {
+            return code;
+        }
         if route_string != 0 {
-            // A device downstream of a hub: validate the Route String
-            // and, for a full/low-speed device, the transaction-translator
-            // coordinates the driver must program (xHCI §6.2.2 / §8.9). A
-            // wrong topology faults Address Device, so the host test proves
-            // the driver programmed them — the root hub occupies slot 1.
-            let route_port = (route_string & 0xF) as u8;
-            let nested_hub = if route_string <= 0xF {
-                self.nested_by_root_port(route_port)
-            } else {
-                None
-            };
-            let is_nested_hub = nested_hub.is_some();
-            let nested_child = self.nested_hubs.iter().position(|h| {
-                h.downstream_port != 0
-                    && route_string
-                        == (u32::from(h.root_port) | (u32::from(h.downstream_port) << 4))
-            });
-            let is_nested_child = nested_child.is_some();
-            let single_tier = route_string <= 0xF && !is_nested_hub;
-            let scripted = is_nested_hub
-                || is_nested_child
-                || (single_tier
-                    && (route_port == self.hub_downstream_port
-                        || (self.msd_downstream_port != 0
-                            && route_port == self.msd_downstream_port)
-                        || (self.mouse_downstream_port != 0
-                            && route_port == self.mouse_downstream_port)
-                        || (self.composite_downstream_port != 0
-                            && route_port == self.composite_downstream_port)));
-            if !scripted {
-                return CompletionCode::TrbError;
+            let tt = (
+                (slot_ctx[2] & 0xFF) as u8,
+                ((slot_ctx[2] >> 8) & 0xFF) as u8,
+            );
+            if let Err(code) = self.address_downstream(route_string, speed, tt) {
+                return code;
             }
-            let needs_tt = speed == 1 || speed == 2;
-            // A full/low-speed device splits through the transaction
-            // translator of the nearest **high-speed** hub above it: the
-            // nested hub for its own child, else the root hub (slot 1).
-            let (want_hub, want_port) = if needs_tt {
-                if let Some(i) = nested_child {
-                    (
-                        self.nested_hubs[i].slot,
-                        self.nested_hubs[i].downstream_port,
-                    )
-                } else {
-                    (self.root_hub_slot, route_port)
-                }
-            } else {
-                (0, 0)
-            };
-            if tt_hub_slot != want_hub || tt_port != want_port {
-                return CompletionCode::TrbError;
-            }
-            if let Some(i) = nested_hub {
-                self.nested_hubs[i].slot = self.active_slot;
-            }
-            self.downstream_active = true;
-            self.downstream_route = route_string;
-            // The single-tier assertions read the low nibble; a nested
-            // route is identified by the full route string instead.
-            self.downstream_route_port = if single_tier { route_port } else { 0 };
         }
         if route_string == 0 {
             // The addressed device sits directly on a root port: the fixture
@@ -2023,9 +2408,93 @@ impl MockXhci {
         let s = usize::from(self.active_slot);
         if s < self.ep0_saved.len() {
             self.ep0_saved[s] = (self.ep0_base, 0, true);
+            self.ep0_state[s] = MockEp0::Running;
         }
         self.addressed = true;
+        self.device_addresses.push(position);
         CompletionCode::Success
+    }
+
+    /// Address the device downstream of a hub on `route_string` at `speed`:
+    /// validate the Route String and, for a full/low-speed device, the
+    /// transaction-translator coordinates `tt` (hub slot, port) the driver
+    /// must program (xHCI §6.2.2 / §8.9), then make it the device standard
+    /// requests are answered for. A wrong topology faults Address Device, so
+    /// the host test proves the driver programmed them.
+    fn address_downstream(
+        &mut self,
+        route_string: u32,
+        speed: u32,
+        tt: (u8, u8),
+    ) -> Result<(), CompletionCode> {
+        let route_port = (route_string & 0xF) as u8;
+        let nested_hub = if route_string <= 0xF {
+            self.nested_by_root_port(route_port)
+        } else {
+            None
+        };
+        let is_nested_hub = nested_hub.is_some();
+        let nested_child = self.nested_hubs.iter().position(|h| {
+            h.downstream_port != 0
+                && route_string == (u32::from(h.root_port) | (u32::from(h.downstream_port) << 4))
+        });
+        let is_nested_child = nested_child.is_some();
+        let single_tier = route_string <= 0xF && !is_nested_hub;
+        let scripted = is_nested_hub
+            || is_nested_child
+            || (single_tier
+                && (route_port == self.hub_downstream_port
+                    || (self.msd_downstream_port != 0 && route_port == self.msd_downstream_port)
+                    || (self.mouse_downstream_port != 0
+                        && route_port == self.mouse_downstream_port)
+                    || (self.composite_downstream_port != 0
+                        && route_port == self.composite_downstream_port)));
+        if !scripted {
+            return Err(CompletionCode::TrbError);
+        }
+        let needs_tt = speed == 1 || speed == 2;
+        // A full/low-speed device splits through the transaction translator
+        // of the nearest **high-speed** hub above it: the nested hub for its
+        // own child, else the root hub.
+        let want = if needs_tt {
+            if let Some(i) = nested_child {
+                (
+                    self.nested_hubs[i].slot,
+                    self.nested_hubs[i].downstream_port,
+                )
+            } else {
+                (self.root_hub_slot, route_port)
+            }
+        } else {
+            (0, 0)
+        };
+        if tt != want {
+            return Err(CompletionCode::TrbError);
+        }
+        if let Some(i) = nested_hub {
+            self.nested_hubs[i].slot = self.active_slot;
+        }
+        self.downstream_active = true;
+        self.downstream_route = route_string;
+        // The single-tier assertions read the low nibble; a nested route is
+        // identified by the full route string instead.
+        self.downstream_route_port = if single_tier { route_port } else { 0 };
+        Ok(())
+    }
+
+    /// The error an Address Device for the device at `position` (root port,
+    /// Route String) at protocol `speed` fails with when that device holds
+    /// the address an earlier one gave it: it never answers the `SET_ADDRESS`
+    /// sent to the default address, and a full/low-speed one behind a hub
+    /// fails its split transaction.
+    fn unanswered_set_address(&self, position: (u8, u32), speed: u32) -> Option<CompletionCode> {
+        self.device_addresses.contains(&position).then_some(
+            if position.1 != 0 && (speed == 1 || speed == 2) {
+                CompletionCode::SplitTransactionError
+            } else {
+                CompletionCode::UsbTransactionError
+            },
+        )
     }
 
     /// Evaluate Context (xHCI §4.6.7): re-evaluate the EP0 Max Packet
@@ -2219,6 +2688,9 @@ impl MockXhci {
 
     fn process_ep0_ring(&mut self) {
         loop {
+            if self.ep0_blocked() {
+                return;
+            }
             let (mut index, mut cycle) = (self.ep0_index, self.ep0_cycle);
             let base = self.ep0_base;
             let Some((addr, trb)) = self.next_owned(base, &mut index, &mut cycle) else {
@@ -2228,6 +2700,10 @@ impl MockXhci {
             self.ep0_cycle = cycle;
             match trb.trb_type() {
                 Ok(TrbType::SetupStage) => {
+                    if let Some(code) = self.fault_next_setup_stage.take() {
+                        self.post_transfer_event(addr, code, 1, 0);
+                        continue;
+                    }
                     self.pending_setup = Some(trb.parameter.to_le_bytes());
                 }
                 Ok(TrbType::DataStage) => {
@@ -2299,13 +2775,16 @@ impl MockXhci {
         let is_composite = self.composite_downstream_port != 0
             && self.downstream_route_port == self.composite_downstream_port;
         match (desc_type, is_hub_device) {
+            (0x01, false) if is_msd && self.names_serial => &MOCK_MSD_SERIAL_DESCRIPTOR,
             (0x01, false) if is_msd => &MOCK_MSD_DESCRIPTOR,
             (0x01, false) if is_mouse => &MOCK_MOUSE_DESCRIPTOR,
             (0x01, false) if is_composite && self.forge_composite_ep0_max => {
                 &MOCK_COMPOSITE_DESCRIPTOR_FORGED_EP0
             }
+            (0x01, false) if is_composite && self.names_serial => &MOCK_COMPOSITE_SERIAL_DESCRIPTOR,
             (0x01, false) if is_composite => &MOCK_COMPOSITE_DESCRIPTOR,
             (0x01, false) if self.superspeed_hub => &MOCK_SS_DESCRIPTOR,
+            (0x01, false) if self.names_serial => &MOCK_SERIAL_DESCRIPTOR,
             (0x01, false) => &MOCK_DESCRIPTOR,
             (0x01, true) if self.superspeed_hub => &MOCK_SS_HUB_DESCRIPTOR,
             (0x01, true) => &MOCK_HUB_DESCRIPTOR,
@@ -2313,7 +2792,7 @@ impl MockXhci {
             (_, false) if is_mouse => &MOCK_MOUSE_CONFIG_DESCRIPTOR,
             (_, false) if is_composite => &MOCK_COMPOSITE_CONFIG_DESCRIPTOR,
             (_, false) => self.keyboard_config,
-            (_, true) => &MOCK_HUB_CONFIG_DESCRIPTOR,
+            (_, true) => self.hub_config,
         }
     }
 
@@ -2362,7 +2841,6 @@ impl MockXhci {
     ) -> bool {
         let own_type = if self.superspeed_hub { 0x2A } else { 0x29 };
         if requested_type != own_type {
-            self.ep0_halted = true;
             self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
             return false;
         }
@@ -2389,6 +2867,82 @@ impl MockXhci {
         self.deliver_in_data(data, &hub_desc, w_length, status_addr)
     }
 
+    /// Leave the IN control TD `setup` names unanswered when a knob says so
+    /// ([`Self::withhold_next_descriptor_read`],
+    /// [`Self::stall_next_control_in`]), returning `true` when it did: the
+    /// controller then keeps retrying its data stage `data`.
+    fn leave_unanswered(
+        &mut self,
+        setup: [u8; 8],
+        data: Option<(u64, u64, u32, bool)>,
+        status_addr: u64,
+    ) -> bool {
+        let (Some((data_trb, buffer, _, _)), true) = (data, setup[0] & 0x80 != 0) else {
+            return false;
+        };
+        let late = match self.withhold_next_descriptor_read {
+            Some(desc_type) if setup[..2] == [0x80, 0x06] && setup[3] == desc_type => {
+                self.withhold_next_descriptor_read = None;
+                Vec::new()
+            }
+            _ => match self.stall_next_control_in.take() {
+                Some(late) => late,
+                None => return false,
+            },
+        };
+        self.ep0_unanswered = Some(UnansweredControl {
+            slot: self.ep0_slot,
+            data_trb,
+            status_trb: status_addr,
+            buffer,
+            late,
+        });
+        true
+    }
+
+    /// Post the scripted [`Self::fault_next_descriptor_read`] in place of a
+    /// standard `GET_DESCRIPTOR` of its type, returning `true` when it did.
+    fn fault_descriptor_read(&mut self, setup: [u8; 8], status_addr: u64) -> bool {
+        match self.fault_next_descriptor_read {
+            Some((desc_type, code)) if setup[..2] == [0x80, 0x06] && setup[3] == desc_type => {
+                self.fault_next_descriptor_read = None;
+                self.post_transfer_event(status_addr, code, 1, 0);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Answer a `GET_DESCRIPTOR(string)` for string `setup[2]` in the LANGID
+    /// `wIndex` names from [`Self::string_descriptors`], with a STALL for one
+    /// the device lacks, as real devices do. Returns
+    /// [`Self::deliver_in_data`]'s verdict.
+    fn execute_get_string_descriptor(
+        &mut self,
+        setup: [u8; 8],
+        data: Option<(u64, u64, u32, bool)>,
+        w_length: usize,
+        status_addr: u64,
+    ) -> bool {
+        let index = setup[2];
+        let langid = u16::from_le_bytes([setup[4], setup[5]]);
+        if let Some((overridden, header)) = self.string_header_override {
+            if overridden == index && w_length == header.len() {
+                return self.deliver_in_data(data, &header, w_length, status_addr);
+            }
+        }
+        let Some(descriptor) = self
+            .string_descriptors
+            .iter()
+            .find(|(served, served_langid, _)| (*served, *served_langid) == (index, langid))
+            .map(|(_, _, descriptor)| descriptor.clone())
+        else {
+            self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
+            return false;
+        };
+        self.deliver_in_data(data, &descriptor, w_length, status_addr)
+    }
+
     /// Post the fault/STALL a HID class request (`SET_PROTOCOL` / `SET_IDLE`)
     /// answers under the scripted knobs, returning `true` when it did so (the
     /// caller must then stop). A scripted `fault_class_requests` answers a
@@ -2406,7 +2960,6 @@ impl MockXhci {
         // hub-descriptor read. The downstream device *is* a HID keyboard, so
         // once it is addressed the request succeeds.
         if self.stall_class_requests || (self.hub_ports > 0 && !self.downstream_active) {
-            self.ep0_halted = true;
             self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
             return true;
         }
@@ -2419,15 +2972,13 @@ impl MockXhci {
             self.post_transfer_event(status_addr, CompletionCode::TrbError, 1, 0);
             return;
         };
-        // A halted EP0 runs no further transfers until reset (xHCI
-        // §4.10.2.4); model that as a transaction error rather than a
-        // valid completion.
-        if self.ep0_halted {
-            self.pending_data.take();
-            self.post_transfer_event(status_addr, CompletionCode::UsbTransactionError, 1, 0);
+        self.control_requests.push(setup);
+        let data = self.pending_data.take();
+        if self.leave_unanswered(setup, data, status_addr)
+            || self.fault_descriptor_read(setup, status_addr)
+        {
             return;
         }
-        let data = self.pending_data.take();
         let w_length = usize::from(u16::from_le_bytes([setup[6], setup[7]]));
         match (setup[0], setup[1]) {
             // GET_DESCRIPTOR(device | configuration); a hub answers with
@@ -2435,6 +2986,11 @@ impl MockXhci {
             (0x80, 0x06) if setup[3] == 0x01 || setup[3] == 0x02 => {
                 let source = self.standard_descriptor_reply(setup[3]);
                 if !self.deliver_in_data(data, source, w_length, status_addr) {
+                    return;
+                }
+            }
+            (0x80, 0x06) if setup[3] == 0x03 => {
+                if !self.execute_get_string_descriptor(setup, data, w_length, status_addr) {
                     return;
                 }
             }
@@ -2454,7 +3010,6 @@ impl MockXhci {
                     return;
                 }
                 let Some(report_descriptor) = self.report_descriptor else {
-                    self.ep0_halted = true;
                     self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
                     return;
                 };
@@ -2528,7 +3083,6 @@ impl MockXhci {
                 }
             }
             _ => {
-                self.ep0_halted = true;
                 self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
                 return;
             }
@@ -2579,7 +3133,6 @@ impl MockXhci {
         // is a mistargeted recovery: the hub has no such endpoint, so it
         // STALLs — loudly, exactly as real hardware would.
         if self.hub_slot_id != 0 && self.ep0_slot == self.hub_slot_id {
-            self.ep0_halted = true;
             self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
             return true;
         }
@@ -2855,6 +3408,8 @@ impl MockXhci {
                     if port == hub.downstream_port {
                         hub.downstream_change |= 1 << 4;
                     }
+                    let route = u32::from(hub.root_port) | (u32::from(port) << 4);
+                    self.forget_addresses(1, route);
                 }
                 _ => {}
             }
@@ -2863,6 +3418,8 @@ impl MockXhci {
         match feature {
             8 => self.hub_powered |= bit,
             4 => {
+                // The hub fixture sits on root port 1.
+                self.forget_addresses(1, u32::from(port));
                 self.hub_reset |= bit;
                 if port == self.hub_downstream_port {
                     self.hub_downstream_change |= 1 << 4;
@@ -3067,11 +3624,18 @@ impl MockXhci {
         self.ep0_slot = 0;
         self.ep0_saved = [(0, 0, true); 33];
         self.ep0_max = [0; 33];
+        self.ep0_state = [MockEp0::Running; 33];
+        self.ep0_unanswered = None;
         self.int_index = 0;
         self.int_cycle = true;
         self.event_index = 0;
         self.event_cycle = true;
         self.next_slot = 1;
+        self.enabled_slots.clear();
+        self.deferred_disables.clear();
+        // The reset takes every port, and the device behind it, back to its
+        // Default state.
+        self.device_addresses.clear();
         self.active_slot = 0;
         self.addressed = false;
         self.configured = false;
@@ -3151,7 +3715,7 @@ impl XhciHost for MockXhci {
                 self.cnr_reads = self.cnr_reads.saturating_sub(1);
                 status |= regs::USBSTS_CNR;
             }
-            if self.usbcmd & regs::USBCMD_RUN == 0 {
+            if self.usbcmd & regs::USBCMD_RUN == 0 || self.never_runs {
                 status |= regs::USBSTS_HCH;
             }
             if self.hse_latched {
@@ -3208,11 +3772,17 @@ impl XhciHost for MockXhci {
         }
         if offset == Self::op(regs::USBCMD) {
             self.usbcmd = value;
+            self.ran |= value & regs::USBCMD_RUN != 0;
             if value & regs::USBCMD_HCRST != 0 {
+                if self.ran {
+                    record_teardown(self.teardown_log.as_ref(), Teardown::ResetAfterRun);
+                }
                 // A real reset clears the operational state and the
                 // self-clearing bit a few reads later.
                 self.hcrst_reads = 3;
-                self.hcrst_stuck |= self.hse_latched || self.pcd_latched;
+                self.hcrst_stuck |= self.hse_latched
+                    || self.pcd_latched
+                    || (self.reset_sticks_once_run && self.ran);
                 self.cnr_reads = 0;
                 self.reset_device_model();
             }
@@ -3285,6 +3855,8 @@ impl XhciHost for MockXhci {
                         2
                     };
                     self.port_reset_port = port;
+                    self.root_port_resets += 1;
+                    self.forget_addresses(u8::try_from(port + 1).expect("four ports"), 0);
                 }
                 // Every change bit is write-1-to-clear (xHCI 1.2 §5.4.8): the
                 // root-port scan consumes the connect latch, the reset path
@@ -3314,6 +3886,10 @@ impl MockXhci {
     /// consumed Port Status Change Event can leave the port latch set with `PCD`
     /// already clear; that case is covered by the drained-event arming instead.
     fn latch_portsc(&mut self, index: usize, value: u32) {
+        if value & regs::PORTSC_CCS == 0 {
+            // Whatever was plugged in there has gone, taking its address.
+            self.forget_addresses(u8::try_from(index + 1).expect("four ports"), 0);
+        }
         self.portsc[index] = value;
         if value & regs::PORTSC_RW1C_MASK != 0 {
             self.pcd_latched = true;
@@ -3339,6 +3915,11 @@ impl MockXhci {
                     self.ep0_index = idx;
                     self.ep0_cycle = cycle;
                     self.ep0_slot = u8::try_from(index).unwrap_or(0);
+                }
+                // A doorbell restarts a stopped endpoint; a halted one stays
+                // halted.
+                if let Some(state @ MockEp0::Stopped) = self.ep0_state.get_mut(index) {
+                    *state = MockEp0::Running;
                 }
                 self.process_ep0_ring();
             }
@@ -3546,6 +4127,9 @@ fn trb_type_round_trips_and_fails_closed() {
         TrbType::EnableSlot,
         TrbType::AddressDevice,
         TrbType::ConfigureEndpoint,
+        TrbType::ResetEndpoint,
+        TrbType::StopEndpoint,
+        TrbType::SetTrDequeuePointer,
         TrbType::NoOpCommand,
         TrbType::TransferEvent,
         TrbType::CommandCompletion,
@@ -3819,6 +4403,211 @@ fn device_descriptor_decode_fails_closed() {
 }
 
 #[test]
+fn the_device_descriptor_carries_its_release_and_class_triple() {
+    let mut bytes = MOCK_DESCRIPTOR;
+    bytes[4..7].copy_from_slice(&[0xEF, 0x02, 0x01]);
+    bytes[12..14].copy_from_slice(&0x1234u16.to_le_bytes());
+    let descriptor = DeviceDescriptor::decode(&bytes).expect("decodes");
+    assert_eq!(descriptor.device_release, 0x1234);
+    assert_eq!(
+        (
+            descriptor.device_class,
+            descriptor.device_subclass,
+            descriptor.device_protocol
+        ),
+        (0xEF, 0x02, 0x01)
+    );
+}
+
+#[test]
+fn the_device_descriptor_carries_its_serial_number_index() {
+    let mut bytes = MOCK_DESCRIPTOR;
+    bytes[16] = 5;
+    assert_eq!(
+        DeviceDescriptor::decode(&bytes).map(|descriptor| descriptor.serial_number_index),
+        Ok(5)
+    );
+}
+
+#[test]
+fn a_serial_number_is_one_to_126_code_units_and_equal_only_unit_for_unit() {
+    assert_eq!(
+        SerialNumber::new(&[]),
+        None,
+        "an empty serial tells nothing apart"
+    );
+    assert!(SerialNumber::new(&[0x41; 126]).is_some());
+    assert_eq!(
+        SerialNumber::new(&[0x41; 127]),
+        None,
+        "no string descriptor carries 127 code units"
+    );
+    assert_eq!(
+        SerialNumber::new(&[0x41, 0x42]),
+        SerialNumber::new(&[0x41, 0x42])
+    );
+    assert_ne!(
+        SerialNumber::new(&[0x41]),
+        SerialNumber::new(&[0x41, 0]),
+        "a trailing NUL is a code unit like any other"
+    );
+}
+
+#[test]
+fn a_string_header_is_exactly_two_bytes_naming_an_even_string_descriptor_length() {
+    let header = StringHeader::decode(&[6, 0x03]).expect("a well-formed header");
+    assert_eq!(header.descriptor_len(), 6);
+    assert_eq!(
+        StringHeader::decode(&[2, 0x03]).map(StringHeader::descriptor_len),
+        Some(2),
+        "an empty string is a header alone"
+    );
+    assert_eq!(
+        StringHeader::decode(&[254, 0x03]).map(StringHeader::descriptor_len),
+        Some(254)
+    );
+    for (shape, answer) in [
+        ("an empty answer", &[][..]),
+        ("a one-byte answer", &[6]),
+        ("an answer past the header", &[6, 0x03, b'A']),
+        ("a bLength of 0", &[0, 0x03]),
+        ("a bLength of 1", &[1, 0x03]),
+        ("an odd bLength", &[5, 0x03]),
+        ("the longest odd bLength", &[255, 0x03]),
+        ("another descriptor type", &[6, 0x02]),
+    ] {
+        assert_eq!(StringHeader::decode(answer), None, "{shape}");
+    }
+}
+
+#[test]
+fn a_string_payload_is_exactly_what_follows_the_header_it_was_requested_by() {
+    let header = StringHeader::decode(&[6, 0x03]).expect("a well-formed header");
+    assert_eq!(
+        header.payload(&[6, 0x03, b'A', 0, b'B', 0]),
+        Some(&[b'A', 0, b'B', 0][..])
+    );
+    let empty = StringHeader::decode(&[2, 0x03]).expect("a well-formed header");
+    assert_eq!(empty.payload(&[2, 0x03]), Some(&[][..]));
+    for (shape, answer) in [
+        ("a short answer", &[6, 0x03, b'A', 0][..]),
+        ("a long answer", &[6, 0x03, b'A', 0, b'B', 0, b'C', 0]),
+        ("a header alone", &[6, 0x03]),
+        ("nothing", &[]),
+        (
+            "a bLength past the bytes delivered",
+            &[8, 0x03, b'A', 0, b'B', 0],
+        ),
+        (
+            "a bLength short of the bytes delivered",
+            &[4, 0x03, b'A', 0, b'B', 0],
+        ),
+        ("another descriptor type", &[6, 0x02, b'A', 0, b'B', 0]),
+    ] {
+        assert_eq!(header.payload(answer), None, "{shape}");
+    }
+}
+
+#[test]
+fn the_first_langid_is_the_first_entry_of_a_table_of_whole_langids() {
+    assert_eq!(first_langid(&[0x07, 0x04, 0x09, 0x04]), Some(0x0407));
+    assert_eq!(first_langid(&[0x09, 0x04]), Some(0x0409));
+    assert_eq!(first_langid(&[]), None, "an empty table lists nothing");
+    assert_eq!(first_langid(&[0x09]), None, "half a LANGID");
+    assert_eq!(first_langid(&[0x09, 0x04, 0x07]), None, "a trailing half");
+}
+
+#[test]
+fn a_serial_number_decodes_utf16le_code_units_exactly() {
+    assert_eq!(
+        SerialNumber::decode(&[b'A', 0, 0x3A, 0x26, 0x00, 0xD8]),
+        SerialNumber::new(&[0x0041, 0x263A, 0xD800]),
+        "every unit kept as delivered, an unpaired surrogate included"
+    );
+    assert_eq!(
+        SerialNumber::decode(&[0x41; 252]),
+        SerialNumber::new(&[0x4141; 126])
+    );
+    assert!(SerialNumber::decode(&[0x41; 252]).is_some());
+    for (shape, payload) in [
+        ("an empty payload", &[][..]),
+        ("half a code unit", b"A"),
+        ("a trailing half unit", &[b'A', 0, b'B']),
+        ("127 code units", &[0x41; 254]),
+    ] {
+        assert_eq!(SerialNumber::decode(payload), None, "{shape}");
+    }
+}
+
+#[test]
+fn a_hub_descriptor_yields_its_port_count_and_the_think_time_of_a_usb2_tt() {
+    // A 7-port hub: wHubCharacteristics 0x00E0, so bits 5:6 name 3 (32 FS
+    // bit times) and bit 7, beside them, is not part of the think time.
+    let hub = [9, 0x29, 7, 0xE0, 0x00, 0x32, 0x64, 0x00, 0xFF];
+    assert_eq!(
+        HubDescriptor::decode(&hub, false),
+        Some(HubDescriptor {
+            ports: 7,
+            tt_think_time: 3
+        })
+    );
+    for (characteristics, think_time) in [(0x0020, 1), (0x0040, 2), (0x0080, 0), (0x0100, 0)] {
+        let [low, high] = u16::to_le_bytes(characteristics);
+        let hub = [9, 0x29, 4, low, high];
+        assert_eq!(
+            HubDescriptor::decode(&hub, false).map(|hub| hub.tt_think_time),
+            Some(think_time),
+            "{characteristics:#06x}"
+        );
+    }
+}
+
+#[test]
+fn a_superspeed_hub_descriptor_has_no_think_time_whatever_its_reserved_bits_say() {
+    let hub = [
+        12, 0x2A, 4, 0x60, 0x00, 0x32, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00,
+    ];
+    assert_eq!(
+        HubDescriptor::decode(&hub, true),
+        Some(HubDescriptor {
+            ports: 4,
+            tt_think_time: 0
+        })
+    );
+}
+
+#[test]
+fn a_hub_reply_of_another_type_or_short_of_its_characteristics_is_refused() {
+    let usb2 = [9, 0x29, 4, 0x00, 0x00, 0x32, 0x00, 0xFF];
+    let superspeed = [12, 0x2A, 4, 0x00, 0x00, 0x32, 0x00, 0xFF];
+    assert!(
+        HubDescriptor::decode(&usb2[..5], false).is_some(),
+        "5 bytes suffice"
+    );
+    for (shape, answer, speed) in [
+        (
+            "a USB 2.0 descriptor from a SuperSpeed hub",
+            &usb2[..],
+            true,
+        ),
+        (
+            "a SuperSpeed descriptor from a USB 2.0 hub",
+            &superspeed,
+            false,
+        ),
+        (
+            "the configuration-shaped garble the RTS5411 answered",
+            &[0x09, 0x02, 0x29, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32],
+            false,
+        ),
+        ("a reply short of wHubCharacteristics", &usb2[..4], false),
+        ("nothing", &[], false),
+    ] {
+        assert_eq!(HubDescriptor::decode(answer, speed), None, "{shape}");
+    }
+}
+
+#[test]
 fn dma_program_rejects_unaligned_addresses() {
     let aligned = DmaProgram {
         dcbaap: 0x1000,
@@ -3899,6 +4688,47 @@ fn started_device_with_wait(
     let xhci = Xhci::open(mock).expect("bring-up succeeds");
     let dma = MockDma::new(Rc::clone(mem), MOCK_DMA_BASE);
     UsbDevice::start(xhci, dma, wait, 4096).expect("engine starts")
+}
+
+/// The mock controller opened and a bank over `mem`, both recording their
+/// teardown steps in one shared log.
+fn logged_controller_and_bank(
+    mut mock: MockXhci,
+    mem: &SharedMem,
+) -> (Xhci<MockXhci>, MockDma, TeardownLog) {
+    let log = TeardownLog::default();
+    mock.teardown_log = Some(Rc::clone(&log));
+    let xhci = Xhci::open(mock).expect("bring-up succeeds");
+    let mut dma = MockDma::new(Rc::clone(mem), MOCK_DMA_BASE);
+    dma.teardown_log = Some(Rc::clone(&log));
+    (xhci, dma, log)
+}
+
+/// [`started_device`] over [`logged_controller_and_bank`].
+fn started_device_with_teardown_log(
+    mock: MockXhci,
+    mem: &SharedMem,
+) -> (UsbDevice<'static, MockXhci, MockDma>, TeardownLog) {
+    let (xhci, dma, log) = logged_controller_and_bank(mock, mem);
+    let device = UsbDevice::start(xhci, dma, TestWait::leaked(), 4096).expect("engine starts");
+    (device, log)
+}
+
+/// Every slot the controller still has enabled reaches, through its DCBAA
+/// entry, only memory the bank still holds, live or withheld.
+fn assert_enabled_slots_reach_only_held_memory(device: &mut UsbDevice<'_, MockXhci, MockDma>) {
+    let slots = device.host_mut().enabled_slots.clone();
+    for slot in slots {
+        let context = device.host_mut().dcbaa_entry(slot);
+        let held = context
+            .checked_sub(MOCK_DMA_BASE)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .is_some_and(|offset| device.dma_ref().holds(offset));
+        assert!(
+            held,
+            "enabled slot {slot} reaches memory the bank let go of"
+        );
+    }
 }
 
 /// Model a root-port change arriving as the controller does: latch `PORTSC`
@@ -4683,7 +5513,7 @@ fn enumerating_a_hub_leaves_ep0_usable_for_the_hub_descriptor() {
         "a hub is not sent the HID SET_PROTOCOL request"
     );
     assert!(
-        !device.host_mut().ep0_halted,
+        !device.host_mut().ep0_halted(),
         "EP0 is never STALL-halted enumerating a hub"
     );
     assert_eq!(
@@ -7386,6 +8216,120 @@ fn decode_all_captures_a_second_bulk_pair_for_uas_pipes() {
     assert_eq!(iface.bulk_out2_dci, 8); // EP4 OUT
 }
 
+/// One interface of a [`configuration`]: its number, its class triple, and
+/// its endpoint descriptors.
+type TestInterface<'a> = (u8, [u8; 3], &'a [[u8; 7]]);
+
+/// A configuration of `interfaces`, each an interface descriptor followed by
+/// its endpoint descriptors, with `wTotalLength` filled in.
+fn configuration(interfaces: &[TestInterface<'_>]) -> Vec<u8> {
+    let count = u8::try_from(interfaces.len()).expect("a test configuration");
+    let mut config = alloc::vec![9u8, 2, 0, 0, count, 1, 0, 0x80, 50];
+    for &(number, [class, subclass, protocol], endpoints) in interfaces {
+        let endpoint_count = u8::try_from(endpoints.len()).expect("a test interface");
+        config.extend_from_slice(&[
+            9,
+            4,
+            number,
+            0,
+            endpoint_count,
+            class,
+            subclass,
+            protocol,
+            0,
+        ]);
+        for endpoint in endpoints {
+            config.extend_from_slice(endpoint);
+        }
+    }
+    let total = u16::try_from(config.len()).expect("a test configuration");
+    config[2..4].copy_from_slice(&total.to_le_bytes());
+    config
+}
+
+/// A bulk endpoint descriptor for `address`, 512-byte packets.
+const fn bulk(address: u8) -> [u8; 7] {
+    [7, 5, address, 0x02, 0x00, 0x02, 0]
+}
+
+/// An interrupt endpoint descriptor for `address`, 8-byte packets, 10 ms.
+const fn interrupt(address: u8) -> [u8; 7] {
+    [7, 5, address, 0x03, 0x08, 0x00, 10]
+}
+
+#[test]
+fn an_endpoint_descriptor_for_endpoint_zero_is_skipped() {
+    // Endpoint zero is the default control endpoint, which has no endpoint
+    // descriptor: a bulk-IN one claiming it would be configured over the
+    // control endpoint's own context.
+    let msd = [0x08, 0x06, 0x50];
+    let config = configuration(&[(0, msd, &[bulk(0x80), bulk(0x81), bulk(0x02)])]);
+    let iface = decoded(&config)[0].expect("the interface decodes");
+    assert_eq!((iface.bulk_in_dci, iface.bulk_out_dci), (3, 4));
+    assert_eq!(iface.bulk_in2_dci, 0, "EP0 took no pipe");
+
+    let keyboard = [0x03, 0x01, 0x01];
+    let config = configuration(&[(0, keyboard, &[interrupt(0x80), interrupt(0x81)])]);
+    let iface = decoded(&config)[0].expect("the interface decodes");
+    assert_eq!(iface.int_dci, 3, "the real report endpoint, never EP0");
+
+    let config = configuration(&[(0, keyboard, &[interrupt(0x80)])]);
+    assert_eq!(
+        InterfaceInfo::decode_all(&config),
+        Err(DriverError::BadMagic),
+        "a keyboard whose only report endpoint is EP0 has none"
+    );
+}
+
+#[test]
+fn an_endpoint_named_twice_in_one_configuration_is_skipped() {
+    let uas = [0x08, 0x06, 0x62];
+    let config = configuration(&[(0, uas, &[bulk(0x81), bulk(0x81), bulk(0x02), bulk(0x02)])]);
+    let iface = decoded(&config)[0].expect("the interface decodes");
+    assert_eq!((iface.bulk_in_dci, iface.bulk_out_dci), (3, 4));
+    assert_eq!(
+        (iface.bulk_in2_dci, iface.bulk_out2_dci),
+        (0, 0),
+        "no second pipe over the first's context"
+    );
+
+    // Across interfaces: the composite's two functions share one slot.
+    let (keyboard, mouse) = ([0x03, 0x01, 0x01], [0x03, 0x01, 0x02]);
+    let config = configuration(&[
+        (0, keyboard, &[interrupt(0x81)]),
+        (1, mouse, &[interrupt(0x81), interrupt(0x82)]),
+    ]);
+    let interfaces = decoded(&config);
+    let (keyboard, mouse) = (
+        interfaces[0].expect("the keyboard decodes"),
+        interfaces[1].expect("the mouse decodes"),
+    );
+    assert_eq!((keyboard.int_dci, mouse.int_dci), (3, 5));
+}
+
+#[test]
+fn a_second_default_setting_of_one_interface_number_is_skipped_with_its_endpoints() {
+    // Two default settings of interface 0 would be served as two functions
+    // answering to one interface number.
+    let (keyboard, mouse) = ([0x03, 0x01, 0x01], [0x03, 0x01, 0x02]);
+    let config = configuration(&[
+        (0, keyboard, &[interrupt(0x81)]),
+        (0, mouse, &[interrupt(0x82)]),
+        (1, mouse, &[interrupt(0x82)]),
+    ]);
+    let interfaces = decoded(&config);
+    let numbered: Vec<(u8, u32, u8)> = interfaces
+        .iter()
+        .flatten()
+        .map(|iface| (iface.interface_number, iface.class24, iface.int_dci))
+        .collect();
+    assert_eq!(
+        numbered,
+        [(0, 0x03_01_01, 3), (1, 0x03_01_02, 5)],
+        "the skipped duplicate claimed no endpoint context either"
+    );
+}
+
 #[test]
 fn control_out_data_stage_reaches_the_device() {
     // The CBI ADSC path end to end through the engine: the command block
@@ -7543,7 +8487,7 @@ fn a_downstream_msd_stall_recovery_targets_the_device_never_the_hub() {
     assert_eq!(device.host_mut().bulk_out.halt, 0, "endpoint recovered");
     // The clear reached the device's EP0 (a mistargeted one STALLs and
     // halts EP0 in the mock), and the hub watch survived the recovery.
-    assert!(!device.host_mut().ep0_halted, "EP0 was never mistargeted");
+    assert!(!device.host_mut().ep0_halted(), "EP0 was never mistargeted");
     assert!(device.hub_watch_active(), "the hub watch keeps its ring");
 
     // And the recovered endpoint accepts a fresh transfer end to end.
@@ -8159,11 +9103,18 @@ fn split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed(
     device.host_mut().suppress_disable_completion = true;
 
     // The slot is still freed locally despite the unconfirmable Disable Slot.
+    let slot = device.raw_device_slot(1);
+    let live = device.dma_ref().live_chunks();
     assert_eq!(device.detach_if_device_gone(1), Ok(true));
     assert!(
         !device.device_live(1),
         "the slot is freed best-effort even without a Disable Slot confirmation"
     );
+    // ...but the controller may still reach the slot's region, so it is
+    // withheld rather than freed, and the slot's context pointer stays valid.
+    assert_eq!(device.dma_ref().live_chunks(), live - 1);
+    assert_eq!(device.dma_ref().withheld_chunks(), 1);
+    assert_ne!(device.host_mut().dcbaa_entry(slot), 0);
     assert!(
         device.hub_watch_active(),
         "the hub watch stays armed for the re-plug"
@@ -8500,6 +9451,732 @@ fn bring_up_serves_a_hub_tier_and_a_direct_root_device_together() {
 }
 
 #[test]
+fn a_controller_reset_releases_what_unconfirmed_teardowns_withheld() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the keyboard behind the hub is reached");
+    device.host_mut().suppress_disable_completion = true;
+    device.host_mut().hub_downstream_status = 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Detached(1)));
+    assert_eq!(device.dma_ref().withheld_chunks(), 1);
+
+    device.host_mut().suppress_disable_completion = false;
+    device
+        .reset_and_reenumerate(&delay)
+        .expect("the controller resets");
+    assert_eq!(
+        device.dma_ref().withheld_chunks(),
+        0,
+        "the reset let go of every slot the controller held"
+    );
+}
+
+#[test]
+fn a_start_that_fails_once_the_controller_runs_resets_it_before_its_memory_goes() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::new();
+    mock.never_runs = true;
+    let (xhci, dma, log) = logged_controller_and_bank(mock, &mem);
+    let kept = Rc::clone(&dma.withheld_for_good);
+    assert_eq!(
+        UsbDevice::start(xhci, dma, TestWait::leaked(), 64).err(),
+        Some(DriverError::DeviceFault)
+    );
+    assert_eq!(
+        *log.borrow(),
+        [Teardown::ResetAfterRun, Teardown::BankDropped],
+        "the controller was reset before its chunk went"
+    );
+    assert!(
+        !kept.get(),
+        "the reset confirmed, so the chunk was returned"
+    );
+}
+
+#[test]
+fn a_start_that_fails_on_a_controller_that_then_will_not_reset_keeps_its_memory() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::new();
+    mock.never_runs = true;
+    mock.reset_sticks_once_run = true;
+    let xhci = Xhci::open(mock).expect("bring-up succeeds");
+    let dma = MockDma::new(Rc::clone(&mem), MOCK_DMA_BASE);
+    let kept = Rc::clone(&dma.withheld_for_good);
+    assert!(UsbDevice::start(xhci, dma, TestWait::leaked(), 64).is_err());
+    assert!(kept.get(), "the controller may still be running over it");
+}
+
+#[test]
+fn a_dropped_engine_resets_its_controller_before_its_memory_goes() {
+    // The controller driver's serve loop, or its bring-up, may return on any
+    // failure with the controller running.
+    let mem = shared_mem();
+    let (device, log) = started_device_with_teardown_log(MockXhci::new(), &mem);
+    let kept = Rc::clone(&device.dma_ref().withheld_for_good);
+    assert!(log.borrow().is_empty());
+    drop(device);
+    assert_eq!(
+        *log.borrow(),
+        [Teardown::ResetAfterRun, Teardown::BankDropped],
+        "the controller was reset before its chunks went"
+    );
+    assert!(!kept.get());
+}
+
+#[test]
+fn a_dropped_engine_whose_controller_will_not_reset_keeps_every_chunk() {
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::new(), &mem);
+    device.host_mut().reset_sticks_once_run = true;
+    let kept = Rc::clone(&device.dma_ref().withheld_for_good);
+    drop(device);
+    assert!(kept.get());
+}
+
+#[test]
+fn a_device_nothing_here_serves_gives_its_slot_back_on_every_attach() {
+    // A printer whose only endpoint is bulk-OUT enumerates, but nothing on it
+    // is served. Its slot must go back to the controller before its region
+    // does, or every re-plug and retry leaks one — its DCBAA entry naming
+    // freed memory — until Enable Slot fails for everything.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.keyboard_config = &MOCK_PRINTER_CONFIG_DESCRIPTOR;
+    let (mut device, log) = started_device_with_teardown_log(mock, &mem);
+    let delay = TestDelay::default();
+    let shared_only = device.dma_ref().live_chunks();
+    for _ in 0..3 {
+        let region = device.dma_ref().next_base;
+        assert_eq!(
+            device.attach_root_port(1, &delay),
+            Err(DriverError::Unsupported),
+            "an attach that serves nothing is never reported served"
+        );
+        let slot = device.host_mut().next_slot - 1;
+        assert!(
+            log.borrow()
+                .ends_with(&[Teardown::SlotDisabled(slot), Teardown::Released(region)]),
+            "the slot was confirmed disabled before its region went: {:?}",
+            log.borrow()
+        );
+        assert!(device.host_mut().enabled_slots.is_empty());
+        assert_eq!(device.host_mut().dcbaa_entry(slot), 0);
+        assert_eq!(device.dma_ref().live_chunks(), shared_only);
+        assert_eq!(device.dma_ref().withheld_chunks(), 0);
+        assert!(!device.any_device_live());
+    }
+
+    // Plugged in live, it is a failed service naming why, never an attach.
+    root_port_change(
+        &mut device,
+        0,
+        regs::PORTSC_CCS
+            | regs::PORTSC_PED
+            | regs::PORTSC_PP
+            | (3 << regs::PORTSC_SPEED_SHIFT)
+            | regs::PORTSC_CSC,
+    );
+    assert_eq!(
+        device.next_root_change(&delay),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        device.last_attach_fault().map(|fault| fault.error),
+        Some(DriverError::Unsupported)
+    );
+    assert!(device.host_mut().enabled_slots.is_empty());
+}
+
+#[test]
+fn an_unserved_device_behind_a_hub_is_skipped_without_holding_a_slot() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.keyboard_config = &MOCK_PRINTER_CONFIG_DESCRIPTOR;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("the hub tier comes up");
+    let hub_slot = device.active_slot();
+    device.retry_skipped_ports(&delay).expect("the retry runs");
+
+    assert_eq!(
+        device.host_mut().next_slot,
+        hub_slot + 3,
+        "the walk and the retry each enumerated the printer"
+    );
+    assert_eq!(
+        device.host_mut().enabled_slots,
+        [hub_slot],
+        "each gave its slot back"
+    );
+    assert_eq!(
+        device.skipped_port_count(),
+        1,
+        "the printer is present but unserved"
+    );
+    let fault = device.last_attach_fault().expect("the skip is diagnosed");
+    assert_eq!((fault.port, fault.error), (4, DriverError::Unsupported));
+    assert!(!device.any_device_live());
+    assert!(device.hub_watch_active());
+}
+
+#[test]
+fn an_unserved_device_whose_slot_will_not_disable_keeps_its_region() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.keyboard_config = &MOCK_PRINTER_CONFIG_DESCRIPTOR;
+    mock.suppress_disable_completion = true;
+    let mut device = started_device(mock, &mem);
+    let shared_only = device.dma_ref().live_chunks();
+    assert_eq!(
+        device.attach_root_port(1, &TestDelay::default()),
+        Err(DriverError::Unsupported)
+    );
+    let slot = device.host_mut().next_slot - 1;
+    assert_eq!(device.dma_ref().live_chunks(), shared_only);
+    assert_eq!(
+        device.dma_ref().withheld_chunks(),
+        1,
+        "the controller may still reach the region"
+    );
+    assert_ne!(
+        device.host_mut().dcbaa_entry(slot),
+        0,
+        "the slot's context pointer stays valid"
+    );
+    assert_enabled_slots_reach_only_held_memory(&mut device);
+}
+
+#[test]
+fn a_hub_is_never_also_served_as_a_device_whatever_its_configuration_claims() {
+    // Served as a device too, the hub's HID interface would claim the region
+    // its hub entry claims, and outlive the hub's detach as a ghost that
+    // keeps its port looking served.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_config = &MOCK_HUB_WITH_HID_CONFIG_DESCRIPTOR;
+    let mut device = started_device(mock, &mem);
+    let hub = install_root_hub_on_port_1(&mut device);
+    assert!(
+        !device.any_device_live(),
+        "the hub's own interfaces are not served"
+    );
+    assert_eq!(
+        device.host_mut().int_slot,
+        0,
+        "no interrupt endpoint was configured for them"
+    );
+
+    root_port_change(&mut device, 0, regs::PORTSC_PP | regs::PORTSC_CSC);
+    assert_eq!(
+        device.next_root_change(&TestDelay::default()),
+        Ok(HubEvent::HubDetached(hub))
+    );
+    assert!(!device.any_device_live());
+}
+
+#[test]
+fn a_hub_without_a_status_endpoint_never_inherits_an_earlier_hubs() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 0);
+    // The first hub's endpoint is captured, then its install fails.
+    mock.garble_hub_descriptor_replies = 3;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    assert_eq!(
+        device.attach_root_port(1, &delay),
+        Err(DriverError::BadMagic)
+    );
+
+    device.host_mut().hub_config = &MOCK_HUB_WITHOUT_WATCH_CONFIG_DESCRIPTOR;
+    assert!(matches!(
+        device.attach_root_port(1, &delay),
+        Ok(AttachOutcome::Hub(_))
+    ));
+    assert!(
+        !device.hub_watch_active(),
+        "a hub with no status-change endpoint is never watched on another's"
+    );
+}
+
+#[test]
+fn a_late_control_transfer_cannot_alter_another_devices_transfer_data() {
+    // A control transfer that timed out stays armed until its endpoint is
+    // stopped, and the device may answer it at any moment until then. The
+    // keyboard here answers as the stop lands, and its bytes must land in its
+    // own region, never in the hub's transfer — or it spoofs the hub's port
+    // state.
+    use crate::transport::UrbEngine;
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    device
+        .bring_up(&TestDelay::default())
+        .expect("the keyboard behind the hub is reached");
+    let status = device.hub_port_status(0, 4).expect("the port reads");
+
+    device.host_mut().stall_next_control_in = Some(alloc::vec![0xEE; 18]);
+    let mut descriptor = [0u8; 18];
+    assert_eq!(
+        device
+            .engine_for(1)
+            .control_in(GET_DEVICE_DESCRIPTOR, &mut descriptor),
+        Err(DriverError::DeviceFault),
+        "the keyboard does not answer in time"
+    );
+    assert!(
+        device.host_mut().ep0_unanswered.is_none(),
+        "the keyboard answered as its endpoint was stopped"
+    );
+    assert_eq!(
+        device.hub_port_status(0, 4),
+        Ok(status),
+        "the hub's answer is its own"
+    );
+    assert_control_endpoint_serves(&mut device, 1);
+}
+
+/// `GET_DESCRIPTOR(device)` for the whole 18 bytes.
+const GET_DEVICE_DESCRIPTOR: [u8; 8] = [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00];
+
+#[test]
+fn a_control_transfer_that_times_out_leaves_the_endpoint_serving_the_next() {
+    // A request the device never answers stays armed, and every transfer
+    // queued behind it would wait on it for ever, until the endpoint is
+    // stopped and repositioned past it.
+    use crate::transport::UrbEngine;
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let index = attach_root_device(&mut device, 1).expect("the keyboard enumerates");
+    device.host_mut().stall_next_control_in = Some(Vec::new());
+    let mut descriptor = [0u8; 18];
+    assert_eq!(
+        device
+            .engine_for(index)
+            .control_in(GET_DEVICE_DESCRIPTOR, &mut descriptor),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(device.last_reject_reason(), 4, "it timed out");
+    assert!(
+        device.host_mut().ep0_unanswered.is_none(),
+        "and was stopped"
+    );
+    assert_control_endpoint_serves(&mut device, index);
+}
+
+#[test]
+fn a_timed_out_transfer_that_halts_as_it_is_stopped_is_reset_instead() {
+    // The device errors in the instant the stop is issued: the controller
+    // refuses a Stop Endpoint on the halted endpoint, which needs a Reset
+    // Endpoint instead.
+    use crate::transport::UrbEngine;
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let index = attach_root_device(&mut device, 1).expect("the keyboard enumerates");
+    device.host_mut().stall_next_control_in = Some(Vec::new());
+    device.host_mut().unanswered_halts_at_stop = Some(CompletionCode::UsbTransactionError);
+    let mut descriptor = [0u8; 18];
+    assert_eq!(
+        device
+            .engine_for(index)
+            .control_in(GET_DEVICE_DESCRIPTOR, &mut descriptor),
+        Err(DriverError::DeviceFault)
+    );
+    assert!(!device.host_mut().ep0_halted());
+    assert_control_endpoint_serves(&mut device, index);
+}
+
+#[test]
+fn every_halting_control_completion_leaves_the_endpoint_serving_the_next() {
+    // Each of these halts the control endpoint. Taken back after every one,
+    // more of them than the ring has slots never fill it.
+    use crate::transport::UrbEngine;
+    for code in [
+        CompletionCode::UsbTransactionError,
+        CompletionCode::BabbleDetected,
+        CompletionCode::SplitTransactionError,
+        CompletionCode::DataBufferError,
+        CompletionCode::TrbError,
+        CompletionCode::StallError,
+    ] {
+        let mem = shared_mem();
+        let mut device = started_device(MockXhci::with_device(&mem), &mem);
+        let index = attach_root_device(&mut device, 1).expect("the keyboard enumerates");
+        let refusal = if code == CompletionCode::StallError {
+            DriverError::EndpointStalled
+        } else {
+            DriverError::DeviceFault
+        };
+        for _ in 0..RING_TRBS {
+            device.host_mut().fault_next_descriptor_read = Some((0x01, code));
+            let mut descriptor = [0u8; 18];
+            assert_eq!(
+                device
+                    .engine_for(index)
+                    .control_in(GET_DEVICE_DESCRIPTOR, &mut descriptor),
+                Err(refusal),
+                "{code:?}"
+            );
+            assert_eq!(device.last_completion_code(), code.as_u8(), "{code:?}");
+        }
+        assert!(!device.host_mut().ep0_halted(), "{code:?}");
+        assert_control_endpoint_serves(&mut device, index);
+    }
+}
+
+#[test]
+fn an_error_on_the_setup_stage_is_the_transfers_own_and_is_taken_back() {
+    use crate::transport::UrbEngine;
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let index = attach_root_device(&mut device, 1).expect("the keyboard enumerates");
+    device.host_mut().fault_next_setup_stage = Some(CompletionCode::UsbTransactionError);
+    let mut descriptor = [0u8; 18];
+    assert_eq!(
+        device
+            .engine_for(index)
+            .control_in(GET_DEVICE_DESCRIPTOR, &mut descriptor),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(
+        device.last_completion_code(),
+        CompletionCode::UsbTransactionError.as_u8()
+    );
+    assert_eq!(
+        device.last_reject_reason(),
+        0,
+        "an event naming the SETUP TRB is the transfer's own, never a stray"
+    );
+    assert_control_endpoint_serves(&mut device, index);
+}
+
+/// A hub on root port 1 with a full-speed keyboard on its port 4, brought up.
+fn keyboard_behind_a_hub(mem: &SharedMem) -> UsbDevice<'static, MockXhci, MockDma> {
+    let mut mock = MockXhci::with_hub(mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, mem);
+    device
+        .bring_up(&TestDelay::default())
+        .expect("the keyboard behind the hub is reached");
+    device
+}
+
+/// Unplug the keyboard on the hub's port 4 and service the report.
+fn unplug_the_keyboard_behind_the_hub(device: &mut UsbDevice<'static, MockXhci, MockDma>) {
+    device.host_mut().hub_downstream_status = 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    assert_eq!(
+        device.next_hub_change(&TestDelay::default()),
+        Ok(HubEvent::Detached(1))
+    );
+}
+
+#[test]
+fn a_late_disable_slot_confirmation_returns_what_the_unplug_withheld() {
+    // On metal a Disable Slot for a device unplugged behind a hub routinely
+    // completes after the teardown stopped waiting for it. Until it does, the
+    // slot's region and DCBAA entry are kept; once it does, they go, rather
+    // than waiting for a controller reset that may never come.
+    let mem = shared_mem();
+    let mut device = keyboard_behind_a_hub(&mem);
+    let slot = device.raw_device_slot(1);
+    let live = device.dma_ref().live_chunks();
+    device.host_mut().defer_disable_completion = true;
+    unplug_the_keyboard_behind_the_hub(&mut device);
+    assert_eq!(device.dma_ref().withheld_chunks(), 1);
+    assert_ne!(device.host_mut().dcbaa_entry(slot), 0);
+
+    device
+        .host_mut()
+        .complete_deferred_disables(CompletionCode::Success);
+    device.pump_reports().expect("the drain runs");
+    assert_eq!(device.dma_ref().withheld_chunks(), 0);
+    assert_eq!(device.dma_ref().live_chunks(), live - 1);
+    assert_eq!(device.host_mut().dcbaa_entry(slot), 0);
+    assert_enabled_slots_reach_only_held_memory(&mut device);
+}
+
+#[test]
+fn repeated_unplugs_whose_disables_confirm_late_withhold_nothing() {
+    let mem = shared_mem();
+    let mut device = keyboard_behind_a_hub(&mem);
+    let delay = TestDelay::default();
+    let live = device.dma_ref().live_chunks();
+    device.host_mut().defer_disable_completion = true;
+    for _ in 0..4 {
+        unplug_the_keyboard_behind_the_hub(&mut device);
+        device
+            .host_mut()
+            .complete_deferred_disables(CompletionCode::Success);
+        // The re-plug's service drains the late answer first.
+        device.host_mut().hub_downstream_status = 1 << 0;
+        device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+        device.host_mut().post_hub_status_change(&[1 << 4]);
+        assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Attached(1)));
+        assert_eq!(device.dma_ref().withheld_chunks(), 0);
+        assert_eq!(device.dma_ref().live_chunks(), live);
+    }
+    assert_enabled_slots_reach_only_held_memory(&mut device);
+}
+
+#[test]
+fn a_late_disable_slot_refusal_keeps_the_region_withheld() {
+    let mem = shared_mem();
+    let mut device = keyboard_behind_a_hub(&mem);
+    let slot = device.raw_device_slot(1);
+    device.host_mut().defer_disable_completion = true;
+    unplug_the_keyboard_behind_the_hub(&mut device);
+    device
+        .host_mut()
+        .complete_deferred_disables(CompletionCode::SlotNotEnabled);
+    device.pump_reports().expect("the drain runs");
+    assert_eq!(
+        device.dma_ref().withheld_chunks(),
+        1,
+        "a refusal proves nothing"
+    );
+    assert_ne!(device.host_mut().dcbaa_entry(slot), 0);
+    assert_enabled_slots_reach_only_held_memory(&mut device);
+
+    device.host_mut().defer_disable_completion = false;
+    device
+        .reset_and_reenumerate(&TestDelay::default())
+        .expect("the controller resets");
+    assert_eq!(device.dma_ref().withheld_chunks(), 0);
+}
+
+#[test]
+fn a_nodes_address_is_its_devices_position_which_a_controller_reset_keeps() {
+    // A node kept across a reset must agree with a sibling published after
+    // it and share its address with no device published beside it. The slot
+    // a device is served on is reassigned by the reset; its position is not.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("the keyboard is served");
+    root_port_change(&mut device, 0, regs::PORTSC_PP | regs::PORTSC_CSC);
+    assert_eq!(device.next_root_change(&delay), Ok(HubEvent::Detached(0)));
+    assert_eq!(
+        device.active_slot(),
+        0,
+        "an emptied topology leaves no control endpoint active"
+    );
+    root_port_change(
+        &mut device,
+        0,
+        regs::PORTSC_CCS
+            | regs::PORTSC_PED
+            | regs::PORTSC_PP
+            | (3 << regs::PORTSC_SPEED_SHIFT)
+            | regs::PORTSC_CSC,
+    );
+    assert_eq!(device.next_root_change(&delay), Ok(HubEvent::Attached(0)));
+    let slot = device.raw_device_slot(0);
+    let published = device
+        .describe_device(0, 0, 7)
+        .expect("the keyboard is described")
+        .address();
+    assert_eq!(published, 1 << 20, "root port 1, below no hub");
+
+    device
+        .reset_and_reenumerate(&delay)
+        .expect("the controller resets");
+    assert_ne!(device.raw_device_slot(0), slot, "the reset moved its slot");
+    assert_eq!(
+        device
+            .describe_device(0, 0, 8)
+            .expect("the keyboard is described")
+            .address(),
+        published
+    );
+}
+
+#[test]
+fn the_shared_chunk_holds_only_what_the_controller_shares() {
+    // The DCBAA for the mock's 32 slots, the event-ring segment table entry,
+    // the command ring, the event segment and the input context: every
+    // control endpoint lives in its own device's region, never here.
+    let mem = shared_mem();
+    let device = started_device(MockXhci::with_device(&mem), &mem);
+    let packed = |len: usize| len.next_multiple_of(64);
+    assert_eq!(
+        device.dma_ref().chunks[0].1,
+        packed(33 * 8) + packed(16) + 2 * packed(RING_TRBS * TRB_LEN) + 33 * MOCK_CTX_SIZE
+    );
+}
+
+#[test]
+fn a_transient_fault_on_a_slot_that_will_not_disable_is_not_retried() {
+    // A re-drive would address the device on the region the unconfirmed slot
+    // keeps: it fails there, enables yet another slot, and masks the fault.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.fault_next_root_address_device = Some(CompletionCode::ContextStateError);
+    mock.suppress_disable_completion = true;
+    let mut device = started_device(mock, &mem);
+    assert_eq!(
+        device.attach_root_port(1, &TestDelay::default()),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(device.host_mut().next_slot, 2, "no second slot was enabled");
+    let fault = device
+        .last_attach_fault()
+        .expect("the failure is diagnosed");
+    assert_eq!(fault.stage, EnumStage::AddressDevice);
+    assert_eq!(fault.completion, CompletionCode::ContextStateError.as_u8());
+    assert_eq!(device.dma_ref().withheld_chunks(), 1);
+    assert_ne!(device.host_mut().dcbaa_entry(1), 0);
+    assert_enabled_slots_reach_only_held_memory(&mut device);
+}
+
+#[test]
+fn a_report_landing_while_a_detached_devices_slot_is_disabled_rings_no_doorbell() {
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let delay = TestDelay::default();
+    let index = attach_root_device(&mut device, 1).expect("the keyboard enumerates");
+    arm_report_request_for(&mut device, index);
+    let slot = device.raw_device_slot(index);
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    device.host_mut().report_on_disable_slot = true;
+    let rung_before = device.host_mut().doorbells.len();
+
+    root_port_change(&mut device, 0, regs::PORTSC_PP | regs::PORTSC_CSC);
+    assert_eq!(
+        device.next_root_change(&delay),
+        Ok(HubEvent::Detached(index))
+    );
+    assert!(
+        device.host_mut().pending_reports.is_empty(),
+        "the report landed during the teardown"
+    );
+    let slot_doorbell = usize::from(slot) * 4;
+    assert!(
+        device.host_mut().doorbells[rung_before..]
+            .iter()
+            .all(|&(doorbell, _)| doorbell != slot_doorbell),
+        "nothing re-armed the slot being disabled"
+    );
+    assert_eq!(
+        device.dma_ref().withheld_chunks(),
+        0,
+        "the stray report did not cost the confirmation"
+    );
+    assert_eq!(device.host_mut().dcbaa_entry(slot), 0);
+}
+
+#[test]
+fn a_failed_composite_attach_on_a_slot_that_will_not_disable_withholds_every_region() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.composite_downstream_port = 4;
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let (hub, status) = install_hub_and_ready_port(&mut device, 4);
+    let held = device.dma_ref().live_chunks();
+    // The receiver's first HID class request faults once both interfaces'
+    // regions are claimed and configured, and its slot will not disable.
+    device.host_mut().fault_class_requests = true;
+    device.host_mut().suppress_disable_completion = true;
+    assert_eq!(
+        device.attach_downstream_device(hub, 4, hub_port_speed(status), &TestDelay::default()),
+        Err(DriverError::DeviceFault)
+    );
+    let slot = device.host_mut().next_slot - 1;
+    assert_eq!(device.dma_ref().live_chunks(), held);
+    assert_eq!(
+        device.dma_ref().withheld_chunks(),
+        2,
+        "the slot's region and its composite sibling's"
+    );
+    assert_ne!(device.host_mut().dcbaa_entry(slot), 0);
+    assert!(!device.any_device_live());
+    assert_enabled_slots_reach_only_held_memory(&mut device);
+}
+
+#[test]
+fn a_hub_teardown_the_controller_will_not_confirm_withholds_the_whole_tier() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the keyboard behind the hub is reached");
+    let hub_slot = device.active_slot();
+    let keyboard_slot = device.raw_device_slot(1);
+    device.host_mut().suppress_disable_completion = true;
+
+    root_port_change(&mut device, 0, regs::PORTSC_PP | regs::PORTSC_CSC);
+    assert_eq!(
+        device.next_root_change(&delay),
+        Ok(HubEvent::HubDetached(0))
+    );
+    assert!(!device.any_device_live() && !device.hub_watch_active());
+    assert_eq!(
+        device.dma_ref().live_chunks(),
+        1,
+        "only the shared chunk is still in service"
+    );
+    assert_eq!(
+        device.dma_ref().withheld_chunks(),
+        3,
+        "the keyboard's region, the hub's region, and its watch chunk"
+    );
+    assert_ne!(device.host_mut().dcbaa_entry(hub_slot), 0);
+    assert_ne!(device.host_mut().dcbaa_entry(keyboard_slot), 0);
+    assert_enabled_slots_reach_only_held_memory(&mut device);
+}
+
+#[test]
+fn a_controller_reset_that_fails_keeps_what_unconfirmed_teardowns_withheld() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the keyboard behind the hub is reached");
+    device.host_mut().suppress_disable_completion = true;
+    device.host_mut().hub_downstream_status = 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Detached(1)));
+    assert_eq!(device.dma_ref().withheld_chunks(), 1);
+
+    device.host_mut().hcrst_stuck = true;
+    assert_eq!(
+        device.reset_and_reenumerate(&delay),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(
+        device.dma_ref().withheld_chunks(),
+        1,
+        "nothing proved the controller let go"
+    );
+
+    device.host_mut().hcrst_stuck = false;
+    device.host_mut().suppress_disable_completion = false;
+    device
+        .reset_and_reenumerate(&delay)
+        .expect("the controller resets");
+    assert_eq!(device.dma_ref().withheld_chunks(), 0);
+}
+
+#[test]
 fn reset_and_reenumerate_brings_up_a_directly_attached_device_as_new() {
     // The recovery path for a directly-attached (no hub) device that
     // reconnected on its root port: a full controller reset + re-enumeration
@@ -8520,11 +10197,593 @@ fn reset_and_reenumerate_brings_up_a_directly_attached_device_as_new() {
         .device_identity(0)
         .expect("a connected directly-attached device must enumerate");
     assert_eq!(descriptor.vendor_id, 0x046D);
+    assert_eq!(
+        (descriptor.root_port, descriptor.route_string),
+        (1, 0),
+        "a directly-attached device's position is its root port alone"
+    );
     assert_ne!(
         device.raw_device_slot(0),
         0,
         "a device is enumerated after the reset"
     );
+}
+
+/// Every device-table entry's identity, `None` where nothing is served.
+fn identities(device: &UsbDevice<'static, MockXhci, MockDma>) -> Vec<Option<DeviceIdentity>> {
+    (0..device.device_table_len())
+        .map(|index| device.device_identity(index))
+        .collect()
+}
+
+#[test]
+fn a_controller_reset_serves_an_unchanged_topology_under_the_same_identities() {
+    // A reset re-enumerates every device from scratch. A device still where
+    // it was must come back as the same identity at the same index, or the
+    // host driver cannot keep its node across the reset.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.msd_downstream_port = 2;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("both devices are served");
+    let before = identities(&device);
+
+    device
+        .reset_and_reenumerate(&delay)
+        .expect("the controller resets");
+
+    assert_eq!(identities(&device), before);
+    let stick = before[1].expect("the stick is index 1");
+    let keyboard = before[2].expect("the keyboard is index 2");
+    assert_eq!(
+        (stick.root_port, keyboard.root_port),
+        (1, 1),
+        "both hang off the hub on root port 1"
+    );
+    assert_eq!(
+        (stick.route_string, keyboard.route_string),
+        (2, 4),
+        "each is placed by its own hub port"
+    );
+}
+
+#[test]
+fn a_device_found_on_another_port_after_a_reset_has_another_identity() {
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_hub(&mem, 4, 4), &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("the keyboard is served");
+    let before = device.device_identity(1).expect("the keyboard is index 1");
+
+    device.host_mut().hub_downstream_port = 3;
+    device
+        .reset_and_reenumerate(&delay)
+        .expect("the controller resets");
+
+    let after = device
+        .device_identity(1)
+        .expect("the keyboard is served again");
+    assert_eq!(
+        after,
+        DeviceIdentity {
+            route_string: 3,
+            ..before
+        },
+        "the same model on another port differs by its position alone"
+    );
+}
+
+/// A string descriptor carrying `units` little-endian after its header: the
+/// shape of a serial string and of the LANGID table alike.
+fn string_descriptor(units: impl IntoIterator<Item = u16>) -> Vec<u8> {
+    let mut descriptor = alloc::vec![0, 0x03];
+    for unit in units {
+        descriptor.extend_from_slice(&unit.to_le_bytes());
+    }
+    descriptor[0] = u8::try_from(descriptor.len()).expect("a test string fits one descriptor");
+    descriptor
+}
+
+/// The strings of a device listing US English alone, its serial `text`.
+fn english_serial(text: &str) -> Vec<(u8, u16, Vec<u8>)> {
+    alloc::vec![
+        (0, 0, string_descriptor([LANGID_EN_US])),
+        (
+            SERIAL_INDEX,
+            LANGID_EN_US,
+            string_descriptor(text.encode_utf16())
+        ),
+    ]
+}
+
+/// The serial number `text` spells.
+fn serial_number(text: &str) -> SerialNumber {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    SerialNumber::new(&units).expect("a test serial fits")
+}
+
+/// The serial number the device served at `index` was enumerated with.
+fn served_serial(
+    device: &UsbDevice<'static, MockXhci, MockDma>,
+    index: usize,
+) -> Option<SerialNumber> {
+    device
+        .device_identity(index)
+        .and_then(|identity| identity.serial_number)
+}
+
+/// Every `GET_DESCRIPTOR(string)` SETUP the device received, in order.
+fn string_requests(device: &mut UsbDevice<'static, MockXhci, MockDma>) -> Vec<[u8; 8]> {
+    device
+        .host_mut()
+        .control_requests
+        .iter()
+        .copied()
+        .filter(|setup| setup[..2] == [0x80, 0x06] && setup[3] == 0x03)
+        .collect()
+}
+
+/// Assert the device at `index` still completes a control transfer.
+fn assert_control_endpoint_serves(
+    device: &mut UsbDevice<'static, MockXhci, MockDma>,
+    index: usize,
+) {
+    use crate::transport::UrbEngine;
+    let mut descriptor = [0u8; 18];
+    assert_eq!(
+        device
+            .engine_for(index)
+            .control_in(GET_DEVICE_DESCRIPTOR, &mut descriptor),
+        Ok(18),
+        "EP0 was left halted"
+    );
+}
+
+#[test]
+fn a_storage_device_with_a_serial_number_enumerates_with_it_in_its_identity() {
+    let mem = shared_mem();
+    let mock = MockXhci::with_serial_storage(&mem, english_serial("SD-0042"));
+    let mut device = started_device(mock, &mem);
+    let index = attach_root_device(&mut device, 1).expect("the stick enumerates");
+    assert_eq!(
+        served_serial(&device, index),
+        Some(serial_number("SD-0042"))
+    );
+}
+
+#[test]
+fn a_device_serving_no_storage_interface_is_sent_no_string_request() {
+    // Only a storage interface's identity rests on the serial, so a keyboard
+    // naming one is enumerated without the reads or their failure paths.
+    let mem = shared_mem();
+    let mock = MockXhci::with_serial_keyboard(&mem, english_serial("KB-0042"));
+    let mut device = started_device(mock, &mem);
+    let index = attach_root_device(&mut device, 1).expect("the keyboard enumerates");
+    assert_eq!(served_serial(&device, index), None);
+    assert_eq!(string_requests(&mut device), Vec::<[u8; 8]>::new());
+}
+
+#[test]
+fn every_interface_of_a_device_serving_storage_carries_its_serial_number() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_serial_keyboard(&mem, english_serial("KC-0007"));
+    mock.keyboard_config = &MOCK_KEYBOARD_CARD_READER_CONFIG_DESCRIPTOR;
+    let mut device = started_device(mock, &mem);
+    let keyboard = attach_root_device(&mut device, 1).expect("the keyboard enumerates");
+    let reader = (0..device.device_table_len())
+        .find(|&index| index != keyboard && device.device_live(index))
+        .expect("the card reader is served beside it");
+    for index in [keyboard, reader] {
+        assert_eq!(
+            served_serial(&device, index),
+            Some(serial_number("KC-0007"))
+        );
+    }
+    assert_eq!(
+        string_requests(&mut device).len(),
+        4,
+        "the one device's serial is read once"
+    );
+}
+
+#[test]
+fn string_descriptors_are_requested_at_exactly_their_advertised_length() {
+    let mem = shared_mem();
+    let mock = MockXhci::with_serial_storage(&mem, english_serial("SD-0042"));
+    let mut device = started_device(mock, &mem);
+    attach_root_device(&mut device, 1).expect("the stick enumerates");
+    // Each header alone, then the bLength it claims: the LANGID table
+    // (string 0, wIndex 0), then the serial in the language it listed.
+    assert_eq!(
+        string_requests(&mut device),
+        [
+            [0x80, 0x06, 0, 0x03, 0x00, 0x00, 2, 0],
+            [0x80, 0x06, 0, 0x03, 0x00, 0x00, 4, 0],
+            [0x80, 0x06, SERIAL_INDEX, 0x03, 0x09, 0x04, 2, 0],
+            [0x80, 0x06, SERIAL_INDEX, 0x03, 0x09, 0x04, 16, 0],
+        ]
+    );
+}
+
+#[test]
+fn a_storage_device_naming_no_serial_number_is_sent_no_string_request() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_msd_device(&mem);
+    // It could answer one, but its descriptor names no serial string.
+    mock.string_descriptors = english_serial("SD-0042");
+    let mut device = started_device(mock, &mem);
+    let index = attach_root_device(&mut device, 1).expect("the stick enumerates");
+    assert_eq!(served_serial(&device, index), None);
+    assert_eq!(string_requests(&mut device), Vec::<[u8; 8]>::new());
+}
+
+#[test]
+fn the_serial_number_is_read_in_the_first_language_the_device_lists() {
+    let mem = shared_mem();
+    let strings = alloc::vec![
+        (0, 0, string_descriptor([LANGID_DE_DE, LANGID_EN_US])),
+        (
+            SERIAL_INDEX,
+            LANGID_DE_DE,
+            string_descriptor("SD-0042".encode_utf16())
+        ),
+    ];
+    let mut device = started_device(MockXhci::with_serial_storage(&mem, strings), &mem);
+    let index = attach_root_device(&mut device, 1).expect("the stick enumerates");
+    assert_eq!(
+        served_serial(&device, index),
+        Some(serial_number("SD-0042"))
+    );
+}
+
+#[test]
+fn the_longest_serial_number_a_string_descriptor_holds_is_carried_whole() {
+    let mem = shared_mem();
+    let units: Vec<u16> = (0..126u16)
+        .map(|unit| u16::from(b'0') + unit % 10)
+        .collect();
+    let serial = string_descriptor(units.iter().copied());
+    assert_eq!(serial[0], 254);
+    let strings = alloc::vec![
+        (0, 0, string_descriptor([LANGID_EN_US])),
+        (SERIAL_INDEX, LANGID_EN_US, serial),
+    ];
+    let mut device = started_device(MockXhci::with_serial_storage(&mem, strings), &mem);
+    let index = attach_root_device(&mut device, 1).expect("the stick enumerates");
+    let whole = SerialNumber::new(&units).expect("126 code units fit");
+    assert_eq!(served_serial(&device, index), Some(whole));
+}
+
+#[test]
+fn a_stalled_langid_table_read_leaves_no_serial_and_ep0_serving() {
+    let mem = shared_mem();
+    // The device serves the serial string but no LANGID table to name it by.
+    let mut strings = english_serial("SD-0042");
+    strings.remove(0);
+    let mut device = started_device(MockXhci::with_serial_storage(&mem, strings), &mem);
+    let index = attach_root_device(&mut device, 1).expect("a refusal costs only the serial");
+    assert_eq!(served_serial(&device, index), None);
+    assert_eq!(
+        string_requests(&mut device).len(),
+        1,
+        "a refusal ends the read"
+    );
+    assert_control_endpoint_serves(&mut device, index);
+}
+
+#[test]
+fn a_stalled_serial_number_read_leaves_no_serial_and_ep0_serving() {
+    let mem = shared_mem();
+    let mut strings = english_serial("SD-0042");
+    strings.truncate(1);
+    let mut device = started_device(MockXhci::with_serial_storage(&mem, strings), &mem);
+    let index = attach_root_device(&mut device, 1).expect("a refusal costs only the serial");
+    assert_eq!(served_serial(&device, index), None);
+    assert_eq!(string_requests(&mut device).len(), 3);
+    assert_control_endpoint_serves(&mut device, index);
+}
+
+/// One answer the serial read must give up on: what it is, the string
+/// requests it costs first, the strings the device serves, and a header its
+/// 2-byte serial read answers in place of the descriptor's own.
+type StringShape = (
+    &'static str,
+    usize,
+    Vec<(u8, u16, Vec<u8>)>,
+    Option<(u8, [u8; 2])>,
+);
+
+/// Enumerate a serial stick once per shape: each leaves the identity without
+/// a serial, is given up on at once, and costs the enumeration nothing else.
+fn assert_every_shape_leaves_no_serial(shapes: impl IntoIterator<Item = StringShape>) {
+    for (shape, requests, strings, header) in shapes {
+        let mem = shared_mem();
+        let mut mock = MockXhci::with_serial_storage(&mem, strings);
+        mock.string_header_override = header;
+        let mut device = started_device(mock, &mem);
+        let index = attach_root_device(&mut device, 1)
+            .unwrap_or_else(|err| panic!("{shape} failed the enumeration: {err:?}"));
+        assert_eq!(
+            served_serial(&device, index),
+            None,
+            "{shape} read as a serial"
+        );
+        assert_eq!(string_requests(&mut device).len(), requests, "{shape}");
+        assert_eq!(
+            device.host_mut().configuration,
+            Some(1),
+            "{shape}: the enumeration went on"
+        );
+    }
+}
+
+#[test]
+fn a_malformed_or_empty_langid_table_leaves_no_serial() {
+    let with = |table: &[u8]| {
+        alloc::vec![
+            (0, 0, table.to_vec()),
+            (
+                SERIAL_INDEX,
+                LANGID_EN_US,
+                string_descriptor("AB".encode_utf16())
+            ),
+        ]
+    };
+    assert_every_shape_leaves_no_serial([
+        ("an empty table", 1, with(&[2, 0x03]), None),
+        (
+            "another descriptor type",
+            1,
+            with(&[4, 0x02, 0x09, 0x04]),
+            None,
+        ),
+        ("an odd length", 1, with(&[5, 0x03, 0x09, 0x04, 0x00]), None),
+    ]);
+}
+
+#[test]
+fn a_malformed_or_empty_serial_string_leaves_no_serial() {
+    let with = |serial: &[u8]| {
+        alloc::vec![
+            (0, 0, string_descriptor([LANGID_EN_US])),
+            (SERIAL_INDEX, LANGID_EN_US, serial.to_vec()),
+        ]
+    };
+    let contradicted = Some((SERIAL_INDEX, [6, 0x03]));
+    assert_every_shape_leaves_no_serial([
+        ("a one-byte answer", 3, with(&[6]), None),
+        ("an empty answer", 3, with(&[]), None),
+        ("a bLength of 0", 3, with(&[0, 0x03]), None),
+        ("a bLength of 1", 3, with(&[1, 0x03]), None),
+        ("an odd bLength", 3, with(&[5, 0x03, b'A', 0, b'B']), None),
+        (
+            "another descriptor type",
+            3,
+            with(&[6, 0x02, b'A', 0, b'B', 0]),
+            None,
+        ),
+        (
+            "a bLength past the bytes delivered",
+            4,
+            with(&[20, 0x03, b'A', 0, b'B', 0]),
+            None,
+        ),
+        (
+            "a second answer claiming more than it carried",
+            4,
+            with(&[20, 0x03, b'A', 0, b'B', 0]),
+            contradicted,
+        ),
+        (
+            "a second answer shorter than the first claimed",
+            4,
+            with(&[4, 0x03, b'A', 0, b'B', 0]),
+            contradicted,
+        ),
+        ("an empty string", 3, with(&[2, 0x03]), None),
+    ]);
+}
+
+#[test]
+fn a_serial_number_read_that_is_never_answered_costs_only_the_serial() {
+    // A string the device NAKs for ever: the read times out, its endpoint is
+    // stopped and repositioned, and the stick is served without a serial,
+    // where before the fix it was never served at all.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_serial_storage(&mem, english_serial("SD-0042"));
+    mock.withhold_next_descriptor_read = Some(0x03);
+    let mut device = started_device(mock, &mem);
+    let index = attach_root_device(&mut device, 1).expect("the serial is optional identity");
+    assert_eq!(served_serial(&device, index), None);
+    assert_eq!(
+        string_requests(&mut device).len(),
+        1,
+        "a fault ends the read"
+    );
+    assert!(
+        device.host_mut().ep0_unanswered.is_none(),
+        "the read the device left unanswered was stopped"
+    );
+    assert_eq!(device.host_mut().next_slot, 2, "and never re-driven");
+    assert_control_endpoint_serves(&mut device, index);
+}
+
+#[test]
+fn a_serial_number_read_that_faults_costs_only_the_serial() {
+    for code in [
+        CompletionCode::UsbTransactionError,
+        CompletionCode::BabbleDetected,
+        CompletionCode::DataBufferError,
+    ] {
+        let mem = shared_mem();
+        let mut mock = MockXhci::with_serial_storage(&mem, english_serial("SD-0042"));
+        mock.fault_next_descriptor_read = Some((0x03, code));
+        let mut device = started_device(mock, &mem);
+        let index = attach_root_device(&mut device, 1)
+            .unwrap_or_else(|err| panic!("{code:?} failed the attach: {err:?}"));
+        assert_eq!(served_serial(&device, index), None, "{code:?}");
+        assert_eq!(
+            device.host_mut().next_slot,
+            2,
+            "{code:?}: a fault on optional identity is not re-driven"
+        );
+        assert_eq!(device.host_mut().configuration, Some(1), "{code:?}");
+        assert_control_endpoint_serves(&mut device, index);
+    }
+}
+
+#[test]
+fn a_controller_reset_tells_two_devices_of_one_model_apart_by_serial_number() {
+    let mem = shared_mem();
+    let mock = MockXhci::with_serial_storage(&mem, english_serial("SD-0001"));
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("the stick is served");
+    let before = device.device_identity(0).expect("the stick is index 0");
+
+    device
+        .reset_and_reenumerate(&delay)
+        .expect("the controller resets");
+    let after = device
+        .device_identity(0)
+        .expect("the stick is served again");
+    assert!(
+        before.recognises(&after),
+        "the same stick comes back as itself"
+    );
+
+    // Another stick of the same model now sits where it was.
+    device.host_mut().string_descriptors = english_serial("SD-0002");
+    device
+        .reset_and_reenumerate(&delay)
+        .expect("the controller resets");
+    let replacement = device.device_identity(0).expect("a stick is served");
+    assert_eq!(
+        replacement,
+        DeviceIdentity {
+            serial_number: Some(serial_number("SD-0002")),
+            ..before
+        },
+        "the replacement differs by its serial number alone"
+    );
+    assert!(!before.recognises(&replacement));
+}
+
+#[test]
+fn a_storage_device_without_a_serial_number_is_never_recognised_after_a_reset() {
+    // Two sticks of one model that carry no serial read exactly alike: one
+    // swapped for the other during a controller reset would keep the first
+    // one's driver, and its view of the medium, bound to the second.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_msd_device(&mem), &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("the stick is served");
+    let before = device.device_identity(0).expect("the stick is index 0");
+    device
+        .reset_and_reenumerate(&delay)
+        .expect("the controller resets");
+    let after = device.device_identity(0).expect("a stick is served again");
+    assert_eq!(after, before, "nothing tells the two apart");
+    assert!(
+        !before.recognises(&after),
+        "so it is never taken for the one it may have replaced"
+    );
+}
+
+#[test]
+fn a_device_is_recognised_by_every_fact_and_storage_by_its_serial_too() {
+    let keyboard = DeviceIdentity {
+        root_port: 1,
+        route_string: 4,
+        vendor_id: 0x046D,
+        product_id: 0xC31C,
+        device_release: 0x0110,
+        device_class: 0,
+        device_subclass: 0,
+        device_protocol: 0,
+        interface_number: 0,
+        interface_class: 0x03_01_01,
+        serial_number: None,
+    };
+    assert!(
+        keyboard.recognises(&keyboard),
+        "a keyboard is recognised by model and position"
+    );
+    assert!(!keyboard.recognises(&DeviceIdentity {
+        route_string: 3,
+        ..keyboard
+    }));
+    let stick = DeviceIdentity {
+        interface_class: 0x08_06_50,
+        ..keyboard
+    };
+    assert!(!stick.recognises(&stick), "a stick with no serial never is");
+    let serial_stick = DeviceIdentity {
+        serial_number: Some(serial_number("SD-0001")),
+        ..stick
+    };
+    assert!(serial_stick.recognises(&serial_stick));
+    assert!(!serial_stick.recognises(&DeviceIdentity {
+        serial_number: Some(serial_number("SD-0002")),
+        ..stick
+    }));
+}
+
+#[test]
+fn a_transaction_fault_on_a_descriptor_read_re_drives_the_device_on_a_fresh_ep0_ring() {
+    // The device answered its Address Device, so it holds its address and a
+    // fresh slot's SET_ADDRESS reaches it only after a port reset; and the
+    // aborted read's TDs stay on the EP0 ring, whose base the re-addressed
+    // slot's endpoint starts from, so the re-drive needs a fresh ring too.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.fault_next_descriptor_read = Some((0x02, CompletionCode::UsbTransactionError));
+    let mut device = started_device(mock, &mem);
+    let index = attach_root_device(&mut device, 1).expect("a disturbed device is re-driven");
+    assert!(device.device_live(index));
+    assert_eq!(device.host_mut().next_slot, 3, "on a fresh slot");
+    assert_eq!(
+        device.host_mut().enabled_slots,
+        [2],
+        "the faulted slot was given back"
+    );
+    assert_eq!(
+        device.host_mut().root_port_resets,
+        1,
+        "the port was reset before the re-drive"
+    );
+}
+
+#[test]
+fn a_transaction_fault_on_a_descriptor_read_behind_a_hub_re_drives_after_a_port_reset() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let (hub, status) = install_hub_and_ready_port(&mut device, 4);
+    device.host_mut().fault_next_descriptor_read =
+        Some((0x01, CompletionCode::SplitTransactionError));
+    let index = match device.attach_downstream_device(
+        hub,
+        4,
+        hub_port_speed(status),
+        &TestDelay::default(),
+    ) {
+        Ok(AttachOutcome::Device(index)) => index,
+        other => panic!("the keyboard is re-driven and served: {other:?}"),
+    };
+    assert_eq!(
+        device.device_identity(index).map(|id| id.product_id),
+        Some(0xC077)
+    );
+    let port_resets = device
+        .host_mut()
+        .control_requests
+        .iter()
+        .filter(|setup| **setup == [0x23, 0x03, 4, 0, 4, 0, 0, 0])
+        .count();
+    assert_eq!(port_resets, 2, "the attach's reset, and the re-drive's");
 }
 
 #[test]
@@ -8750,6 +11009,9 @@ fn bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together() {
     assert_eq!(mouse_node.class(), Some(tairix_abi::HwDeviceClass::Input));
     let kbd_node = device.describe_device(2, 0, 2).expect("keyboard node");
     assert_eq!(kbd_node.class(), Some(tairix_abi::HwDeviceClass::Input));
+    // Each carries its own position behind root port 1 as its address.
+    assert_eq!(mouse_node.address(), (1 << 20) | 2);
+    assert_eq!(kbd_node.address(), (1 << 20) | 4);
 
     // The keyboard's reports flow on its own index...
     let mut buf = [0u8; REPORT_LEN];
@@ -8916,7 +11178,7 @@ fn bring_up_serves_both_interfaces_of_a_composite_receiver() {
     assert!(HwMatchKey::usb(0, 0, 0x03_01_01).matches(&kbd_node.match_keys()[0]));
     let mouse_node = device.describe_device(2, 0, 2).expect("mouse node");
     assert!(HwMatchKey::usb(0, 0, 0x03_01_02).matches(&mouse_node.match_keys()[0]));
-    // Both interface nodes carry the one physical device's slot as their
+    // Both interface nodes carry the one physical device's position as their
     // device address, so an inventory consumer (`lsusb`) attributes them
     // to a single device rather than listing it twice.
     assert_ne!(kbd_node.address(), 0);
@@ -8948,10 +11210,9 @@ fn bring_up_serves_both_interfaces_of_a_composite_receiver() {
     // slot's EP0 owner (the primary entry parked it), so a mouse class
     // driver's control-IN works even though its entry never held the ring.
     let mut data = [0u8; 18];
-    let setup = [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00];
     let transferred = device
         .engine_for(2)
-        .control_in(setup, &mut data)
+        .control_in(GET_DEVICE_DESCRIPTOR, &mut data)
         .expect("the sibling's control transfer routes through the EP0 owner");
     assert_eq!(transferred, 18);
     assert_eq!(&data[..], &MOCK_COMPOSITE_DESCRIPTOR[..]);
@@ -9189,6 +11450,10 @@ fn bring_up_serves_a_keyboard_behind_a_nested_hub() {
         device.host_mut().downstream_route,
         0x23,
         "nibble 0 routes the root hub's port 3, nibble 1 the nested hub's port 2"
+    );
+    assert_eq!(
+        identity.route_string, 0x23,
+        "the identity records the path the slot was addressed with"
     );
     assert!(
         device.host_mut().nested_hubs[0].marked,

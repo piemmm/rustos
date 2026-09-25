@@ -231,9 +231,8 @@ impl<C: ConfigSpace> Pci<C> {
     /// Decode every BAR slot of a *type-0* function into `out`.
     ///
     /// Type-1 (PCI-to-PCI bridge) and type-2 (`CardBus`) headers are
-    /// recognised but produce no BAR records — they are out of scope
-    /// for Stage 4 (: only the surface the first
-    /// drivers need).
+    /// recognised but produce no BAR records: only the surface the first
+    /// drivers need is decoded.
     ///
     /// # Errors
     ///
@@ -320,7 +319,7 @@ impl<C: ConfigSpace> Pci<C> {
     /// from configuration space and asks the kernel's MMIO-map
     /// facility for a window over it. The driver never synthesises a
     /// pointer — the kernel allocates and validates the mapping. The returned window is what the bus driver
-    /// hands to the virtio transport's `PciBackend`.
+    /// hands to the virtio `PciTransport`.
     ///
     /// # Errors
     ///

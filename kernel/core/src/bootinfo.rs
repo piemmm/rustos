@@ -520,6 +520,26 @@ pub trait KernelArch: SchedulerArch {
         None
     }
 
+    /// This port's cross-CPU TLB shootdown, which the kernel owes after
+    /// tearing down a mapping in a space live on another CPU — another
+    /// process's, when a removed device's windows are revoked from its
+    /// driver. Read once, during [`crate::Phase::Syscall`].
+    ///
+    /// # Default
+    ///
+    /// [`None`], which is right only where no TLB exists: `wasm32` and the
+    /// host test arch. Every bare-metal port returns its handle.
+    #[must_use]
+    fn cross_cpu_tlb_shootdown(
+        arch: &'static Self,
+    ) -> Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)>
+    where
+        Self: Sized,
+    {
+        let _ = arch;
+        None
+    }
+
     /// Hand the kernel core the architecture's **platform entropy source** —
     /// the per-port hardware random-number handle (x86 `RDSEED`/`RDRAND`,
     /// ARMv8.5 `RNDR`, the RISC-V `Zkr` `seed` CSR) — so the boot path can

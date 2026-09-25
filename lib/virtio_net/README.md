@@ -47,6 +47,21 @@ crate, which re-exports `VirtioNet` from here.
   harvests every queue into its own shared receive ring. Transmit stays a
   single queue (the stack serialises egress). A single-queue device uses
   one `RxQueue` at index 0, unchanged.
+- **Bounded drains.** One `service` consumes at most a ring's worth of
+  completions from each queue — a receive pass also finishes a merged frame
+  begun inside that bound — however fast the device posts them, and leaves
+  the rest for the next call, so a device refilling re-posted buffers cannot
+  hold the doorbell.
+- **Queues deep enough for their chains.** A transmit or control queue that
+  cannot hold its two-descriptor chain is refused at `open`, before the
+  device is given it.
+- **Teardown.** Dropping the engine resets the device; one whose reset does
+  not confirm keeps every ring, receive pool and transmit staging pair —
+  in flight or idle — withheld for the kernel's DMA quarantine rather than
+  freed under it. A queue-pair command the device never answered keeps its
+  buffer the same way. Once the reset confirms, the receive pool and
+  reassembly buffer are zeroed before they are freed, whatever class their
+  frames had: a frame no `service` delivered has none.
 - `no_std`, allocation-free steady state (staging carved once at `open`).
 - Fail-closed: a runt/oversize/corrupt TX slot is dropped without wedging
   the queue; a device fault is a typed `DriverError`, never a panic
@@ -65,6 +80,9 @@ no-per-packet-DMA steady-state invariant, and mergeable receive buffers
 (negotiation on/off, single-buffer over the 12-byte header, in-order
 multi-buffer reassembly, the three fail-closed drops — zero /
 out-of-range `num_buffers`, over-link-frame merge — and the pool
-capturing a burst in one service), and multiqueue receive (a two-pair
+capturing a burst in one service), multiqueue receive (a two-pair
 device: `VIRTIO_NET_F_MQ` negotiation, the control-queue pair-count
-handshake, and per-queue steering into each queue's own ring).
+handshake, and per-queue steering into each queue's own ring), the
+per-call drain bounds, the shallow-queue refusal, and teardown against a
+device that does and does not confirm its reset, including the receive
+staging coming back zeroed.

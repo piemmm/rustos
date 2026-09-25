@@ -10,8 +10,9 @@
 extern crate alloc;
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -40,6 +41,9 @@ enum DmaStop {
     Never,
     /// An engine that has once been started never stops again.
     OnceStarted,
+    /// The engine whose control block is at this offset never stops; the
+    /// other honours a stop.
+    Wedged(usize),
 }
 
 /// A model of the controller's register file.
@@ -102,6 +106,7 @@ impl MockRegs {
             DmaStop::Honoured => false,
             DmaStop::Never => true,
             DmaStop::OnceStarted => self.dma_started.contains(&block),
+            DmaStop::Wedged(engine) => engine == block,
         };
         if enabled || wedged {
             0
@@ -217,6 +222,17 @@ impl GenetRegs for MockRegs {
         self.words.insert(offset, value);
         self.writes.push((offset, value));
         Ok(())
+    }
+}
+
+/// A register file a test keeps a handle on after the driver owning it is gone.
+impl GenetRegs for Rc<RefCell<MockRegs>> {
+    fn read(&mut self, offset: usize) -> Result<u32, DriverError> {
+        self.borrow_mut().read(offset)
+    }
+
+    fn write(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
+        self.borrow_mut().write(offset, value)
     }
 }
 
@@ -435,6 +451,93 @@ fn a_failure_once_live_on_an_engine_that_never_stops_again_releases_nothing() {
         Some(DriverError::DeviceFault)
     );
     assert_eq!(RELEASED.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_live_device_dropped_stops_its_engines_before_releasing_the_frames() {
+    // Whatever owns the running device — the channel server's serve loop —
+    // may return on any failure and drop it.
+    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+    let file = Rc::new(RefCell::new(MockRegs::new()));
+    let device = Genet::open(
+        Rc::clone(&file),
+        MockDelay::new(),
+        counted_frames(&RELEASED),
+        MacAddress::new(MAC),
+        layout(),
+        &QuiesceProbe::default(),
+    )
+    .expect("bring-up");
+    drop(device);
+    assert_eq!(RELEASED.load(Ordering::Relaxed), 1);
+    let file = file.borrow();
+    for desc_base in [regs::RDMA_DESC, regs::TDMA_DESC] {
+        let ctrl = regs::dma_regs(desc_base) + regs::DMA_CTRL;
+        let last = file
+            .writes
+            .iter()
+            .rev()
+            .find(|(offset, _)| *offset == ctrl)
+            .map(|(_, value)| value & DMA_ENABLES);
+        assert_eq!(
+            last,
+            Some(0),
+            "the engine was stopped before its frames went"
+        );
+    }
+}
+
+#[test]
+fn a_live_device_whose_engines_will_not_stop_is_dropped_without_releasing_the_frames() {
+    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+    let mut device = Genet::open(
+        MockRegs::new(),
+        MockDelay::new(),
+        counted_frames(&RELEASED),
+        MacAddress::new(MAC),
+        layout(),
+        &QuiesceProbe::default(),
+    )
+    .expect("bring-up");
+    device.regs.dma_stop = DmaStop::Never;
+    drop(device);
+    assert_eq!(
+        RELEASED.load(Ordering::Relaxed),
+        0,
+        "the engines may still be mastering them"
+    );
+}
+
+#[test]
+fn a_live_device_with_one_engine_that_will_not_stop_still_stops_the_other_and_keeps_the_frames() {
+    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+    for (wedged, other) in [
+        (regs::TDMA_DESC, regs::RDMA_DESC),
+        (regs::RDMA_DESC, regs::TDMA_DESC),
+    ] {
+        let file = Rc::new(RefCell::new(MockRegs::new()));
+        let device = Genet::open(
+            Rc::clone(&file),
+            MockDelay::new(),
+            counted_frames(&RELEASED),
+            MacAddress::new(MAC),
+            layout(),
+            &QuiesceProbe::default(),
+        )
+        .expect("bring-up");
+        file.borrow_mut().dma_stop = DmaStop::Wedged(regs::dma_regs(wedged));
+        drop(device);
+        assert_eq!(
+            RELEASED.load(Ordering::Relaxed),
+            0,
+            "the wedged engine may still be mastering them"
+        );
+        assert_eq!(
+            file.borrow().dma_status(regs::dma_regs(other)),
+            regs::DMA_DISABLED,
+            "the engine that honours a stop was told to stop"
+        );
+    }
 }
 
 #[test]

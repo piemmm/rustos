@@ -332,6 +332,18 @@ pub const TARGETS: &[Target] = &[
             "split-virtqueue completion path (hostile device-written used ring / descriptors)",
     },
     Target {
+        package: "tairix-usb",
+        test: "fuzz_descriptors",
+        description:
+            "lib/usb device, configuration, hub, and string descriptor decoders (hostile device-written enumeration bytes)",
+    },
+    Target {
+        package: "tairix-hid",
+        test: "fuzz_hid_report",
+        description:
+            "lib/hid Report Descriptor parser, report normaliser, and boot keyboard/mouse decoders (hostile device-written HID bytes)",
+    },
+    Target {
         package: "tairix-vt",
         test: "fuzz_vt",
         description: "lib/vt escape-sequence parser (untrusted terminal / remote-host bytes)",

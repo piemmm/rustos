@@ -385,10 +385,9 @@ pub trait SchedulerArch: Send + Sync {
     /// than the absolute monotonic-nanoseconds deadline `deadline_ns`, for
     /// the nearest pending timed blocking wait.
     ///
-    /// This is the timed half of the tickless one-shot (:
-    /// the timer is armed "to the next event the scheduler actually needs —
-    /// the running task's preemption deadline *or* the nearest armed
-    /// wakeup"). A blocking wait with a finite timeout (the wait-queue in
+    /// This is the timed half of the tickless one-shot: the timer is armed
+    /// to the next event the scheduler actually needs, the running task's
+    /// preemption deadline or the nearest armed wakeup. A blocking wait with a finite timeout (the wait-queue in
     /// `kernel/core`, whose first consumer is `hw_tree_wait`) records its
     /// soonest waiter deadline through this hook so the parked waiter is
     /// woken on time even when the CPU has *no* runnable task to preempt and

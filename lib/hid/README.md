@@ -1,20 +1,28 @@
 # `tairix-hid`
 
-Arch-neutral, transport-agnostic HID boot-protocol logic: the keyboard/mouse
-report decoders, the console-input producer, and the xHCI boot-keyboard
-orchestration. This is **generic** HID-protocol code — it names no device,
-board, PCI id, or SoC — so it lives in `lib/*` as shared common code
-(`AGENTS.md` §6 / §2.2), *not* under the §2.20 / §2.22 single-device
-carve-out. The user-space keyboard and mouse class-driver processes
-(`drivers/input/usb_kbd`, `drivers/input/usb_mouse`) compose it without a
-`drivers/*`→`drivers/*` dependency (`AGENTS.md` §17.4 / §2.2).
+Arch-neutral, transport-agnostic HID logic: the boot-protocol keyboard/mouse
+report decoders, the Report Descriptor parser and report-protocol normaliser,
+and the console-input producer. This is **generic** HID-protocol code — it
+names no device, board, PCI id, or SoC — so it lives in `lib/*` as shared
+common code (`AGENTS.md` §6 / §2.2), *not* under the §2.20 / §2.22
+single-device carve-out. The user-space keyboard and mouse class-driver
+processes (`drivers/input/usb_kbd`, `drivers/input/usb_mouse`) and the xHCI
+enumeration engine (`lib/usb`) compose it without a `drivers/*`→`drivers/*`
+dependency (`AGENTS.md` §17.4 / §2.2).
 
 See `docs/src/lib/hid.md` for the full description and test surface.
 
 ## Public surface
 
 - `BootKeyboard`, `BootMouse` — boot-protocol report decoders over the
-  `tairix_abi::driver::input::ReportSource` seam.
+  `tairix_abi::driver::input::ReportSource` seam. The keyboard's modifier
+  bitmap alone reports the modifiers, and a usage repeated across slots is
+  pressed and released once.
+- `parse_report_descriptor` → `HidReportMap`, `HidReportMap::normalize`,
+  `HidReportMap::summary` — the Report Descriptor parser that locates the boot
+  fields inside a report-protocol report, and the normaliser that rewrites one
+  such report into the boot layout. A map locating a field the boot layout
+  cannot read is refused, so the caller falls back to boot protocol.
 - `KeyboardConsole`, `pump_once`, `ConsoleSink` — the console-input producer
   that resolves HID usages to `KeyInput` records (via `lib/keymap`) and injects
   them through a sink. Held modifiers are tracked over the shared
@@ -22,9 +30,6 @@ See `docs/src/lib/hid.md` for the full description and test surface.
   *observable* set emits a `KeyInput::ModifiersChanged` record so the desktop
   can qualify a gesture that is not a key (a shift-click); a repeat, or letting
   go of one shift key while the other is held, emits nothing.
-- `bring_up_boot_keyboard`, `derive_keyboard_resources`, `KeyboardResources`,
-  `KeyboardSource` — the user-space boot-keyboard bring-up over a
-  `DriverHost` + the grant→BAR/DMA-aperture derivation.
 - `transport_error`, `pump_error_limit_reached` — the pump loop's error
   policy: which refusal means the transport itself has gone (and so a clean
   unplug), and the saturating consecutive-failure limit that fails a wedged
@@ -36,16 +41,18 @@ See `docs/src/lib/hid.md` for the full description and test surface.
 
 ## Dependencies
 
-`lib/abi`, `lib/input`, `lib/keymap`, `lib/usb` — all `lib/*` (§17.4). Names no
-board, PCI, or SoC detail (`AGENTS.md` §2.20).
+`lib/abi`, `lib/input`, `lib/keymap` — all `lib/*` (§17.4). Names no board,
+PCI, or SoC detail (`AGENTS.md` §2.20).
 
 ## Stability
 
-Tier: `experimental`. The decode/console/orchestration surface is still
-evolving alongside the `plans/PI.md` P10 USB-keyboard bring-up; `abi-v1` types
-it exchanges are governed by `lib/abi`.
+Tier: `experimental`. The decode/console surface is still evolving alongside
+the `plans/USB.md` class drivers; `abi-v1` types it exchanges are governed by
+`lib/abi`.
 
 ## Tests
 
-`cargo test -p tairix-hid` — decode, console-producer, orchestration, and
-grant-derivation unit tests against in-process mocks (`AGENTS.md` §7).
+`cargo test -p tairix-hid` — decode, report-descriptor, and console-producer
+unit tests against in-process mocks (`AGENTS.md` §7). Fuzzed:
+`tests/fuzz_hid_report.rs` (registered with `cargo xtask fuzz`) holds the parser,
+the normaliser, and both boot decoders to a naive model of each.

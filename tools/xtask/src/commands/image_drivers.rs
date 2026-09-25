@@ -212,10 +212,11 @@ fn build_bundle(
 /// Returns the signed `.rxe` bundle bytes exactly as the store scan
 /// reads them back. The driver requests only the capabilities it needs — a
 /// mapped doorbell window (`CAP_MMIO_MAP`), a coherent DMA property buffer
-/// (`CAP_MEM_DMA`), and the privilege to create the restricted-sender mailbox
-/// endpoint (`CAP_IPC_BIND_PRIVILEGED`) — and carries the driver crate's own
-/// canonical bind table, so the autoload match data never drifts from
-/// the driver.
+/// (`CAP_MEM_DMA`), the inbox interrupt every reply wait parks on instead of
+/// polling the doorbell (`CAP_IRQ_BIND`), and the privilege to create the
+/// restricted-sender mailbox endpoint (`CAP_IPC_BIND_PRIVILEGED`) — and
+/// carries the driver crate's own canonical bind table, so the autoload
+/// match data never drifts from the driver.
 ///
 /// # Errors
 ///
@@ -233,6 +234,7 @@ pub fn build_vcmailbox_bundle(
         &[
             CapabilityId::MMIO_MAP,
             CapabilityId::MEM_DMA,
+            CapabilityId::IRQ_BIND,
             CapabilityId::IPC_BIND_PRIVILEGED,
         ],
         tairix_vcmailbox::BIND_KEYS,

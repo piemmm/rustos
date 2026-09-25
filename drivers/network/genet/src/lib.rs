@@ -351,6 +351,9 @@ pub struct Genet<R: GenetRegs, D: Delay> {
     delay: D,
     /// The one frame-buffer carve: receive buffers first, then transmit.
     frames: DmaSlab,
+    /// Whether this instance has started the DMA engines over [`Self::frames`],
+    /// so the device may be reaching them.
+    engines_started: bool,
     /// How that carve is laid out — the descriptor count each ring is
     /// programmed to and the staging area behind the buffers.
     layout: DmaLayout,
@@ -433,6 +436,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
             regs,
             delay,
             frames,
+            engines_started: false,
             layout,
             mac,
             link: None,
@@ -466,10 +470,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         carved_from.device_quiesced();
         device.init_rx()?;
         device.init_tx()?;
-        if let Err(e) = device.go_live() {
-            device.close();
-            return Err(e);
-        }
+        device.go_live()?;
         Ok(device)
     }
 
@@ -482,15 +483,6 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         self.apply_link()?;
         self.regs
             .write(regs::INTRL2_CPU_MASK_CLEAR, regs::IRQ_ENABLED)
-    }
-
-    /// Stop both DMA engines, then release the frame buffers.
-    fn close(mut self) {
-        if self.disable_dma().is_err() {
-            // An engine that never stops may still master the frame buffers:
-            // hold them for the kernel to quarantine when the driver exits.
-            core::mem::forget(self);
-        }
     }
 
     /// Refuse a controller that does not report the GENET v5 core revision.
@@ -603,19 +595,26 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
     /// Stop both DMA engines, waiting for each to report itself stopped, and
     /// drain the transmit path, so the rings can be reprogrammed with the
     /// device quiescent. An engine that never stops is a
-    /// [`DriverError::DeviceFault`].
+    /// [`DriverError::DeviceFault`], and the other is still stopped: one
+    /// wedged engine must not leave its sibling running over the frames.
     fn disable_dma(&mut self) -> Result<(), DriverError> {
         // Transmit first, so no further frame is queued behind a receive stop.
-        for desc_base in [regs::TDMA_DESC, regs::RDMA_DESC] {
-            let block = regs::dma_regs(desc_base);
-            let current = self.regs.read(block + regs::DMA_CTRL)?;
-            self.regs
-                .write(block + regs::DMA_CTRL, current & !DMA_ENABLES)?;
-            self.await_dma_stopped(block)?;
-        }
+        let tx = self.stop_dma_engine(regs::TDMA_DESC);
+        let rx = self.stop_dma_engine(regs::RDMA_DESC);
+        tx.and(rx)?;
         self.regs.write(regs::UMAC_TX_FLUSH, 1)?;
         self.delay.delay_us(RESET_HOLD_US);
         self.regs.write(regs::UMAC_TX_FLUSH, 0)
+    }
+
+    /// Clear the enables of the DMA engine whose descriptors are at
+    /// `desc_base` and wait for it to report itself stopped.
+    fn stop_dma_engine(&mut self, desc_base: usize) -> Result<(), DriverError> {
+        let block = regs::dma_regs(desc_base);
+        let current = self.regs.read(block + regs::DMA_CTRL)?;
+        self.regs
+            .write(block + regs::DMA_CTRL, current & !DMA_ENABLES)?;
+        self.await_dma_stopped(block)
     }
 
     /// Wait, bounded by [`DMA_STOP_TIMEOUT_US`], for the DMA engine whose
@@ -635,6 +634,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
 
     /// Enable both DMA engines and the default ring's buffers.
     fn enable_dma(&mut self) -> Result<(), DriverError> {
+        self.engines_started = true;
         for desc_base in [regs::RDMA_DESC, regs::TDMA_DESC] {
             let ctrl = regs::dma_regs(desc_base) + regs::DMA_CTRL;
             let current = self.regs.read(ctrl)?;
@@ -1230,6 +1230,17 @@ enum RxOutcome {
     Filtered,
     /// The receive ring is full; the frame stays in its descriptor.
     RingFull,
+}
+
+impl<R: GenetRegs, D: Delay> Drop for Genet<R, D> {
+    /// Stop the DMA engines before the frame buffers go: an engine that never
+    /// stops may still master them, and they are then held for the kernel to
+    /// quarantine when the driver exits.
+    fn drop(&mut self) {
+        if self.engines_started && self.disable_dma().is_err() {
+            self.frames.withhold();
+        }
+    }
 }
 
 impl<R: GenetRegs, D: Delay> Net for Genet<R, D> {

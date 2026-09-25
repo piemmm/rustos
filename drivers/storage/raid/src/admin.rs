@@ -214,7 +214,7 @@ pub fn handle_control<A: LiveArrays>(
     let effects = match op {
         RaidControlOp::ListArrays { offset, limit } => list_arrays(arrays, offset, limit, out),
         RaidControlOp::ListMembers { offset, limit } => {
-            list_members(registry, arrays, connect, offset, limit, out)
+            list_members(registry, arrays, offset, limit, out)
         }
         RaidControlOp::Create {
             level,
@@ -311,7 +311,6 @@ fn array_record<D: Block>(runtime: &mut ArrayRuntime<D>) -> RaidArrayRecord {
 fn list_members<A: LiveArrays>(
     registry: &mut MemberRegistry,
     arrays: &mut A,
-    mut connect: impl FnMut(usize) -> Option<A::Device>,
     offset: u32,
     limit: u16,
     out: &mut [u8],
@@ -322,7 +321,7 @@ fn list_members<A: LiveArrays>(
     let mut records: Vec<[u8; RaidMemberRecord::WIRE_LEN]> = Vec::new();
     let mut index = start;
     while index < total && records.len() < usize::from(limit) {
-        records.push(member_record(registry, arrays, &mut connect, index).to_le_bytes());
+        records.push(member_record(registry, arrays, index).to_le_bytes());
         index += 1;
     }
     let reply_len = encode_page_reply(&records, limit, out).unwrap_or(0);
@@ -331,18 +330,18 @@ fn list_members<A: LiveArrays>(
 
 /// Build one member record from the registry and, for a composed member, the
 /// live array it belongs to.
+///
+/// The geometry is what the device reported when it was offered, so a listing
+/// opens no client: a composed member's window is already lent to its array,
+/// and a listing must not wait on any device.
 fn member_record<A: LiveArrays>(
     registry: &MemberRegistry,
     arrays: &mut A,
-    connect: &mut impl FnMut(usize) -> Option<A::Device>,
     index: usize,
 ) -> RaidMemberRecord {
-    let offer = registry.members()[index].offer();
-    // The device's own geometry, read from the device rather than assumed; a
-    // device that will not answer reports zero rather than a guess.
-    let (block_count, block_size) = connect(index)
-        .and_then(|device| device.geometry().ok())
-        .map_or((0, 0), |geo| (geo.block_count, geo.block_size));
+    let held = registry.members()[index];
+    let offer = held.offer();
+    let geometry = held.geometry();
     let (array, disposition, slot, generation) = match registry.member_superblock(index) {
         // A blank candidate belongs to no array.
         None => (
@@ -359,8 +358,8 @@ fn member_record<A: LiveArrays>(
         slot,
         offer.node,
         offer.endpoint,
-        block_count,
-        block_size,
+        geometry.block_count,
+        geometry.block_size,
         generation,
     )
 }

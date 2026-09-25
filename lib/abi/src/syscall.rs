@@ -471,10 +471,27 @@ impl SyscallNumber {
     /// **user virtual address** the driver's CPU accesses go through. For a
     /// coherent bus (and the QEMU `virt` stand-in) the device-visible
     /// address is the CPU-physical base; a translating inbound viewport
-    /// (`dma_translated`) maps it onto the far-side bus address. Gated by
-    /// [`crate::CapabilityId::MEM_DMA`]; an unknown or non-owned handle, a
-    /// grant of the wrong kind, a limit no free block lies below, or a build
-    /// with no DMA facility wired fails closed.
+    /// (`dma_translated`) maps it onto the far-side bus address. The buffer
+    /// is held against the caller's hardware-tree node: should the caller end
+    /// still holding it, it is quarantined rather than freed
+    /// ([`SyscallNumber::DMA_QUIESCED`]).
+    ///
+    /// Gated by [`crate::CapabilityId::MEM_DMA`]. Returns `-errno`:
+    /// [`Errno::NotFound`] for a handle the caller does not hold, which is
+    /// what a grant revoked by its node's removal answers;
+    /// [`Errno::OutOfRange`] for a grant that is not `Dma`, a length past its
+    /// extent or past the largest contiguous block, a limit no RAM lies
+    /// below, or a block a translating window cannot name;
+    /// [`Errno::LengthOutOfRange`] for a zero length;
+    /// [`Errno::PermissionDenied`] for a caller not loaded for a node;
+    /// [`Errno::DeviceOffline`] for a node that left the tree while its grant
+    /// was still being revoked;
+    /// [`Errno::OutOfMemory`] when no free block lies below the limit, the
+    /// caller's DMA window has no free slot, or the quarantine cannot make
+    /// room for the block; [`Errno::BadAddress`] for a page-table or
+    /// direct-map failure, or a `device_out` that faults; and
+    /// [`Errno::NotImplemented`] where no DMA facility, live space, or
+    /// quarantine is wired.
     pub const DMA_ALLOC: Self = Self(27);
     /// Enumerate the device-resource grants the kernel minted for the
     /// calling driver task, delivering the unforgeable handles the driver
@@ -700,7 +717,10 @@ impl SyscallNumber {
     ///
     /// Arguments: `node: *const u8` — a non-null pointer to a wire-encoded
     /// [`crate::HwNode`] (see [`crate::hwtree`]); `len: usize` — its length.
-    /// Returns `0`, or `-errno`.
+    /// Returns the id the kernel assigned the node, or `-errno`. An id is
+    /// never reissued within a boot, so one names one device throughout; a
+    /// publish once every id has been issued fails with
+    /// [`crate::Errno::NoSpace`] rather than reusing one.
     ///
     /// Gated by [`crate::CapabilityId::HW_EMIT`]: the kernel verifies the
     /// capability, copies in at most [`crate::hwtree::HwNode::WIRE_LEN`]
@@ -709,11 +729,14 @@ impl SyscallNumber {
     /// the matching driver in turn — discovery is data-driven, never a
     /// compiled-in list. The node is admitted **only** when
     /// every [`crate::hwtree::HwResource`] it requests is wholly contained
-    /// within a device-resource grant the calling driver already holds, so an
-    /// emitted child can never carry more authority than its emitter
-    /// (no ambient authority; — a driver receives only
-    /// its matched node's resources). Any malformed node, an unknown parent,
-    /// or an out-of-grant resource fails closed; a
+    /// within a device-resource grant the calling driver holds from its own
+    /// node or from no device, so an emitted child can never carry more
+    /// authority than its emitter, nor authority another device's removal
+    /// would not reach (no ambient authority). Any malformed node, an unknown
+    /// parent, or an out-of-grant resource fails closed; a shared region
+    /// retired by a node's removal is refused
+    /// ([`crate::Errno::PermissionDenied`]); and a driver whose own node
+    /// has left the tree publishes nothing ([`crate::Errno::NotFound`]); a
     /// successful publish bumps the hardware-tree generation, waking the
     /// device manager's reactive autoload (the same change channel
     /// [`SyscallNumber::HW_TREE_WAIT`] observes).
@@ -829,7 +852,8 @@ impl SyscallNumber {
     /// (no ambient authority). Gated by [`crate::CapabilityId::SHM`]; an
     /// unknown or non-owned handle, a grant of the wrong kind, a region that
     /// has been torn down, or a build with no shared-memory facility wired
-    /// fails closed.
+    /// fails closed, and a region retired by the removal of the node it was
+    /// conferred through is refused with `PermissionDenied`.
     pub const SHM_MAP: Self = Self(41);
 
     /// Release a shared-memory mapping the calling task established with
@@ -1577,8 +1601,11 @@ impl SyscallNumber {
     /// task id. Returns the minted unforgeable grant handle, which the
     /// caller forwards in-band for the recipient's
     /// [`SyscallNumber::SHM_MAP`] — the handle is owner-checked there, so
-    /// the number is useless to a bystander. Requires `CAP_SHM`; every
-    /// mint is audited, exactly as `shm_create`.
+    /// the number is useless to a bystander. The caller must be allowed to
+    /// post to the endpoint, so no bystander can grow its server's grant
+    /// table; one that may not, and a region retired by the removal of the
+    /// node it was conferred through, are refused with `PermissionDenied`.
+    /// Requires `CAP_SHM`; every mint is audited, exactly as `shm_create`.
     pub const SHM_GRANT: Self = Self(82);
 
     /// Report whether the in-flight caller of a served call endpoint holds
@@ -1987,9 +2014,10 @@ impl SyscallNumber {
     /// A bus/hub/controller driver that owns an interior node beneath which a
     /// group of devices hang turns a controller-wide blip (an HC reset, a hub
     /// mid-reset) into *one* fault-domain event: it records the node's
-    /// [`crate::blkio::FaultDomainState`] here, and the reactive tree
-    /// observers — the device manager — see a coherent recovery episode
-    /// across the subtree rather than N spurious child removals. This is a
+    /// [`crate::blkio::FaultDomainState`] here and the tree generation is
+    /// bumped; the leaf drivers beneath read it on their recovery path, so
+    /// the subtree sees one coherent recovery episode rather than N spurious
+    /// child removals. This is a
     /// **distinct** signal from the surprise-removal hotplug path
     /// ([`SyscallNumber::HW_REMOVE_NODE`]): the node stays present, only its
     /// health changes, so a merely-recovering subtree is never torn down.
@@ -2104,7 +2132,8 @@ impl SyscallNumber {
     /// endpoint it may already call. A grant the caller does not hold and an
     /// unknown recipient endpoint are the same [`Errno::NotFound`] with
     /// nothing minted, so the reply confirms nothing about foreign
-    /// endpoints. Gated on [`crate::CapabilityId::IPC_ENDPOINT`] — the
+    /// endpoints, and a caller that may not post to the recipient is
+    /// [`Errno::PermissionDenied`]. Gated on [`crate::CapabilityId::IPC_ENDPOINT`] — the
     /// capability the endpoint resource itself declares, exactly as
     /// [`Self::SHM_GRANT`] is gated on the shared-region resource's
     /// `CAP_SHM` — and audited on every mint.
@@ -2510,11 +2539,14 @@ impl SyscallNumber {
     /// node calls this once its device can no longer reach them — after a
     /// reset, for most devices. A carve an earlier instance leaves after the
     /// call is freed as it arrives. Memory the caller itself carved is never
-    /// released by its own call.
+    /// released by its own call. The kernel admits at most one driver per
+    /// node, from admission until its last thread is down, so no earlier
+    /// instance can still be programming the device.
     ///
     /// No arguments. Returns the bytes freed now, or `-errno`:
-    /// [`Errno::NotFound`] for a caller that was not loaded for a node.
-    /// Gated by [`crate::CapabilityId::MEM_DMA`].
+    /// [`Errno::NotFound`] for a caller that was not loaded for a node, and
+    /// [`Errno::NotImplemented`] where no quarantine is wired. Gated by
+    /// [`crate::CapabilityId::MEM_DMA`].
     pub const DMA_QUIESCED: Self = Self(126);
 
     /// Create a shared region a DMA master may reach (`plans/SOUND.md`
@@ -2526,11 +2558,13 @@ impl SyscallNumber {
     /// then the user pointers the region id and the block's device address —
     /// translated through the grant's bus window — are written to. Returns
     /// the base virtual address of the caller's mapping, or `-errno`:
-    /// [`Errno::NotFound`] for a handle the caller does not hold,
+    /// [`Errno::NotFound`] for a handle the caller does not hold, which is
+    /// what a grant revoked by its node's removal answers,
     /// [`Errno::OutOfRange`] for a grant that is not `Dma`, a length past its
     /// extent, or a block the device could not reach, and
     /// [`Errno::PermissionDenied`] for a caller not loaded for a node or
-    /// lacking `CAP_SHM`. The region binds the caller's node quarantine
+    /// lacking `CAP_SHM`, and [`Errno::DeviceOffline`] for a node that left the
+    /// tree while its grant was still being revoked. The region reserves room in the caller's node quarantine
     /// (`plans/OPEN-DEFECTS.md` D167). The caller's own unmap is its word that
     /// its device is done with the region, as [`SyscallNumber::DMA_FREE`] is
     /// for a carve; should the caller end still mapping it, its frames go to
@@ -2552,8 +2586,9 @@ impl SyscallNumber {
     /// the caller forwards in its reply; it resolves only for the recipient.
     /// Fails closed with [`Errno::NotFound`] (no such region held, endpoint,
     /// in-service ticket, or live recipient) or
-    /// [`Errno::PermissionDenied`] (not the endpoint's server). Gated by
-    /// [`crate::CapabilityId::SHM`]; audited.
+    /// [`Errno::PermissionDenied`] (not the endpoint's server, or a region
+    /// retired by its node's removal). Gated by [`crate::CapabilityId::SHM`];
+    /// audited.
     pub const SHM_GRANT_PEER: Self = Self(128);
 
     /// Report whether the in-service caller of an endpoint the caller owns
@@ -2587,6 +2622,25 @@ impl SyscallNumber {
     /// `Origin`, and a watch reveals only when a process the caller already
     /// knows has gone.
     pub const PEER_WATCH: Self = Self(130);
+
+    /// Read the hardware-tree node the in-service caller of an endpoint the
+    /// caller owns was admitted for — the node counterpart of
+    /// [`SyscallNumber::CALL_PEER_ORIGIN`], so a server can require that a
+    /// request comes from the driver of a particular kind of device.
+    ///
+    /// Arguments: the endpoint id, the ticket of the call being served, then a
+    /// user pointer to and the length of a buffer for one wire-encoded
+    /// [`crate::HwNode`]. The caller must own the endpoint and hold its
+    /// receive capability. The peer is resolved by its process instance, never
+    /// its reusable pid, so a poster that has exited names nothing. Returns the
+    /// record's length, or `-errno`: [`Errno::PermissionDenied`] when the
+    /// caller is not the endpoint's server, [`Errno::BufferTooSmall`] for a
+    /// buffer short of one record, and [`Errno::NotFound`] for an unknown
+    /// endpoint or ticket, a peer that is not a driver loaded for a node, or a
+    /// node that has left the tree. No capability beyond the endpoint's
+    /// receive gate; not audited — the decision it feeds is the server's to
+    /// log.
+    pub const CALL_PEER_NODE: Self = Self(131);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -2746,7 +2800,7 @@ impl WaitFlags {
 /// Returned by the `irq_bind` syscall and consumed by `irq_wait`. The
 /// inner `u64` is unforgeable in the sense that the kernel rejects any
 /// `irq_wait` whose `handle` was not previously minted for the calling
-/// task (capabilities are unforgeable tokens; —
+/// task (capabilities are unforgeable tokens;
 /// no trusted-caller shortcuts). The wire representation is the raw
 /// `u64`; the wrapper exists so call sites cannot confuse it with
 /// arbitrary integer arguments.

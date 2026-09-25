@@ -611,7 +611,7 @@ impl PerCpuGdt {
             assert!(bytes >= 1 && bytes - 1 <= u16::MAX as usize);
             // SAFETY-INVARIANT: the `assert!` above proves that
             // `bytes - 1` fits in a `u16`, so the truncation cast
-            // is lossless. — justified `#[allow]`.
+            // is lossless.
             #[allow(clippy::cast_possible_truncation)]
             let limit = (bytes - 1) as u16;
             limit

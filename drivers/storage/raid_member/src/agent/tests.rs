@@ -103,6 +103,22 @@ fn a_composer_that_went_away_is_offered_to_again() {
 }
 
 #[test]
+fn a_deferred_offer_is_made_again_after_a_pace() {
+    // The composer answers Busy while a previous membership for this device
+    // has yet to end, which is exactly the moment a re-enumerated disk offers
+    // itself; stopping here would keep that disk out of its array for good.
+    for errno in [Errno::Busy, Errno::OutOfMemory] {
+        let mut agent = with_membership_held(1_000);
+        agent.note_end(MembershipEnd::Deferred(errno), 2_000);
+        let AgentStep::Retry { deadline_ns } = agent.next_step(2_000) else {
+            panic!("a deferred device is offered again, never abandoned");
+        };
+        assert!(deadline_ns > 2_000, "and paced, never re-sent at once");
+        assert_eq!(agent.next_step(deadline_ns), AgentStep::Offer);
+    }
+}
+
+#[test]
 fn a_refusal_stops_the_agent_for_good() {
     let mut agent = with_membership_held(1_000);
     agent.note_end(MembershipEnd::Refused(Errno::NotFound), 2_000);

@@ -1,7 +1,7 @@
 //! In-kernel [`VirtioHost`] backed by a per-process [`DmaPool`].
 //!
-//! Stage 4.D Item 0 wiring: the always-available [`tairix_virtio::MockHost`]
-//! satisfies [`tairix_virtio::VirtioHost`] by leaking `Box<[u8]>` storage; the
+//! The test-only `tairix_virtio::MockHost` satisfies
+//! [`tairix_virtio::VirtioHost`] by leaking `Box<[u8]>` storage; the
 //! [`KernelVirtioHost`] here satisfies the same trait but routes every
 //! allocation through the capability-gated [`tairix_kernel_sec::alloc_dma`]
 //! / [`tairix_kernel_sec::free_dma`] pair.
@@ -30,8 +30,8 @@
 //! interrupt line, driving the shared
 //! [`tairix_kernel_irq::block_until_ready`] poll-and-yield loop
 //! through an injected [`IrqWaiter`] (Stage 4.D Item 2-tail.3). The
-//! polled in-process `notify_log` is retained only on
-//! [`tairix_virtio::MockHost`]; the production wake-up is the IRQ path.
+//! polled in-process `notify_log` is retained only on the test-only
+//! `tairix_virtio::MockHost`; the production wake-up is the IRQ path.
 //!
 //! # Safety
 //!
@@ -342,6 +342,10 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> VirtioHost for KernelVirtioHost<'_, 
             | WaitOutcome::Aborted(_) => CompletionSignal::TimedOut,
         }
     }
+
+    fn now_ns(&self) -> u64 {
+        self.waiter.now_ns()
+    }
 }
 
 /// Map a [`DmaGateError`] to the closest [`DriverError`].
@@ -349,7 +353,7 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> VirtioHost for KernelVirtioHost<'_, 
 /// Capability refusals surface as [`DriverError::PermissionDenied`];
 /// every other failure (oversize requests, OOM, pool config bugs)
 /// collapses to [`DriverError::LengthOutOfRange`] — the same
-/// variant the existing [`tairix_virtio::MockHost`] uses when its
+/// variant the test `tairix_virtio::MockHost` uses when its
 /// 64 MiB cap is hit, so a driver consumer sees a single failure
 /// shape regardless of which host minted it.
 fn map_gate_error(e: DmaGateError) -> DriverError {
@@ -871,6 +875,27 @@ mod tests {
             9,
             "the park must be told the deadline the wait is bounded by"
         );
+    }
+
+    #[test]
+    fn a_waits_clock_is_the_parks_own_clock() {
+        let frames = FrameAllocator::new(&small_map(16)).unwrap();
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
+        let sink = Recorder::new();
+        let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
+        let (irq, handle) = irq_binding(4);
+        let waiter = TestWaiter::idle(&irq);
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        assert_eq!(host.now_ns(), 0);
+        assert_eq!(host.notify_wait(0, 5), CompletionSignal::TimedOut);
+        assert_eq!(
+            host.now_ns(),
+            waiter.now_ns(),
+            "one clock for waits and deadlines"
+        );
+        assert!(host.now_ns() >= 5, "the timed-out wait spent its budget");
     }
 
     #[test]

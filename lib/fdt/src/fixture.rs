@@ -133,6 +133,10 @@ pub const GENET_SPI_A: u32 = 157;
 /// The GENET node's second `interrupts` entry; see [`GENET_SPI_A`].
 pub const GENET_SPI_B: u32 = 158;
 
+/// The SPI [`raspi_like_arm`]'s `VideoCore` mailbox raises while its inbox
+/// holds a word (the real tree's value), type-relative like [`GENET_SPI_A`].
+pub const MAILBOX_SPI: u32 = 33;
+
 /// The board MAC [`raspi_like_arm`] publishes on the GENET node, as the Pi's
 /// firmware does through the `local-mac-address` binding.
 pub const GENET_BOARD_MAC: [u8; 6] = [0xDC, 0xA6, 0x32, 0x11, 0x22, 0x33];
@@ -399,7 +403,8 @@ pub const RASPI_GIC_PHANDLE: u32 = 1;
 /// mini-UART (`brcm,bcm2835-aux-uart`) — a GIC-400 interrupt controller
 /// (`arm,gic-400`) at the BCM2711 bases, the `VideoCore` firmware mailbox
 /// (`brcm,bcm2835-mbox`) at the BCM2711 ARM-physical base `0xFE00_B880`
-/// with a `0x40`-byte doorbell window, plus a `/psci` (`smc`) node and a
+/// with a `0x40`-byte doorbell window and SPI [`MAILBOX_SPI`], plus a
+/// `/psci` (`smc`) node and a
 /// 1 GiB `/memory@0` node.
 ///
 /// The tree mirrors the real `bcm2711-rpi-4-b.dtb` shape: the root
@@ -478,10 +483,15 @@ pub fn raspi_like_arm(pl011_base: u64, miniuart_base: u64) -> Vec<u8> {
 
     // The VideoCore firmware mailbox doorbell block at its bus address
     // (CPU-physical `0xFE00_B880`), the node the HVS framebuffer
-    // discovery binds.
+    // discovery binds, with the level-high SPI its inbox raises.
     b.begin_node("mailbox@7e00b880");
     b.prop_str("compatible", "brcm,bcm2835-mbox");
     b.prop("reg", &soc_reg(0x7e00_b880, 0x40));
+    let mut mailbox_interrupts = Vec::new();
+    for cell in [0u32, MAILBOX_SPI, 0x04] {
+        mailbox_interrupts.extend_from_slice(&cell.to_be_bytes());
+    }
+    b.prop("interrupts", &mailbox_interrupts);
     b.end_node();
 
     // The BCM2711 GPIO controller at its bus address (CPU-physical

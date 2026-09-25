@@ -178,12 +178,31 @@ pub struct MmioWindowMap {
     base: VirtAddr,
     capacity_pages: usize,
     /// Slot runs handed out — the two guard slots included — keyed by the
-    /// run's leading guard slot and valued by the register block's
-    /// within-page offset. The data-page count is the run's own length less
-    /// its guards, so it is not carried a second time, and the gaps between
-    /// runs are the free slots: no occupancy bitmap sized to the window
-    /// exists to scan or to grow.
-    regions: RangeMap<usize, u64>,
+    /// run's leading guard slot and valued by the span the run maps. The
+    /// data-page count is the run's own length less its guards, so it is not
+    /// carried a second time, and the gaps between runs are the free slots:
+    /// no occupancy bitmap sized to the window exists to scan or to grow.
+    regions: RangeMap<usize, WindowSpan>,
+}
+
+/// The physical span one window was mapped for: exactly the bytes asked for,
+/// not the pages rounded out around them.
+///
+/// For a chunked shared window it is the first chunk's base and the whole
+/// length, which names no single contiguous span; [`MmioWindowMap::retain`]
+/// is therefore meaningful only over device windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindowSpan {
+    phys: u64,
+    len: u64,
+}
+
+impl WindowSpan {
+    /// The block's offset into its first page, which the user-visible base
+    /// carries.
+    fn page_offset(self) -> u64 {
+        self.phys & (PAGE_SIZE as u64 - 1)
+    }
 }
 
 impl MmioWindowMap {
@@ -344,7 +363,13 @@ impl MmioWindowMap {
         phys_base
             .checked_add(len_u64)
             .ok_or(MmioError::InvalidRegion)?;
-        let leading_guard_slot = self.claim_run(data_pages, page_offset)?;
+        let leading_guard_slot = self.claim_run(
+            data_pages,
+            WindowSpan {
+                phys: phys_base,
+                len: len_u64,
+            },
+        )?;
         let first_data_slot = leading_guard_slot + 1;
 
         // Frame number = phys_base >> PAGE_SHIFT, converted without a
@@ -432,8 +457,15 @@ impl MmioWindowMap {
         let len = data_pages
             .checked_mul(PAGE_SIZE)
             .ok_or(MmioError::InvalidRegion)?;
+        let len_u64 = u64::try_from(len).map_err(|_| MmioError::InvalidRegion)?;
 
-        let leading_guard_slot = self.claim_run(data_pages, 0)?;
+        let leading_guard_slot = self.claim_run(
+            data_pages,
+            WindowSpan {
+                phys: chunks[0].0,
+                len: len_u64,
+            },
+        )?;
         let first_data_slot = leading_guard_slot + 1;
 
         // Walk the chunk list, mapping each chunk's frames into the next
@@ -481,18 +513,18 @@ impl MmioWindowMap {
     }
 
     /// Claim a free run of `data_pages` slots plus its two guard slots,
-    /// recording the register block's `page_offset` against it, and return
-    /// the leading guard slot.
+    /// recording the `span` it maps against it, and return the leading guard
+    /// slot.
     ///
     /// Placement is first-fit over the gaps between the runs already handed
     /// out, so it costs one pass over those rather than a scan of the window
     /// — and a released run's slots, guards included, are free again the
     /// moment its record leaves.
-    fn claim_run(&mut self, data_pages: usize, page_offset: u64) -> Result<usize, MmioError> {
+    fn claim_run(&mut self, data_pages: usize, span: WindowSpan) -> Result<usize, MmioError> {
         let block_pages = data_pages.checked_add(2).ok_or(MmioError::NoVirtualSpace)?;
         let count = u64::try_from(block_pages).map_err(|_| MmioError::NoVirtualSpace)?;
         self.regions
-            .place(0..self.capacity_pages, count, page_offset)
+            .place(0..self.capacity_pages, count, span)
             .map(|run| run.start)
             .ok_or(MmioError::NoVirtualSpace)
     }
@@ -531,9 +563,9 @@ impl MmioWindowMap {
     fn locate(&self, virt: VirtAddr) -> Option<(usize, usize)> {
         let offset_in_window = virt.as_u64().checked_sub(self.base.as_u64())?;
         let data_slot = usize::try_from(offset_in_window >> PAGE_SHIFT).ok()?;
-        let (run, &page_offset) = self.regions.covering(data_slot)?;
+        let (run, span) = self.regions.covering(data_slot)?;
         let leading_guard_slot = run.start;
-        if self.window_virt(leading_guard_slot, page_offset) != virt {
+        if self.window_virt(leading_guard_slot, span.page_offset()) != virt {
             return None;
         }
         // Every recorded run is its data pages bracketed by two guard slots,
@@ -589,6 +621,43 @@ impl MmioWindowMap {
         // becomes free space the next placement can use.
         self.regions.remove(leading_guard_slot);
         Ok(())
+    }
+
+    /// Unmap from `space` every window whose physical span `keep` refuses,
+    /// handing each released window's user-visible base and data-page count
+    /// to `unmapped` once its pages are gone.
+    ///
+    /// `keep` sees the exact `(phys, len)` a window was mapped for. Windows
+    /// are visited in address order, each at most once.
+    ///
+    /// # Errors
+    ///
+    /// [`MmioError::PageTable`] from the first unmap that fails; the windows
+    /// before it are released, and it keeps its record but is still handed to
+    /// `unmapped`, since some of its pages may already be gone.
+    pub fn retain<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        mut keep: impl FnMut(u64, u64) -> bool,
+        mut unmapped: impl FnMut(VirtAddr, usize),
+    ) -> Result<(), MmioError> {
+        let mut from = 0;
+        loop {
+            let refused = self
+                .regions
+                .overlapping(from..self.capacity_pages)
+                .map(|(run, span)| (run, *span))
+                .find(|&(_, span)| !keep(span.phys, span.len));
+            let Some((run, span)) = refused else {
+                return Ok(());
+            };
+            let base = self.window_virt(run.start, span.page_offset());
+            let data_pages = (run.end - run.start).saturating_sub(2);
+            let released = self.unmap_at(space, base);
+            unmapped(base, data_pages);
+            released?;
+            from = run.end;
+        }
     }
 
     /// Raw, non-null base pointer to the first register of `region`, resolved

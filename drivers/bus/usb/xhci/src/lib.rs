@@ -10,10 +10,12 @@
 //! or a bus by name (`plans/USB.md`).
 //!
 //! This `lib` target holds the HCD's host-testable logic — the controller
-//! [`bringup`] orchestration and the per-interface URB-[`serve`] state
-//! machine — so they are proven host-side over mocks; the `Run` binary
-//! composes them with the live kernel seams (`shm_create`, `call_create`,
-//! `hw_emit_node`, the wait-set event loop). The bus-agnostic `xHCI`
+//! [`bringup`] orchestration, the controller fault [`domain`], the
+//! per-interface URB-[`serve`] state machine, and the table of published
+//! [`interfaces`] with its reconcile, serve, and recovery sequencing — so they
+//! are proven host-side over mocks; the `Run` binary composes them with the
+//! live kernel seams (`shm_create`, `call_create`, `hw_emit_node`, the
+//! wait-set event loop). The bus-agnostic `xHCI`
 //! *protocol* engine (the [`Xhci`](tairix_usb::Xhci) controller, the TRB/ring
 //! vocabulary, and the [`UsbDevice`](tairix_usb::device::UsbDevice)
 //! enumeration engine) lives in `lib/usb` so this driver and the class drivers
@@ -34,11 +36,14 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
 use tairix_abi::{DriverBindKey, HwMatchKey};
 use tairix_usb::XHCI_COMPATIBLE;
 
 pub mod bringup;
 pub mod domain;
+pub mod interfaces;
 pub mod serve;
 
 /// The bind priority [`BIND_KEYS`] carries.

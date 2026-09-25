@@ -402,6 +402,11 @@ uniqueness test and may never be re-numbered.
 `HostError::as_errno(self) -> tairix_abi::Errno` is total: every
 variant has a stable counterpart in `abi-v1`. Callers wrapping the host
 behind a syscall surface the result without inventing new error codes.
+A failed registration keeps its cause: `DriverRegisterFailed(e)` maps
+through `DriverError::as_errno`, except `Busy`, which at the load gate
+means another live driver holds the node and reads as `Errno::Busy`, so the
+device manager can tell a removal race (`DeviceOffline`) or an
+already-driven node from a refused image.
 
 ## Stability tier
 

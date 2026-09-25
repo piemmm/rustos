@@ -35,7 +35,8 @@ workspace = true
 # and the `CapabilityId` / `DriverError` types it fails closed with.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The bus-agnostic virtio split-virtqueue protocol (Transport, SplitQueue, DMA
-# slabs, and the MockHost/MockTransport doubles the host tests drive). A
+# slabs; the host tests' doubles come from the dev-dependency's `mock`
+# feature). A
 # `lib/*` crate, so the layering holds: a driver depends on `lib/*`, never on
 # another driver.
 tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
@@ -58,3 +59,6 @@ tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the stack canary, the panic
 # handler, the allocator, and the `irq_bind` / `entry!` surface.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+
+[dev-dependencies]
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0", features = ["mock"] }

@@ -1,9 +1,8 @@
 # `tairix-drv-storage-virtio-blk` — virtio-blk block driver
 
-Stage 4 deliverable. Implements `tairix_abi::driver::block::Block` on
-top of the cross-arch virtio transport in `drivers/bus/virtio`. The
-driver is **bus-agnostic**: the same source compiles against the PCI
-backend (x86_64) and the MMIO backend (aarch64, riscv64).
+Implements `tairix_abi::driver::block::Block` over the bus-agnostic virtio
+protocol in `lib/virtio`, so the same source drives the PCI (x86_64) and
+MMIO (aarch64, riscv64) transports.
 
 ## Wire protocol
 
@@ -13,10 +12,15 @@ virtio 1.1 §5.2 — Stage 4 implements the unextended subset:
 - 16-byte `struct virtio_blk_req` header (type + reserved + sector).
 - Fixed 512-byte logical sector size. `VIRTIO_BLK_F_BLK_SIZE` and
   `VIRTIO_BLK_F_TOPOLOGY` negotiation is a Stage 5 follow-up.
-- Status byte: `VIRTIO_BLK_S_OK` (0), `VIRTIO_BLK_S_IOERR` (1),
-  `VIRTIO_BLK_S_UNSUPP` (2). The first maps to `Ok(())`, the second
-  to `DriverError::DeviceFault`, the third to
-  `DriverError::Unsupported`.
+- Status byte: `VIRTIO_BLK_S_OK` (0) maps to `Ok(())`,
+  `VIRTIO_BLK_S_IOERR` (1) to the per-request `DriverError::MediumError`,
+  `VIRTIO_BLK_S_UNSUPP` (2) to `DriverError::Unsupported`, and any other
+  byte to `DriverError::DeviceFault`. A status no device writes is staged
+  before every request, so a completion that wrote none is refused.
+- A read's data is handed back only when the completion reports writing
+  the payload and the status behind it.
+- A requestq too shallow for one three-descriptor request is refused at
+  `open`, before the device is given it.
 
 ## DMA staging
 
@@ -32,14 +36,14 @@ the volume size (`AGENTS.md` §2.16, §24, §26).
 
 ## Supported hardware
 
-| Bus      | Architectures            | Stage 4 status                     |
-|----------|--------------------------|-------------------------------------|
-| virtio   | x86_64 / aarch64 / riscv64 | mock-transport only (see notes)   |
+| Bus                   | Architectures               |
+|-----------------------|-----------------------------|
+| virtio-mmio, virtio-pci | x86_64 / aarch64 / riscv64 |
 
-The "mock-transport only" status reflects the prerequisites the
-`drivers/bus/virtio` README enumerates (per-process DMA mapping, IRQ
-routing, bus-handle hand-off). Once those land the same `VirtioBlk`
-type binds to a `PciBackend` / `MmioBackend` without modification.
+The driver reaches its device through `lib/virtio`'s `MmioTransport` or
+`PciTransport` over the register window the kernel mints for its node, and
+is exercised on QEMU by the `virtio-blk-mmio-aarch64` and
+`virtio-blk-pci-x86-64` verticals.
 
 ## Discovery (bind table)
 
@@ -64,11 +68,13 @@ floor registry against a build-signed manifest carrying this same
 
 ## Zero-on-free
 
-`Block::read_blocks_with_class(_, _, BufferClass::Sensitive)` and the
-corresponding `write_blocks_with_class` route every internal staging
-copy through `BounceBuffer`, whose `Drop` impl scrubs the DMA region
-before release (`AGENTS.md` §4). The caller-owned `buf` is **not**
-zeroed; that scrubbing remains the caller's responsibility.
+A `BufferClass::Sensitive` read or write scrubs the data staging when the
+request ends. A request the device still holds past its deadline keeps its
+staging unscrubbed — a scrub could overwrite a payload the device has yet to
+read — until the device hands it back, or a confirmed reset when the driver
+is dropped takes it back; a device that will not reset keeps it for the
+kernel's DMA quarantine. The caller-owned `buf` is **not** zeroed; that
+remains the caller's responsibility.
 
 ## Test surface
 

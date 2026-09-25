@@ -19,7 +19,7 @@
 //! Spawning a program is privileged: it materialises a new principal's
 //! address space and hands it the CPU. [`spawn_and_enter`] therefore
 //! requires the caller to satisfy the requested [`SpawnMode`] and fails
-//! closed (no ambient authority; — fail closed) — the check
+//! closed (no ambient authority; fail closed) — the check
 //! happens *before* `build_process_image` touches any page table. The hosted
 //! program still receives only the capabilities its own signed manifest
 //! requests intersected with its user's grants; this gate
@@ -316,11 +316,11 @@ pub trait InitSpawnCtx {
     /// [`spawn_kernel_service`](Self::spawn_kernel_service) returning
     /// [`None`].
     ///
-    /// `node_id` is the discovered hardware-tree node the driver was matched
-    /// for; it is recorded against the child so the
-    /// child's later `hw_emit_node` calls parent published children under
-    /// exactly that node, and the emitter cannot forge its tree position. [`None`] when the spawn is not a node-matched
-    /// driver load.
+    /// `node` is the discovered hardware-tree node the driver was matched
+    /// for; it is recorded against the child so the child's later
+    /// `hw_emit_node` calls parent published children under exactly that
+    /// node, and the emitter cannot forge its tree position. [`None`] when the
+    /// spawn is not a node-matched driver load.
     ///
     /// `path` is the kernel-resolved driver-store path the signed load gate
     /// verified the image from (a plain `/System/Drivers/input/usb_kbd` or a
@@ -338,9 +338,9 @@ pub trait InitSpawnCtx {
         caps: CapabilitySet,
         grants: &[HwResource],
         args: &[&[u8]],
-        node_id: Option<u32>,
+        node: Option<DriverNode<'_>>,
     ) -> Result<u64, Errno> {
-        let _ = (path, rxe, caps, grants, args, node_id);
+        let _ = (path, rxe, caps, grants, args, node);
         Err(Errno::NotImplemented)
     }
 
@@ -715,6 +715,9 @@ pub fn admit_errno(err: AdmitError) -> Errno {
         AdmitError::SchedulerFull => Errno::NoSpace,
         AdmitError::AspaceConflict => Errno::AlreadyExists,
         AdmitError::OutOfMemory => Errno::OutOfMemory,
+        AdmitError::NodeBusy => Errno::Busy,
+        AdmitError::NodeGone => Errno::DeviceOffline,
+        AdmitError::GrantsWithoutNode => Errno::PermissionDenied,
     }
 }
 
@@ -905,6 +908,42 @@ pub enum AdmitError {
     AspaceConflict,
     /// The new task's kernel stack could not be allocated.
     OutOfMemory,
+    /// The hardware-tree node a driver was loaded for already has a live
+    /// driver: a second would share its device.
+    NodeBusy,
+    /// The hardware-tree node a driver was loaded for left the tree during
+    /// its admission.
+    NodeGone,
+    /// Device grants were asked for with no node to revoke them through.
+    GrantsWithoutNode,
+}
+
+/// The hardware-tree node a driver is loaded for, and the tree that must
+/// still hold it once the driver's grants are minted.
+#[derive(Clone, Copy)]
+pub struct DriverNode<'a> {
+    /// The node's id.
+    pub id: u32,
+    /// The live tree the node was matched in.
+    pub tree: &'a dyn crate::hwtree::HwNodeLiveness,
+}
+
+#[cfg(test)]
+impl DriverNode<'static> {
+    /// `id`, matched in a tree that holds every node: for an admission whose
+    /// subject is not a removal.
+    pub(crate) fn matched(id: u32) -> Self {
+        struct EveryNodeLive;
+        impl crate::hwtree::HwNodeLiveness for EveryNodeLive {
+            fn is_live(&self, _: u32) -> bool {
+                true
+            }
+        }
+        Self {
+            id,
+            tree: &EveryNodeLive,
+        }
+    }
 }
 
 /// A freshly built, not-yet-admitted user image an [`ArchImageBuilder`]
@@ -1608,6 +1647,12 @@ mod tests {
         assert_eq!(
             admit_errno(AdmitError::AspaceConflict),
             Errno::AlreadyExists
+        );
+        assert_eq!(admit_errno(AdmitError::NodeBusy), Errno::Busy);
+        assert_eq!(admit_errno(AdmitError::NodeGone), Errno::DeviceOffline);
+        assert_eq!(
+            admit_errno(AdmitError::GrantsWithoutNode),
+            Errno::PermissionDenied
         );
     }
 

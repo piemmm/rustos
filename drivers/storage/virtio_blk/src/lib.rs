@@ -21,9 +21,8 @@
 //! # Zero-on-free
 //!
 //! The classified `read_blocks_with_class` / `write_blocks_with_class`
-//! methods honour the sensitive flag by scrubbing the bounce-buffer
-//! staging through [`tairix_virtio::BounceBuffer`]'s drop
-//! impl (`BufferClass::Sensitive` contract).
+//! methods scrub the data staging when a sensitive request ends, or, when the
+//! device still holds it, once the device or a confirmed reset hands it back.
 //!
 //! # Device status → health class
 //!
@@ -52,15 +51,20 @@ extern crate alloc;
 use core::convert::TryFrom;
 use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
-use tairix_abi::driver::{BufferClass, CompletionSignal};
+use tairix_abi::driver::BufferClass;
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 use tairix_virtio::{
-    BounceBuffer, ChainSegment, Direction, DmaSlab, SplitQueue, Status, Transport, VirtioError,
-    VirtioHost,
+    scrub, BounceBuffer, ChainSegment, Direction, DmaSlab, RequestQueue, SplitQueue, Status,
+    Transport, UsedToken, VirtioError, VirtioHost,
 };
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x564E_4250_0000_0001; // "VBKP"
+
+/// Descriptors the requestq is programmed with: one request is out at a time,
+/// and the rest of the ring lets descriptors rotate, so a completion the
+/// device repeats names free ones.
+const QUEUE_SIZE: u16 = 8;
 
 /// The virtio device id of a block device (virtio 1.1 §5.2 — `virtio-blk`
 /// is device type 2). This driver's [`BIND_KEYS`] match key is built from
@@ -89,19 +93,6 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
     HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID),
 )];
-
-/// Upper bound on advisory completion wakes a single request tolerates
-/// before failing closed.
-///
-/// A virtio-blk request is serialised by the owner's lock, so exactly one
-/// completion is ever outstanding, and a healthy device posts it within a
-/// wake or two of the notify (an early wake whose used-ring write is not
-/// yet visible, or a wake for the shared line's other queue, costs one
-/// extra re-poll). A count far above that turns a *pathological* stream of
-/// wakes with no matching completion — a stuck or mis-routed shared
-/// interrupt — into a deterministic [`DriverError::DeviceFault`] rather
-/// than an unbounded loop, without ever tripping in normal operation.
-const MAX_COMPLETION_WAKES: u32 = 1024;
 
 /// Driver entry point.
 ///
@@ -134,12 +125,18 @@ mod wire {
     /// `struct virtio_blk_req` header size: type(4) + reserved(4) + sector(8).
     pub const HEADER_LEN: usize = 16;
     pub const STATUS_LEN: usize = 1;
+    /// Descriptors in the longest request chain: header, data, status.
+    pub const REQUEST_CHAIN_LEN: u16 = 3;
     pub const STATUS_OK: u8 = 0;
     pub const STATUS_IOERR: u8 = 1;
     /// `VIRTIO_BLK_S_UNSUPP` (virtio 1.1 §5.2.6): the device does not
     /// support this request type (e.g. a flush or discard it never
     /// negotiated). A request-level refusal, not a device fault.
     pub const STATUS_UNSUPP: u8 = 2;
+    /// Staged in the status byte before every request. No device writes it,
+    /// so a completion that wrote no status is refused rather than read as
+    /// the last request's.
+    pub const STATUS_UNANSWERED: u8 = 0xFF;
     /// Most bytes staged into the persistent data buffer for a single
     /// virtio transaction. A `read_blocks`/`write_blocks` call larger
     /// than this is split into block-aligned chunks of at most this
@@ -185,7 +182,7 @@ mod wire {
 /// it for `'h` rather than demanding a `'static` host (per-process pools are reclaimed when the driver unloads).
 pub struct VirtioBlk<'h, T: Transport> {
     transport: T,
-    queue: SplitQueue,
+    queue: RequestQueue,
     host: &'h dyn VirtioHost,
     block_size: u32,
     block_count: u64,
@@ -206,6 +203,9 @@ pub struct VirtioBlk<'h, T: Transport> {
     header: Option<DmaSlab>,
     data: Option<DmaSlab>,
     status: Option<DmaSlab>,
+    /// The request the device still holds staged a sensitive payload, so the
+    /// data staging is scrubbed once the device hands it back.
+    scrub_when_returned: bool,
 }
 
 /// Negotiated discard limits, or `unsupported` when the device did not
@@ -232,7 +232,8 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
     ///
     /// Propagates [`VirtioError`] from the transport / queue setup,
     /// including [`VirtioError::DeviceFault`] for a device whose reset
-    /// never confirms. The constructor returns
+    /// never confirms and [`VirtioError::QueueTooShallow`] for a requestq
+    /// that cannot hold one request's chain. The constructor returns
     /// [`VirtioError::FeaturesRejected`] if the device clears
     /// [`Status::FEATURES_OK`] after the driver completed negotiation.
     pub fn open(mut transport: T, host: &'h dyn VirtioHost) -> Result<Self, VirtioError> {
@@ -276,7 +277,13 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         let request_status = host
             .alloc_dma_zeroed(wire::STATUS_LEN)
             .map_err(|_| VirtioError::DeviceFault)?;
-        let queue = SplitQueue::new(&mut transport, host, 0, 8)?;
+        let queue = RequestQueue::new(SplitQueue::new(
+            &mut transport,
+            host,
+            0,
+            QUEUE_SIZE,
+            wire::REQUEST_CHAIN_LEN,
+        )?);
         status = status.with(Status::DRIVER_OK);
         transport.set_status(status);
         // Read capacity from device-config.
@@ -315,28 +322,8 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
             header: Some(header),
             data: Some(data),
             status: Some(request_status),
+            scrub_when_returned: false,
         })
-    }
-
-    /// Tear the device down for unload: reset it, then release its memory.
-    pub fn close(mut self) {
-        if self.transport.reset().is_err() {
-            // A wedged device may still master its rings and staging: hold
-            // them for the kernel to quarantine when the driver exits.
-            core::mem::forget(self);
-        }
-    }
-
-    /// Borrow the underlying transport (host-side test access only;
-    /// not exposed across the driver-class trait surface).
-    #[must_use]
-    pub fn transport(&self) -> &T {
-        &self.transport
-    }
-    /// Borrow the underlying transport mutably for the in-process
-    /// software peer to drive on `kick` (`MockTransport::drain_queue`).
-    pub fn transport_mut(&mut self) -> &mut T {
-        &mut self.transport
     }
 
     fn build_header(req_type: u32, sector: u64) -> [u8; wire::HEADER_LEN] {
@@ -386,6 +373,7 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         payload: Payload<'_>,
         class: BufferClass,
     ) -> Result<(), DriverError> {
+        self.reclaim_staging()?;
         // Take the persistent staging and wrap it in class-aware
         // bounce buffers. Only the data buffer carries caller bytes, so
         // only it inherits `class` (scrubbed on return when sensitive);
@@ -407,12 +395,36 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
             lba,
             payload,
         );
-        // Return the staging regardless of outcome (`into_slab` scrubs
-        // the data buffer first when the class was sensitive).
+        // Return the staging regardless of outcome.
+        let device_holds_it = self.queue.is_abandoned();
         self.header = Some(header_bb.into_slab());
-        self.data = Some(data_bb.into_slab());
         self.status = Some(status_bb.into_slab());
+        self.data = Some(data_bb.into_slab_after(device_holds_it));
+        self.scrub_when_returned = device_holds_it && class.is_sensitive();
         result
+    }
+
+    /// Take the staging back from a request the device answered after it was
+    /// abandoned, scrubbing a payload it held that was sensitive.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceOffline`] while the device still holds it: the
+    /// staging is not the driver's to reuse, so no request may be published.
+    fn reclaim_staging(&mut self) -> Result<(), DriverError> {
+        if self.queue.settle(&mut self.transport, self.host)?.is_some() {
+            self.scrub_returned_payload();
+        }
+        Ok(())
+    }
+
+    /// Scrub the data staging if a sensitive payload the device held is back.
+    fn scrub_returned_payload(&mut self) {
+        if core::mem::take(&mut self.scrub_when_returned) {
+            if let Some(data) = self.data.as_mut() {
+                scrub(data);
+            }
+        }
     }
 
     /// Stage `payload` into the persistent buffers, publish the chain,
@@ -430,8 +442,8 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
     ) -> Result<(), DriverError> {
         let payload_len = payload.len();
         let write_outbound = payload.is_write();
-        // Stage header.
         header_bb.stage(&Self::build_header(req_type, lba))?;
+        status_bb.stage(&[wire::STATUS_UNANSWERED])?;
         // Stage outbound data for writes; a read only needs the device
         // to have a buffer of `payload_len` bytes to fill. Fail closed
         // if the chunk does not fit the staging window (the chunking
@@ -471,115 +483,34 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
                 direction: Direction::DeviceWrite,
             },
         ];
-        self.submit_and_wait(&segments)?;
-        // Decode the status, and copy device-written data back to the
-        // caller only on success. The data staging is a persistent buffer
-        // reused across requests, so gating the copy on `status_to_result`
-        // returning `Ok` keeps a faulted or unsupported request from
-        // handing the caller stale bytes left by an earlier request — it
-        // returns early and copies nothing.
+        let token = self.submit_and_wait(&segments)?;
+        // The data staging persists across requests, so nothing is copied
+        // back that the device has not vouched for: a refused request, or a
+        // read whose completion does not cover the payload and the status
+        // behind it, would hand the caller an earlier request's bytes.
         status_to_result(status_bb.full_region_mut()[0])?;
         if let Payload::Read(dst) = payload {
-            // The device wrote `payload_len` bytes into the staging
-            // through its phys-mapped slice; `full_region_mut` gives us a
-            // CPU view of them.
+            if (token.written as usize) < payload_len + wire::STATUS_LEN {
+                return Err(DriverError::DeviceFault);
+            }
             dst.copy_from_slice(&data_bb.full_region_mut()[..payload_len]);
         }
         Ok(())
     }
 
-    /// Publish `segments` on the requestq, kick the device, and wait for
-    /// the single outstanding completion, acknowledging the device
-    /// interrupt before returning.
+    /// Publish `segments` on the requestq and wait for their completion.
     ///
-    /// A virtio device signals a finished request by posting a used-ring
-    /// entry and raising its single interrupt line; the host notifier
-    /// (`notify_wait`) parks the calling task until that line fires (the
-    /// mock host drains the queue and returns). A wake is only *advisory*:
-    /// the device's used-`idx` DMA write and its interrupt can be observed
-    /// in either order, and the one shared line can wake us for an
-    /// unrelated queue, so a single empty `poll_used` is never proof that
-    /// no completion is coming. Re-scan the ring after every wake and wait
-    /// again only when it is genuinely empty — the request is serialised
-    /// by the owner's lock, so exactly one completion is outstanding and
-    /// the loop ends when it lands.
-    ///
-    /// Two independent bounds keep an unwell device from stalling the
-    /// caller, because the two failure shapes are different and neither
-    /// bound catches the other:
-    ///
-    /// * **Silence** — each wait carries this device class's per-request
-    ///   deadline, so a device whose completion interrupt is lost, coalesced
-    ///   or never raised releases the caller at the deadline. Without it the
-    ///   caller parks inside the request forever *holding the disk's lock*,
-    ///   which wedges every other user of that disk (at boot: the `/System`
-    ///   mount and the driver store, and so the whole system) — a hang, not
-    ///   a fault, and invisible to the caller.
-    /// * **Noise** — `MAX_COMPLETION_WAKES` bounds a wake storm (a stuck
-    ///   shared line delivering wakes with no matching completion), which no
-    ///   deadline would catch because each wake resets the wait.
-    ///
-    /// Both bounds fail the request closed with a typed error, so the caller
-    /// gets an answer it can act on and the disk's lock is released.
-    fn submit_and_wait(&mut self, segments: &[ChainSegment]) -> Result<(), DriverError> {
-        self.queue
-            .add_chain(segments)
-            .map_err(VirtioError::as_driver_error)?;
-        self.queue.kick(&mut self.transport);
-        // The per-request deadline is the shared per-class I/O policy every
-        // consumer of a block device already obeys, discovered from the class
-        // this driver declares for its hardware — not a constant of this
-        // driver's own, which a bigger machine or a slower device would
-        // outgrow.
+    /// The per-request deadline is the shared per-class I/O policy every
+    /// consumer of a block device already obeys, discovered from the class
+    /// this driver declares — not a constant of this driver's own, which a
+    /// bigger machine or a slower device would outgrow. A request the device
+    /// never answers fails closed rather than being reissued, since the device
+    /// may still own its staging; reissue policy belongs to the consumer
+    /// above, which knows whether the request is safe to repeat.
+    fn submit_and_wait(&mut self, segments: &[ChainSegment]) -> Result<UsedToken, DriverError> {
         let deadline_ns = self.device_class().budget().deadline_ns;
-        let mut outcome: Result<(), DriverError> = Err(DriverError::DeviceFault);
-        let mut silent = false;
-        for _ in 0..MAX_COMPLETION_WAKES {
-            match self.queue.poll_used() {
-                Ok(_token) => {
-                    outcome = Ok(());
-                    break;
-                }
-                Err(VirtioError::NoCompletion) => {
-                    if silent {
-                        // The deadline elapsed and this final re-scan still
-                        // finds no completion: the device is present but not
-                        // answering. Fail closed rather than reissuing — the
-                        // device may still own the published descriptor
-                        // chain, so re-publishing the same staging could have
-                        // it write an abandoned request's data into the next
-                        // request's buffers. Reissue policy belongs to the
-                        // consumer above, which knows whether the request is
-                        // safe to repeat.
-                        outcome = Err(DriverError::DeviceOffline);
-                        break;
-                    }
-                    if self.host.notify_wait(self.queue.index(), deadline_ns)
-                        == CompletionSignal::TimedOut
-                    {
-                        // Re-scan once before giving up: a completion whose
-                        // interrupt was lost or coalesced is already sitting
-                        // in the ring, and a wait timing out says nothing
-                        // about the ring's contents.
-                        silent = true;
-                    }
-                }
-                Err(e) => {
-                    outcome = Err(e.as_driver_error());
-                    break;
-                }
-            }
-        }
-        // Acknowledge the device's interrupt now that its completion has
-        // been observed (or the wait gave up), so it de-asserts its line
-        // before the next request re-arms the kernel IRQ (otherwise a
-        // stale edge re-delivers and the following request mis-pairs its
-        // completion). Done regardless of the outcome — a faulted or
-        // abandoned request must still leave the device's line clear. A
-        // no-op on transports that need no device-side ack (MSI-X PCI, the
-        // mock).
-        self.transport.ack_interrupt();
-        outcome
+        self.queue
+            .submit_and_wait(&mut self.transport, self.host, segments, deadline_ns)
     }
 
     /// Issue a `VIRTIO_BLK_T_FLUSH` request, committing the device's
@@ -587,6 +518,7 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
     /// header and a status byte only — no data segment — so it reuses the
     /// persistent header/status staging and leaves the data slab in place.
     fn run_flush(&mut self) -> Result<(), DriverError> {
+        self.reclaim_staging()?;
         let (Some(header), Some(status)) = (self.header.take(), self.status.take()) else {
             return Err(DriverError::DeviceFault);
         };
@@ -607,6 +539,7 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         status_bb: &mut BounceBuffer,
     ) -> Result<(), DriverError> {
         header_bb.stage(&Self::build_header(wire::VIRTIO_BLK_T_FLUSH, 0))?;
+        status_bb.stage(&[wire::STATUS_UNANSWERED])?;
         let segments = [
             ChainSegment {
                 phys: header_bb.phys(),
@@ -621,6 +554,27 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         ];
         self.submit_and_wait(&segments)?;
         status_to_result(status_bb.full_region_mut()[0])
+    }
+}
+
+impl<T: Transport> Drop for VirtioBlk<'_, T> {
+    /// Reset the device before its memory goes: a device that will not confirm
+    /// may still master its rings and staging, which are then held for the
+    /// kernel to quarantine when the driver exits. A confirmed reset hands
+    /// back what an abandoned request still held, so a sensitive payload in
+    /// it is scrubbed before it is freed.
+    fn drop(&mut self) {
+        if self.transport.reset().is_err() {
+            self.queue.withhold();
+            for slab in [&mut self.header, &mut self.data, &mut self.status]
+                .into_iter()
+                .flatten()
+            {
+                slab.withhold();
+            }
+        } else {
+            self.scrub_returned_payload();
+        }
     }
 }
 

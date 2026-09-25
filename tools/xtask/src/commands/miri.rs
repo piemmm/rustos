@@ -242,6 +242,14 @@ pub const TARGETS: &[Target] = &[
         ),
     },
     Target {
+        package: "tairix-vcmailbox",
+        description: "the property-buffer window the owned-buffer mailbox builds over the DMA \
+                      slab it holds, which must never outlive that slab",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
         package: "tairix-abi-sys",
         description: "the C-callable syscall stubs' marshalling of caller pointers into trap \
                       arguments",

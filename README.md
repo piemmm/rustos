@@ -173,6 +173,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Boot-stack poison guard, read back by the post-mortem (§4, §19.2) | Early-boot stack overrun corrupting `.bss` silently, before the MMU exists to fault on it | ✓ | ✓ | ✓ | — |
 | Encrypted root + encrypted swap, no plaintext mode (§4, §11) | Secret/data recovery at rest | ✓ | ✓ | ✓ | — |
 | Capability-gated, bounded DMA/MMIO (§4, §18.1) | Malicious-device DMA, unbounded device memory | ✓ | ✓ | ✓ | — |
+| A removed device's authority revoked at removal (§4, §18.4) | A vanished device's driver, or anything it delegated to, reaching its successor's registers, interrupts, endpoints or buffers | ✓ | ✓ | ✓ | — |
 | Continuous fuzzing of parsers/ABI/IPC/syscalls (§19.6) | Input-handling memory-safety bugs | ✓ | ✓ | ✓ | ✓ |
 | Keyed hashing of caller-chosen keys, per-boot / per-process (§26.2, §26.4) | Hash-flooding: chosen keys collapsing a hash index onto one bucket to starve a shared lock or a bonded link | ✓ | ✓ | ✓ boot seed | ◐ unkeyed |
 | Unpredictable network identifiers, fail-closed without entropy (§22, §5.4) | Off-path TCP injection and SYN-cookie forgery; DNS, NTP, and DHCP spoofing through guessable sequence numbers, ports, ids, and nonces | ✓ | ✓ | ✓ | — |

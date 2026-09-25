@@ -24,11 +24,13 @@
 //! SD host for the Pi-metal root), so this arch-neutral core names no
 //! architecture.
 
+use alloc::vec::Vec;
+
 use tairix_abi::{CapabilityId, Errno, HwNode};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_core::{ConsoleRead, CooperativeYield, SecretFeedback};
 use tairix_kernel_sec::captable::ProcessId;
-use tairix_log::{log, Event, EventId, Level, Sink};
+use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_sync::SpinLock;
 
 use crate::root_storage::RootBlockBinding;
@@ -80,34 +82,54 @@ impl UnlockBoot {
 /// Single producer, single consumer, so the lock never contends.
 static UNLOCK_BOOT: SpinLock<UnlockBoot> = SpinLock::new(UnlockBoot::EMPTY);
 
-/// Record the resolved root binding and the firmware DTB pointer for the
-/// init seam, and seed the authoritative hardware-inventory store
-/// ([`crate::hwtree_store::HW_TREE`]) with the discovered `tree` plus the
-/// synthetic virtual bus every machine has ([`crate::virtual_bus`]).
+/// Resolve the bootstrap root binding from the discovered `tree`, stash it
+/// with the firmware DTB pointer for the init seam, and move `tree` — plus
+/// the synthetic virtual bus every machine has ([`crate::virtual_bus`]) —
+/// into the authoritative hardware inventory
+/// ([`crate::hwtree_store::HW_TREE`]), which then holds the kernel's one
+/// copy of it.
 ///
-/// `tree` is the full discovered hardware tree the kthread matches against
-/// the signed driver store during autoload — it
-/// already carries the bus root nodes `FdtDiscovery` emits (the
-/// `brcm,bcm2711-pcie` root complex, the `VideoCore` mailbox), against which
-/// `devmgr` autoloads the user-space bus chain. It is copied into the store
-/// (the single source of truth), so the boot path no longer
-/// needs to leak it to `'static`; a user-space bus driver appends its
-/// enumerated children at runtime through `hw_emit_node`
-/// ([`crate::hwtree_store::HwTreeStore::publish_child`]), and the autoload
-/// load gate resolves a matched node's grants from the live store directly.
+/// The binding is resolved through the shared `lib/devmatch` policy
+/// ([`crate::root_storage::resolve_root_block_driver`]), audited on `audit`. A
+/// user-space bus driver later publishes its enumerated children into the
+/// same inventory through `hw_emit_node`, and the autoload load gate resolves
+/// a matched node's grants from it.
 ///
-/// The virtual bus is appended here rather than by each architecture's
+/// The virtual bus is added here rather than by each architecture's
 /// discovery because firmware cannot describe it and every port needs it
-/// identically: it is the parent a *composed* block device hangs from. This
-/// is the one arch-neutral point where a discovered tree becomes the live
-/// inventory, so publishing it here is what makes forgetting it impossible.
+/// identically: it is the parent a *composed* block device hangs from.
+///
+/// The store takes one seed for the boot, so a tree it refuses, or no memory
+/// to add the bus, leaves the inventory empty and no device autoloads; the
+/// refusal is logged with its errno ([`BOOT_TREE_REFUSED`]), and the binding
+/// is stashed either way.
 ///
 /// MUST be called **after** the MMU is enabled (see `UNLOCK_BOOT` and
 /// [`crate::hwtree_store`]).
-pub fn record_boot(binding: Option<RootBlockBinding>, dtb: u64, tree: &[HwNode]) {
-    crate::hwtree_store::HW_TREE.seed(tree);
-    crate::hwtree_store::HW_TREE.append(&crate::virtual_bus::node());
+pub fn record_boot(dtb: u64, mut tree: Vec<HwNode>, audit: &dyn Sink) {
+    let binding = crate::root_storage::resolve_root_block_driver(&tree, audit);
     *UNLOCK_BOOT.lock() = UnlockBoot { binding, dtb };
+    let seeded = match tree.try_reserve(1) {
+        Ok(()) => {
+            tree.push(crate::virtual_bus::node());
+            crate::hwtree_store::HW_TREE.seed(tree)
+        }
+        Err(_) => Err(Errno::OutOfMemory),
+    };
+    if let Err(errno) = seeded {
+        log(
+            audit,
+            &Event {
+                level: Level::Error,
+                id: BOOT_TREE_REFUSED,
+                message: "boot hardware tree refused: no device will autoload",
+                fields: &[Field {
+                    key: "errno",
+                    value: FieldValue::Error(errno),
+                }],
+            },
+        );
+    }
 }
 
 /// Read the boot stash once at the init seam.
@@ -226,6 +248,10 @@ impl ConsoleRead for GatedConsoleRead {
 /// future x86_64 / riscv64 siblings) logs through [`note`], never a
 /// per-arch copy.
 pub const UNLOCK_SERVICE: EventId = EventId(4139);
+
+/// Audit event: the hardware inventory refused the boot tree, so no device
+/// autoloads this boot. Carries the refusal's `errno`.
+pub const BOOT_TREE_REFUSED: EventId = EventId(4209);
 
 /// Synthetic owner process id for the unlock kthread's capability context
 /// and IRQ binding. Distinct from the keyboard service's so an audit observer
@@ -969,26 +995,37 @@ mod tests {
         // inventory with the discovered tree `FdtDiscovery` built — here a
         // root plus a discovered bus (the `brcm,bcm2711-pcie` root complex
         // stands in), against which `devmgr` autoloads the user-space bus
-        // chain.
+        // chain, and a probed sound card, whose probe region lies above the
+        // virtual bus's id.
+        let audio = crate::hwtree_node_ids::VIRTIO_AUDIO_PROBE_NODE_BASE_ID;
         let seed = [
             HwNode::new(HW_NODE_ROOT_ID, HW_NODE_ROOT, HwDeviceClass::Root),
             HwNode::new(2, HW_NODE_ROOT_ID, HwDeviceClass::Bus),
+            HwNode::new(audio, HW_NODE_ROOT_ID, HwDeviceClass::Audio),
         ];
-        record_boot(None, 0xDEAD_0000, &seed);
+        let log = CapturingSink::new();
+        record_boot(0xDEAD_0000, seed.to_vec(), &log);
+        assert!(log.refusals().is_empty(), "the boot tree seeded");
         let boot = take_boot();
-        assert!(boot.binding.is_none());
+        assert!(boot.binding.is_none(), "the tree holds no block device");
         assert_eq!(boot.dtb, 0xDEAD_0000);
 
         // The live inventory snapshot reflects the seeded tree plus the one
         // node firmware can never describe: the synthetic virtual bus a
-        // composed block device hangs from. A user-space bus driver's
-        // enumerated children are added at runtime through `hw_emit_node`
-        // (`publish_child`) and observed through the reactive `hw_tree_wait`
-        // generation.
-        let snap = crate::hwtree_store::HW_TREE.snapshot();
-        assert_eq!(snap.len(), 3, "the seeded tree plus the virtual bus");
-        assert_eq!(snap[0], seed[0], "existing nodes keep their order");
+        // composed block device hangs from, in ascending id order. A
+        // user-space bus driver's enumerated children are added at runtime
+        // through `hw_emit_node` (`publish_child`) and observed through the
+        // reactive `hw_tree_wait` generation.
+        let inventory = || {
+            crate::hwtree_store::HW_TREE
+                .snapshot()
+                .expect("the snapshot fits in memory")
+        };
+        let snap = inventory();
+        assert_eq!(snap.len(), 4, "the seeded tree plus the virtual bus");
+        assert_eq!(snap[0], seed[0], "existing nodes are kept whole");
         assert_eq!(snap[1], seed[1]);
+        assert_eq!(snap[3], seed[2]);
         assert_eq!(
             snap[2],
             crate::virtual_bus::node(),
@@ -1012,17 +1049,28 @@ mod tests {
         child
             .push_match_key(HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
             .expect("match key fits");
-        let id = crate::hwtree_store::HW_TREE.publish_child(2, child);
-        let snap = crate::hwtree_store::HW_TREE.snapshot();
-        assert_eq!(snap.len(), 4, "the runtime child is added, nothing dropped");
-        assert_eq!(snap[3].id(), id, "the store assigned the published id");
-        assert_eq!(snap[3].parent(), 2, "parented under the emitter's node");
+        let id = crate::hwtree_store::HW_TREE
+            .publish_child(2, child)
+            .expect("an id is free");
+        assert!(id > audio, "issued above every seeded id");
+        let snap = inventory();
+        assert_eq!(snap.len(), 5, "the runtime child is added, nothing dropped");
+        assert_eq!(snap[4].id(), id, "the store assigned the published id");
+        assert_eq!(snap[4].parent(), 2, "parented under the emitter's node");
+
+        // A second boot record cannot re-seed, which would drop the child; it
+        // says so under its own id with the store's cause, and still stashes
+        // what it was handed.
+        record_boot(0xBEEF_0000, seed.to_vec(), &log);
+        assert_eq!(log.refusals(), [Errno::AlreadyExists]);
+        assert_eq!(take_boot().dtb, 0xBEEF_0000);
+        assert_eq!(inventory(), snap);
     }
 
-    /// A [`Sink`] that records each logged event's id and message so a test
-    /// can prove `note` stamps the shared [`UNLOCK_SERVICE`] event id.
+    /// A [`Sink`] that records each logged event's id, message, and `errno`
+    /// field, so a test can prove which id and cause a record carries.
     struct CapturingSink {
-        events: core::cell::RefCell<alloc::vec::Vec<(u32, alloc::string::String)>>,
+        events: core::cell::RefCell<alloc::vec::Vec<(u32, alloc::string::String, Option<Errno>)>>,
     }
 
     impl CapturingSink {
@@ -1031,14 +1079,28 @@ mod tests {
                 events: core::cell::RefCell::new(alloc::vec::Vec::new()),
             }
         }
+
+        /// The errno of every [`BOOT_TREE_REFUSED`] record, in order.
+        fn refusals(&self) -> alloc::vec::Vec<Errno> {
+            self.events
+                .borrow()
+                .iter()
+                .filter(|(id, _, _)| *id == BOOT_TREE_REFUSED.0)
+                .filter_map(|(_, _, errno)| *errno)
+                .collect()
+        }
     }
 
     impl Sink for CapturingSink {
         fn write_event(&self, event: &Event<'_>) {
             use alloc::string::ToString;
+            let errno = event.fields.iter().find_map(|field| match field.value {
+                FieldValue::Error(errno) if field.key == "errno" => Some(errno),
+                _ => None,
+            });
             self.events
                 .borrow_mut()
-                .push((event.id.0, event.message.to_string()));
+                .push((event.id.0, event.message.to_string(), errno));
         }
     }
 
@@ -1050,6 +1112,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, UNLOCK_SERVICE.0);
         assert_eq!(events[0].1, "root-unlock: a decision");
+        assert_eq!(events[0].2, None);
     }
 
     #[test]

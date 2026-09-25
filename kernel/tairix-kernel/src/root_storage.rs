@@ -101,10 +101,9 @@ fn classify(node: &HwNode) -> Option<RootBlockBinding> {
 /// The streaming accumulator that selects the single root block device as
 /// discovered nodes are emitted.
 ///
-/// Feeding nodes one at a time ([`Self::observe`]) lets the production
-/// boot path resolve the root device straight off the discovery sink with
-/// no intermediate `Vec` of the whole tree (allocation-free on the boot path; — no fixed-size tree buffer to
-/// outgrow). [`Self::finish`] audits and yields the decision.
+/// Nodes are folded one at a time ([`Self::observe`]), so the selection
+/// holds at most one candidate whatever the tree's size. [`Self::finish`]
+/// audits and yields the decision.
 #[derive(Default)]
 pub struct RootBlockSelection {
     found: Option<RootBlockBinding>,
@@ -205,10 +204,9 @@ impl RootBlockSelection {
 ///
 /// The array-slice form of the streaming [`RootBlockSelection`]: it folds
 /// every node and audits the decision, returning the bound root block
-/// device or [`None`] (fail closed). The production aarch64 boot path
-/// drives [`RootBlockSelection`] straight off the discovery sink instead,
-/// so no whole-tree buffer is allocated; this entry serves callers that
-/// already hold the tree (and the tests).
+/// device or [`None`] (fail closed). The boot record
+/// ([`crate::unlock_service::record_boot`]) resolves the root through it from
+/// the collected tree.
 #[must_use]
 pub fn resolve_root_block_driver(tree: &[HwNode], audit: &dyn Sink) -> Option<RootBlockBinding> {
     let mut selection = RootBlockSelection::new();

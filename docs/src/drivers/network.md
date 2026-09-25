@@ -336,9 +336,12 @@ per frame.
 Before it programs either ring, bring-up stops both DMA engines and waits,
 bounded by Linux `bcmgenet`'s 5 ms, for each to report `DMA_DISABLED`; only
 then is the device declared quiesced to its DMA host, so frame buffers a dead
-predecessor left with it leave the kernel's quarantine. A failure once the
-engines run again stops them before the frame carve is released, and an
-engine that will not stop keeps the carve for the kernel to quarantine.
+predecessor left with it leave the kernel's quarantine. Once it has started
+the engines over its frame carve, the device stops them again whenever it is
+dropped — a failed bring-up, or the channel server's serve loop returning —
+before the carve is released. Each engine is told to stop whatever the other
+did, and an engine that will not stop keeps the carve for the kernel to
+quarantine.
 
 Bring-up refuses any core that does not report the GENET v5 revision, masks
 **both** level-2 interrupt instances wholesale *before* programming anything
@@ -469,7 +472,15 @@ receive: it reads `max_virtqueue_pairs` from device config, brings up one
 receive + one transmit virtqueue per enabled pair (bounded by the
 transport's `MAX_RX_QUEUES` = 8), sets up the control virtqueue, and
 issues `VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET` after `DRIVER_OK` to select the
-pair count. The shared frame region then carries one receive ring per
+pair count — through the shared `RequestQueue`, parked on the device's
+interrupt under a two-second deadline, with a command the device never
+answers withheld rather than freed. Each `service` takes at most a ring's
+worth of completions from any one queue — a receive pass also finishing a
+merged frame begun inside that bound — however far the device claims to have
+got or however fast it refills the buffers the pass re-posts, and leaves the
+rest for the next call. A transmit or control queue too shallow for its
+two-descriptor chain is refused at `open`, before the device is given it. The
+shared frame region then carries one receive ring per
 enabled queue (`RingGeometry::rx_queues`, `FrameRings::rx_ring(i)`)
 followed by a single transmit ring — the stack serialises its own egress,
 so transmit stays one queue. The device steers each received frame into

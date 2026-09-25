@@ -18,15 +18,20 @@ any other driver.
   device-tree `compatible` string `brcm,bcm2835-mbox` (the BCM2711 reuses the
   bcm2835 mailbox programming model).
 
-The doorbell register base and the DMA property buffer are **discovered**
-values threaded from the matched hardware-tree node's resource grants
+The doorbell register base, its inbox interrupt line, and the DMA property
+buffer are **discovered** values threaded from the matched hardware-tree
+node's resource grants
 (`AGENTS.md` §2.20 / §18.3); the driver names no board address.
 
 ## Protocol
 
 The service is the server half of `tairix_abi::mailbox_ipc`: it `call_recv`s a
 32-word `VideoCore` property buffer, runs the exchange over
-`lib/vcmailbox::MmioMailbox`, and `call_reply`s a status-framed response. A
+`lib/vcmailbox::DmaMailbox`, which owns the DMA property buffer and never frees
+it while the firmware owes it a reply, and `call_reply`s a status-framed
+response. Each wait for the firmware's reply parks on the mailbox's inbox
+interrupt until a four-second deadline of its own; the service never polls
+the doorbell, and exits at bring-up if it cannot bind the interrupt. A
 malformed request or a transport fault is answered as a fail-closed in-band
 error reply, never a dropped caller (`AGENTS.md` §5.4 / §2.9). The
 board-neutral protocol logic lives once in `lib/abi::mailbox_ipc::serve_request`
@@ -36,6 +41,7 @@ board-neutral protocol logic lives once in `lib/abi::mailbox_ipc::serve_request`
 
 - `CAP_MMIO_MAP` — map the discovered doorbell window.
 - `CAP_MEM_DMA` — carve the DMA-visible property buffer.
+- `CAP_IRQ_BIND` — bind the discovered inbox interrupt the reply waits park on.
 - `CAP_IPC_BIND_PRIVILEGED` — create the restricted-sender call endpoint
   (callers must hold `CAP_MAILBOX`).
 

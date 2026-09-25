@@ -140,8 +140,9 @@ when convenient), with one staged follow-up below.
   the capability record, but no user frames and no page-table frames.
 - **Landed behaviour:** teardown is owned by the retained live space.
   `LiveSpace::drop` (`kernel/mem/src/live.rs`, run when the scheduler reap
-  drops the control block's `Box<dyn LiveUserSpace>`) drains every live DMA
-  carve, then releases every remaining tracked mapping — a page inside the
+  drops the control block's `Box<dyn LiveUserSpace>`) surrenders every live
+  DMA carve to its node's quarantine (`plans/OPEN-DEFECTS.md` D167), then
+  releases every remaining tracked mapping — a page inside the
   MMIO/shared windows is only unmapped (device- or registry-owned frames);
   every other frame (image, user stack, startup block, anon heap) is zeroed
   through the physmap (zero-on-free, §4) and freed — and finally returns the

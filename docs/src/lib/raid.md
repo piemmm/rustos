@@ -53,23 +53,39 @@ a time, from the process that legitimately holds it.
 2. **The member agent delegates.** The RAID member-agent driver
    (`drivers/storage/raid_member`), matched to that node, delegates the
    endpoint and the window to the composer's reserved rendezvous
-   (`call_grant`, `shm_grant`) and posts a `MemberOffer` naming them
-   (`tairix_abi::raid_ipc`). It is its own driver crate, not a second role of
-   the composer, because one signed bundle grants its whole manifest's
-   capability set to every instance loaded from it, and one instance of the
-   agent runs per member disk: sharing a bundle with the composer would hand
-   every agent the composer's privileged-endpoint-bind and node-emit
-   authority it has no need of.
-3. **The composer verifies for itself.** Which array the device belongs to,
-   which slot it holds and which generation it last saw are read back off the
-   device through `lib/raidmeta` — never taken from the offer. The node is a
-   pointer to look, never a datum to believe, so a mistaken or malicious
-   emitter cannot place a disk into an array it has nothing to do with.
+   (`call_grant`, `shm_grant`) and posts a `MemberOffer`
+   (`tairix_abi::raid_ipc`) naming the endpoint by its id and the window by
+   the handle `shm_grant` minted the composer, which is what the composer maps
+   it by: a region id is not a handle. It is its own driver crate, not a
+   second role of the composer, because one signed bundle grants its whole
+   manifest's capability set to every instance loaded from it, and one
+   instance of the agent runs per member disk: sharing a bundle with the
+   composer would hand every agent the composer's privileged-endpoint-bind and
+   node-emit authority it has no need of.
+3. **The composer verifies for itself.** Before touching anything an offer
+   names, it asks the kernel which node the sender was admitted for
+   (`call_peer_node`) and what its own grant for the offered window names
+   (`resource_grants`), and admits the offer only from the driver of a member
+   or candidate node whose one endpoint is the offered one — never an endpoint
+   the composer serves itself — and whose one region is the one that grant
+   names. Sending to the rendezvous requires `CAP_SHM`. Which array the device
+   belongs to, which slot it holds and which generation it last saw are then
+   read back off the device through `lib/raidmeta` — never taken from the
+   offer. The node is a pointer to look, never a datum to believe, so a
+   mistaken or malicious emitter cannot place a disk into an array it has
+   nothing to do with.
 4. **The membership stays open.** The composer answers the offer only when the
    membership ends, so one outstanding call carries the whole lifecycle: the
    agent parks on the reply, and the composer's endpoint being torn down
    cancels the call and wakes it, whereupon it re-offers. A composer that
    restarts reassembles its arrays without a reboot, and nothing polls.
+5. **The membership ends with its agent.** The composer watches the
+   kernel-attested agent behind each membership (`peer_watch`). When it exits
+   the device's client refuses every transfer, the device is faulted and
+   retired from its array, and the membership is released, so a re-enumerated
+   disk's fresh offer is placed as a rebuild target instead of being taken for a
+   duplicate. An offer that cannot be taken yet is deferred (`Busy`,
+   `OutOfMemory`), which the agent re-offers rather than treating as a verdict.
 
 The rendezvous id is reserved, so binding it demands
 `CAP_IPC_BIND_PRIVILEGED`. That gate is load-bearing: an unprivileged squatter

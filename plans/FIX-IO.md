@@ -662,27 +662,36 @@ controller is the interior node every USB device below it hangs from, so a
 controller-wide fault — a latched Host System Error / HCHalted, or the
 `USBCMD.HCRST` reset the driver performs to recover — is one recovery episode
 over the whole subtree, not one spurious failure per device. The pure,
-host-tested coordinator `domain::ControllerHealth` (the crate's `lib`) wraps one
-`FaultDomain` (owner = the controller's own discovered URB endpoint-block base,
-never a board constant; grace = the documented `CONTROLLER_GRACE_NS`, matching
-the removable-storage window it sits above so the controller and the storage
-beneath it ride a blip out under one coherent budget) and encapsulates the
-recovery sequencing over the landed primitives: `begin_recovery` opens the
+host-tested coordinator `domain::ControllerHealth` (the crate's `lib`) wraps
+one `FaultDomain` (owner = the controller's own discovered URB endpoint-block
+base, never a board constant; grace = the documented `CONTROLLER_GRACE_NS`,
+matching the removable-storage window it sits above so the controller and the
+storage beneath it ride a blip out under one coherent budget) and encapsulates
+the recovery sequencing over the landed primitives: `begin_recovery` opens the
 shared window on the first fault, `note_reset(ok)` recovers on a demonstrated
-return or advances the window on a failed reset, `poll` fails a quiet recovering
-controller closed on the one-shot deadline `wait_timeout` names, and
-`is_failed_closed` declares a dead controller so it is not retried forever
-(sticky-but-recoverable — a later successful reset clears it). The freestanding
-serve loop drives it around the existing synchronous
-`recover_if_controller_faulted` (the `recover_controller` wrapper), arms its wait
-from `wait_timeout` (previously always `WAIT_FOREVER`), and retries on the grace
-one-shot — the fix for the real gap that a faulted controller raises no further
-interrupt (xHCI §4.24.1), so a failed reset previously left the event loop
-parked forever with no timer to retry it. Device-wide edges are audited through
-the shared `for_fault_domain` vocabulary (`HCD_DOMAIN_RECOVERING 4190`,
+return or advances the window on a failed reset, and `is_failed_closed`
+declares a controller that did not return within the window: terminal, so it is
+not retried forever. `interfaces::Interfaces::recover` drives each synchronous
+reset attempt, the serve loop arming its wait from `wait_timeout` and retrying
+on the grace one-shot, since a faulted controller raises no further interrupt
+(xHCI §4.24.1). A controller reset does not remove the controller's children —
+the Linux USB core's reset-and-verify model (`usb_reset_and_verify_device`):
+after a successful reset each node is matched by identity to the index now
+serving its device (`Interfaces::reconcile` over `UsbDevice::device_identity`,
+bus position plus descriptor identity and serial number), so a device that came
+back keeps its node, its id, its buffer and its bound class driver even at
+another index, while a vanished one is retracted and a new one published; a
+held URB is then answered with the URB protocol's reissuable
+`WouldBlock` where its device came back and `NotFound` where it did not — never
+before the reset, when its class driver's resubmission could reach a device
+that replaced its own. While a failed reset's window runs the children stay
+published and nothing is driven through the controller (a report poll is held,
+any other transfer answered `WouldBlock`); when the window elapses every
+interface node is retracted and the HCD exits (85) with its reason logged. Device-wide edges are audited through the shared
+`for_fault_domain` vocabulary (`HCD_DOMAIN_RECOVERING 4190`,
 `HCD_DOMAIN_RECOVERED 4191`, `HCD_DOMAIN_OFFLINE 4192`). The controller-node
-machine is proven host-side; the serve-loop wiring is metal-only (QEMU models no
-Pi USB).
+machine and the reconciliation are proven host-side; the serve-loop wiring is
+metal-only (QEMU models no Pi USB).
 
 **Landed (the cross-process propagation signal):** an interior fault-domain
 owner's health is now a first-class, reactive **hardware-tree node property** —
@@ -699,21 +708,21 @@ changes, so a merely-recovering subtree is never torn down). The live emitter
 is the xHCI controller: its `log_domain_event` maps each `ControllerHealth`
 edge to `Recovering`/`Healthy`/`Offline` and publishes it best-effort (the
 audit record is authoritative; a refused publish never fails the recovery).
-The live consumer is the device manager: a bound child whose fault-domain
-**owner** (its nearest bus/hub/controller ancestor, recorded per binding as
-`NodeDriver::owner` via `fault_domain_owner` at bind time) is currently
-`Recovering` is **held**, not unloaded, when it transiently vanishes — so one
-controller reset is one recovery episode across the subtree rather than N
-spurious teardown/reload cycles; the child unloads only once the owner is no
-longer recovering (returned `Healthy` without the child, or the subtree failed
-closed). The kernel `BlkClient` already marks each affected volume
-`Degraded`/`Recovering` as the leaf transport blips (IO2/IO5), so the volumes
-under a recovering controller surface as recovering through the existing fold.
-Proven host-side: the `HwNode` health wire round-trip + fail-closed decode; the
-`FaultDomainState` codec; the `HwTreeStore::set_node_health` record/generation/
-fail-closed-`NotFound`; the `hw_node_health` handler (own-node resolution,
-fail-closed out-of-range, no-loaded-node denied); and the device manager's
-recovery-hold (`a_child_of_a_recovering_owner_is_held_not_unloaded`).
+The live consumers are the leaf drivers beneath it (the multi-owner fold
+below). The device manager holds nothing across an owner's recovery: no bus
+driver drops its children across its own reset, and a node id is never
+reissued, so a child that vanishes is gone for good and its driver is unloaded
+at once — a driver held for a vanished node would run beside the one loaded for
+whatever node replaces it, both on one URB transport. The kernel `BlkClient`
+already marks each affected volume `Degraded`/`Recovering` as the leaf
+transport blips (IO2/IO5), so the volumes under a recovering controller surface
+as recovering through the existing fold. Proven host-side: the `HwNode` health
+wire round-trip + fail-closed decode; the `FaultDomainState` codec; the
+`HwTreeStore::set_node_health` record/generation/fail-closed-`NotFound`; the
+`hw_node_health` handler (own-node resolution, fail-closed out-of-range,
+no-loaded-node denied); and the device manager unloading a vanished child in
+the reaction that saw it go, while its owner is recovering
+(`a_vanished_child_is_unloaded_at_once_even_while_its_owner_is_recovering`).
 
 **Landed (the leaf-side multi-owner fold — a leaf attributes its ancestors'
 published blip to the fault domain):** the read side of the cross-process
@@ -757,9 +766,9 @@ own `BlkHealth` degrading independently. The primitives:
 
 Remaining:
 - A QEMU vertical of a modelled hub/controller with several children resetting,
-  asserting one recovery episode across the subtree (the device manager holds
-  the children through the owner's grace window rather than unloading them, and
-  the leaf's completions carry the attributed reissuable status). A watched hub
+  asserting one recovery episode across the subtree (the owner keeps the
+  children that come back published under their ids through its grace window,
+  and the leaf's completions carry the attributed reissuable status). A watched hub
   / SAS expander *owning its own tree node* (publishing its own
   `hw_node_health`) extends the xHCI single-owner emitter shape; the leaf fold
   already composes an arbitrarily deep published chain.
@@ -778,9 +787,14 @@ closed; a return after the window still recovers). The xHCI controller
 interior-node wiring is proven host-side over `domain::ControllerHealth` (a
 first fault enters recovery and arms a one-shot; a continuing fault does not
 postpone the fail-closed; a reset inside the window recovers; a failed reset
-past the window and an idle poll each fail closed; a failed-closed controller
-recovers on a later successful reset; a spurious success on a healthy controller
-is silent). A QEMU vertical of a modelled hub with several children resetting
+past the window fails closed; a spurious success on a healthy controller is
+silent), over `interfaces::Interfaces` (an unchanged device kept, a change in
+any identity fact replaced, a gone device retracted, a new one published, a
+device a reset moved or reordered kept with its node and buffer, a controller
+that missed its window retracting every node), over `serve::UrbService` in the
+recovering state (a report poll held, any other transfer answered `WouldBlock`,
+neither reaching the controller), and in `lib/usb` by an unchanged topology
+re-enumerating under the same identities at the same indices. A QEMU vertical of a modelled hub with several children resetting
 (asserting one recovery episode across the subtree) lands with the cross-process
 propagation above.
 
@@ -1642,12 +1656,15 @@ the critical path and land first.
     other, §17.4), `RAID_REGISTRY_ENDPOINT` (enrolled in `is_reserved_endpoint`,
     so binding it demands `CAP_IPC_BIND_PRIVILEGED` — the gate that stops a
     squatter being handed every array member on the machine), the fixed-width
-    `MemberOffer{endpoint, window, node}`, and `MembershipEnd`, which reads a
+    `MemberOffer{endpoint, window_grant, node}` (the window named by the
+    composer's own grant handle, which `shm_grant` returned to the agent), and
+    `MembershipEnd`, which reads a
     completed membership call's outcome from the **shared** status reply
-    (§2.2) as `Released` / `Refused` / `ComposerGone` (a cancelled call, i.e.
-    `None`). Decode fails closed on a short frame, a foreign magic/version, a
-    zero resource id, and an undecodable reply (read as a refusal, never a
-    release).
+    (§2.2) as `Released` / `Refused` / `Deferred` (the composer cannot take the
+    device yet: a membership for it has not ended, or the registry is full) /
+    `ComposerGone` (a cancelled call, i.e. `None`). Decode fails closed on a short frame, a foreign magic/version, a
+    zero endpoint id or window handle, and an undecodable reply (read as a
+    refusal, never a release).
   - **`volmgr` emits the node** for a device whose probe recognised a member,
     under `CAP_HW_EMIT`, re-declaring that device's endpoint + window. One node
     per *device* however many of its partitions are members: the composer
@@ -1666,8 +1683,9 @@ the critical path and land first.
     repeated on every offer, which is free because IO6a made delegation
     idempotent, and *necessary* because a restarted composer is a new task
     holding none of the old grants — then posts the offer with **no deadline**
-    and parks on the reply. A release or a cancelled call re-offers on a paced
-    cadence; a refusal stops (the verdict came from the device's own metadata).
+    and parks on the reply. A release, a deferral or a cancelled call re-offers
+    on a paced cadence; a refusal stops (the verdict came from the device's own
+    metadata).
     Delegation necessarily precedes the verdict — reading the metadata *is* an
     access — which is proportionate because the node is only emitted for a
     device discovery already identified as a member.
@@ -1776,9 +1794,19 @@ the critical path and land first.
   built once at startup:
   `MAX_GRANTS` is a per-node validation bound (§24.4) and member ids come from
   registrations, never from re-reading the accumulated grant table. An offered
-  window another membership already holds is refused before it is mapped, and
-  every refusal after a mapping releases it, so no two members can stage over
-  one region and a stream of bad offers cannot grow the address space. The
+  window another membership already holds (keyed by the composer's own grant
+  handle) is deferred before it is mapped, and every refusal after a mapping
+  releases it, so no two members can stage over one region and a stream of bad
+  offers cannot grow the address space. Each window is lent to one client at a
+  time (`MemberWindow`), so no two views of it coexist, and a member listing
+  reports the geometry recorded at offer time without opening a client. A
+  membership is bound to the kernel-attested agent that offered it and is
+  watched (`peer_watch`): when the agent exits the member is marked departed,
+  so its client refuses every transfer, the array is flushed and the member
+  retired, and the membership released, so the disk can rejoin as a rebuild
+  target. An array's node is published as its runtime's last act, so nothing
+  is ever withdrawn on a failed build and a reused pending endpoint and window
+  were never conferred. The
   signed bundle ships at `/System/Drivers/storage/raid/Run` requesting exactly
   `CAP_IPC_ENDPOINT`, `CAP_SHM`, `CAP_HW_EMIT`, `CAP_LOG_EMIT`, and
   `CAP_IPC_BIND_PRIVILEGED`.

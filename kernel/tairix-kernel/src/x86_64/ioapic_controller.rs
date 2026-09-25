@@ -72,9 +72,9 @@ use tairix_sync::spinlock::SpinLock;
 /// `tests/integration/irq_qemu_x86_64` integration test reads this
 /// slot to unmask a real IO-APIC pin (`program_pin(masked=false)`)
 /// and to re-read the redirection-entry mask state after
-/// [`tairix_kernel_irq::IrqTable::fire`] runs. — the
-/// slot is set-once per boot; — the typed accessor is
-/// a *read* of already-published state, not a new writable surface.
+/// [`tairix_kernel_irq::IrqTable::fire`] runs. The slot is set-once per
+/// boot, and the typed accessor is a *read* of already-published state, not
+/// a new writable surface.
 #[cfg(freestanding)]
 static PUBLISHED_TYPED: tairix_sync::once::OnceCell<
     &'static IoApicController<tairix_arch_x86_64::apic::VolatileIoApicMmio>,
@@ -290,8 +290,7 @@ impl<M: IoApicMmio + Send + 'static> IoApicController<M> {
     /// to re-read the redirection entry and assert
     /// `low & (1 << 16) != 0` — i.e. that
     /// [`tairix_kernel_irq::IrqTable::fire`]'s controller-side mask
-    /// write reached the hardware. — every
-    /// security-relevant invariant has a direct evidence path.
+    /// write reached the hardware.
     #[must_use]
     pub fn read_pin_low(&self, gsi: u32) -> Option<u32> {
         let (idx, pin) = self.locate(gsi)?;

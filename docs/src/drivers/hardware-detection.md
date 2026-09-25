@@ -67,7 +67,7 @@ This resolution policy (`resolve`, `best_bind_priority`, `DriverCandidate`,
 §18.3 definition. `tairix-devmgr` re-exports it unchanged, and the kernel's
 in-kernel bootstrap-floor driver-candidate catalogue
 (`kernel/tairix-kernel::driver_catalog` — the storage floor only, §18.6, see
-[Remaining work](#remaining-stage-4hw-work)) resolves against the same crate — the
+[the user-space driver chain](#the-user-space-driver-chain)) resolves against the same crate — the
 kernel cannot depend on the `userland/*` device manager (`AGENTS.md` §17.4),
 so the policy is shared, never duplicated (§2.2).
 
@@ -176,9 +176,9 @@ The kernel **owns the published node's identity** — the emitter never names
 it (`AGENTS.md` §4 / §5.4 — identity is kernel-provided, never
 caller-supplied). A driver builds the node's class, match keys, and resource
 requests and leaves `id`/`parent` unassigned (`PciBus::describe_function`
-returns a placeholder identity); on publish the kernel (1) assigns a fresh
-`id` one past the largest live node id, so an emitter-chosen id can never
-collide with an existing node, and (2) sets the parent to the **emitter's own
+returns a placeholder identity); on publish the kernel (1) assigns an `id` no
+node has held this boot, so an id names one device for the whole boot and a
+removed node never returns under its id, and (2) sets the parent to the **emitter's own
 matched node** — looked up kernel-side from the calling task, recorded when
 the driver was loaded for that node — so a driver can neither forge its
 position in the tree nor publish a child under a node it was not loaded for.
@@ -187,6 +187,15 @@ resolves a matched node by its id to mint the loaded driver's grants, so a
 collision would mint the wrong driver's authority. A task with no recorded
 loaded node (an ordinary process, or a driver not loaded for a node) may
 publish nothing — `hw_emit_node` fails closed with `PermissionDenied`.
+
+The boot record (`tairix_kernel::unlock_service::record_boot`) resolves the
+bootstrap root block binding from the collected boot tree and then moves the
+tree, plus the virtual bus, into the store, which keeps the kernel's only copy.
+The store takes one seed per boot and refuses a tree that names an id twice or
+holds a node whose id is not above its parent's — the order that lets a
+removal find a whole subtree in one ascending pass. A refused seed, or no
+memory to take it, leaves the inventory empty so nothing autoloads, and is
+logged as `4209` `BOOT_TREE_REFUSED` carrying the `errno`.
 
 ## Audit surface
 
@@ -200,19 +209,26 @@ range (`tairix_devmgr::events`):
 | `13002` `NODE_UNBOUND` | no driver matched; never an error (§18.4). Emitted at **`Debug`** — the routine, high-volume case (most nodes have no driver), filtered out by the default `Info` threshold so it never floods the slow diagnostic UART (§20 / §2.16) |
 | `13003` `NODE_TIE_REJECTED` | unbroken highest-priority tie refused; field: `priority` |
 | `13004` `NODE_LOAD_FAILED` | the load gate refused the winner; fields: `path`, `errno` |
+| `13020` `NODE_LOAD_RACED_REMOVAL` | the node left the tree before its driver was admitted (`errno` `DeviceOffline`); `Info` |
+| `13021` `NODE_ALREADY_DRIVEN` | another live driver already holds the node (`errno` `Busy`); `Info` |
 
 The drvhost gate's own `7000`-range records interleave with these on a
 shared sink, giving audit consumers the full causal chain from match
 to load decision.
 
-The reactive `tairix_devmgr::run` loop re-matches the whole tree snapshot on
-every generation advance (§18.4), but a node's decision is logged only the
-**first** time it is reached and again only when it *changes* (e.g. `13002`
-`NODE_UNBOUND` → `13001` `NODE_BOUND` once the late-bound catalogue arrives):
-the loop carries a per-node `ReportedNodes`/`NodeReport` memory, so
-re-evaluating a settled tree emits no record and the diagnostic log is never
-re-flooded with identical lines (`AGENTS.md` §20 / §2.16). An unbound node is
-thus *logged*, not re-logged.
+The reactive `tairix_devmgr::run` loop re-reads the tree on every generation
+advance (§18.4) but re-matches it only when its node ids changed, the
+catalogue just arrived, or a device-channel hand-off is outstanding: an id is
+never reissued and only a node's fault-domain health changes after it is
+published, so an advance that recorded a health edge or asked for a
+re-evaluation gives the match nothing to do. A node's decision is logged only
+the **first** time it is reached and again only when it *changes* (e.g.
+`13002` `NODE_UNBOUND` → `13001` `NODE_BOUND` once the late-bound catalogue
+arrives): the loop carries a per-node `ReportedNodes`/`NodeReport` memory,
+dropped for every node that leaves the tree, so a re-match emits no record
+for a settled node and the diagnostic log is never re-flooded with identical
+lines (`AGENTS.md` §20 / §2.16). An unbound node is thus *logged*, not
+re-logged.
 
 That late-bound catalogue arrival is the loop's own guarantee, not a
 consequence of a tree change. The kernel serves the store endpoint only once
@@ -220,7 +236,7 @@ the boot floor has the system volume up, and **nothing bumps the hardware-tree
 generation when it does**, so a fetch issued before then (logged `13005`
 `DRIVER_STORE_UNAVAILABLE`) has no wake source behind it. While the fetch is
 outstanding the loop therefore waits under a bounded deadline
-(`tairix_devmgr::service`'s `CATALOGUE_RETRY_NS`) and retries; once the
+(`tairix_devmgr::service`'s `DEFERRED_RETRY_NS`) and retries; once the
 catalogue is in hand the wait is indefinite again, so the steady state takes
 no wakes. Waiting indefinitely for a bump that never comes is what parked the
 device manager for the rest of the boot on a platform whose tree is
@@ -287,22 +303,30 @@ standard `mac-address` / `local-mac-address` ethernet-controller binding, the
 only place a SoC MAC like the BCM2711's GENET publishes its factory
 address.
 
-## Remaining Stage 4.HW work
+## The user-space driver chain
 
-The Pi-4 USB-keyboard chain is now **entirely user space** (`plans/PI.md`
-P10 D5d): the boot walk seeds the discovered `brcm,bcm2711-pcie` root
-complex and VideoCore mailbox nodes, and `devmgr` autoloads the signed
-`/System/Drivers/` bundles against them — the PCIe root-complex driver
-binds the bridge and emits the VL805 PCI function, the VL805 driver reloads
-the controller firmware over the mailbox and emits the `usb,xhci` node, and
-the keyboard driver binds that and pumps key edges. Nothing of the chain is
-compiled into the kernel: the in-kernel driver-candidate catalogue
-(`kernel/tairix-kernel::driver_catalog`) is now the storage **bootstrap
-floor only** — virtio-blk + EMMC2, the block drivers that must be up before
-the signed store is reachable (§18.6). The remaining work, tracked in
-`PLAN.md`, is the hotplug **removal** runtime path: the kernel side landed
-(the `hw_remove_node` syscall, the mirror of `hw_emit_node` — a bus driver
-retires a node it published and its subtree, ownership-checked and
-fail-closed), and the producer/reactor — a bus driver's port-watcher that
-calls it on a hot-remove, and the `devmgr` reaction that unloads the bound
-driver — is Design D D4.
+The Pi-4 USB input chain is **entirely user space** (`plans/PI.md` P10 D5d):
+the boot walk seeds the discovered `brcm,bcm2711-pcie` root complex and
+VideoCore mailbox nodes, and `devmgr` autoloads the signed `/System/Drivers/`
+bundles against them — the PCIe root-complex driver binds the bridge and emits
+the VL805 PCI function, the VL805 driver reloads the controller firmware over
+the mailbox and emits the `usb,xhci` node, the xHCI host-controller driver
+binds that and emits one node per USB interface, and the class drivers bind
+those. Nothing of the chain is compiled into the kernel: the in-kernel
+driver-candidate catalogue (`kernel/tairix-kernel::driver_catalog`) is the
+storage **bootstrap floor only** — virtio-blk + EMMC2, the block drivers that
+must be up before the signed store is reachable (§18.6). Hot-removal runs the
+same path in reverse: a bus driver retires a vanished device's node and its
+subtree with `hw_remove_node` (the mirror of `hw_emit_node`, ownership-checked
+and fail-closed), and the `devmgr` reaction to the generation bump unloads the
+driver bound to it at once, since the node's id is never reissued
+(`plans/USB.md` U1, U5), before it loads a driver for any node the same
+reaction found — so a device replugged between two reactions never has its old
+and new driver running together. The kernel does not wait for the unload: the removal
+itself revokes every grant the subtree conferred, from its drivers and from
+whatever they delegated to, releasing their interrupt bindings and unmapping
+their register windows on every CPU before it returns, so a driver still
+running reaches nothing of the vanished device. Shared regions the subtree
+conferred stay mapped where they are but are retired, so none ever reaches
+another device's driver, and a bus driver gives each node it publishes a fresh
+one ([the syscall reference](../architecture/syscalls.md)).

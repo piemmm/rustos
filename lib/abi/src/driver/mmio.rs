@@ -26,7 +26,7 @@
 //! and the natural alignment of the access width *before* it touches
 //! memory, returning [`WindowError`] on a violation rather than
 //! reading or writing out of bounds (validate
-//! every input; — no panics on the production path).
+//! every input; no panics on the production path).
 //!
 //! [`DriverHost`]: super::DriverHost
 

@@ -79,6 +79,18 @@ quarantine, and an in-kernel host or a test double has nothing to release.
 It is best effort: a refused or missing declaration only leaves the memory
 held.
 
+A driver frees DMA memory only once its device can no longer reach it. Every
+device type that owns DMA memory, when it is dropped — whatever path drops
+it, a serve loop's early return included — either stops or resets its device,
+or, where nothing short of a reset could prove the memory released (an EMMC2
+controller that never confirmed its line reset, a firmware mailbox still owed
+a reply), withholds it: `DmaSlab::withhold` makes the slab's drop free
+nothing, so the region stays mapped until the driver exits and the kernel
+quarantines it. A request a device leaves unanswered is failed
+to its caller, but the buffers it named stay the device's until the device
+hands them back; a request queue carrying one request at a time
+(`tairix_virtio::RequestQueue`) publishes nothing over them until then.
+
 `mailbox(&self) -> Option<&dyn MailboxChannel>` is the board-neutral
 firmware property-mailbox seam. A bus driver whose bring-up needs the
 platform firmware (the BCM2711 VideoCore reload of the VL805 USB
@@ -105,11 +117,11 @@ emitted child can never carry more authority than its emitter — the security
 spine of recursive, user-space discovery (`AGENTS.md` §4 / §18.3, see
 [Syscalls](../architecture/syscalls.md)). The kernel also **owns the node's
 identity**: a driver leaves the node's `id`/`parent` unassigned, and on
-publish the kernel assigns a fresh, collision-free id and sets the parent to
-the emitter's own matched node (resolved kernel-side from the calling task),
-so a driver can neither forge its tree position nor collide with an existing
-node id (`AGENTS.md` §4 / §5.4 — identity is kernel-provided, never
-caller-supplied). A task with no matched node may publish nothing. A refused
+publish the kernel assigns an id no node has held before in this boot and
+sets the parent to the emitter's own matched node (resolved kernel-side from
+the calling task), so a driver can neither forge its tree position nor collide
+with a node id, and an id names one device for the whole boot (`AGENTS.md` §4
+/ §5.4 — identity is kernel-provided, never caller-supplied). A task with no matched node may publish nothing. A refused
 publish surfaces as `DriverError::PermissionDenied`; the in-kernel floor host
 still attaches the node to the boot tree directly.
 

@@ -5,8 +5,8 @@
 //! number of platform sources — a motherboard hardware RNG (RDRAND/RDSEED,
 //! virtio-rng; see [`crate::hardware`]), boot-time timing jitter, an
 //! interrupt-arrival pool — can implement it without naming a concrete
-//! architecture, keeping `lib/rng` architecture-neutral (:
-//! target-conditional probing stays in `kernel/arch/<target>`).
+//! architecture, keeping `lib/rng` architecture-neutral: target-conditional
+//! probing stays in `kernel/arch/<target>`.
 //!
 //! [`CombinedSource`] mixes several sources into one so the system never
 //! trusts a single source: the issue's "in addition to any existing hardware

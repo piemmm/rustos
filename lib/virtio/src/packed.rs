@@ -16,6 +16,7 @@
 
 use crate::dma::DmaSlab;
 use crate::host::VirtioHost;
+use crate::queue::negotiate_size;
 use crate::transport::{Direction, Transport, VirtioError};
 use tairix_abi::DriverError;
 use tairix_dma_barrier::{dma_rmb, dma_wmb};
@@ -75,7 +76,8 @@ pub(crate) fn write_packed_desc(ring: &mut [u8], slot: u16, d: PackedDescriptor)
 /// `true` iff the descriptor flags mark the descriptor available to a
 /// device whose Device Ring Wrap Counter is `wrap` (virtio 1.1
 /// §2.7.1): the `AVAIL` and `USED` bits differ and `AVAIL` matches
-/// `wrap`.
+/// `wrap`. The device's view, taken only by the mock peer.
+#[cfg(any(test, feature = "mock"))]
 pub(crate) fn desc_is_available(flags: u16, wrap: bool) -> bool {
     let avail = (flags & VRING_PACKED_DESC_F_AVAIL) != 0;
     let used = (flags & VRING_PACKED_DESC_F_USED) != 0;
@@ -139,38 +141,22 @@ impl PackedQueue {
     /// descriptor ring and the two event-suppression structures via
     /// `host`, program `transport`, and initialise the wrap counters.
     ///
+    /// Sized as [`crate::SplitQueue::new`] is: `requested_size` slots, or as
+    /// many as the device allows below that, but never fewer than `needed`.
+    ///
     /// # Errors
     ///
-    /// Propagates allocation and transport errors.
+    /// [`VirtioError::QueueTooShallow`] for a device that cannot hold
+    /// `needed` slots, refused before it is given the ring; otherwise the
+    /// allocation and transport errors.
     pub fn new<T: Transport>(
         transport: &mut T,
         host: &dyn VirtioHost,
         queue_index: u16,
         requested_size: u16,
+        needed: u16,
     ) -> Result<Self, VirtioError> {
-        transport.queue_select(queue_index)?;
-        let max = transport.queue_max_size();
-        if max == 0 {
-            return Err(VirtioError::QueueSizeTooLarge);
-        }
-        // A request that is not a power of two is the caller's bug, and
-        // virtio §2.6 admits no such queue: refuse it.
-        if requested_size == 0 || !requested_size.is_power_of_two() {
-            return Err(VirtioError::QueueSizeTooLarge);
-        }
-        // The device's own maximum, however, is its claim, and a
-        // non-conformant device may advertise one that is not a power of
-        // two. Where that cap binds, take the largest conformant size at or
-        // below it rather than refusing to bring the queue up at all.
-        let size = core::cmp::min(requested_size, max);
-        let size = if size.is_power_of_two() {
-            size
-        } else {
-            1 << (u16::BITS - 1 - size.leading_zeros())
-        };
-        if size == 0 {
-            return Err(VirtioError::QueueSizeTooLarge);
-        }
+        let size = negotiate_size(transport, queue_index, requested_size, needed)?;
         let desc = host
             .alloc_dma_zeroed(Self::desc_ring_size(size))
             .map_err(|_| VirtioError::DeviceFault)?;
@@ -387,6 +373,7 @@ impl PackedQueue {
 /// [`crate::transport::MockTransport`] inspect descriptors a driver
 /// made available, collect a chain, and write completions back —
 /// without owning the driver's allocations.
+#[cfg(any(test, feature = "mock"))]
 pub(crate) mod packed_ring_view {
     use super::{
         desc_is_available, read_packed_desc, write_packed_desc, PackedDescriptor,

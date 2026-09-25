@@ -33,3 +33,12 @@ tairix-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
 # rather than a second parser here. No cycle: `lib/hid` does not depend on this
 # crate.
 tairix-hid = { path = "../hid", version = "=0.0.0" }
+# The fixed 256-bit set the configuration decoder records the interface
+# numbers and endpoint contexts a device has claimed in.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+
+[dev-dependencies]
+# The descriptor fuzz harness draws its inputs through the shared seed/budget
+# seam: one place picks the per-run seed, logs it at the start of the test, and
+# bounds the smoke/soak loop. Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

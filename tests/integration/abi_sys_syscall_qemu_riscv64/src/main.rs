@@ -56,7 +56,7 @@
 //! The test body only compiles under `#[cfg(feature = "test-hooks")]`.
 //! The feature is on by default for this crate; release builds that
 //! enable it are rejected by the `compile_error!` guard below
-//! (no hacks; — fail closed), mirroring
+//! (no hacks; fail closed), mirroring
 //! `tairix-test-abi-sys-syscall-qemu`.
 
 #![cfg_attr(itest_riscv64, no_std)]

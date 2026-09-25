@@ -197,8 +197,8 @@ pub struct DiscoveredVideo {
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use metal::{
-    active_framebuffer_extent, attach_console, configure_from_fdt, purge, reclaim_surface,
-    set_surface, text_cell_count, text_grid, write_bytes, write_output_bytes,
+    active_framebuffer_extent, attach_console, configure, purge, reclaim_surface, set_surface,
+    text_cell_count, text_grid, write_bytes, write_output_bytes,
 };
 
 /// Host stand-in for the freestanding writer: rendering needs the
@@ -278,10 +278,12 @@ mod metal {
     use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
     use tairix_sync::IrqSafeSpinLock;
 
-    use crate::firmware::{find_mailbox, with_transport, DiscoveredMailbox};
+    use crate::firmware::DiscoveredMailbox;
     use crate::irqmask::PortIrqControl;
 
-    use super::{bring_up, ramfb_geometry, DiscoveredVideo, Geometry, VIDEO_ACTIVE};
+    use super::{
+        bring_up, ramfb_geometry, DiscoveredVideo, Geometry, MailboxTransport, VIDEO_ACTIVE,
+    };
 
     /// The discovered surface and, once attached post-MMU, the renderer.
     ///
@@ -335,10 +337,10 @@ mod metal {
     /// live inside a lock; the discipline on [`VideoSlot`] covers that window.
     static RENDER_LOCK: IrqSafeSpinLock<(), PortIrqControl> = IrqSafeSpinLock::new(());
 
-    /// Discover the board's display path in `fdt` and bring the
-    /// framebuffer console up: the `VideoCore` firmware mailbox where
-    /// the tree carries one (the Pi), else the QEMU `virt` `fw_cfg` /
-    /// `ramfb` fallback.
+    /// Bring the framebuffer console up: over `firmware`, the transport the
+    /// boot path talks to the `VideoCore` firmware through, where the tree
+    /// carries a mailbox (the Pi), else the QEMU `virt` `fw_cfg` / `ramfb`
+    /// fallback discovered in `fdt`.
     ///
     /// **Boot-CPU, pre-MMU only**: it must run before
     /// `enable_mmu_and_vectors` (with the data caches off the
@@ -350,9 +352,12 @@ mod metal {
     /// or malformed firmware answer — the UART keeps the console (fail
     /// closed).
     #[must_use]
-    pub fn configure_from_fdt(fdt: &Fdt<'_>) -> Option<DiscoveredVideo> {
-        match find_mailbox(fdt) {
-            Some(mailbox) => configure_mailbox(mailbox),
+    pub fn configure(
+        fdt: &Fdt<'_>,
+        firmware: Option<(DiscoveredMailbox, &mut dyn MailboxTransport)>,
+    ) -> Option<DiscoveredVideo> {
+        match firmware {
+            Some((mailbox, transport)) => configure_mailbox(mailbox, transport),
             None => configure_ramfb(fdt),
         }
     }
@@ -360,13 +365,11 @@ mod metal {
     /// Bring the Pi's mailbox-allocated framebuffer console up: probe
     /// the attached display over the firmware property channel and
     /// publish the firmware-allocated surface.
-    ///
-    /// The doorbell window and the DMA-visible property buffer belong to
-    /// `crate::firmware`, which every early consumer of the firmware shares,
-    /// so the surface probe and the boot-time clock raise cannot build the
-    /// transport two different ways.
-    fn configure_mailbox(mailbox: DiscoveredMailbox) -> Option<DiscoveredVideo> {
-        let configured = with_transport(mailbox, bring_up).flatten()?;
+    fn configure_mailbox(
+        mailbox: DiscoveredMailbox,
+        transport: &mut dyn MailboxTransport,
+    ) -> Option<DiscoveredVideo> {
+        let configured = bring_up(transport)?;
 
         let fb_base = usize::try_from(configured.phys_base).ok()?;
         // The firmware allocated `[fb_base, fb_base + len_bytes)`

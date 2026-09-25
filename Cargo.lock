@@ -2308,6 +2308,7 @@ name = "tairix-hid"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-fuzzseed",
  "tairix-input",
  "tairix-keymap",
 ]
@@ -6749,7 +6750,9 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-dma-barrier",
+ "tairix-fuzzseed",
  "tairix-hid",
+ "tairix-inline",
 ]
 
 [[package]]
@@ -6867,6 +6870,7 @@ dependencies = [
  "tairix-abi",
  "tairix-dma-barrier",
  "tairix-fuzzseed",
+ "tairix-virtio",
 ]
 
 [[package]]

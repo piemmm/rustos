@@ -405,6 +405,12 @@ impl KernelArch for RiscvBinArch {
         Some(tairix_arch_riscv64::takeover::machine_takeover_handle())
     }
 
+    fn cross_cpu_tlb_shootdown(
+        arch: &'static Self,
+    ) -> Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)> {
+        Some(&arch.arch)
+    }
+
     fn install_kernel_remap(
         arch: &'static Self,
         frames: &'static tairix_kernel_mem::FrameAllocator,
@@ -1170,28 +1176,14 @@ pub fn try_boot(
         .and_then(tairix_arch_riscv64::cpuname::name_for_compatible)
         .and_then(tairix_abi::CpuName::new);
 
-    // Discover the platform hardware tree from the firmware device tree and
-    // publish it to the authoritative `HW_TREE` the `hw_tree_read` /
-    // `hw_tree_wait` syscalls read, so user space observes the same
-    // inventory the kernel discovered (Design D). It also runs the
-    // bootstrap-floor virtio-MMIO `DeviceID` probe, so the served tree
-    // carries the autoloadable per-device Block/Input/Network nodes. It
-    // consumes the parsed `fdt`, which no later step needs. Returns the
-    // leaked `'static` tree so the root-storage bind resolution below can
-    // borrow the same nodes.
+    // Discover the platform hardware tree from the firmware device tree,
+    // including the bootstrap-floor virtio-MMIO `DeviceID` probe's
+    // per-device Block/Input/Network nodes; the boot record resolves the root
+    // block binding from it and moves it into the authoritative `HW_TREE`
+    // the `hw_tree_read` / `hw_tree_wait` syscalls read (Design D). It
+    // consumes the parsed `fdt`, which no later step needs.
     let tree = seed_hardware_tree(fdt, dtb, log_sink);
-
-    // Resolve + audit which discovered node carries the bootstrap root block
-    // device, and which floor block driver binds it, through the same shared
-    // `lib/devmatch` policy the user-space `devmgr` uses, then stash the
-    // binding (with the firmware DTB pointer and the tree) for the init seam
-    // where the in-kernel root-unlock kthread reads it once
-    // (`plans/NETWORK.md` N4e-riscv64, the aarch64 buffered-tree analogue). A
-    // `None` binding (no/ambiguous disk) leaves the unlock a no-op and `login`
-    // fails closed; the tree is still stashed so an input driver can still
-    // autoload once the store is reachable.
-    let binding = crate::root_storage::resolve_root_block_driver(tree, log_sink);
-    crate::unlock_service::record_boot(binding, dtb, tree);
+    crate::unlock_service::record_boot(dtb, tree, log_sink);
 
     let arch = Arc::new(RiscvBinArch::new(
         RiscvArch::new(&STORAGE, BOOT_CPU, timebase_hz),
@@ -1286,10 +1278,11 @@ pub fn try_boot(
     Ok(boot_info)
 }
 
-/// Discover the platform hardware tree from the firmware `fdt` and publish
-/// it to the authoritative [`crate::hwtree_store::HW_TREE`] the
-/// `hw_tree_read` / `hw_tree_wait` syscalls read, so user space observes the
-/// same inventory the kernel discovered (Design D).
+/// Discover the platform hardware tree from the firmware `fdt`: the boot seed
+/// [`crate::unlock_service::record_boot`] publishes to the authoritative
+/// [`crate::hwtree_store::HW_TREE`] the `hw_tree_read` / `hw_tree_wait`
+/// syscalls read, so user space observes the same inventory the kernel
+/// discovered (Design D).
 ///
 /// Two phases feed the one buffered tree:
 ///
@@ -1320,9 +1313,8 @@ pub fn try_boot(
 /// Fail closed throughout: a malformed tree, a bus that cannot be built, or
 /// an over-full/erroring bus leaves whatever was already collected and seeds
 /// that, so the syscalls report the devices that *were* discovered rather
-/// than failing the boot. The buffered tree is leaked to `'static` (a
-/// one-shot boot publish, never a mutable global) so the inventory readers
-/// can borrow it for the kernel's lifetime.
+/// than failing the boot. The collected tree is returned by value for the
+/// boot record to move into the live inventory.
 ///
 /// # SAFETY-INVARIANT
 ///
@@ -1334,7 +1326,7 @@ fn seed_hardware_tree(
     fdt: Fdt<'_>,
     dtb: u64,
     log_sink: &'static (dyn Sink + Sync),
-) -> &'static [tairix_abi::HwNode] {
+) -> alloc::vec::Vec<tairix_abi::HwNode> {
     use tairix_arch_api::PlatformDiscovery;
     // The validated blob's own length, captured before the discovery walk
     // consumes the `fdt` reader, so the virtio-MMIO probe below can reborrow
@@ -1401,12 +1393,7 @@ fn seed_hardware_tree(
         );
     }
 
-    // Leak the buffered tree to `'static` (a one-shot boot publish, never a
-    // mutable global) so the `hw_tree_read` / `hw_tree_wait` syscalls and the
-    // root-storage bind resolution can borrow it for the kernel's lifetime.
-    let tree: &'static [tairix_abi::HwNode] = sink.leak();
-    crate::hwtree_store::HW_TREE.seed(tree);
-    tree
+    sink.into_vec()
 }
 
 /// Round `value` up to the next multiple of `align` (a power of two).

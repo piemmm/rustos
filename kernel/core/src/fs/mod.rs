@@ -107,7 +107,7 @@ pub(crate) const PRIVATE_ROOT_HANDLE: u64 = 0x726F_6F74;
 /// This is the shared shape of the real root volume — which carries the
 /// whole tree from its own root directory — used by every boot-time
 /// reader that resolves a path off the mounted root before the full mount
-/// table exists (: one definition, no per-reader copy).
+/// table exists, so no reader carries its own copy.
 ///
 /// # Errors
 ///

@@ -45,7 +45,7 @@ use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_devmgr::DriverLoader;
 use tairix_drvhost::store::{scan_store, DriverStore};
-use tairix_kernel_core::{CooperativeYield, SYSTEM_VOLUME_STORE_PATH};
+use tairix_kernel_core::{CooperativeYield, HwNodeLiveness, SYSTEM_VOLUME_STORE_PATH};
 use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_log::Sink;
@@ -125,7 +125,7 @@ pub fn create_driver_store_endpoint<S: Sink + ?Sized>(
 /// child the instant it appears. Resolving
 /// against a frozen snapshot would fail every runtime-emitted node closed and
 /// stall the recursive bus chain.
-pub trait HwNodeResolver {
+pub trait HwNodeResolver: HwNodeLiveness {
     /// The resource grants of the live non-root node `node_id`, or `None`
     /// when no live non-root node has that id (fail closed). The returned grants are owned so resolution holds no live-tree
     /// lock across the spawn.
@@ -345,8 +345,10 @@ fn unload_reply(buf: &mut [u8], ctx: &StoreServeContext<'_>, handle: u64) -> Res
 ///
 /// Returns the spawned driver's handle, or the fail-closed [`Errno`] of the
 /// first failed step: an out-of-range `bundle_id`
-/// ([`Errno::NotFound`]), an unknown `node_id` ([`Errno::NotFound`]), or the
-/// signed-gate refusal the loader maps from `drvhost::HostError`. Only the
+/// ([`Errno::NotFound`]), a `node_id` the live tree does not hold
+/// ([`Errno::DeviceOffline`]: ids are never reissued, so it names a device
+/// that has gone), or the signed-gate refusal the loader maps from
+/// `drvhost::HostError`. Only the
 /// one matched bundle's bytes are read (by [`SpawnDriverLoader`]); the store
 /// is not re-scanned.
 fn load_matched_driver<F>(
@@ -367,17 +369,23 @@ where
     // (no ambient authority). Resolving against the live
     // inventory (not a boot snapshot) is what lets a node a user-space bus
     // driver published at runtime through `hw_emit_node` be loaded the moment
-    // it appears. An unknown node fails closed.
+    // it appears. A node no longer in the tree fails closed.
     let resources = ctx
         .nodes
         .resolve_resources(node_id)
-        .ok_or(Errno::NotFound)?;
+        .ok_or(Errno::DeviceOffline)?;
     // Thread the matched node's id into the loader so the kernel records it
     // against the spawned driver: a child the driver later publishes through
     // `hw_emit_node` is parented under *this* node, and the driver cannot
     // forge its tree position.
+    // Admission checks, after minting the grants, that the tree the node was
+    // resolved in still holds it.
+    let node = tairix_kernel_core::DriverNode {
+        id: node_id,
+        tree: ctx.nodes,
+    };
     let mut loader =
-        SpawnDriverLoader::new(ctx.trusted, service, audit, ctx.spawn, &[], Some(node_id));
+        SpawnDriverLoader::new(ctx.trusted, service, audit, ctx.spawn, &[], Some(node));
     let handle = loader.load(driver.path(), &resources, &ctx.caps)?;
     Ok(handle.as_u64())
 }
@@ -652,9 +660,9 @@ mod tests {
     }
 
     /// One recorded `spawn_driver`: the bundle bytes, the granted capability
-    /// set, the matched node's resource grants, and the matched node id the
-    /// load threaded for the kernel to record against the child.
-    type RecordedSpawn = (Vec<u8>, CapabilitySet, Vec<HwResource>, Option<u32>);
+    /// set, the matched node's resource grants, and the matched node id with
+    /// whether the tree it was forwarded with holds it.
+    type RecordedSpawn = (Vec<u8>, CapabilitySet, Vec<HwResource>, Option<(u32, bool)>);
 
     /// Records every `spawn_driver` (so a test can assert the gate forwarded
     /// exactly the matched node's grants) and every `terminate_driver`
@@ -682,11 +690,14 @@ mod tests {
             granted: CapabilitySet,
             grants: &[HwResource],
             _args: &[&[u8]],
-            node_id: Option<u32>,
+            node: Option<tairix_kernel_core::DriverNode<'_>>,
         ) -> Result<u64, Errno> {
-            self.calls
-                .borrow_mut()
-                .push((rxe.to_vec(), granted, grants.to_vec(), node_id));
+            self.calls.borrow_mut().push((
+                rxe.to_vec(),
+                granted,
+                grants.to_vec(),
+                node.map(|node| (node.id, node.tree.is_live(node.id))),
+            ));
             Ok(0x4242)
         }
 
@@ -712,7 +723,7 @@ mod tests {
             _granted: CapabilitySet,
             _grants: &[HwResource],
             _args: &[&[u8]],
-            _node_id: Option<u32>,
+            _node: Option<tairix_kernel_core::DriverNode<'_>>,
         ) -> Result<u64, Errno> {
             panic!("the load must fail closed before spawning");
         }
@@ -761,6 +772,11 @@ mod tests {
     /// for the global live [`crate::hwtree_store::HW_TREE`] so a test drives
     /// the load gate with an explicit node set.
     struct SliceNodes<'a>(&'a [HwNode]);
+    impl HwNodeLiveness for SliceNodes<'_> {
+        fn is_live(&self, node_id: u32) -> bool {
+            self.0.iter().any(|node| node.id() == node_id)
+        }
+    }
     impl HwNodeResolver for SliceNodes<'_> {
         fn resolve_resources(&self, node_id: u32) -> Option<Vec<HwResource>> {
             self.0
@@ -915,8 +931,8 @@ mod tests {
         );
         assert_eq!(
             calls[0].3,
-            Some(2),
-            "the matched node id is threaded so the kernel records it against the child (§18.3)"
+            Some((2, true)),
+            "the matched node is threaded with the tree it was resolved in (§18.3)"
         );
     }
 
@@ -947,7 +963,12 @@ mod tests {
         // The live tree at scan time holds only the root — the device node
         // does not exist yet (a stale `ctx.tree` snapshot would freeze this).
         let live = HwTreeStore::new();
-        live.seed(&[HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root)]);
+        live.seed(alloc::vec![HwNode::new(
+            1,
+            HW_NODE_ROOT,
+            HwDeviceClass::Root
+        )])
+        .expect("a fresh store seeds");
 
         // A bus driver publishes the device at runtime; the kernel assigns
         // its id. Build the requested-resource node exactly as an emitter
@@ -960,7 +981,7 @@ mod tests {
         emitted
             .push_resource(HwResource::dma(0x3fff_ffff, 0x1000))
             .expect("dma fits");
-        let node_id = live.publish_child(1, emitted);
+        let node_id = live.publish_child(1, emitted).expect("an id is free");
 
         let serve_ctx = ctx(&trusted, &spawn, &live);
         let req = StoreRequest::Load {
@@ -986,8 +1007,8 @@ mod tests {
         );
         assert_eq!(
             calls[0].3,
-            Some(node_id),
-            "the live node id is threaded so a grandchild it emits is parented under it (§18.3)"
+            Some((node_id, true)),
+            "the live node is threaded with the live tree, so a grandchild it emits is parented under it (§18.3)"
         );
     }
 
@@ -1020,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn a_load_with_an_unknown_node_id_is_in_band_not_found() {
+    fn a_load_for_a_node_the_tree_no_longer_holds_is_in_band_device_offline() {
         let key = HwMatchKey::virtio(0x1234);
         let keys = [DriverBindKey::new(5, key)];
         let sk = signing_key();
@@ -1044,7 +1065,7 @@ mod tests {
         let mut rbuf = [0u8; LOAD_REQUEST_LEN];
         let n = req.encode(&mut rbuf).expect("encode");
         let reply = build_reply(&service, &serve_ctx, &store, &rbuf[..n], &NullSink);
-        assert_eq!(reply_status(&reply), Err(Errno::NotFound));
+        assert_eq!(reply_status(&reply), Err(Errno::DeviceOffline));
     }
 
     #[test]

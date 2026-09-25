@@ -15,7 +15,7 @@ use tairix_abi::driver::net_ring::{
     SLOT_META_LEN,
 };
 use tairix_abi::driver::BufferClass;
-use tairix_virtio::{ChainView, CompletionSignal, DmaHost, MockHost, MockTransport};
+use tairix_virtio::{ChainView, MockHost, MockTransport};
 
 /// MAC address the mock device exposes through its config window.
 const DEVICE_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
@@ -104,83 +104,41 @@ fn build_device_with_queue_max(queue_max: u16) -> (MockTransport, TxLog, RxQueue
     (t, tx_log, rx_queue)
 }
 
-/// `VirtioHost` that auto-drains *both* queues when notified.
-struct AutoDrainHost {
-    inner: MockHost,
-    transport: core::cell::UnsafeCell<*mut MockTransport>,
+/// The mock device, shared by the driver under test and the host playing it.
+type Device = Rc<RefCell<MockTransport>>;
+
+/// The driver under test, the device it drives, and the host playing it.
+struct TestNet {
+    net: Box<VirtioNet<'static, Device>>,
+    device: Device,
+    host: &'static MockHost,
+    waits_at_open: usize,
 }
 
-impl AutoDrainHost {
-    fn new() -> Self {
-        Self {
-            inner: MockHost::new(),
-            transport: core::cell::UnsafeCell::new(core::ptr::null_mut()),
-        }
-    }
-    fn install_transport(&self, t: *mut MockTransport) {
-        // SAFETY: `auto_host()` allocates a fresh leaked instance
-        // per call, so no aliasing borrow of `self.transport` can
-        // exist when this write runs.
-        unsafe {
-            *self.transport.get() = t;
-        }
-    }
-    fn bytes_allocated(&self) -> usize {
-        self.inner.bytes_allocated()
+impl core::ops::Deref for TestNet {
+    type Target = VirtioNet<'static, Device>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.net
     }
 }
 
-impl DmaHost for AutoDrainHost {
-    fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
-        self.inner.alloc_dma_zeroed(size)
-    }
-
-    fn device_quiesced(&self) {
-        self.inner.device_quiesced();
+impl core::ops::DerefMut for TestNet {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.net
     }
 }
 
-impl VirtioHost for AutoDrainHost {
-    fn notify_wait(&self, queue_index: u16, timeout_ns: u64) -> CompletionSignal {
-        // SAFETY: the driver releases its `&mut self.transport`
-        // borrow between `kick` and `notify_wait`; the pointer was
-        // installed while no live borrow existed and is unique
-        // here for the duration of `drain_queue`.
-        let t_ptr = unsafe { *self.transport.get() };
-        if !t_ptr.is_null() {
-            let t = unsafe { &mut *t_ptr };
-            let _ = t.drain_queue(queue_index);
-        }
-        self.inner.notify_wait(queue_index, timeout_ns)
-    }
-}
-
-fn auto_host() -> &'static AutoDrainHost {
-    Box::leak(Box::new(AutoDrainHost::new()))
-}
-
-/// A `VirtioHost` whose `notify_wait` panics. The non-blocking `service`
-/// doorbell must never wait on the device — it may run inside a
-/// cross-process `Service` call, where parking would block the reply and
-/// the serve loop — so any `notify_wait` from the service path is a defect
-/// this host turns into a loud test failure.
-struct NoWaitHost {
-    inner: MockHost,
-}
-
-impl DmaHost for NoWaitHost {
-    fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
-        self.inner.alloc_dma_zeroed(size)
-    }
-
-    fn device_quiesced(&self) {
-        self.inner.device_quiesced();
-    }
-}
-
-impl VirtioHost for NoWaitHost {
-    fn notify_wait(&self, _queue_index: u16, _timeout_ns: u64) -> CompletionSignal {
-        panic!("service() must never wait on the device");
+impl TestNet {
+    /// The non-blocking `service` doorbell may run inside a cross-process
+    /// call, where parking would block the reply and the serve loop, so it
+    /// must never have waited on the device.
+    fn assert_never_waited(&self) {
+        assert_eq!(
+            self.host.notify_log().len(),
+            self.waits_at_open,
+            "service() must never wait on the device"
+        );
     }
 }
 
@@ -195,26 +153,25 @@ fn test_machine() -> tairix_abi::BootFacts {
     }
 }
 
-fn open_net_no_wait(t: MockTransport) -> Box<VirtioNet<'static, MockTransport>> {
-    let host = Box::leak(Box::new(NoWaitHost {
-        inner: MockHost::new(),
-    }));
-    Box::new(VirtioNet::open(t, host, Some(&test_machine())).expect("open"))
+fn open_net_with_host(t: MockTransport) -> (TestNet, &'static MockHost) {
+    let host: &'static MockHost = Box::leak(Box::new(MockHost::new()));
+    let device = t.into_shared();
+    host.attach(&device);
+    let net =
+        Box::new(VirtioNet::open(Rc::clone(&device), host, Some(&test_machine())).expect("open"));
+    let waits_at_open = host.notify_log().len();
+    (
+        TestNet {
+            net,
+            device,
+            host,
+            waits_at_open,
+        },
+        host,
+    )
 }
 
-fn open_net_with_host(
-    t: MockTransport,
-) -> (
-    Box<VirtioNet<'static, MockTransport>>,
-    &'static AutoDrainHost,
-) {
-    let host = auto_host();
-    let mut net = Box::new(VirtioNet::open(t, host, Some(&test_machine())).expect("open"));
-    host.install_transport(core::ptr::from_mut::<MockTransport>(net.transport_mut()));
-    (net, host)
-}
-
-fn open_net(t: MockTransport) -> Box<VirtioNet<'static, MockTransport>> {
+fn open_net(t: MockTransport) -> TestNet {
     open_net_with_host(t).0
 }
 
@@ -234,20 +191,33 @@ fn test_geometry() -> RingGeometry {
     RingGeometry::new(4, 4, 2048, 2048, 1).expect("test geometry")
 }
 
-/// Backing buffer for one frame region, over-allocated so an aligned region
-/// of the geometry's length can be cut from it: the ring headers' counters
-/// are atomics, and a plain `Vec<u8>` is only byte-aligned.
-fn rings_region() -> Vec<u8> {
-    vec![0u8; test_geometry().region_len() + REGION_ALIGN_PADDING]
+/// Backing buffer for one frame region of `geometry`, over-allocated so an
+/// aligned region of its length can be cut from it: the ring headers'
+/// counters are atomics, and a plain `Vec<u8>` is only byte-aligned.
+fn region_buffer(geometry: RingGeometry) -> Vec<u8> {
+    vec![0u8; geometry.region_len() + REGION_ALIGN_PADDING]
 }
 
-/// The aligned, exact-length frame region inside `buffer`.
-fn region_of(buffer: &mut [u8]) -> &mut [u8] {
-    aligned_region(buffer, test_geometry().region_len()).expect("aligned frame region")
+/// [`region_buffer`] for [`test_geometry`].
+fn rings_region() -> Vec<u8> {
+    region_buffer(test_geometry())
+}
+
+/// The aligned, exact-length region of `geometry` inside `buffer`.
+fn region_of(buffer: &mut [u8], geometry: RingGeometry) -> &mut [u8] {
+    aligned_region(buffer, geometry.region_len()).expect("aligned frame region")
+}
+
+fn bind_rings_with(
+    buffer: &mut [u8],
+    geometry: RingGeometry,
+    class: BufferClass,
+) -> FrameRings<'_> {
+    FrameRings::bind(region_of(buffer, geometry), geometry, class).expect("bind rings")
 }
 
 fn bind_rings(buffer: &mut [u8], class: BufferClass) -> FrameRings<'_> {
-    FrameRings::bind(region_of(buffer), test_geometry(), class).expect("bind rings")
+    bind_rings_with(buffer, test_geometry(), class)
 }
 
 /// Simulate the device completing the driver's posted receive chain and
@@ -256,8 +226,8 @@ fn bind_rings(buffer: &mut [u8], class: BufferClass) -> FrameRings<'_> {
 /// device does this and the driver's IRQ handler wakes the stack; the
 /// non-blocking `service` doorbell never waits for a receive event itself,
 /// so a test must post the completion the same way the hardware would.
-fn deliver_rx(net: &mut VirtioNet<'static, MockTransport>) {
-    let _ = net.transport_mut().drain_queue(wire::RX_QUEUE);
+fn deliver_rx(net: &TestNet) {
+    let _ = net.device.borrow_mut().drain_queue(wire::RX_QUEUE);
 }
 
 /// Simulate the device consuming a posted transmit chain and raising its
@@ -268,8 +238,8 @@ fn deliver_rx(net: &mut VirtioNet<'static, MockTransport>) {
 /// boundary; a later `service` (which the completion's interrupt drives)
 /// reaps the staging. A test therefore drives the device the same way the
 /// hardware would, between the transmitting `service` and the reaping one.
-fn deliver_tx(net: &mut VirtioNet<'static, MockTransport>) {
-    let _ = net.transport_mut().drain_queue(wire::TX_QUEUE);
+fn deliver_tx(net: &TestNet) {
+    let _ = net.device.borrow_mut().drain_queue(wire::TX_QUEUE);
 }
 
 #[test]
@@ -300,7 +270,7 @@ fn link_status_reports_up_and_down() {
         wire::CONFIG_STATUS_OFFSET,
         &wire::VIRTIO_NET_S_LINK_UP.to_le_bytes(),
     );
-    let mut net = open_net_no_wait(t);
+    let mut net = open_net(t);
     assert_eq!(net.device_facts().expect("facts").link, LinkState::Up);
     let mut region = rings_region();
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
@@ -311,7 +281,8 @@ fn link_status_reports_up_and_down() {
     // The link drops (carrier lost). The device would raise a
     // config-change interrupt; the driver reads the new state on the next
     // service.
-    net.transport_mut()
+    net.device
+        .borrow_mut()
         .set_config(wire::CONFIG_STATUS_OFFSET, &[0, 0]);
     assert_eq!(
         net.service(&mut rings).expect("service").link,
@@ -319,7 +290,7 @@ fn link_status_reports_up_and_down() {
     );
     assert_eq!(net.device_facts().expect("facts").link, LinkState::Down);
     // And it recovers.
-    net.transport_mut().set_config(
+    net.device.borrow_mut().set_config(
         wire::CONFIG_STATUS_OFFSET,
         &wire::VIRTIO_NET_S_LINK_UP.to_le_bytes(),
     );
@@ -327,6 +298,7 @@ fn link_status_reports_up_and_down() {
         net.service(&mut rings).expect("service").link,
         LinkState::Up
     );
+    net.assert_never_waited();
 }
 
 /// A device that does **not** offer `VIRTIO_NET_F_STATUS` has no
@@ -335,7 +307,7 @@ fn link_status_reports_up_and_down() {
 #[test]
 fn link_status_absent_reports_up() {
     let (t, _, _) = build_device();
-    let mut net = open_net_no_wait(t);
+    let mut net = open_net(t);
     assert_eq!(net.device_facts().expect("facts").link, LinkState::Up);
     let mut region = rings_region();
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
@@ -343,6 +315,7 @@ fn link_status_absent_reports_up() {
         net.service(&mut rings).expect("service").link,
         LinkState::Up
     );
+    net.assert_never_waited();
 }
 
 #[test]
@@ -357,7 +330,7 @@ fn service_transmits_queued_frames_to_the_peer() {
     assert_eq!(report.transmitted, 1);
     // The doorbell handed the frame to the device without waiting; driving
     // the device now delivers it to the peer.
-    deliver_tx(&mut net);
+    deliver_tx(&net);
     let log = tx_log.borrow();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0], frame);
@@ -371,7 +344,7 @@ fn service_transmits_queued_frames_to_the_peer() {
 #[test]
 fn transmit_doorbell_never_waits_on_the_device() {
     let (t, tx_log, _) = build_device();
-    let mut net = open_net_no_wait(t);
+    let mut net = open_net(t);
     let mut region = rings_region();
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     let frame = arp_frame();
@@ -382,10 +355,11 @@ fn transmit_doorbell_never_waits_on_the_device() {
     // (undriven) device.
     assert!(tx_log.borrow().is_empty());
     // Driving the device now completes it, and the next doorbell reaps.
-    deliver_tx(&mut net);
+    deliver_tx(&net);
     assert_eq!(tx_log.borrow().len(), 1);
     let report = net.service(&mut rings).expect("reap");
     assert_eq!(report, ServiceReport::default());
+    net.assert_never_waited();
 }
 
 /// Build an ARP-shaped frame tagged in its first byte so a test can tell
@@ -417,8 +391,8 @@ fn build_multiqueue_device(pairs: u16, rx_sources: Vec<RxQueue>) -> MockTranspor
     );
     t.set_config(0, &DEVICE_MAC);
     t.set_config(wire::CONFIG_MAX_VQ_PAIRS_OFFSET, &pairs.to_le_bytes());
-    // The driver polls the control-queue completion inline at open, so the
-    // device must process that notify synchronously, as a real vmexit does.
+    // A device answering on the notify, as a vmexit does, so a host with no
+    // device attached still sees the control command answered.
     t.set_synchronous_notify(true);
     for (pair, source) in (0u16..).zip(rx_sources) {
         let rx_index = wire::RX_QUEUE + pair * wire::QUEUE_PAIR_STRIDE;
@@ -470,25 +444,68 @@ fn a_device_whose_reset_never_confirms_is_refused_before_it_is_given_memory() {
 }
 
 #[test]
-fn a_confirmed_close_releases_every_region() {
+fn a_dropped_device_that_confirms_its_reset_releases_every_region() {
     let (t, _tx, _rx) = build_device();
     let host = MockHost::new();
-    VirtioNet::open(t, &host, Some(&test_machine()))
-        .expect("open")
-        .close();
+    drop(VirtioNet::open(t, &host, Some(&test_machine())).expect("open"));
     assert_eq!(host.slabs_outstanding(), 0);
 }
 
 #[test]
-fn a_close_whose_reset_never_confirms_releases_nothing() {
+fn a_dropped_device_whose_reset_never_confirms_releases_nothing() {
+    // The serve loop that owns the device may return on any failure; the
+    // posted receive pools and in-flight transmit staging go with it.
     let (t, _tx, _rx) = build_device();
-    let host = MockHost::new();
-    let mut net = VirtioNet::open(t, &host, Some(&test_machine())).expect("open");
+    let (net, host) = open_net_with_host(t);
     let held = host.slabs_outstanding();
     assert!(held > 0);
-    net.transport_mut().refuse_resets_after(0);
-    net.close();
+    net.device.borrow_mut().refuse_resets_after(0);
+    drop(net);
     assert_eq!(host.slabs_outstanding(), held);
+}
+
+#[test]
+fn a_frame_the_device_left_in_the_receive_pool_is_scrubbed_when_the_driver_is_dropped() {
+    // Never serviced, the frame has no ring class to say whether it was
+    // sensitive.
+    let (t, _tx, rx_queue) = build_device();
+    let (net, host) = open_net_with_host(t);
+    rx_queue.borrow_mut().push_back(arp_frame());
+    deliver_rx(&net);
+    let pool = &net.rx[0].as_ref().expect("receive queue").pool;
+    assert!(
+        pool.as_bytes().iter().any(|b| *b != 0),
+        "the device wrote the frame into the pool"
+    );
+    let slot = pool.slot();
+    drop(net);
+    assert!(
+        host.released_zeroed(slot),
+        "the confirmed reset handed the pool back zeroed"
+    );
+}
+
+#[test]
+fn a_merged_frame_is_scrubbed_from_the_reassembly_buffer_when_the_driver_is_dropped() {
+    // Delivered on a non-sensitive ring, so only the teardown clears it: what a
+    // frame leaves there is scrubbed whatever its class.
+    let t = build_device_mergeable(2, vec![vec![0xA1; 40], vec![0xB2; 40]]);
+    let (mut net, host) = open_net_with_host(t);
+    assert!(deliver_merged(&mut net).is_some());
+    let reasm = net.rx[0]
+        .as_ref()
+        .and_then(|queue| queue.reasm.as_ref())
+        .expect("reassembly buffer");
+    assert!(
+        reasm.as_bytes().iter().any(|b| *b != 0),
+        "the frame was reassembled there"
+    );
+    let slot = reasm.slot();
+    drop(net);
+    assert!(
+        host.released_zeroed(slot),
+        "the confirmed reset handed the reassembly buffer back zeroed"
+    );
 }
 
 /// A two-pair device whose control queue answers the pair-count command
@@ -534,6 +551,117 @@ fn an_unanswered_queue_pair_command_keeps_what_the_device_may_still_write() {
 }
 
 #[test]
+fn the_queue_pair_command_waits_for_a_device_that_answers_later() {
+    // A device answering on its interrupt rather than on the notify: spinning
+    // on the ring would give up on it, so the driver parks until it answers.
+    let sources = vec![
+        Rc::new(RefCell::new(VecDeque::new())),
+        Rc::new(RefCell::new(VecDeque::new())),
+    ];
+    let mut t = build_multiqueue_device(2, sources);
+    t.set_synchronous_notify(false);
+    let (net, host) = open_net_with_host(t);
+    assert_eq!(net.device_facts().expect("facts").rx_queues, 2);
+    assert!(host.notify_log().contains(&(2 * wire::QUEUE_PAIR_STRIDE)));
+}
+
+#[test]
+fn one_service_takes_no_more_than_a_ring_of_completions() {
+    // A device fabricating completions as fast as they are consumed must not
+    // hold the doorbell for ever: a call takes a ring's worth and leaves the
+    // rest for the next.
+    let (t, _tx, _rx) = build_device_with_queue_max(8);
+    let mut net = open_net(t);
+    let ring = net.rx[0].as_ref().expect("rx0").queue.size();
+    for _ in 0..2 * ring {
+        net.device
+            .borrow_mut()
+            .publish_raw_used(wire::RX_QUEUE, u16::MAX, 0)
+            .expect("in the ring");
+    }
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    assert_eq!(net.service(&mut rings).expect("service").received, 0);
+    let queue = &mut net.rx[0].as_mut().expect("rx0").queue;
+    assert_eq!(
+        queue.poll_used(),
+        Err(VirtioError::MalformedCompletion),
+        "a ring's worth is still waiting"
+    );
+    net.assert_never_waited();
+}
+
+#[test]
+fn one_service_reaps_no_more_than_a_ring_of_transmit_completions() {
+    let (t, _tx, _rx) = build_device_with_queue_max(8);
+    let mut net = open_net(t);
+    let ring = net.tx_queue.size();
+    for _ in 0..2 * ring {
+        net.device
+            .borrow_mut()
+            .publish_raw_used(wire::TX_QUEUE, u16::MAX, 0)
+            .expect("in the ring");
+    }
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    net.service(&mut rings).expect("service");
+    assert_eq!(
+        net.tx_queue.poll_used(),
+        Err(VirtioError::MalformedCompletion),
+        "a ring's worth is still waiting"
+    );
+    net.assert_never_waited();
+}
+
+/// A receive pre-filter with no local consumer for anything.
+#[derive(Debug)]
+struct ShedAll;
+
+impl tairix_abi::driver::net_ring::RxAdmit for ShedAll {
+    fn admit(&self, _frame: &[u8]) -> bool {
+        false
+    }
+}
+
+#[test]
+fn one_service_harvests_no_more_than_a_ring_while_the_device_keeps_refilling() {
+    // A shed frame fills no ring slot and its buffer goes straight back, so a
+    // device refilling it at once would hold the pass for as long as it had
+    // frames.
+    let (mut t, _tx, rx) = build_device_with_queue_max(8);
+    t.set_synchronous_notify(true);
+    rx.borrow_mut()
+        .extend(core::iter::repeat_n(arp_frame(), 64));
+    let mut net = open_net(t);
+    let ring = net.rx[0].as_ref().expect("rx0").queue.size();
+    let shed_all = ShedAll;
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive).with_admit(&shed_all);
+    let report = net.service(&mut rings).expect("service");
+    assert_eq!(report.harvested, u32::from(ring));
+    assert!(!rx.borrow().is_empty(), "the rest waits for the next call");
+    net.assert_never_waited();
+}
+
+#[test]
+fn a_transmit_queue_that_cannot_hold_one_frame_is_refused_before_it_is_programmed() {
+    // A one-descriptor ring left no staging to transmit with at all.
+    let (mut t, _tx, _rx) = build_device();
+    t.set_queue_max(wire::TX_QUEUE, 1);
+    let device = t.into_shared();
+    let host = MockHost::new();
+    assert!(matches!(
+        VirtioNet::open(Rc::clone(&device), &host, Some(&test_machine())),
+        Err(VirtioError::QueueTooShallow)
+    ));
+    assert_eq!(
+        device.borrow_mut().publish_raw_used(wire::TX_QUEUE, 0, 0),
+        Err(VirtioError::DeviceFault),
+        "the device was never given the ring"
+    );
+}
+
+#[test]
 fn multiqueue_enables_queues_and_steers_receive_per_queue() {
     // A two-pair device: the driver negotiates VIRTIO_NET_F_MQ, selects two
     // queue pairs through the control queue, and reports two receive queues.
@@ -546,13 +674,13 @@ fn multiqueue_enables_queues_and_steers_receive_per_queue() {
     let t = build_multiqueue_device(2, vec![Rc::clone(&src0), Rc::clone(&src1)]);
     // The frames are delivered into the posted buffers by the synchronous
     // notify at open; a plain non-waiting host suffices.
-    let mut net = open_net_no_wait(t);
+    let mut net = open_net(t);
     assert_eq!(net.device_facts().expect("facts").rx_queues, 2);
 
     // Two receive rings, sized for the device, one transmit ring.
     let geom = RingGeometry::new(4, 4, 2048, 2048, 2).expect("geometry");
-    let mut region = vec![0u8; geom.region_len()];
-    let mut rings = FrameRings::bind(&mut region, geom, BufferClass::NonSensitive).expect("bind");
+    let mut region = region_buffer(geom);
+    let mut rings = bind_rings_with(&mut region, geom, BufferClass::NonSensitive);
     assert_eq!(rings.rx_queues(), 2);
     let report = net.service(&mut rings).expect("service");
     assert_eq!(
@@ -577,6 +705,7 @@ fn multiqueue_enables_queues_and_steers_receive_per_queue() {
         .expect("pop")
         .expect("frame");
     assert_eq!(&buf[..n1], frame1.as_slice());
+    net.assert_never_waited();
 }
 
 /// Regression (D11): a burst of frames queued before a single `service`
@@ -590,7 +719,7 @@ fn multiqueue_enables_queues_and_steers_receive_per_queue() {
 #[test]
 fn service_egresses_a_burst_in_one_call_without_a_completion() {
     let (t, tx_log, _) = build_device();
-    let mut net = open_net_no_wait(t);
+    let mut net = open_net(t);
     let mut region = rings_region();
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     // Three frames — a data segment and the two frames queued behind it —
@@ -608,12 +737,13 @@ fn service_egresses_a_burst_in_one_call_without_a_completion() {
     // consumed by the (undriven) device.
     assert!(tx_log.borrow().is_empty());
     // Driving the device now completes all three, in order.
-    deliver_tx(&mut net);
+    deliver_tx(&net);
     let log = tx_log.borrow();
     assert_eq!(log.len(), 3);
     for (sent, expected) in log.iter().zip(frames.iter()) {
         assert_eq!(sent, expected);
     }
+    net.assert_never_waited();
 }
 
 /// Back-pressure is applied only when the transmit ring is genuinely full
@@ -625,7 +755,7 @@ fn service_egresses_a_burst_in_one_call_without_a_completion() {
 #[test]
 fn transmit_back_pressure_only_when_the_ring_is_full() {
     let (t, tx_log, _) = build_device();
-    let mut net = open_net_no_wait(t);
+    let mut net = open_net(t);
     let mut region = rings_region();
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
 
@@ -657,12 +787,12 @@ fn transmit_back_pressure_only_when_the_ring_is_full() {
 
     // Drive the device: the first batch completes; the next service reaps
     // the pool and drains the held second batch.
-    deliver_tx(&mut net);
+    deliver_tx(&net);
     assert_eq!(
         net.service(&mut rings).expect("service").transmitted,
         u32::try_from(depth).unwrap()
     );
-    deliver_tx(&mut net);
+    deliver_tx(&net);
 
     let log = tx_log.borrow();
     let expected: Vec<Frame> = first.iter().chain(second.iter()).cloned().collect();
@@ -670,6 +800,7 @@ fn transmit_back_pressure_only_when_the_ring_is_full() {
     for (sent, want) in log.iter().zip(expected.iter()) {
         assert_eq!(sent, want);
     }
+    net.assert_never_waited();
 }
 
 #[test]
@@ -682,7 +813,7 @@ fn service_delivers_a_queued_frame_into_the_rx_ring() {
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     // The device completes the posted receive chain and raises its IRQ;
     // only then does the non-blocking `service` doorbell harvest it.
-    deliver_rx(&mut net);
+    deliver_rx(&net);
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.received, 1);
     let mut buf = vec![0u8; 2048];
@@ -720,7 +851,7 @@ fn runt_and_oversize_tx_frames_are_dropped_without_wedging() {
     rings.tx.push(&good).expect("queue good");
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
-    deliver_tx(&mut net);
+    deliver_tx(&net);
     let log = tx_log.borrow();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0], good);
@@ -739,11 +870,11 @@ fn sensitive_class_round_trip_scrubs_staging() {
     rings.tx.push(&tx_frame).expect("queue");
     let report = net.service(&mut rings).expect("service tx");
     assert_eq!(report.transmitted, 1);
-    deliver_tx(&mut net);
+    deliver_tx(&net);
     assert_eq!(tx_log.borrow()[0], tx_frame);
     let rx_frame = arp_frame();
     rx_queue.borrow_mut().push_back(rx_frame.clone());
-    deliver_rx(&mut net);
+    deliver_rx(&net);
     let report = net.service(&mut rings).expect("service rx");
     assert_eq!(report.received, 1);
     let mut buf = vec![0u8; 2048];
@@ -782,8 +913,8 @@ fn steady_state_traffic_allocates_no_new_dma() {
         // chain, each raising the (shared) IRQ; the next doorbell reaps the
         // transmit staging and harvests the frame (the non-blocking
         // `service` never waits for either event itself).
-        deliver_tx(&mut net);
-        deliver_rx(&mut net);
+        deliver_tx(&net);
+        deliver_rx(&net);
         let report = net.service(&mut rings).expect("service rx");
         assert_eq!(report.received, 1);
         while rings
@@ -820,13 +951,13 @@ fn corrupt_tx_slot_is_consumed_and_flow_continues() {
     // rings, then the ring header, then the per-frame offload metadata.
     let len_prefix = test_geometry().rx_ring_len() + RING_HEADER_LEN + SLOT_META_LEN;
     {
-        let bytes = region_of(&mut region);
+        let bytes = region_of(&mut region, test_geometry());
         bytes[len_prefix..len_prefix + 4].copy_from_slice(&8000u32.to_le_bytes());
     }
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
-    deliver_tx(&mut net);
+    deliver_tx(&net);
     assert_eq!(tx_log.borrow().len(), 1);
 }
 
@@ -859,10 +990,7 @@ fn build_device_rx_flags(flags: u8, csum_start: u16, csum_offset: u16) -> (MockT
 /// Service the driver once and return the offload metadata tagged onto
 /// the single delivered frame, asserting the frame bytes round-trip.
 /// The caller has already queued `frame` on the device's RX queue.
-fn deliver_and_pop_offload(
-    net: &mut VirtioNet<'static, MockTransport>,
-    frame: &[u8],
-) -> FrameOffload {
+fn deliver_and_pop_offload(net: &mut TestNet, frame: &[u8]) -> FrameOffload {
     let mut region = rings_region();
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     deliver_rx(net);
@@ -1014,7 +1142,7 @@ fn tx_checksum_frame_sets_needs_csum_header() {
         .expect("queue");
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
-    deliver_tx(&mut net);
+    deliver_tx(&net);
     // The frame bytes are handed over verbatim; the header carries the
     // device's completion request.
     assert_eq!(tx_log.borrow()[0], frame);
@@ -1049,7 +1177,7 @@ fn plain_tx_frame_emits_a_zero_header() {
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     rings.tx.push(&arp_frame()).expect("queue");
     net.service(&mut rings).expect("service");
-    deliver_tx(&mut net);
+    deliver_tx(&net);
     assert_eq!(hdr_log.borrow()[0], [0u8; wire::HEADER_LEN]);
 }
 
@@ -1106,7 +1234,7 @@ fn tx_segment_frame_sets_the_gso_header() {
         .expect("queue");
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
-    deliver_tx(&mut net);
+    deliver_tx(&net);
     assert_eq!(tx_log.borrow()[0], frame);
     let hdr = hdr_log.borrow()[0];
     assert_eq!(
@@ -1170,7 +1298,7 @@ fn tx_checksum_header_suppressed_when_host_csum_not_negotiated() {
     // logs the frame, so the zero-header path is exercised without fault).
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
-    deliver_tx(&mut net);
+    deliver_tx(&net);
     assert_eq!(tx_log.borrow()[0], frame);
 }
 
@@ -1237,7 +1365,7 @@ fn build_device_mergeable(declared: u16, parts: Vec<Vec<u8>>) -> MockTransport {
 
 /// Service once and return the single delivered frame, or `None` when
 /// nothing was delivered (a fail-closed drop).
-fn deliver_merged(net: &mut VirtioNet<'static, MockTransport>) -> Option<Vec<u8>> {
+fn deliver_merged(net: &mut TestNet) -> Option<Vec<u8>> {
     let mut region = rings_region();
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     deliver_rx(net);
@@ -1261,7 +1389,7 @@ fn mergeable_negotiation_is_accepted_when_offered() {
     let t = build_device_mergeable(1, vec![arp_frame()]);
     let net = open_net(t);
     assert_ne!(
-        net.transport().negotiated_driver_features() & wire::VIRTIO_NET_F_MRG_RXBUF,
+        net.device.borrow().negotiated_driver_features() & wire::VIRTIO_NET_F_MRG_RXBUF,
         0,
         "the driver must negotiate mergeable buffers when the device offers them"
     );
@@ -1274,7 +1402,7 @@ fn mergeable_not_negotiated_when_not_offered() {
     let (t, _tx, _rx) = build_device();
     let net = open_net(t);
     assert_eq!(
-        net.transport().negotiated_driver_features() & wire::VIRTIO_NET_F_MRG_RXBUF,
+        net.device.borrow().negotiated_driver_features() & wire::VIRTIO_NET_F_MRG_RXBUF,
         0
     );
 }
@@ -1413,10 +1541,9 @@ fn receive_pool_captures_a_burst_in_one_service() {
     for f in &frames {
         rx_queue.borrow_mut().push_back(f.clone());
     }
-    let mut region = vec![0u8; geometry.region_len()];
-    let mut rings =
-        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
-    deliver_rx(&mut net);
+    let mut region = region_buffer(geometry);
+    let mut rings = bind_rings_with(&mut region, geometry, BufferClass::NonSensitive);
+    deliver_rx(&net);
     let report = net.service(&mut rings).expect("service");
     assert_eq!(
         report.received, slots,

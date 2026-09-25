@@ -87,9 +87,10 @@ struct FieldLoc {
 /// belongs to a sibling collection. Spelling "no IDs" as id `0` made those two
 /// indistinguishable, and read a sibling's report — its ID byte landing where
 /// the button bitmap is read from — as this interface's own.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 enum FieldReport {
     /// No Report ID item preceded this field, so its report carries no prefix.
+    #[default]
     Unprefixed,
     /// The field belongs to the report this ID prefixes.
     Prefixed(u8),
@@ -202,6 +203,17 @@ impl FieldLoc {
             count: self.count,
         }
     }
+
+    /// Whether this is a bitmap of one bit per flag, as the boot button and
+    /// modifier bytes are.
+    const fn is_bitmap(self) -> bool {
+        self.size_bits == 1 && self.count >= 1
+    }
+
+    /// Whether this holds values a 32-bit read can take.
+    const fn is_values(self) -> bool {
+        self.size_bits >= 1 && self.size_bits <= 32 && self.count >= 1
+    }
 }
 
 /// Byte length of the normalised boot mouse report [`HidReportMap::normalize`]
@@ -262,28 +274,35 @@ const MAX_USAGES: usize = 16;
 /// untrusted nesting, not a capacity.
 const MAX_PUSH_DEPTH: usize = 8;
 
-/// Global item state saved/restored by Push/Pop.
+/// Global item state saved/restored by Push/Pop, the Report ID among it
+/// (HID §6.2.2.7).
 #[derive(Copy, Clone, Default)]
 struct GlobalState {
     usage_page: u16,
     report_size: u32,
     report_count: u32,
+    /// The report in force: `Unprefixed` until a Report ID is declared, after
+    /// which every report the device sends carries a 1-byte prefix.
+    report: FieldReport,
 }
+
+/// A prefixed report's fields start past its 1-byte Report ID.
+const REPORT_ID_BITS: u32 = 8;
 
 /// The running parse of a Report Descriptor, accumulating the boot fields.
 struct Parser {
     global: GlobalState,
     stack: [GlobalState; MAX_PUSH_DEPTH],
     stack_len: usize,
-    /// The report in force: `Unprefixed` until a Report ID is declared, after
-    /// which every report the device sends carries a 1-byte prefix.
-    report: FieldReport,
     /// Whether the descriptor declared a Report ID anywhere, which is what
     /// makes a field pinned *before* the first one unusable rather than
     /// merely unprefixed.
     report_ids_used: bool,
-    /// Next field's bit offset within the current report.
-    bit_offset: u32,
+    /// Next field's bit offset in the unprefixed report.
+    unprefixed_offset: u32,
+    /// Next field's bit offset in each Report ID's report: a report's fields
+    /// run on wherever its items are interleaved with another report's.
+    prefixed_offsets: [u32; 256],
     usages: [u32; MAX_USAGES],
     usages_len: usize,
     usage_min: Option<u32>,
@@ -305,9 +324,9 @@ impl Parser {
             global: GlobalState::default(),
             stack: [GlobalState::default(); MAX_PUSH_DEPTH],
             stack_len: 0,
-            report: FieldReport::Unprefixed,
             report_ids_used: false,
-            bit_offset: 0,
+            unprefixed_offset: 0,
+            prefixed_offsets: [REPORT_ID_BITS; 256],
             usages: [0; MAX_USAGES],
             usages_len: 0,
             usage_min: None,
@@ -330,26 +349,35 @@ impl Parser {
         self.usage_max = None;
     }
 
-    /// Whether field index `i` of the current variable item carries `usage`,
-    /// resolving both the explicit `Usage` list and a `Usage Minimum/Maximum`
-    /// range.
-    fn field_usage(&self, i: u32) -> Option<u32> {
-        if (i as usize) < self.usages_len {
-            return Some(self.usages[i as usize]);
+    /// The first field of the current variable item, among its `count`, that
+    /// carries `usage`: the explicit `Usage` list first, then the `Usage
+    /// Minimum/Maximum` range past it. Computed, not searched, so the work is
+    /// the list's length whatever `Report Count` the device declares.
+    fn field_index(&self, usage: u32, count: u32) -> Option<u32> {
+        let listed = self.usages[..self.usages_len]
+            .iter()
+            .position(|&listed| listed == usage)
+            .and_then(|index| u32::try_from(index).ok());
+        let ranged = || {
+            let (min, max) = (self.usage_min?, self.usage_max?);
+            let index = usage.checked_sub(min)?;
+            (usage <= max && usize::try_from(index).ok()? >= self.usages_len).then_some(index)
+        };
+        listed.or_else(ranged).filter(|&index| index < count)
+    }
+
+    /// The running bit offset of the report in force.
+    fn offset(&mut self) -> &mut u32 {
+        match self.global.report {
+            FieldReport::Unprefixed => &mut self.unprefixed_offset,
+            FieldReport::Prefixed(id) => &mut self.prefixed_offsets[usize::from(id)],
         }
-        if let (Some(min), Some(max)) = (self.usage_min, self.usage_max) {
-            let candidate = min.checked_add(i)?;
-            if candidate <= max {
-                return Some(candidate);
-            }
-        }
-        None
     }
 
     /// A field location at the current offset with the given per-field size and
     /// element count.
-    fn loc(&self, size_bits: u32, count: u32, extra_offset: u32) -> Option<FieldLoc> {
-        let offset = self.bit_offset.checked_add(extra_offset)?;
+    fn loc(&mut self, size_bits: u32, count: u32, extra_offset: u32) -> Option<FieldLoc> {
+        let offset = self.offset().checked_add(extra_offset)?;
         Some(FieldLoc {
             offset_bits: u16::try_from(offset).ok()?,
             size_bits: u8::try_from(size_bits).ok()?,
@@ -358,46 +386,42 @@ impl Parser {
     }
 
     /// Record the boot fields carried by one `Input` main item, then advance
-    /// the running bit offset by the whole item's width.
+    /// its report's running bit offset by the whole item's width.
     fn on_input(&mut self, flags: u32) {
         let size = self.global.report_size;
         let count = self.global.report_count;
-        let width = size.saturating_mul(count);
         // A constant (padding) item carries no usage; only advance past it.
-        if flags & INPUT_CONSTANT != 0 {
-            self.bit_offset = self.bit_offset.saturating_add(width);
-            self.clear_local();
-            return;
+        if flags & INPUT_CONSTANT == 0 {
+            self.locate(flags & INPUT_VARIABLE != 0, size, count);
         }
+        let offset = self.offset();
+        *offset = offset.saturating_add(size.saturating_mul(count));
+        self.clear_local();
+    }
+
+    /// Record the boot fields one data item carries. A kind's fields are
+    /// taken only from the report its first field was: a sibling
+    /// collection's are another report's bits.
+    fn locate(&mut self, variable: bool, size: u32, count: u32) {
+        let report = self.global.report;
+        let mouse = self.mouse_report.is_none_or(|pin| pin == report);
+        let keyboard = self.kbd_report.is_none_or(|pin| pin == report);
         match self.global.usage_page {
-            PAGE_BUTTON if flags & INPUT_VARIABLE != 0 => {
-                if self.buttons.is_none() {
-                    if let Some(loc) = self.loc(size, count, 0) {
-                        self.buttons = Some(loc);
-                        self.pin_mouse();
-                    }
+            PAGE_BUTTON if variable && mouse && self.buttons.is_none() => {
+                self.buttons = self.loc(size, count, 0);
+            }
+            PAGE_GENERIC_DESKTOP if variable && mouse => {
+                if self.x.is_none() {
+                    self.x = self.axis(USAGE_X, size, count);
+                }
+                if self.y.is_none() {
+                    self.y = self.axis(USAGE_Y, size, count);
+                }
+                if self.wheel.is_none() {
+                    self.wheel = self.axis(USAGE_WHEEL, size, count);
                 }
             }
-            PAGE_GENERIC_DESKTOP if flags & INPUT_VARIABLE != 0 => {
-                for i in 0..count {
-                    match self.field_usage(i) {
-                        Some(USAGE_X) if self.x.is_none() => {
-                            self.x = self.loc(size, 1, i.saturating_mul(size));
-                            self.pin_mouse();
-                        }
-                        Some(USAGE_Y) if self.y.is_none() => {
-                            self.y = self.loc(size, 1, i.saturating_mul(size));
-                            self.pin_mouse();
-                        }
-                        Some(USAGE_WHEEL) if self.wheel.is_none() => {
-                            self.wheel = self.loc(size, 1, i.saturating_mul(size));
-                            self.pin_mouse();
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            PAGE_KEYBOARD if flags & INPUT_VARIABLE != 0 => {
+            PAGE_KEYBOARD if variable && keyboard => {
                 // The eight modifier flags: a variable item over the
                 // LeftControl..RightGUI usage range.
                 let is_modifier_range = self.usage_min == Some(USAGE_KBD_LCTRL)
@@ -405,33 +429,27 @@ impl Parser {
                 let is_modifiers =
                     is_modifier_range || self.usages[..self.usages_len].contains(&USAGE_KBD_LCTRL);
                 if is_modifiers && self.modifiers.is_none() {
-                    if let Some(loc) = self.loc(size, count, 0) {
-                        self.modifiers = Some(loc);
-                        self.pin_keyboard();
-                    }
+                    self.modifiers = self.loc(size, count, 0);
                 }
             }
             // The key-array: an array (non-variable) item of usage IDs.
-            PAGE_KEYBOARD if self.keys.is_none() => {
-                if let Some(loc) = self.loc(size, count, 0) {
-                    self.keys = Some(loc);
-                    self.pin_keyboard();
-                }
+            PAGE_KEYBOARD if !variable && keyboard && self.keys.is_none() => {
+                self.keys = self.loc(size, count, 0);
             }
             _ => {}
         }
-        self.bit_offset = self.bit_offset.saturating_add(width);
-        self.clear_local();
+        if self.buttons.is_some() || self.x.is_some() || self.y.is_some() || self.wheel.is_some() {
+            self.mouse_report.get_or_insert(report);
+        }
+        if self.modifiers.is_some() || self.keys.is_some() {
+            self.kbd_report.get_or_insert(report);
+        }
     }
 
-    /// Pin the mouse fields to the report ID active when the first was seen;
-    /// a later report ID's pointer fields (a second collection) are ignored.
-    fn pin_mouse(&mut self) {
-        self.mouse_report.get_or_insert(self.report);
-    }
-
-    fn pin_keyboard(&mut self) {
-        self.kbd_report.get_or_insert(self.report);
+    /// The one-field location of the axis `usage` names in the current item.
+    fn axis(&mut self, usage: u32, size: u32, count: u32) -> Option<FieldLoc> {
+        let index = self.field_index(usage, count)?;
+        self.loc(size, 1, index.checked_mul(size)?)
     }
 
     /// Whether a pinned field's reports can be told from a sibling
@@ -450,11 +468,16 @@ impl Parser {
 
     /// Assemble the parsed map, preferring a complete keyboard, then a
     /// complete mouse (X and Y are the minimum a pointer map needs).
+    ///
+    /// A map locating a field the boot layout cannot be read from — a
+    /// bitmap that is not one bit per flag, a value wider than 32 bits, a
+    /// field of no elements — is refused, so the caller falls back to boot
+    /// protocol rather than a map that drops every report.
     fn finish(self) -> Option<HidReportMap> {
         if let (Some(modifiers), Some(keys), Some(pin)) =
             (self.modifiers, self.keys, self.kbd_report)
         {
-            if !self.demuxable(pin) {
+            if !self.demuxable(pin) || !modifiers.is_bitmap() || !keys.is_values() {
                 return None;
             }
             return Some(HidReportMap::Keyboard(KeyboardMap {
@@ -464,7 +487,11 @@ impl Parser {
             }));
         }
         if let (Some(x), Some(y), Some(pin)) = (self.x, self.y, self.mouse_report) {
-            if !self.demuxable(pin) {
+            let readable = x.is_values()
+                && y.is_values()
+                && self.wheel.is_none_or(FieldLoc::is_values)
+                && self.buttons.is_none_or(FieldLoc::is_bitmap);
+            if !self.demuxable(pin) || !readable {
                 return None;
             }
             return Some(HidReportMap::Mouse(MouseMap {
@@ -499,8 +526,11 @@ pub fn parse(desc: &[u8]) -> Option<HidReportMap> {
         i += 1;
         // Long items (prefix 0xFE): skip bDataSize + 1 tag byte + data.
         if prefix == 0xFE {
-            let data_size = *desc.get(i)? as usize;
-            i = i.checked_add(1)?.checked_add(data_size)?;
+            let data_size = usize::from(*desc.get(i)?);
+            i = i.checked_add(2)?.checked_add(data_size)?;
+            if i > desc.len() {
+                return None;
+            }
             continue;
         }
         let b_size = (prefix & 0x03) as usize;
@@ -529,10 +559,8 @@ pub fn parse(desc: &[u8]) -> Option<HidReportMap> {
                 GLOBAL_REPORT_SIZE => p.global.report_size = data,
                 GLOBAL_REPORT_COUNT => p.global.report_count = data,
                 GLOBAL_REPORT_ID => {
-                    p.report = FieldReport::Prefixed(u8::try_from(data & 0xFF).unwrap_or(0));
+                    p.global.report = FieldReport::Prefixed(u8::try_from(data & 0xFF).unwrap_or(0));
                     p.report_ids_used = true;
-                    // Each report ID's fields start after its 1-byte prefix.
-                    p.bit_offset = 8;
                 }
                 GLOBAL_PUSH => {
                     if p.stack_len >= MAX_PUSH_DEPTH {
@@ -607,6 +635,12 @@ impl HidReportMap {
     }
 }
 
+/// Bits of the one-bit-per-flag `field` the boot byte takes: its own flags,
+/// never a neighbour's, and no more than eight.
+fn boot_bitmap_bits(field: FieldLoc) -> u32 {
+    u32::from(field.count).min(8)
+}
+
 /// Strip and check the report-ID prefix, returning the body offset in bits.
 fn report_body_offset(report_id: Option<u8>, raw: &[u8]) -> Option<u32> {
     let Some(id) = report_id else {
@@ -628,11 +662,9 @@ impl MouseMap {
         // The recorded offsets already include the report-ID prefix byte, so
         // only the ID demux (not an offset shift) depends on it.
         report_body_offset(self.report_id, raw)?;
-        let buttons = if self.buttons.size_bits == 0 {
-            0
-        } else {
-            let count = u32::from(self.buttons.count) * u32::from(self.buttons.size_bits);
-            read_bits(raw, u32::from(self.buttons.offset_bits), count)? & 0xFF
+        let buttons = match boot_bitmap_bits(self.buttons) {
+            0 => 0,
+            bits => read_bits(raw, u32::from(self.buttons.offset_bits), bits)?,
         };
         let x = sign_extend(
             read_bits(
@@ -671,9 +703,13 @@ impl KeyboardMap {
             return None;
         }
         report_body_offset(self.report_id, raw)?;
-        // The modifier byte is the front of the report; a report too short to
-        // even carry it is not this keyboard's report.
-        let modifiers = read_bits(raw, u32::from(self.modifiers.offset_bits), 8)?;
+        // The modifier flags are the front of the report; a report too short
+        // to even carry them is not this keyboard's report.
+        let modifiers = read_bits(
+            raw,
+            u32::from(self.modifiers.offset_bits),
+            boot_bitmap_bits(self.modifiers),
+        )?;
         out[0] = (modifiers & 0xFF) as u8;
         out[1] = 0;
         for slot in 0..BOOT_KEY_SLOTS {
@@ -699,6 +735,10 @@ impl KeyboardMap {
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
+
+    use alloc::vec::Vec;
+
     use super::*;
 
     /// The canonical boot mouse Report Descriptor (USB HID 1.11 Appendix E.10):
@@ -1061,5 +1101,182 @@ mod tests {
         assert_eq!(out[0], 0x02);
         assert_eq!(out[2], 0x04);
         assert_eq!(out[3], 0x05);
+    }
+
+    /// `BOOT_MOUSE_DESC` with `item` inserted before its axes' `Report Size`.
+    fn boot_mouse_with(item: &[u8]) -> Vec<u8> {
+        let at = BOOT_MOUSE_DESC
+            .windows(2)
+            .rposition(|pair| pair == [0x75, 0x08])
+            .expect("the axes declare their size");
+        let mut desc = BOOT_MOUSE_DESC.to_vec();
+        desc.splice(at..at, item.iter().copied());
+        desc
+    }
+
+    #[test]
+    fn a_long_item_is_skipped_whole() {
+        // Prefix, bDataSize, bLongItemTag, then the data. Stopping a byte short
+        // read its last data byte, an `Input` prefix here, as an item that
+        // swallowed the axes' `Report Size`.
+        let desc = boot_mouse_with(&[0xFE, 0x01, 0x00, 0x81]);
+        assert_eq!(parse(&desc), parse(BOOT_MOUSE_DESC));
+        // One running off the end is as truncated as a short item.
+        assert_eq!(
+            parse(&[BOOT_MOUSE_DESC, &[0xFE, 0x04, 0x00]].concat()),
+            None
+        );
+    }
+
+    /// A mouse whose buttons and X are Report ID 1's, and whose only Y is a
+    /// second collection's, Report ID 2.
+    const SPLIT_POINTER_DESC: &[u8] = &[
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x01, 0x05, 0x09, 0x19, 0x01, 0x29, 0x08, 0x95,
+        0x08, 0x75, 0x01, 0x81, 0x02, 0x05, 0x01, 0x09, 0x30, 0x95, 0x01, 0x75, 0x08, 0x81, 0x06,
+        0xC0, 0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x02, 0x05, 0x01, 0x09, 0x31, 0x95, 0x01,
+        0x75, 0x08, 0x81, 0x06, 0xC0,
+    ];
+
+    #[test]
+    fn a_field_of_another_report_is_never_read_from_this_ones() {
+        // Taking report 2's Y offset for report 1 read the button bitmap as
+        // motion: a left click moved the pointer down.
+        assert_eq!(parse(SPLIT_POINTER_DESC), None, "report 1 carries no Y");
+    }
+
+    #[test]
+    fn a_report_s_fields_continue_where_its_last_item_left_off() {
+        // Report 1's buttons, one byte of report 2, then report 1 again: its
+        // axes follow its own buttons, not a fresh prefix.
+        let desc: &[u8] = &[
+            0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x01, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
+            0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x05, 0x81, 0x01, 0x85, 0x02, 0x95, 0x01,
+            0x75, 0x08, 0x81, 0x01, 0x85, 0x01, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x95, 0x02,
+            0x75, 0x08, 0x81, 0x06, 0xC0,
+        ];
+        let map = parse(desc).expect("parses");
+        let ReportMapSummary::Mouse { x, y, .. } = map.summary() else {
+            panic!("expected a mouse map");
+        };
+        assert_eq!((x.offset_bits, y.offset_bits), (16, 24));
+        let mut out = [0u8; 8];
+        assert_eq!(map.normalize(&[0x01, 0x01, 0x05, 0xFB], &mut out), Some(4));
+        assert_eq!(out[..3], [0x01, 5, 0xFB], "a click moves nothing");
+    }
+
+    #[test]
+    fn a_pop_restores_the_report_id_its_push_saved() {
+        // Report ID is global state: after the pop, the axes are report 1's.
+        let desc: &[u8] = &[
+            0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x01, 0x05, 0x09, 0x19, 0x01, 0x29, 0x08,
+            0x95, 0x08, 0x75, 0x01, 0x81, 0x02, 0xA4, 0x85, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81,
+            0x01, 0xB4, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x95, 0x02, 0x75, 0x08, 0x81, 0x06,
+            0xC0,
+        ];
+        let map = parse(desc).expect("parses");
+        let ReportMapSummary::Mouse { report_id, x, .. } = map.summary() else {
+            panic!("expected a mouse map");
+        };
+        assert_eq!((report_id, x.offset_bits), (Some(1), 16));
+    }
+
+    /// `desc` with the first (or, `last`, the final) `Report Size` of `size`
+    /// declaring `with` instead.
+    fn resized(desc: &[u8], size: u8, with: u8, last: bool) -> Vec<u8> {
+        let sized = |pair: &[u8]| pair == [0x75, size];
+        let at = if last {
+            desc.windows(2).rposition(sized)
+        } else {
+            desc.windows(2).position(sized)
+        }
+        .expect("a sized item");
+        let mut desc = desc.to_vec();
+        desc[at + 1] = with;
+        desc
+    }
+
+    #[test]
+    fn a_map_locating_a_field_the_boot_layout_cannot_read_is_refused() {
+        // Each was accepted, then refused every report: a device silenced
+        // rather than put back in boot protocol.
+        for (shape, desc) in [
+            ("64-bit axes", resized(BOOT_MOUSE_DESC, 8, 64, true)),
+            ("axes of no width", resized(BOOT_MOUSE_DESC, 8, 0, true)),
+            ("byte-wide buttons", resized(BOOT_MOUSE_DESC, 1, 8, false)),
+            (
+                "byte-wide modifiers",
+                resized(BOOT_KEYBOARD_DESC, 1, 8, false),
+            ),
+        ] {
+            assert_eq!(parse(&desc), None, "{shape}");
+        }
+    }
+
+    #[test]
+    fn buttons_past_the_boot_byte_leave_its_eight_intact() {
+        // Forty one-bit buttons: the map read all forty as one value, past
+        // what one read takes, and refused every report.
+        let desc: &[u8] = &[
+            0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x05, 0x09, 0x19, 0x01, 0x29, 0x28, 0x95, 0x28,
+            0x75, 0x01, 0x81, 0x02, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x95, 0x02, 0x75, 0x08,
+            0x81, 0x06, 0xC0,
+        ];
+        let map = parse(desc).expect("parses");
+        let mut out = [0u8; 8];
+        let raw = [0x05, 0xFF, 0xFF, 0xFF, 0xFF, 0x03, 0xFD];
+        assert_eq!(map.normalize(&raw, &mut out), Some(4));
+        assert_eq!(out[..3], [0x05, 3, 0xFD]);
+    }
+
+    #[test]
+    fn a_narrow_modifier_field_yields_only_its_own_flags() {
+        // Four modifier flags, then four bits of padding: reading a whole
+        // byte took the padding as RightControl..RightGUI held.
+        let desc: &[u8] = &[
+            0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x75, 0x01,
+            0x95, 0x04, 0x81, 0x02, 0x95, 0x04, 0x81, 0x03, 0x95, 0x06, 0x75, 0x08, 0x19, 0x00,
+            0x29, 0x65, 0x81, 0x00, 0xC0,
+        ];
+        let map = parse(desc).expect("parses");
+        let mut out = [0u8; 8];
+        assert_eq!(map.normalize(&[0xF2, 4, 0, 0, 0, 0, 0], &mut out), Some(8));
+        assert_eq!(out[..3], [0x02, 0, 4]);
+    }
+
+    #[test]
+    fn an_axis_is_located_by_its_usages_whatever_report_count_is_declared() {
+        // The walk used to step through every declared field, 2^32 - 1 of
+        // them here.
+        let desc: &[u8] = &[
+            0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x05, 0x01, 0x19, 0x30, 0x29, 0x38, 0x75, 0x08,
+            0x97, 0xFF, 0xFF, 0xFF, 0xFF, 0x81, 0x06, 0xC0,
+        ];
+        let map = parse(desc).expect("parses");
+        let ReportMapSummary::Mouse { x, y, wheel, .. } = map.summary() else {
+            panic!("expected a mouse map");
+        };
+        let wheel = wheel.expect("the range covers the wheel");
+        assert_eq!(
+            (x.offset_bits, y.offset_bits, wheel.offset_bits),
+            (0, 8, 64)
+        );
+    }
+
+    #[test]
+    fn a_field_index_takes_the_usage_list_then_the_range_past_it() {
+        let mut parser = Parser::new();
+        parser.usages[..2].copy_from_slice(&[USAGE_Y, USAGE_X]);
+        parser.usages_len = 2;
+        assert_eq!(parser.field_index(USAGE_X, 8), Some(1));
+        assert_eq!(parser.field_index(USAGE_X, 1), None, "past the count");
+        parser.usage_min = Some(0x2E);
+        parser.usage_max = Some(0x38);
+        assert_eq!(parser.field_index(USAGE_WHEEL, 16), Some(10));
+        assert_eq!(parser.field_index(USAGE_WHEEL, 10), None, "past the count");
+        assert_eq!(
+            parser.field_index(0x2F, 16),
+            None,
+            "range indices under the list are the list's"
+        );
     }
 }

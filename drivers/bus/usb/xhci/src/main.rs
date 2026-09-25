@@ -64,11 +64,12 @@
 //! # Data path (`plans/USB.md` U3a2, Option B)
 //!
 //! The URB data buffer is a cross-process **shared-memory** region this HCD
-//! creates (`shm_create`) and forwards as a grant on the interface node; the
-//! class driver inherits the grant and `shm_map`s the same frames. The buffer
-//! is plain cacheable RAM with no DMA properties — the class driver holds
-//! **zero** DMA authority — and the HCD bounce-copies between it and its own
-//! DMA-granted ring.
+//! creates (`shm_create`) for each interface node it publishes, and no other
+//! node ever carries, forwarded as a grant on that node; the class driver
+//! inherits the grant and `shm_map`s the same frames. The buffer is plain
+//! cacheable RAM with no DMA properties — the class driver holds **zero** DMA
+//! authority — and the HCD bounce-copies between it and its own DMA-granted
+//! ring.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `tairix-rt` (`_start`, the stack canary, the panic handler, the
@@ -76,16 +77,12 @@
 //! --workspace`, clippy, and fmt still cover the file. The live controller
 //! bring-up and report path are metal-only because QEMU models no Pi USB; the
 //! HCD's host-testable logic lives in the crate's `lib` target
-//! ([`tairix_drv_bus_usb::bringup`] / [`tairix_drv_bus_usb::serve`]).
+//! ([`tairix_drv_bus_usb::bringup`], [`tairix_drv_bus_usb::serve`],
+//! [`tairix_drv_bus_usb::interfaces`]).
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
 #![deny(missing_docs)]
-
-// The per-index URB transport table grows with the devices the controller
-// actually serves; `tairix-rt` supplies the process heap.
-#[cfg(freestanding)]
-extern crate alloc;
 
 #[cfg(any(freestanding, test))]
 fn waitset_ctl_result(ret: i64) -> Result<(), i64> {
@@ -102,23 +99,27 @@ const WAIT_FOREVER_NS: u64 = u64::MAX;
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use alloc::vec::Vec;
     use tairix_abi::hwtree::HW_NODE_ROOT;
-    use tairix_abi::usb_urb::{decode_completion, URB_COMPLETION_LEN, URB_REQUEST_LEN};
+    use tairix_abi::usb_urb::{URB_COMPLETION_LEN, URB_REQUEST_LEN};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{CapabilityId, Errno};
+    use tairix_abi::{CapabilityId, DriverError, Errno, HwNode, RegisterWindow};
     use tairix_caps::CapabilitySet;
     use tairix_drv_bus_usb::bringup::{
-        bring_up_controller_diagnostic, derive_controller_resources, BringupPhase,
+        bring_up_controller_diagnostic, derive_controller_resources, BringupPhase, ControllerDevice,
     };
     use tairix_drv_bus_usb::domain::{ControllerDomainEvent, ControllerHealth, SkippedPortRetry};
-    use tairix_drv_bus_usb::serve::{attach_transport_grants, UrbOutcome, UrbReply, UrbService};
+    use tairix_drv_bus_usb::interfaces::{Interfaces, Note, Seam, UrbBuffer, ENDPOINT_CAPACITY};
+    use tairix_drv_bus_usb::serve::UrbReply;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_hid::{ReportFieldSummary, ReportMapSummary};
     use tairix_log::{log, Event, EventId, Field, Level};
+    use tairix_rt::shm::SharedRegion;
     use tairix_rt::{ClockDelay, LogSink};
-    use tairix_usb::device::{EnumStage, EventWait, HubEvent, MAX_INTERFACES, XHCI_MAX_SLOTS};
-    use tairix_usb::XhciOpenStage;
+    use tairix_usb::device::{
+        DeviceEngine, DeviceIdentity, EnumStage, EventWait, HubEvent, MAX_INTERFACES,
+        XHCI_MAX_SLOTS,
+    };
+    use tairix_usb::{SlabBank, XhciOpenStage};
     use tairix_util::fmt::{format_hex_bytes, format_hex_u64};
 
     /// Exit code when the rt-backed driver host could not be built from the
@@ -142,6 +143,16 @@ mod program {
     /// fail-closed before any register is touched.
     const EXIT_NO_IRQ: i32 = 84;
 
+    /// Exit code when the controller did not come back within its recovery
+    /// grace window. Every interface node is retracted first; exiting hands
+    /// the controller's memory to the kernel, which quarantines what a
+    /// controller that would not reset may still reach.
+    const EXIT_CONTROLLER_FAILED: i32 = 85;
+
+    /// Exit code when the event loop's own wait-set failed, so nothing it
+    /// serves can wake it again. Every interface node is retracted first.
+    const EXIT_WAIT_FAILED: i32 = 86;
+
     /// Diagnostic event id: a one-shot controller bring-up failure.
     const HCD_BRINGUP_FAILED: EventId = EventId(4126);
 
@@ -158,9 +169,6 @@ mod program {
 
     /// Diagnostic event id: URB transport setup or IRQ arming state.
     const HCD_URB_SETUP: EventId = EventId(4149);
-
-    /// Diagnostic event id: a URB was held awaiting a controller event.
-    const HCD_URB_HELD: EventId = EventId(4151);
 
     /// Diagnostic event id: a URB reply was sent or attempted.
     const HCD_URB_REPLY: EventId = EventId(4152);
@@ -298,13 +306,12 @@ mod program {
     /// creating a block's *base* id claims the whole block, so a second
     /// controller's HCD probes on to the next block and two controllers
     /// never collide on one id; the block's interior ids are bound lazily,
-    /// one per device-table index, as devices actually serve
-    /// ([`Transports::reconcile`]).
+    /// one per transport, as the interface table opens them.
     const URB_ENDPOINT_BASE: u64 = 0x0055_5242_0000_0000;
 
-    /// Ids per claimed endpoint block: one per device-table index one
-    /// controller can ever serve concurrently — the xHCI protocol's
-    /// 255-slot ceiling plus the DCBAA's scratchpad slot
+    /// Ids per claimed endpoint block: one per transport, and a controller
+    /// never needs more transports than interfaces it serves at once — the
+    /// xHCI protocol's 255-slot ceiling plus the DCBAA's scratchpad slot
     /// ([`XHCI_MAX_SLOTS`] + 1), times the servable interfaces a composite
     /// device can put on one slot ([`MAX_INTERFACES`]). Derived from
     /// protocol maxima, never a tuning knob, so any controller's full
@@ -316,18 +323,13 @@ mod program {
     /// the first block on its first try).
     const URB_ENDPOINT_BLOCKS: u64 = 64;
 
-    /// Bytes of shared buffer per interface: one bulk chunk
+    /// Bytes of shared buffer per interface node: one bulk chunk
     /// ([`tairix_usb::device::BULK_BUF_LEN`], the engine's per-TD ceiling —
     /// one definition, never a second constant), which also comfortably
     /// holds a boot report and any control-IN descriptor a class driver
     /// reads. One page, so the mass-storage data path costs the keyboard
     /// path nothing extra.
     const SHM_LEN: usize = tairix_usb::device::BULK_BUF_LEN;
-
-    /// Outstanding-URB capacity of the per-interface endpoint. The class
-    /// driver submits one at a time (it blocks on the reply); a small queue
-    /// absorbs a re-submit racing the previous reply.
-    const ENDPOINT_CAPACITY: usize = 4;
 
     /// The engine's parked event-wait seam on metal: waits park on the
     /// controller's bound interrupt line with the remaining wall-clock
@@ -355,8 +357,8 @@ mod program {
 
     /// Wait-set token for "the controller completion interrupt fired".
     const TOKEN_IRQ: u64 = 0;
-    /// Base wait-set token for "a URB submit arrived on device index
-    /// `token - TOKEN_URB_BASE`'s transport endpoint".
+    /// Base wait-set token for "a URB submit arrived on transport slot
+    /// `token - TOKEN_URB_BASE`'s endpoint".
     const TOKEN_URB_BASE: u64 = 1;
 
     fn log_hex_event(
@@ -381,7 +383,7 @@ mod program {
         );
     }
 
-    fn reply_to_urb(endpoint_id: u64, reply: tairix_drv_bus_usb::serve::UrbReply) {
+    fn reply_to_urb(endpoint_id: u64, reply: UrbReply) {
         let ret = tairix_rt::call_reply(endpoint_id, reply.ticket, &reply.bytes[..reply.len]);
         if ret == 0 {
             log_hex_event(
@@ -402,132 +404,214 @@ mod program {
         }
     }
 
-    fn abort_pending_urb(endpoint_id: u64, service: &mut UrbService) {
-        if let UrbOutcome::Reply(reply) = service.abort_outstanding(Errno::NotFound) {
-            reply_to_urb(endpoint_id, reply);
+    /// The HCD's own mapping of one interface node's shared URB buffer.
+    struct NodeBuffer(SharedRegion);
+
+    impl UrbBuffer for NodeBuffer {
+        fn region(&self) -> u64 {
+            self.0.id()
+        }
+
+        fn bytes(&mut self) -> &mut [u8] {
+            self.0.bytes_mut()
         }
     }
 
-    fn reply_error(endpoint_id: u64, ticket: u64, errno: Errno) {
-        let mut bytes = [0u8; URB_COMPLETION_LEN];
-        let len = tairix_usb::transport::frame_completion(&mut bytes, Err(errno)).unwrap_or(0);
-        reply_to_urb(endpoint_id, UrbReply { ticket, bytes, len });
+    /// The live controller and kernel the interface table drives.
+    struct Live<'d, 'h> {
+        device: &'d mut ControllerDevice<'h>,
+        delay: ClockDelay,
+        /// The event loop's wait-set.
+        set: u64,
+        /// This controller's endpoint block ([`claim_urb_block`]).
+        urb_base: u64,
     }
 
-    fn urb_reply_errno(reply: &UrbReply) -> Option<Errno> {
-        decode_completion(&reply.bytes[..reply.len]).err()
-    }
+    impl<'h> Seam for Live<'_, 'h> {
+        type Buffer = NodeBuffer;
+        type Engine<'a>
+            = DeviceEngine<'a, 'h, RegisterWindow, SlabBank<'h>>
+        where
+            Self: 'a;
 
-    /// One device index's URB transport: the call endpoint and shared buffer
-    /// created once at start-up (and reused across attach/detach cycles at
-    /// the same index, so a re-plugged device's class driver lands on the
-    /// same transport), the per-interface URB service, and the published
-    /// interface node.
-    struct Transport {
-        /// The URB call endpoint the class driver submits on.
-        endpoint_id: u64,
-        /// The shared data buffer's kernel id, forwarded as a node grant.
-        shm_id: u64,
-        /// The HCD's own mapping of the shared buffer. The process serves
-        /// this transport for its whole life, so the mapping is permanent.
-        shm: &'static mut [u8],
-        /// The per-interface URB service (at most one outstanding URB).
-        service: UrbService,
-        /// The published interface node id; meaningful only while
-        /// [`Self::node_live`].
-        node_id: u32,
-        /// Whether an interface node is currently published for this index.
-        node_live: bool,
-    }
-
-    /// Publish the interface node for the served device at `index` onto its
-    /// transport, logging the attach. A device that cannot be described or
-    /// whose node the kernel refuses stays unpublished (fail closed).
-    fn publish_interface(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        index: usize,
-        transport: &mut Transport,
-    ) {
-        if transport.node_live || !device.device_live(index) {
-            return;
+        fn table_len(&self) -> usize {
+            self.device.device_table_len()
         }
-        let Some(id) = emit_interface_node(device, index, transport.endpoint_id, transport.shm_id)
-        else {
-            return;
-        };
-        transport.node_id = id;
-        transport.node_live = true;
-        log_hex_event(
-            HCD_ATTACHED,
-            Level::Info,
-            "usb-hcd: interface node emitted",
-            "node_hex",
-            u64::from(id),
-        );
-        // One-shot: record how this interface's reports will be read (report
-        // vs boot protocol, parsed field layout, armed transfer size) so a
-        // metal capture can diagnose a silenced device without guessing, then
-        // the descriptor that decision was derived from so a wrong decision is
-        // diagnosable too.
-        log_hid_enum_diag(device, index);
-        log_hid_report_descriptor(device, index);
-    }
 
-    /// Retract `transport`'s published interface node (best-effort) and
-    /// abort its outstanding URB, so the class driver being unloaded never
-    /// stays parked on a dead device.
-    fn retract_interface(transport: &mut Transport) {
-        if transport.node_live {
-            // A physically-vanished device is a surprise removal: it is never
-            // refused for being in use, so the flag set is empty.
-            if tairix_rt::hw_remove_node(transport.node_id, tairix_abi::HwRemoveFlags::empty()) < 0
-            {
+        fn identity(&self, index: usize) -> Option<DeviceIdentity> {
+            self.device.device_identity(index)
+        }
+
+        fn describe(&self, index: usize) -> Result<HwNode, DriverError> {
+            self.device.describe_device(index, HW_NODE_ROOT, 0)
+        }
+
+        fn engine(&mut self, index: usize) -> Self::Engine<'_> {
+            self.device.engine_for(index)
+        }
+
+        fn detach_if_gone(&mut self, index: usize) -> Result<bool, DriverError> {
+            self.device.detach_if_device_gone(index)
+        }
+
+        fn next_hub_change(&mut self) -> Result<HubEvent, DriverError> {
+            self.device.next_hub_change(&self.delay)
+        }
+
+        fn faulted(&mut self) -> bool {
+            self.device.controller_faulted()
+        }
+
+        fn reset(&mut self) -> Result<(), DriverError> {
+            // Which USBSTS fault bit latched is the only evidence a metal
+            // capture gets for why the controller died (QEMU models no Pi USB).
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Warn,
+                    id: HCD_DISCONNECT,
+                    message: "usb-hcd: resetting the controller to recover it",
+                    fields: &[
+                        opt_u32_field("usbsts", self.device.read_usbsts()),
+                        opt_u32_field("usbcmd", self.device.read_usbcmd()),
+                    ],
+                },
+            );
+            self.device.reset_and_reenumerate(&self.delay)
+        }
+
+        fn open_endpoint(&mut self, slot: usize) -> Option<u64> {
+            let offset = u64::try_from(slot)
+                .ok()
+                .filter(|&offset| offset < URB_ENDPOINT_BLOCK)?;
+            let endpoint = self.urb_base + offset;
+            // Claiming the block bound its base, which serves slot 0.
+            (offset == 0 || bind_urb_endpoint(endpoint)).then_some(endpoint)
+        }
+
+        fn watch_endpoint(&mut self, slot: usize, endpoint: u64) -> bool {
+            let Some(token) = u64::try_from(slot)
+                .ok()
+                .and_then(|slot| TOKEN_URB_BASE.checked_add(slot))
+            else {
+                return false;
+            };
+            let added = tairix_rt::waitset_ctl(
+                self.set,
+                WaitSetOp::Add,
+                WaitSourceKind::Endpoint,
+                endpoint,
+                token,
+            );
+            if super::waitset_ctl_result(added).is_err() {
+                return false;
+            }
+            log_hex_event(
+                HCD_URB_SETUP,
+                Level::Info,
+                "usb-hcd: URB transport created",
+                "endpoint_hex",
+                endpoint,
+            );
+            true
+        }
+
+        fn create_buffer(&mut self) -> Option<NodeBuffer> {
+            SharedRegion::create(SHM_LEN).map(NodeBuffer)
+        }
+
+        fn receive(
+            &mut self,
+            endpoint: u64,
+            request: &mut [u8],
+        ) -> Result<Option<(u64, usize)>, Errno> {
+            let mut ticket = 0u64;
+            match tairix_rt::call_recv_nonblock(endpoint, request, &mut ticket) {
+                Ok(len) => Ok(Some((ticket, len))),
+                Err(err) => match Errno::from_syscall(err) {
+                    Errno::WouldBlock => Ok(None),
+                    errno => Err(errno),
+                },
+            }
+        }
+
+        fn reply(&mut self, endpoint: u64, reply: UrbReply) {
+            reply_to_urb(endpoint, reply);
+        }
+
+        fn emit(&mut self, node: &HwNode) -> Option<u32> {
+            // A negative return is the errno; anything else is the node id.
+            u32::try_from(tairix_rt::hw_emit_node(node)).ok()
+        }
+
+        fn remove(&mut self, id: u32) {
+            // A device that vanished is never refused for being in use, so
+            // the removal is a surprise one: an empty flag set.
+            if tairix_rt::hw_remove_node(id, tairix_abi::HwRemoveFlags::empty()) < 0 {
                 log_hex_event(
                     HCD_WAIT_ERROR,
                     Level::Warn,
                     "usb-hcd: interface retraction failed",
                     "node_hex",
-                    u64::from(transport.node_id),
+                    u64::from(id),
                 );
             }
-            transport.node_live = false;
         }
-        abort_pending_urb(transport.endpoint_id, &mut transport.service);
-    }
 
-    /// Reconcile every device-table index's published node with the
-    /// engine's live device table: grow the per-index transport list to
-    /// cover the table, create a missing transport when its index first
-    /// serves (binding its endpoint id from the claimed block and creating
-    /// its shared buffer), publish a node for each newly served index, and
-    /// retract the node of each no-longer-served index (aborting its held
-    /// URB). A composite device — a wireless keyboard+mouse receiver —
-    /// attaches or detaches **several** indices in one hub event, so the
-    /// whole table is trued up rather than a single index. An index whose
-    /// transport cannot be created stays unpublished (fail closed) and is
-    /// retried on the next reconcile; a created transport is kept across
-    /// detaches so a re-plug finds it waiting.
-    fn reconcile_interfaces(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
-    ) {
-        while transports.len() < device.device_table_len() {
-            transports.push(None);
+        fn now_ns(&self) -> u64 {
+            tairix_rt::clock_get()
         }
-        for (index, slot) in transports.iter_mut().enumerate() {
-            if device.device_live(index) {
-                if slot.is_none() {
-                    *slot = create_transport(set, index, urb_base);
+
+        fn note(&mut self, note: Note) {
+            match note {
+                Note::Published { index, node } => {
+                    log_hex_event(
+                        HCD_ATTACHED,
+                        Level::Info,
+                        "usb-hcd: interface node emitted",
+                        "node_hex",
+                        u64::from(node),
+                    );
+                    // How the interface's reports will be read, and the
+                    // descriptor that decision came from: a silenced device's
+                    // only diagnosis on metal.
+                    log_hid_enum_diag(self.device, index);
+                    log_hid_report_descriptor(self.device, index);
                 }
-                if let Some(transport) = slot {
-                    publish_interface(device, index, transport);
+                Note::UrbFailed { index, errno } => log_urb_error(self.device, index, errno),
+                Note::FaultDetached => {
+                    log(
+                        &LogSink,
+                        &Event {
+                            level: Level::Info,
+                            id: HCD_DISCONNECT,
+                            message: "usb-hcd: device transfer fault confirmed disconnect, interface retracted",
+                            fields: &[],
+                        },
+                    );
                 }
-            } else if let Some(transport) = slot {
-                if transport.node_live {
-                    retract_interface(transport);
-                }
+                Note::DetachUnconfirmed(err) => log_hex_event(
+                    HCD_WAIT_ERROR,
+                    Level::Warn,
+                    "usb-hcd: disconnect confirmation after transfer fault failed",
+                    "err_hex",
+                    err as u64,
+                ),
+                Note::HubServiceFailed(err) => log_hex_event(
+                    HCD_WAIT_ERROR,
+                    Level::Warn,
+                    "usb-hcd: hub watch re-arm after transfer fault failed",
+                    "err_hex",
+                    err as u64,
+                ),
+                Note::ReceiveFailed(errno) => log_hex_event(
+                    HCD_WAIT_ERROR,
+                    Level::Warn,
+                    "usb-hcd: call_recv failed after endpoint wake",
+                    "errno_hex",
+                    errno as u64,
+                ),
+                Note::Domain { event, owner } => log_domain_event(event, owner),
             }
         }
     }
@@ -546,18 +630,15 @@ mod program {
     /// pays for the post-teardown controller-fault check when a teardown
     /// actually happened.
     fn service_root_changes(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
-        delay: ClockDelay,
+        live: &mut Live<'_, '_>,
+        interfaces: &mut Interfaces<NodeBuffer>,
     ) -> bool {
         let mut changed = false;
         loop {
-            match device.next_root_change(&delay) {
+            match live.device.next_root_change(&live.delay) {
                 Ok(HubEvent::None) => return changed,
                 Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {
-                    reconcile_interfaces(device, transports, set, urb_base);
+                    interfaces.reconcile(live);
                     changed = true;
                     log(
                         &LogSink,
@@ -570,7 +651,7 @@ mod program {
                     );
                 }
                 Ok(HubEvent::Detached(_) | HubEvent::HubDetached(_)) => {
-                    reconcile_interfaces(device, transports, set, urb_base);
+                    interfaces.reconcile(live);
                     changed = true;
                     log(
                         &LogSink,
@@ -584,7 +665,7 @@ mod program {
                 }
                 Err(err) => {
                     log_topology_service_failure(
-                        device,
+                        live.device,
                         "usb-hcd: root-port hot-plug service failed",
                         err,
                     );
@@ -594,192 +675,12 @@ mod program {
         }
     }
 
-    /// Service one pending hub status-change after a fault detach re-armed
-    /// the watch, reconciling the published interfaces with whatever the
-    /// change attached or detached.
-    fn service_hub_after_fault_detach(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
-        delay: ClockDelay,
-    ) {
-        match device.next_hub_change(&delay) {
-            Ok(
-                HubEvent::Attached(_)
-                | HubEvent::Detached(_)
-                | HubEvent::HubAttached(_)
-                | HubEvent::HubDetached(_),
-            ) => {
-                reconcile_interfaces(device, transports, set, urb_base);
-            }
-            Ok(HubEvent::None) => {}
-            Err(err) => {
-                log_hex_event(
-                    HCD_WAIT_ERROR,
-                    Level::Warn,
-                    "usb-hcd: hub watch re-arm after transfer fault failed",
-                    "err_hex",
-                    err as u64,
-                );
-            }
-        }
-    }
-
-    /// Whether the failed URB reply for device `index` was caused by the
-    /// device physically vanishing; if so, detach it, retract its interface,
-    /// answer the URB `NotFound`, and service the hub watch (which may
-    /// already carry the re-attach). `true` when the device was detached
-    /// (the reply has then been answered); `false` leaves the reply for the
-    /// caller to send.
-    ///
-    /// The engine surfaces a faulted transfer as [`Errno::DeviceFault`] (a
-    /// report endpoint that could not be recovered, a bulk endpoint fault);
-    /// only such a reply is a candidate for a disconnect confirmation, so any
-    /// other error (a class-driver protocol violation, a malformed URB) is
-    /// passed straight back to the class driver and never triggers a port
-    /// read. `detach_if_device_gone` itself fails safe — a device whose port
-    /// still reads connected is left live and its fault returned to the class
-    /// driver unchanged.
-    fn retract_after_fault_if_gone(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        index: usize,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
-        reply: UrbReply,
-        delay: ClockDelay,
-    ) -> bool {
-        if urb_reply_errno(&reply) != Some(Errno::DeviceFault) {
-            return false;
-        }
-        match device.detach_if_device_gone(index) {
-            Ok(true) => {
-                // The detach freed every entry riding the device's slot (a
-                // composite device's siblings vanish together), so true up
-                // the whole node table, then answer the faulted URB.
-                reconcile_interfaces(device, transports, set, urb_base);
-                if let Some(transport) = transports.get_mut(index).and_then(Option::as_mut) {
-                    reply_error(transport.endpoint_id, reply.ticket, Errno::NotFound);
-                }
-                log(
-                    &LogSink,
-                    &Event {
-                        level: Level::Info,
-                        id: HCD_DISCONNECT,
-                        message:
-                            "usb-hcd: device transfer fault confirmed disconnect, interface retracted",
-                        fields: &[],
-                    },
-                );
-                service_hub_after_fault_detach(device, transports, set, urb_base, delay);
-                true
-            }
-            Ok(false) => false,
-            Err(err) => {
-                log_hex_event(
-                    HCD_WAIT_ERROR,
-                    Level::Warn,
-                    "usb-hcd: disconnect confirmation after transfer fault failed",
-                    "err_hex",
-                    err as u64,
-                );
-                false
-            }
-        }
-    }
-
-    /// Reset the controller and re-enumerate from scratch (the engine
-    /// re-programs the controller and re-enables its interrupter as part of
-    /// the reset), publishing a fresh interface node for every device found
-    /// back, so `devmgr` re-autoloads each class driver onto the same
-    /// per-index transport.
-    ///
-    /// This is the recovery from a latched controller fault: the controller
-    /// is returned to the same state a cold boot reaches, from which the
-    /// next connect enumerates through the normal attach path. With no
-    /// device present yet it simply leaves the controller awaiting that
-    /// connect.
-    fn reset_reenumerate_and_publish(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
-        delay: ClockDelay,
-    ) {
-        if device.reset_and_reenumerate(&delay).is_err() {
-            return;
-        }
-        reconcile_interfaces(device, transports, set, urb_base);
-    }
-
-    /// Recover if the controller has latched a fatal error or halted
-    /// (`USBSTS.HSE`/`HCHalted`). Such a controller raises no further interrupts
-    /// until it is reset (xHCI §4.24.1), so a watched device's hot-plug and
-    /// transfers go silent — on the Pi 4 the VL805 latches a Host System Error
-    /// during a downstream-device hot-removal teardown, after its Disable Slot
-    /// has already completed, which is why an unplug worked but the controller
-    /// never saw the re-plug. Retract every still-live interface, abort the
-    /// held URBs, then reset and re-enumerate so the controller returns to the
-    /// proven await-connect state and a re-plug enumerates normally. Returns
-    /// whether a recovery ran (the caller then restarts its service pass on
-    /// the freshly reset controller).
-    fn recover_if_controller_faulted(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
-        delay: ClockDelay,
-    ) -> bool {
-        if !device.controller_faulted() {
-            return false;
-        }
-        // The whole register breadcrumb: which USBSTS fault bit latched
-        // (HSE/HCE/HCHalted) is the only evidence a metal capture gets for
-        // *why* a controller died mid-service (QEMU models no Pi USB).
-        log(
-            &LogSink,
-            &Event {
-                level: Level::Warn,
-                id: HCD_DISCONNECT,
-                message: "usb-hcd: controller fault latched, resetting to recover",
-                fields: &[
-                    opt_u32_field("usbsts", device.read_usbsts()),
-                    opt_u32_field("usbcmd", device.read_usbcmd()),
-                ],
-            },
-        );
-        for transport in transports.iter_mut().flatten() {
-            retract_interface(transport);
-        }
-        reset_reenumerate_and_publish(device, transports, set, urb_base, delay);
-        true
-    }
-
-    /// Record a controller interior fault-domain edge as one audit event,
-    /// naming the controller's owner id, **and** publish the coherent
-    /// fault-domain state onto our own hardware-tree node so the observers
-    /// beneath us react to one recovery episode rather than N spurious child
-    /// failures (`plans/FIX-IO.md` IO4 cross-process propagation).
-    ///
-    /// Recovering/Recovered use the shared `BlkHealthTransition` vocabulary (via
-    /// [`ControllerHealth`], over `for_fault_domain`), the same the leaf devices
-    /// and the mount overlay use, so a controller recovery and a disk recovery
-    /// cannot be classified differently; the fail-closed edge is the
-    /// fault-domain owner's own distinct event.
-    ///
-    /// The health published on the tree is the *same edge* mapped to the
-    /// [`FaultDomainState`](tairix_abi::blkio::FaultDomainState) an interior
-    /// node reports: `Recovering` while the grace window is open, `Healthy`
-    /// once the controller returns, `Offline` when the window elapses. The
-    /// kernel records it against the controller's *own* matched node
-    /// (resolved kernel-side; the driver never names a node), and the device
-    /// manager's reactive watch reacts. It is best-effort cross-process
-    /// hinting: a build with no hardware-tree store, or a controller not
-    /// autoloaded for a node, simply has no observer to notify, and the leaf
-    /// consumers still ride out their own transport blips as before — so a
-    /// refused publish never fails the recovery, which the audit record above
-    /// already captured loudly.
+    /// Audit a controller fault-domain edge, naming the controller's owner
+    /// id, and publish the state it leaves onto the controller's own
+    /// hardware-tree node (`plans/FIX-IO.md` IO4), so the leaves below read
+    /// one recovery episode rather than a failure each. The publish is
+    /// best-effort: the audit record is authoritative, and a refused publish
+    /// never fails the recovery.
     fn log_domain_event(event: ControllerDomainEvent, owner: u32) {
         let (id, level, message, health) = match event {
             ControllerDomainEvent::Recovering => (
@@ -794,55 +695,16 @@ mod program {
                 "usb-hcd: controller returned, subtree recovered",
                 tairix_abi::blkio::FaultDomainState::Healthy,
             ),
+            // The serve loop exits on this edge, so it states why.
             ControllerDomainEvent::FailedClosed => (
                 HCD_DOMAIN_OFFLINE,
-                Level::Warn,
-                "usb-hcd: controller recovery grace window elapsed, subtree failed closed",
+                Level::Error,
+                "usb-hcd: controller did not come back within its grace window; interfaces retracted, exiting",
                 tairix_abi::blkio::FaultDomainState::Offline,
             ),
         };
         log_hex_event(id, level, message, "owner_hex", u64::from(owner));
         let _ = tairix_rt::hw_node_health(health);
-    }
-
-    /// Recover a faulted controller under its interior fault domain, folding the
-    /// outcome into `health` and auditing each edge.
-    ///
-    /// This wraps [`recover_if_controller_faulted`] with the controller's
-    /// [`ControllerHealth`] machine so a controller blip is one coherent
-    /// recovery episode over the whole subtree (`plans/FIX-IO.md` IO4), ridden
-    /// out within a bounded grace window rather than either silently retried
-    /// forever or — on a failed reset — left faulted with no timer to retry it
-    /// (a faulted controller raises no further interrupts, xHCI §4.24.1, so the
-    /// event loop would otherwise park indefinitely).
-    ///
-    /// A controller already **failed closed** (its grace window elapsed) is
-    /// declared dead and is not retried: one that raises no interrupt and will
-    /// not reset stays failed closed rather than re-opening its window forever
-    /// (fail closed, sticky-but-recoverable — a later successful reset clears
-    /// it). Returns whether a recovery was attempted, so the caller restarts its
-    /// service pass on the freshly reset controller.
-    fn recover_controller(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
-        delay: ClockDelay,
-        health: &mut ControllerHealth,
-    ) -> bool {
-        if !device.controller_faulted() || health.is_failed_closed() {
-            return false;
-        }
-        let owner = health.owner();
-        if let Some(event) = health.begin_recovery(tairix_rt::clock_get()) {
-            log_domain_event(event, owner);
-        }
-        recover_if_controller_faulted(device, transports, set, urb_base, delay);
-        let recovered = !device.controller_faulted();
-        if let Some(event) = health.note_reset(recovered, tairix_rt::clock_get()) {
-            log_domain_event(event, owner);
-        }
-        true
     }
 
     /// Spend the single deferred re-attach the bring-up walk owed a port it
@@ -856,14 +718,8 @@ mod program {
     /// it. A port still unserved afterwards is logged with its failing
     /// snapshot and left alone; the retry is never re-armed, so a genuinely
     /// broken device cannot loop.
-    fn retry_skipped_ports(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
-        delay: ClockDelay,
-    ) {
-        if let Err(err) = device.retry_skipped_ports(&delay) {
+    fn retry_skipped_ports(live: &mut Live<'_, '_>, interfaces: &mut Interfaces<NodeBuffer>) {
+        if let Err(err) = live.device.retry_skipped_ports(&live.delay) {
             log_hex_event(
                 HCD_WAIT_ERROR,
                 Level::Warn,
@@ -872,8 +728,8 @@ mod program {
                 err as u64,
             );
         }
-        reconcile_interfaces(device, transports, set, urb_base);
-        if device.skipped_port_count() == 0 {
+        interfaces.reconcile(live);
+        if live.device.skipped_port_count() == 0 {
             log(
                 &LogSink,
                 &Event {
@@ -885,7 +741,7 @@ mod program {
             );
             return;
         }
-        log_skipped_ports(device);
+        log_skipped_ports(live.device);
     }
 
     /// The capability set the HCD host re-checks up front; the kernel is the
@@ -929,8 +785,8 @@ mod program {
     /// *base* id claims the whole block — that create is the only contended
     /// one, so a second controller's HCD moves on to the next block and two
     /// controllers never collide on an id. The block's interior ids — one
-    /// per device-table index — are bound lazily as devices first serve
-    /// ([`create_transport`]), so an idle controller holds one endpoint,
+    /// per transport — are bound as the interface table opens them
+    /// ([`Seam::open_endpoint`]), so an idle controller holds one endpoint,
     /// not a table of them. Returns the claimed base id, or `None` when
     /// every block is taken.
     fn claim_urb_block() -> Option<u64> {
@@ -941,157 +797,6 @@ mod program {
             }
         }
         None
-    }
-
-    /// Create device index `index`'s URB transport: bind its call endpoint
-    /// from the claimed block (`urb_base + index`; the block's base id was
-    /// already bound by [`claim_urb_block`], and doubles as index 0's
-    /// endpoint), create its shared data buffer, and register the endpoint
-    /// on the wait-set under the index's token. `None` on any refusal (the
-    /// caller fails closed — a transport-less device is never published —
-    /// and retries on the next reconcile).
-    fn create_transport(set: u64, index: usize, urb_base: u64) -> Option<Transport> {
-        let endpoint_id = urb_base + u64::try_from(index).ok()?;
-        if index > 0 && !bind_urb_endpoint(endpoint_id) {
-            return None;
-        }
-        let mut shm_id = 0u64;
-        // A negative return is the errno and a base this pointer width cannot
-        // hold is equally unusable: either way there is no transport.
-        let shm_base = usize::try_from(tairix_rt::shm_create(SHM_LEN, &mut shm_id)).ok()?;
-        // SAFETY: `shm_create` mapped `SHM_LEN` bytes of zeroed, cacheable,
-        // RW (non-executable) memory into this process at `shm_base` and
-        // returned that base. The region is owned by this process for the
-        // rest of its life (never unmapped), and no other reference in this
-        // address space aliases it — each transport owns its own region — so
-        // a single exclusive `&mut [u8]` over exactly the requested length is
-        // sound (and `'static`, as the mapping is permanent). The class
-        // driver maps the same frames in its *own* address space;
-        // cross-process sharing is outside Rust's aliasing model (like
-        // DMA/MMIO) and is synchronised by the URB reply, which
-        // happens-after the HCD's write here.
-        let shm: &'static mut [u8] =
-            unsafe { core::slice::from_raw_parts_mut(shm_base as *mut u8, SHM_LEN) };
-        let token = TOKEN_URB_BASE + u64::try_from(index).ok()?;
-        let endpoint_add = tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Endpoint,
-            endpoint_id,
-            token,
-        );
-        if super::waitset_ctl_result(endpoint_add).is_err() {
-            return None;
-        }
-        log_hex_event(
-            HCD_URB_SETUP,
-            Level::Info,
-            "usb-hcd: URB transport created",
-            "endpoint_hex",
-            endpoint_id,
-        );
-        Some(Transport {
-            endpoint_id,
-            shm_id,
-            shm,
-            service: UrbService::new(),
-            node_id: 0,
-            node_live: false,
-        })
-    }
-
-    /// Build and publish the served device at `index`'s interface node — its
-    /// `vid:pid:class` match keys plus the per-interface URB-transport grants
-    /// (the call endpoint and the shared buffer) the class driver inherits —
-    /// returning the kernel-assigned node id.
-    ///
-    /// Used for the initial publish and, identically, for a re-attach after a
-    /// hot-plug: a *fresh* node so `devmgr` re-autoloads the class driver onto
-    /// the same transport endpoint, so the device's data resumes to the same
-    /// OS sink. `None` if the device is not enumerated or the kernel refuses
-    /// the node.
-    fn emit_interface_node(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        index: usize,
-        endpoint_id: u64,
-        shm_id: u64,
-    ) -> Option<u32> {
-        let node = device.describe_device(index, HW_NODE_ROOT, 0).ok()?;
-        let node = attach_transport_grants(node, endpoint_id, shm_id).ok()?;
-        // A negative return is the errno; anything else is the assigned node id.
-        u32::try_from(tairix_rt::hw_emit_node(&node)).ok()
-    }
-
-    /// Drive every transport with a URB outstanding: drained controller
-    /// events may complete any of them. Called after the IRQ arm's drain
-    /// **and** after a URB submit is serviced — a synchronous engine wait
-    /// inside a submit parks on the same interrupt line and consumes its
-    /// edge, stashing any asynchronous completion that edge carried, so the
-    /// stash must be drained here rather than waiting for another
-    /// interrupt. A transport whose device just detached has already had
-    /// its URB aborted, so it is simply not busy.
-    ///
-    /// Returns whether a transfer fault detached a device, so the caller only
-    /// pays for the post-teardown controller-fault check when a teardown
-    /// actually happened.
-    fn service_busy_urbs(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
-        delay: ClockDelay,
-    ) -> bool {
-        let mut any_detached = false;
-        for index in 0..transports.len() {
-            let busy = transports[index]
-                .as_ref()
-                .is_some_and(|transport| transport.service.is_busy());
-            if !busy {
-                continue;
-            }
-            let Some(outcome) = transports[index].as_mut().map(|transport| {
-                transport
-                    .service
-                    .on_event(transport.shm, &mut device.engine_for(index))
-            }) else {
-                continue;
-            };
-            match outcome {
-                UrbOutcome::Reply(reply) => {
-                    if let Some(errno) = urb_reply_errno(&reply) {
-                        log_urb_error(device, index, errno);
-                    }
-                    let node_live = transports[index]
-                        .as_ref()
-                        .is_some_and(|transport| transport.node_live);
-                    let detached = node_live
-                        && retract_after_fault_if_gone(
-                            device, index, transports, set, urb_base, reply, delay,
-                        );
-                    any_detached |= detached;
-                    if !detached {
-                        if let Some(transport) = transports[index].as_ref() {
-                            reply_to_urb(transport.endpoint_id, reply);
-                        }
-                    }
-                }
-                UrbOutcome::Held => {
-                    let _ = log(
-                        &LogSink,
-                        &Event {
-                            level: Level::Debug,
-                            id: HCD_URB_HELD,
-                            message: "usb-hcd: event did not complete held URB yet",
-                            fields: &[],
-                        },
-                    );
-                }
-                // `is_busy` was checked above, so an Idle outcome cannot
-                // occur; nothing to service either way.
-                UrbOutcome::Idle => {}
-            }
-        }
-        any_detached
     }
 
     /// Run the engine's consumer-independent report pump on a controller
@@ -1719,22 +1424,19 @@ mod program {
         Some(set)
     }
 
-    /// Publish an interface node for every device enumerated at bring-up
-    /// (creating each served index's transport on the way), then announce that
-    /// the controller is serving.
+    /// Publish an interface node for every device enumerated at bring-up,
+    /// then announce that the controller is serving.
     ///
     /// A cold boot with nothing plugged in is a first-class state: the
     /// controller comes up with no node, and the first hot-plug connect —
     /// delivered through the onboard hub's status-change watch, or a root-port
     /// connect — publishes from the event loop.
     fn publish_initial_interfaces(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
+        live: &mut Live<'_, '_>,
+        interfaces: &mut Interfaces<NodeBuffer>,
     ) {
-        reconcile_interfaces(device, transports, set, urb_base);
-        if !device.any_device_live() {
+        interfaces.reconcile(live);
+        if !live.device.any_device_live() {
             log(
                 &LogSink,
                 &Event {
@@ -1794,27 +1496,22 @@ mod program {
             return EXIT_NO_TRANSPORT;
         };
 
-        // Claim this controller's URB endpoint-id block. The per-interface
-        // transports — one shared data buffer and one grant-restricted call
-        // endpoint per served device index, each minting this HCD the grant
-        // it forwards onto that index's interface node — are created lazily
-        // as device-table indices first serve (`reconcile_interfaces`), so
-        // the controller pays for the devices actually attached, never a
-        // fixed table.
+        // Transports are opened as devices need them, so the controller pays
+        // for the devices attached, never a fixed table.
         let Some(urb_base) = claim_urb_block() else {
             return EXIT_NO_TRANSPORT;
         };
-        let mut transports: Vec<Option<Transport>> = Vec::new();
-        publish_initial_interfaces(&mut device, &mut transports, set, urb_base);
+        let mut live = Live {
+            device: &mut device,
+            delay,
+            set,
+            urb_base,
+        };
+        let mut interfaces = Interfaces::new();
+        publish_initial_interfaces(&mut live, &mut interfaces);
 
-        // The controller is the interior fault-domain owner of every device
-        // below it (`plans/FIX-IO.md` IO4): a controller-wide fault (a latched
-        // Host System Error, HCHalted, the HCRST reset) is one recovery episode
-        // over the whole subtree, ridden out within a bounded grace window
-        // before it is failed closed — not one spurious failure per device. The
-        // owner id is this controller's own runtime-discovered URB endpoint
-        // block base (never a board constant), naming the owner in the audit
-        // log.
+        // The owner id names the controller in the audit log: its own
+        // discovered endpoint block, never a board constant.
         let controller_owner = u32::try_from(urb_base & 0xFFFF_FFFF).unwrap_or(u32::MAX);
         let mut controller_health = ControllerHealth::new(controller_owner);
 
@@ -1823,16 +1520,13 @@ mod program {
         // deferred re-attach so a device that merely lost the boot race comes
         // up without the user unplugging it.
         let mut port_retry = SkippedPortRetry::default();
-        if device.skipped_port_count() > 0 {
+        if live.device.skipped_port_count() > 0 {
             port_retry.arm(tairix_rt::clock_get());
         }
 
         serve_events(
-            &mut device,
-            &mut transports,
-            set,
-            urb_base,
-            delay,
+            &mut live,
+            &mut interfaces,
             &mut controller_health,
             &mut port_retry,
         )
@@ -1845,14 +1539,11 @@ mod program {
     /// connect/disconnect through the controller's Port Status Change
     /// interrupt.
     ///
-    /// Returns the process exit code; it returns only once the wait-set is
-    /// torn down under us.
+    /// Returns the process exit code: once the controller fails closed, or
+    /// once the wait-set is torn down under us.
     fn serve_events(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
-        delay: ClockDelay,
+        live: &mut Live<'_, '_>,
+        interfaces: &mut Interfaces<NodeBuffer>,
         health: &mut ControllerHealth,
         port_retry: &mut SkippedPortRetry,
     ) -> i32 {
@@ -1874,132 +1565,50 @@ mod program {
                 .flatten()
                 .min()
                 .unwrap_or(super::WAIT_FOREVER_NS);
-            let wait_ret = tairix_rt::waitset_wait(set, timeout, &mut token);
-            if wait_ret < 0 {
-                if Errno::from_syscall(wait_ret) == Errno::TimedOut {
-                    let fired_ns = tairix_rt::clock_get();
-                    // Spend the deferred re-attach whenever its deadline has
-                    // passed, even if the controller's own recovery is what
-                    // runs instead: an overdue one-shot left armed would bound
-                    // every later park at zero and spin the loop.
-                    let retry_due = port_retry.take_if_due(fired_ns);
-                    if device.controller_faulted() {
-                        // Nothing below the controller can be attached while
-                        // it is faulted, and its recovery re-runs the whole
-                        // bring-up walk, which subsumes the re-attach.
-                        let _ =
-                            recover_controller(device, transports, set, urb_base, delay, health);
-                    } else {
-                        // Not faulted when its window came due: it returned on
-                        // its own. Silent on an already-healthy controller.
-                        if let Some(event) = health.note_reset(true, fired_ns) {
-                            log_domain_event(event, health.owner());
-                        }
-                        if retry_due {
-                            retry_skipped_ports(device, transports, set, urb_base, delay);
+            let wait_ret = tairix_rt::waitset_wait(live.set, timeout, &mut token);
+            if wait_ret >= 0 {
+                match token {
+                    TOKEN_IRQ => {
+                        service_controller_interrupt(live, interfaces, health, &mut reported_drops);
+                    }
+                    // Registered as `TOKEN_URB_BASE + slot`.
+                    token => {
+                        let slot = token
+                            .checked_sub(TOKEN_URB_BASE)
+                            .and_then(|slot| usize::try_from(slot).ok());
+                        if let Some(slot) = slot {
+                            interfaces.serve_submit(slot, health, live);
                         }
                     }
-                    continue;
                 }
+            } else if Errno::from_syscall(wait_ret) == Errno::TimedOut {
+                // Spend the deferred re-attach whenever its deadline has
+                // passed, even if the controller's own recovery runs instead:
+                // an overdue one-shot left armed would bound every later park
+                // at zero and spin the loop.
+                let retry_due = port_retry.take_if_due(tairix_rt::clock_get());
+                // A recovery re-runs the whole bring-up walk, which subsumes
+                // the re-attach.
+                let attempted = interfaces.recover(health, live);
+                if retry_due && !attempted && !health.is_failed_closed() {
+                    retry_skipped_ports(live, interfaces);
+                }
+            } else {
                 log_hex_event(
                     HCD_WAIT_ERROR,
-                    Level::Warn,
-                    "usb-hcd: wait-set wait failed",
+                    Level::Error,
+                    "usb-hcd: wait-set wait failed; stopping",
                     "ret_hex",
                     wait_ret.unsigned_abs(),
                 );
-                // Any other negative result on a wait-set we own means the
-                // set was torn down — stop rather than spin.
-                return 0;
+                interfaces.retract_all(live);
+                return EXIT_WAIT_FAILED;
             }
-            match token {
-                token if token >= TOKEN_URB_BASE => {
-                    // The token was registered as `TOKEN_URB_BASE + index`.
-                    let Ok(index) = usize::try_from(token - TOKEN_URB_BASE) else {
-                        continue;
-                    };
-                    serve_urb_endpoint(device, transports, set, urb_base, delay, index);
-                }
-                TOKEN_IRQ => service_controller_interrupt(
-                    device,
-                    transports,
-                    set,
-                    urb_base,
-                    delay,
-                    health,
-                    &mut reported_drops,
-                ),
-                _ => {}
+            // Nothing is retried below a controller failed closed; its reason
+            // is already logged and every node retracted.
+            if health.is_failed_closed() {
+                return EXIT_CONTROLLER_FAILED;
             }
-        }
-    }
-
-    /// Serve the URB submit that woke device `index`'s transport endpoint,
-    /// then drain any completion the submit's own synchronous wait stashed.
-    ///
-    /// The receive is non-blocking: the wait-set's readiness peek is not a
-    /// guarantee — the queued call may have been cancelled by its poster's
-    /// exit (the kernel scrubs a dead caller's in-flight calls) — and the loop
-    /// serves every transport plus the controller IRQ, so it must never park
-    /// on one endpoint.
-    fn serve_urb_endpoint(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
-        delay: ClockDelay,
-        index: usize,
-    ) {
-        let Some(transport) = transports.get_mut(index).and_then(Option::as_mut) else {
-            return;
-        };
-        let mut request = [0u8; URB_REQUEST_LEN];
-        let mut ticket = 0u64;
-        // Whether servicing the submit could have consumed another transport's
-        // completion. Only a submit that ran a synchronous engine wait can: it
-        // parks on the shared interrupt line and stashes whatever else that
-        // edge carried. A held interrupt-IN URB ran no wait — the report simply
-        // was not buffered yet — so there is nothing stashed to drive.
-        let mut wait_may_have_stashed = false;
-        match tairix_rt::call_recv_nonblock(transport.endpoint_id, &mut request, &mut ticket) {
-            Ok(n) => {
-                match transport.service.on_submit(
-                    transport.node_live,
-                    ticket,
-                    &request[..n],
-                    transport.shm,
-                    &mut device.engine_for(index),
-                ) {
-                    UrbOutcome::Reply(reply) => {
-                        wait_may_have_stashed = true;
-                        reply_to_urb(transport.endpoint_id, reply);
-                    }
-                    UrbOutcome::Held => {}
-                    UrbOutcome::Idle => log_hex_event(
-                        HCD_WAIT_ERROR,
-                        Level::Warn,
-                        "usb-hcd: submit path produced idle outcome",
-                        "ticket_hex",
-                        ticket,
-                    ),
-                }
-            }
-            // An empty queue after a wake is benign: the queued call was
-            // cancelled (its poster exited) between the readiness peek and
-            // this receive.
-            Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => {}
-            Err(err) => {
-                log_hex_event(
-                    HCD_WAIT_ERROR,
-                    Level::Warn,
-                    "usb-hcd: call_recv failed after endpoint wake",
-                    "errno_hex",
-                    err.unsigned_abs(),
-                );
-            }
-        }
-        if wait_may_have_stashed {
-            service_busy_urbs(device, transports, set, urb_base, delay);
         }
     }
 
@@ -2013,11 +1622,8 @@ mod program {
     /// interrupt with one shared classifier, rather than each consumer walking
     /// it again with its own copy of that decision.
     fn service_controller_interrupt(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-        set: u64,
-        urb_base: u64,
-        delay: ClockDelay,
+        live: &mut Live<'_, '_>,
+        interfaces: &mut Interfaces<NodeBuffer>,
         health: &mut ControllerHealth,
         reported_drops: &mut u64,
     ) {
@@ -2032,10 +1638,17 @@ mod program {
         // port-change latches, so the whole service needs no further read of
         // it. A controller already faulted when we woke raises no further
         // interrupt, so recover before touching anything else.
-        let faulted = device
+        let faulted = live
+            .device
             .acknowledge_interrupt()
             .is_ok_and(|status| status.faulted);
-        if faulted && recover_controller(device, transports, set, urb_base, delay, health) {
+        if faulted && interfaces.recover(health, live) {
+            return;
+        }
+        // Nothing is served through a controller whose last reset did not
+        // bring it back — the grace one-shot owns the next attempt — nor
+        // through one failed closed.
+        if health.is_recovering() || health.is_failed_closed() {
             return;
         }
         // Drain the event ring once, here, into the per-consumer buffers: every
@@ -2049,18 +1662,14 @@ mod program {
         // interrupt-IN device the controller serves, not just the one whose URB
         // happens to be in flight. Everything below dispatches from those
         // buffers rather than walking the ring again.
-        pump_reports(device, reported_drops);
+        pump_reports(live.device, reported_drops);
         // Hot-plug. Root-port connects/disconnects come from the `PORTSC.CSC`
         // latches (a `SuperSpeed` device trains directly on a root port;
         // pulling a hub assembly clears the root port it sat on — either way
         // the change stays latched even when its Port Status Change Event was
         // drained by an engine wait). Then a watched hub's status-change report
-        // drives downstream connect/disconnect: a fresh device is enumerated
-        // and a new interface node published on its index's transport (so
-        // `devmgr` autoloads the class driver onto the same endpoint across a
-        // re-plug), and a disconnect retracts only that device's node. All
-        // leave the controller up.
-        let mut topology_changed = service_root_changes(device, transports, set, urb_base, delay);
+        // drives downstream connect/disconnect. Both leave the controller up.
+        let mut topology_changed = service_root_changes(live, interfaces);
         // Every hub with a report parked is serviced, not just the first: a
         // hub's status-change endpoint is re-armed only once its report is
         // serviced, so a second reporting hub left until "the next interrupt"
@@ -2069,13 +1678,12 @@ mod program {
         // have parked — which stops a flapping hub whose endpoint re-completes
         // during each service from holding this loop and starving the other
         // devices' URBs.
-        for _ in 0..device.watched_hub_count() {
-            match device.next_hub_change(&delay) {
+        for _ in 0..live.device.watched_hub_count() {
+            match live.device.next_hub_change(&live.delay) {
                 Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {
-                    // A fresh leaf device — or a fresh hub tier whose
-                    // downstream devices were enumerated with it — is
-                    // published by diffing every live index.
-                    reconcile_interfaces(device, transports, set, urb_base);
+                    // A fresh leaf device, or a fresh hub tier with the
+                    // devices enumerated behind it.
+                    interfaces.reconcile(live);
                     topology_changed = true;
                     log(
                         &LogSink,
@@ -2088,9 +1696,9 @@ mod program {
                     );
                 }
                 Ok(HubEvent::Detached(_) | HubEvent::HubDetached(_)) => {
-                    // A vanished leaf device — or a vanished hub tier with
-                    // everything behind it — is retracted by the same diff.
-                    reconcile_interfaces(device, transports, set, urb_base);
+                    // A vanished leaf device, or a vanished hub tier with
+                    // everything behind it.
+                    interfaces.reconcile(live);
                     topology_changed = true;
                     log(
                         &LogSink,
@@ -2105,7 +1713,7 @@ mod program {
                 Ok(HubEvent::None) => break,
                 Err(err) => {
                     log_topology_service_failure(
-                        device,
+                        live.device,
                         "usb-hcd: hub status-change service failed",
                         err,
                     );
@@ -2118,21 +1726,13 @@ mod program {
         // latched Host System Error on the Pi 4 VL805; recover before
         // servicing so the re-plug is still seen. Only a teardown can latch it,
         // so a routine report interrupt pays nothing to check.
-        if topology_changed && recover_controller(device, transports, set, urb_base, delay, health)
-        {
+        if topology_changed && interfaces.recover(health, live) {
             return;
         }
-        // Hand the already-buffered reports to any outstanding URB. A drained
-        // completion may satisfy any transport, and one the hot-plug handling
-        // above parked must not wait for another interrupt.
-        let detached = service_busy_urbs(device, transports, set, urb_base, delay);
-        // The transfer-fault disconnect teardown (the Disable Slot in
-        // `retract_after_fault_if_gone`) latches the same controller fault on
-        // the Pi 4 VL805 after it completes; recover here too so the re-plug
-        // is seen rather than the controller staying halted and silent.
-        if detached {
-            let _ = recover_controller(device, transports, set, urb_base, delay, health);
-        }
+        // Hand the buffered reports to any held URB: a drained completion may
+        // satisfy any transport. A transfer fault that proves an unplug
+        // recovers the controller its teardown may have halted.
+        interfaces.drive_busy(health, live);
     }
 
     tairix_rt::entry!(main);

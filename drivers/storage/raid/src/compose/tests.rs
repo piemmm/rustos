@@ -10,13 +10,14 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{Admission, ComposerAction, MemberRegistry, MemberStanding};
+use super::{Admission, ComposerAction, MemberRegistry, MemberStanding, ProbedDevice};
 
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::raid::{RaidLevel, SlotDisposition};
 use tairix_abi::raid_ipc::MemberOffer;
 use tairix_abi::time::Time64;
+use tairix_abi::ProcId;
 use tairix_raid::{ArraySuperblock, ArrayUuid, RetryCadence};
 
 const UUID_A: ArrayUuid = [0xA1; 16];
@@ -54,7 +55,7 @@ fn superblock(
 fn offer(endpoint: u64) -> MemberOffer {
     MemberOffer {
         endpoint,
-        window: endpoint + 0x1000,
+        window_grant: endpoint + 0x1000,
         node: 0,
     }
 }
@@ -64,6 +65,24 @@ fn offer(endpoint: u64) -> MemberOffer {
 /// two.
 fn membership_of(endpoint: u64) -> u64 {
     0x9000 + endpoint
+}
+
+/// The agent process instance that offered the device on `endpoint`.
+fn agent_of(endpoint: u64) -> ProcId {
+    let mut raw = [0xA6; 16];
+    raw[..8].copy_from_slice(&endpoint.to_le_bytes());
+    ProcId::from_raw(raw)
+}
+
+/// What a device of `class` answered when the composer connected to it.
+fn probed(class: BlkDeviceClass) -> ProbedDevice {
+    ProbedDevice {
+        class,
+        geometry: BlockGeometry {
+            block_size: 512,
+            block_count: 8192,
+        },
+    }
 }
 
 /// Register the device on `endpoint` carrying `superblock`, asserting it was
@@ -77,8 +96,9 @@ fn admit(
 ) -> usize {
     match registry.admit(
         membership_of(endpoint),
+        agent_of(endpoint),
         offer(endpoint),
-        class,
+        probed(class),
         superblock,
         now_ns,
     ) {
@@ -140,8 +160,9 @@ fn a_second_membership_for_a_device_already_held_is_refused() {
     assert_eq!(
         registry.admit(
             membership_of(99),
+            agent_of(99),
             offer(7),
-            BlkDeviceClass::Removable,
+            probed(BlkDeviceClass::Removable),
             sb,
             0
         ),
@@ -150,6 +171,82 @@ fn a_second_membership_for_a_device_already_held_is_refused() {
     );
     assert_eq!(registry.members().len(), 1);
     assert_eq!(registry.candidates().len(), 1);
+}
+
+#[test]
+fn a_membership_is_found_by_the_agent_holding_it_and_its_release_frees_the_device() {
+    // A re-enumerated disk offers itself again through a fresh agent, naming
+    // the same endpoint; while the exited agent's membership stood, that offer
+    // was a duplicate and the disk could never rejoin its array.
+    let mut registry = MemberRegistry::new();
+    let sb = superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4);
+    let index = admit(&mut registry, 7, BlkDeviceClass::Removable, sb, 0);
+    assert_eq!(registry.members()[index].agent(), agent_of(7));
+    assert_eq!(
+        registry.index_of_agent(agent_of(8)),
+        None,
+        "an agent holding no membership names nothing"
+    );
+
+    let exited = registry
+        .index_of_agent(agent_of(7))
+        .expect("the exited agent's membership is found by the agent");
+    assert!(registry.release(exited).is_some());
+    assert_eq!(
+        registry.admit(
+            membership_of(7),
+            agent_of(70),
+            offer(7),
+            probed(BlkDeviceClass::Removable),
+            sb,
+            0
+        ),
+        Admission::Registered { index: 0 },
+        "the fresh offer registers once the exited membership is released"
+    );
+}
+
+#[test]
+fn a_held_window_is_recognised_by_the_handle_the_offer_names() {
+    let mut registry = MemberRegistry::new();
+    admit(
+        &mut registry,
+        7,
+        BlkDeviceClass::Removable,
+        superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4),
+        0,
+    );
+    assert_eq!(
+        registry.admit_candidate(
+            membership_of(9),
+            agent_of(9),
+            offer(9),
+            probed(BlkDeviceClass::Removable)
+        ),
+        Admission::Registered { index: 1 }
+    );
+    assert!(
+        registry.holds_window(offer(7).window_grant),
+        "a window a membership holds is refused before it is mapped again"
+    );
+    assert!(
+        registry.holds_window(offer(9).window_grant),
+        "a blank candidate holds its window too"
+    );
+    assert!(
+        !registry.holds_window(offer(8).window_grant),
+        "another device's window is not held"
+    );
+    assert!(
+        !registry.holds_window(offer(7).endpoint),
+        "the endpoint id is not a window handle"
+    );
+
+    registry.release(0);
+    assert!(
+        !registry.holds_window(offer(7).window_grant),
+        "a released window may be offered again"
+    );
 }
 
 #[test]

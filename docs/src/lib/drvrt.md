@@ -92,11 +92,11 @@ regardless (§5.4).
 so a driver process works before the userland heap is available
 (`plans/SPAWN.md` `SP5b`). A missing capability, an unmappable request, a
 window no grant covers, an over-long grant table, or a kernel refusal returns
-an error — never a fabricated pointer or a panic (§2.9). There is no userland
-DMA-free syscall: a carved buffer lives for the driver process's lifetime and
-the kernel reclaims it at exit (`LiveSpace::Drop`, §4), so the slab's drop is a
-no-op — the same "alloc once, never free" contract the in-kernel frame DMA host
-uses.
+an error — never a fabricated pointer or a panic (§2.9). A carve's slab frees
+itself on drop through `dma_free`, so a running driver's footprint stays
+bounded; a driver drops a slab only once its device can no longer reach it, and
+one it cannot prove released is withheld (`DmaSlab::withhold`) and stays mapped
+until the driver exits, when the kernel quarantines it (`LiveSpace::drop`).
 
 ## Testing seam
 

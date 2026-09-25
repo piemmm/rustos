@@ -185,7 +185,8 @@ impl IrqController for UnsupportedController {
 /// unit-like type has no interior mutability, so the lint does not
 /// fire here, but the `static` form keeps the address stable and
 /// allows the type-erased reference to round-trip through the
-/// `tairix_kernel_core` handover without surprise. — no global mutable state; this is an *immutable* static.
+/// `tairix_kernel_core` handover without surprise. It is an immutable
+/// static, not global mutable state.
 pub static UNSUPPORTED_CONTROLLER: UnsupportedController = UnsupportedController;
 
 /// Outcome of [`IrqTable::release_for`].
@@ -600,20 +601,32 @@ impl IrqTable {
 
     /// The line bound to `handle` for `caller`, or [`None`] if the handle is
     /// unknown or its binding is owned by another task.
-    ///
-    /// Applies the same owner check [`Self::try_wait_step`] performs
-    /// (identify before acting), so the `irq_wait` park
-    /// path can resolve the line to re-arm without trusting a caller-supplied
-    /// value: a forged or foreign handle yields [`None`] and re-arms nothing.
     #[must_use]
     pub fn line_for(&self, handle: IrqHandle, caller: ProcessId) -> Option<u32> {
+        self.with_bound_line(handle, caller, |line| line)
+    }
+
+    /// Run `act` on the line bound to `handle` for `caller` while the binding
+    /// is held, or return [`None`] if the handle is unknown or another task's.
+    ///
+    /// Applies the same owner check [`Self::try_wait_step`] performs, so the
+    /// `irq_wait` park path re-arms a line without trusting a caller-supplied
+    /// value, and a release cannot land between the lookup and `act`. `act`
+    /// must not take this table's lock; [`Self::fire`] never does, so an
+    /// interrupt taken meanwhile cannot wait on it.
+    pub fn with_bound_line<R>(
+        &self,
+        handle: IrqHandle,
+        caller: ProcessId,
+        act: impl FnOnce(u32) -> R,
+    ) -> Option<R> {
         let g = self.inner.read();
         let line = *g.by_handle.get(&handle.as_u64())?;
         let entry = g.entries.get(&line)?;
         if entry.owner != caller {
             return None;
         }
-        Some(line)
+        Some(act(line))
     }
 
     /// The task that owns the binding for `line`, or [`None`] if `line` is
@@ -820,21 +833,59 @@ impl IrqTable {
             .collect();
         let released = to_drop.len();
         for line in to_drop {
-            if let Some(entry) = g.entries.remove(&line) {
-                g.by_handle.remove(&entry.handle.as_u64());
-                // Clear the binding's lock-free flags so a late edge
-                // on the now-unbound line is reported as a stray, and
-                // reset the runaway accounting so a future rebind starts
-                // clean (bind resets these too; clearing here keeps a
-                // released line's state tidy in the meantime).
-                self.bound[line as usize].store(false, Ordering::SeqCst);
-                self.ready[line as usize].store(false, Ordering::SeqCst);
-                self.quarantined[line as usize].store(false, Ordering::SeqCst);
-                self.storm_fire_count[line as usize].store(0, Ordering::SeqCst);
-                self.storm_window_start_ns[line as usize].store(0, Ordering::SeqCst);
-            }
+            self.drop_binding(&mut g, line);
         }
         ReleaseOutcome { released }
+    }
+
+    /// `owner`'s binding on the lowest line above `after`, or on the lowest
+    /// line of all when `after` is [`None`] — a cursor over one owner's
+    /// bindings that holds the table lock only for each step.
+    #[must_use]
+    pub fn next_binding_of(&self, owner: ProcessId, after: Option<u32>) -> Option<IrqEntry> {
+        let from = match after {
+            Some(line) => line.checked_add(1)?,
+            None => 0,
+        };
+        self.inner
+            .read()
+            .entries
+            .range(from..)
+            .map(|(_, entry)| *entry)
+            .find(|entry| entry.owner == owner)
+    }
+
+    /// Release the binding `handle`, returning whether `owner` still held it.
+    ///
+    /// A parked [`Self::try_wait_step`] on the handle reports
+    /// [`WaitStep::NotFound`] from its next poll. Keyed by handle, so a line
+    /// the owner has since rebound is not released by a stale caller.
+    pub fn release_binding(&self, handle: IrqHandle, owner: ProcessId) -> bool {
+        let mut g = self.inner.write();
+        let Some(&line) = g.by_handle.get(&handle.as_u64()) else {
+            return false;
+        };
+        if g.entries
+            .get(&line)
+            .is_none_or(|entry| entry.owner != owner)
+        {
+            return false;
+        }
+        self.drop_binding(&mut g, line);
+        true
+    }
+
+    /// Remove `line`'s binding and reset its lock-free state, so a late edge
+    /// on the unbound line is a stray and a later bind starts clean.
+    fn drop_binding(&self, g: &mut Inner, line: u32) {
+        if let Some(entry) = g.entries.remove(&line) {
+            g.by_handle.remove(&entry.handle.as_u64());
+            self.bound[line as usize].store(false, Ordering::SeqCst);
+            self.ready[line as usize].store(false, Ordering::SeqCst);
+            self.quarantined[line as usize].store(false, Ordering::SeqCst);
+            self.storm_fire_count[line as usize].store(0, Ordering::SeqCst);
+            self.storm_window_start_ns[line as usize].store(0, Ordering::SeqCst);
+        }
     }
 
     /// Snapshot of an entry by handle, for diagnostic / audit
@@ -881,6 +932,27 @@ impl IrqTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_is_acted_on_only_while_its_owner_holds_the_binding() {
+        let table = IrqTable::new(15);
+        let owner = ProcessId(0x10);
+        let handle = table.bind(5, owner).expect("binds").handle;
+        assert_eq!(
+            table.with_bound_line(handle, owner, |line| line * 2),
+            Some(10)
+        );
+        assert_eq!(
+            table.with_bound_line(handle, ProcessId(0x11), |line| line),
+            None
+        );
+        assert!(table.release_binding(handle, owner));
+        assert_eq!(
+            table.with_bound_line(handle, owner, |line| line),
+            None,
+            "released"
+        );
+    }
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
@@ -1206,6 +1278,60 @@ mod tests {
         // 99's binding survives.
         assert_eq!(
             t.try_wait_step(c.handle, ProcessId(99), 0, 1_000),
+            WaitStep::Continue
+        );
+    }
+
+    #[test]
+    fn the_owner_cursor_visits_only_the_owners_bindings_in_line_order() {
+        let t = IrqTable::new(31);
+        let low = t.bind(3, ProcessId(42)).unwrap();
+        let _ = t.bind(5, ProcessId(99)).unwrap();
+        let high = t.bind(9, ProcessId(42)).unwrap();
+
+        let first = t.next_binding_of(ProcessId(42), None).unwrap();
+        assert_eq!(first.handle, low.handle);
+        let second = t.next_binding_of(ProcessId(42), Some(first.line)).unwrap();
+        assert_eq!(second.handle, high.handle);
+        assert_eq!(t.next_binding_of(ProcessId(42), Some(second.line)), None);
+        assert_eq!(t.next_binding_of(ProcessId(42), Some(u32::MAX)), None);
+    }
+
+    #[test]
+    fn a_released_binding_fails_its_wait_and_frees_its_line() {
+        let t = IrqTable::new(31);
+        let mine = t.bind(7, ProcessId(42)).unwrap();
+        let other = t.bind(8, ProcessId(42)).unwrap();
+
+        assert!(
+            !t.release_binding(mine.handle, ProcessId(99)),
+            "another owner releases nothing"
+        );
+        assert!(t.release_binding(mine.handle, ProcessId(42)));
+        assert!(!t.release_binding(mine.handle, ProcessId(42)), "idempotent");
+        assert_eq!(
+            t.try_wait_step(mine.handle, ProcessId(42), 0, 1_000),
+            WaitStep::NotFound
+        );
+        assert_eq!(
+            t.try_wait_step(other.handle, ProcessId(42), 0, 1_000),
+            WaitStep::Continue,
+            "only the named binding goes"
+        );
+        let controller = MockController::ok();
+        assert_eq!(t.fire(7, &controller), Ok(FireOutcome::Stray));
+        assert!(t.bind(7, ProcessId(99)).is_ok(), "the line is free again");
+    }
+
+    #[test]
+    fn a_stale_handle_does_not_release_the_line_rebound_under_a_new_one() {
+        let t = IrqTable::new(31);
+        let old = t.bind(7, ProcessId(42)).unwrap();
+        assert!(t.release_binding(old.handle, ProcessId(42)));
+        let new = t.bind(7, ProcessId(42)).unwrap();
+        assert!(!t.release_binding(old.handle, ProcessId(42)));
+        assert_eq!(
+            t.try_wait_step(new.handle, ProcessId(42), 0, 1_000),
             WaitStep::Continue
         );
     }

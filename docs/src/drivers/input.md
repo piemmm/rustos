@@ -253,7 +253,7 @@ keystrokes — never a busy poll (`AGENTS.md` §2.23) — and repeated pump erro
 exit fail-closed after a bounded budget, leaving the console without a
 keyboard rather than wedged (`AGENTS.md` §2.9). A device disconnect retracts
 the interface node, `devmgr` unloads this driver, and a re-plug autoloads a
-fresh instance onto the same transport. This bundle is installed into the
+fresh instance onto a fresh node, whose shared buffer is new. This bundle is installed into the
 image `/System/Drivers/` store and autoloaded by `devmgr` against the
 discovered HID interface node; QEMU models no Pi USB, so the live autoload +
 keystroke is the metal acceptance item (`plans/PI.md` §0.4).

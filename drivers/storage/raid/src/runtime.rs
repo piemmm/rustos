@@ -123,14 +123,21 @@ impl<B: Block> ArrayRuntime<B> {
     /// * [`ServiceError::OutOfMemory`] — the per-member backoff records could
     ///   not be allocated.
     /// * [`ServiceError::Maintenance`] — the scheduler refused the array.
+    /// * [`ServiceError::Unpublished`] — `publish` could not publish the node.
+    ///
+    /// `publish` publishes the array's node and returns its id. It runs last,
+    /// once everything that can fail here has succeeded: a published node
+    /// confers the array's window, and withdrawing the node retires that
+    /// window for good, so a runtime that could not be built must never have
+    /// published one.
     pub fn new(
         identity: ArrayIdentity,
         mut array: OwnedRaidArray<PartitionBlock<B>>,
         endpoint: u64,
         window_id: u64,
-        node_id: u32,
         resume: MaintenanceResume,
         now_ns: u64,
+        publish: impl FnOnce() -> Option<u32>,
     ) -> Result<Self, ServiceError> {
         let class = array.device_class();
         let mut retries = Vec::new();
@@ -145,6 +152,7 @@ impl<B: Block> ArrayRuntime<B> {
             })
             .map_err(|_| ServiceError::Maintenance)?;
         let availability = array.health().to_mount_availability();
+        let node_id = publish().ok_or(ServiceError::Unpublished)?;
         Ok(Self {
             identity,
             array,
@@ -381,6 +389,44 @@ impl<B: Block> ArrayRuntime<B> {
         self.identity = self.identity.bump_generation();
         self.record_members_current(now)
             .map_err(|_| ServiceError::Assembly)
+    }
+
+    /// Take every member device `departed` names — one whose membership has
+    /// ended — out of the array, leaving its slot absent for a returning
+    /// device.
+    ///
+    /// A departed device fails every transfer, so the flush opening this faults
+    /// each one by the engine's own rule, and each is then retired like any
+    /// faulted member, which fences its disk out. A level that cannot give a
+    /// member up (a stripe) keeps it, as does a slot the flush left unfaulted.
+    pub fn retire_departed(&mut self, now: Time64, mut departed: impl FnMut(&mut B) -> bool) {
+        let count = self.array.member_count();
+        if !(0..count).any(|index| self.holds_departed(index, &mut departed)) {
+            return;
+        }
+        // Healthy members' flush outcomes are the array's to record, as for
+        // any flush; what matters here is that every departed one faults.
+        let _ = self.array.flush();
+        for index in 0..count {
+            if !self.holds_departed(index, &mut departed)
+                || self.array.member_state(index) != Some(MemberState::Faulted)
+            {
+                continue;
+            }
+            if let Ok(slot) = u16::try_from(index) {
+                // A refused re-stamp still leaves the device out of its slot,
+                // which is all a returning disk needs.
+                let _ = self.retire_member(slot, now);
+            }
+        }
+    }
+
+    /// Whether the device in slot `index` is one `departed` names.
+    fn holds_departed(&mut self, index: usize, departed: &mut impl FnMut(&mut B) -> bool) -> bool {
+        self.array.with_array(|view| {
+            view.member_device_mut(index)
+                .is_some_and(|member| departed(member.device_mut()))
+        })
     }
 
     /// The array's current health.

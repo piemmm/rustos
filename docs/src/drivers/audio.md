@@ -208,3 +208,27 @@ and it is counted too.
 The reported position is what the device has *clocked out*, not what it was
 handed: the transfer status' `latency_bytes` is subtracted from the submitted
 total.
+
+### Nothing is freed under the device
+
+Every stream of a direction shares one transfer queue, sized when the device
+comes up for every period all its streams keep in flight at once — every
+stream in both directions, since a stream's direction is known only once it
+is enumerated — and a device whose queue cannot hold them is refused then,
+before it is given the ring. Each chain a transfer queue holds is recorded
+under its descriptor head, so a completion reaches whichever stream posted
+it, whichever stream's service collected it, without a search. Each period's
+status word is zeroed before it is posted, so a completion that wrote no
+status is refused rather than read as the buffer's last one; a lent period
+is kept in that record, room carved at bring-up, so letting a stream go never
+allocates; and a period is filled from the mixer's ring only when its queue
+has room to post it, so the frames of a period lent chains leave no room for
+stay in the ring. Each event slot is zeroed before it is reposted, and a
+drain of the event queue takes at most a ring's worth of events.
+A period the device still holds when its stream is released or reconfigured is
+lent until the device hands it back — only an acknowledged `PCM_RELEASE`
+promises that, and it is followed by collecting everything the device
+returned — and is never freed before; a control request the device leaves
+unanswered holds back the next until it is answered. The device resets when
+the driver drops it, and one that will not reset keeps every ring, pool and
+period for the kernel's DMA quarantine.

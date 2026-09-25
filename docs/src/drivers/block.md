@@ -33,9 +33,12 @@ and the volume manager's probe alike — classifies it through the one shared
 can act on them: a permanent bad sector is `DriverError::MediumError`, a
 present-but-unresponsive or surprise-removed device is
 `DriverError::DeviceOffline` — including a `virtio_blk` request whose
-per-request deadline elapsed with no completion — a transient stall or a
-device/hub reset is a reissuable `DriverError::Busy`, and a timed-out or
-vanished endpoint, a wake-storm on a stuck device line, and any
+per-request deadline elapsed with no completion, or whose wait could not be
+made at all, and every later request until the device hands that request's
+staging back, since it may still write the abandoned request's data into it —
+a transient stall or a device/hub reset is a reissuable `DriverError::Busy`,
+and a timed-out or vanished endpoint, a wake-storm on a stuck device line, a
+`virtio_blk` read whose completion does not cover its data, and any
 unclassified failure all fail closed as `DriverError::DeviceFault`. Because the
 mapping is per-consumer-agnostic, a fault on one device surfaces only to that
 device's callers while every other mount keeps running (`plans/FIX-IO.md`
@@ -473,7 +476,8 @@ the freestanding serve loop drives it around the controller reset: it
 retries on the grace one-shot (the fix for a faulted controller raising no
 further interrupt, xHCI §4.24.1, which previously parked the loop forever),
 `note_reset`s each attempt (recovering on a demonstrated return, failing closed
-once the window elapses), and audits the device-wide edges through
+once the window elapses, when every interface node is retracted), and audits
+the device-wide edges through
 `BlkHealthTransition::for_fault_domain` (`HCD_DOMAIN_RECOVERING` /
 `HCD_DOMAIN_RECOVERED` / `HCD_DOMAIN_OFFLINE`). A controller failed closed stays
 sticky-but-recoverable — a later successful reset clears it — and is not retried
@@ -489,13 +493,15 @@ reactive `hw_tree_wait` observers re-read — the same channel the hotplug
 emit/remove path uses, but a *distinct* signal: the node stays present, only its
 health changes, so a merely-recovering subtree is never torn down. The xHCI
 controller is the live emitter (each `ControllerHealth` edge → a
-`Recovering`/`Healthy`/`Offline` publish); the device manager is the live
-consumer — a bound child whose fault-domain owner (recorded per binding via
-`fault_domain_owner`) is currently `Recovering` is **held**, not unloaded, when
-it transiently vanishes, so one controller reset is one recovery episode across
-the subtree rather than N spurious teardown/reload cycles. The affected volumes
-already surface as `Recovering` through the kernel `BlkClient`'s existing
-`MountAvailability` fold as their leaf transports blip.
+`Recovering`/`Healthy`/`Offline` publish), and it keeps its children published
+across its own reset, retracting only those whose device did not come back
+(`docs/src/drivers/bus.md`, "Controller recovery keeps the devices that come
+back"), so one controller reset is one recovery episode across the subtree
+rather than N teardown/reload cycles. The device manager therefore holds
+nothing: a node id is never reissued, so a child that vanishes is gone for good
+and its driver is unloaded at once, whatever its owner's health. The affected
+volumes already surface as `Recovering` through the kernel `BlkClient`'s
+existing `MountAvailability` fold as their leaf transports blip.
 
 The remaining live wiring is the deeper nested-owner chains a hub or SAS
 expander adds (`fault_domain_chain` + `effective_child_status`) and the QEMU
@@ -707,6 +713,23 @@ on each completion and on every error bit; the kernel supplies the
 handshakes that have no completion source (reset, clock-stable) still spin,
 and every wait is bounded by a poll budget that fails closed with
 `DriverError::DeviceFault` rather than waiting forever (`AGENTS.md` §2.1).
+
+A failed transfer, DMA or PIO, is recovered by the SDHCI error-interrupt
+sequence before its error returns: the command and data lines are reset,
+halting the ADMA2 engine, and a multi-block transfer is then aborted with an
+Abort-type `CMD12` whose busy is awaited on the transfer-complete interrupt. A
+failed abort leaves the transfer's own error standing. A controller whose line
+reset never confirms is sent no abort and may still be mastering the DMA region,
+so every later DMA transfer is refused and the region is withheld for the
+kernel's DMA quarantine when the driver drops.
+
+Only an answered abort proves the card back in `tran`. After a single-block
+failure, a failed abort, or an unconfirmed line reset, the next data command
+first asks the card with `CMD13` (`SEND_STATUS`): a transfer still open is
+aborted and a programming card's busy awaited on the transfer-complete interrupt
+of an R1b `CMD13`, each asked again, for at most three rounds. Any other answer,
+a locked card, or a failed `CMD13` fails closed as `DeviceFault` with the state
+still unknown, so the next command asks again. A healthy card is never asked.
 
 Bring-up resets the host controller and then **powers the card rail**
 (SD Bus Power on, 3.3 V) through the power-control byte of `CONTROL0`

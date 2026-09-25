@@ -18,18 +18,22 @@
 //!   process can build it without a `drivers/*` dependency; the
 //!   concrete PCI implementation (which needs the bus driver's PCI
 //!   capability-window wiring) lives in `drivers/bus/virtio`.
-//!   [`MockTransport`] is the in-process peer the driver unit tests
-//!   drive.
+//!   The `mock` feature adds `MockTransport`, the in-process peer the
+//!   driver unit tests drive.
 //! * [`SplitQueue`] — split-virtqueue descriptor/avail/used management
 //!   (virtio 1.1 §2.6).
+//! * [`RequestQueue`] — one request at a time on a split virtqueue, each
+//!   completion attributed to its own chain.
 //! * [`PackedQueue`] — packed-virtqueue single-ring management
 //!   (virtio 1.1 §2.7).
 //! * [`VirtioHost`] — the DMA-allocation seam (re-exported from
-//!   [`tairix_abi`]); [`MockHost`] is the in-process implementation, and
+//!   [`tairix_abi`]); the `mock` feature's `MockHost` is the in-process
+//!   implementation, and
 //!   `tairix_kernel_virtio::KernelVirtioHost` is the capability-checked
 //!   production host.
-//! * [`DmaSlab`] / [`BounceBuffer`] — owned device-visible memory and
-//!   the zero-on-free staging wrapper.
+//! * [`DmaSlab`] / [`BounceBuffer`] / [`scrub`] — owned device-visible
+//!   memory, the zero-on-free staging wrapper, and the one scrub staging
+//!   gets once the device hands it back.
 //!
 //! # Ring formats
 //!
@@ -53,6 +57,7 @@ pub mod dma;
 pub mod host;
 pub mod packed;
 pub mod queue;
+pub mod request;
 pub mod transport;
 pub mod transport_mmio;
 pub mod transport_pci;
@@ -60,12 +65,15 @@ pub mod transport_pci;
 #[cfg(test)]
 mod tests;
 
-pub use dma::{BounceBuffer, DmaSlab, PoolId, SlabFreeFn};
-pub use host::{CompletionSignal, DmaHost, MockHost, VirtioHost, VirtioHostFactory};
+pub use dma::{scrub, BounceBuffer, DmaSlab, PoolId, SlabFreeFn};
+pub use host::{CompletionSignal, DmaHost, VirtioHost, VirtioHostFactory};
+#[cfg(any(test, feature = "mock"))]
+pub use host::{MockHost, MockWait};
 pub use packed::PackedQueue;
 pub use queue::{ChainSegment, SplitQueue, UsedToken};
-pub use transport::{
-    ChainView, Direction, MockTransport, PciTransportWindows, Status, Transport, VirtioError,
-};
+pub use request::{RequestQueue, MAX_COMPLETION_WAKES};
+#[cfg(any(test, feature = "mock"))]
+pub use transport::{ChainView, DeviceShim, MockTransport};
+pub use transport::{Direction, PciTransportWindows, Status, Transport, VirtioError};
 pub use transport_mmio::MmioTransport;
 pub use transport_pci::{PciTransport, VIRTIO_MSI_NO_VECTOR};

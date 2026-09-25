@@ -9,12 +9,9 @@
 //! The four public layers, top to bottom:
 //!
 //! 1. [`sensitive`] — zero-on-free buffers for credentials, keys, and
-//!    capability tokens, backed by the audited `zeroize` crate
-//!    (: "Zero-on-free for any allocation that ever held
-//!    credentials, keys, or capability tokens").
+//!    capability tokens, backed by the audited `zeroize` crate.
 //! 2. [`slab`] — fixed-size kernel object allocator with guard pages on
-//!    both sides of every slab (: "Guard pages around
-//!    kernel slabs").
+//!    both sides of every slab.
 //! 3. [`vmm`] — per-process [`AddressSpace`], generic over a
 //!    [`PageTable`] backend (a port's HAL page-table implementation).
 //!    The architecture crates supply the real implementation; a
@@ -31,9 +28,7 @@
 //! # Allocation contract
 //!
 //! Every allocator entry point returns
-//! `Result<_, `[`AllocError`]`>`. No path panics on out-of-memory
-//! (: *"Deterministic OOM behaviour: allocation failure
-//! is a `Result`, never a panic."*).
+//! `Result<_, `[`AllocError`]`>`. No path panics on out-of-memory.
 //!
 //! # Unsafe and pointer arithmetic
 //!

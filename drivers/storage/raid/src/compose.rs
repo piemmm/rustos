@@ -65,8 +65,10 @@
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::raid::SlotDisposition;
 use tairix_abi::raid_ipc::MemberOffer;
+use tairix_abi::ProcId;
 use tairix_raid::{
     ArrayIdentity, ArraySuperblock, ArrayUuid, Candidate, CandidateVerdict, RetryCadence,
     RetryState,
@@ -83,8 +85,19 @@ pub enum MemberStanding {
     Composed,
 }
 
+/// What an offered device answered when the composer connected to it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ProbedDevice {
+    /// The class it declared, which sizes the patience its array is assembled
+    /// with.
+    pub class: BlkDeviceClass,
+    /// The geometry it reported.
+    pub geometry: BlockGeometry,
+}
+
 /// One member device the composer holds: the membership call it answers when
-/// the membership ends, and the transport the member's agent delegated.
+/// the membership ends, the agent whose call that is, and the transport that
+/// agent delegated.
 ///
 /// The device's *metadata* is deliberately not here — it lives once, in the
 /// reassembly candidate at the same index
@@ -93,8 +106,9 @@ pub enum MemberStanding {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct HeldMember {
     membership: u64,
+    agent: ProcId,
     offer: MemberOffer,
-    class: BlkDeviceClass,
+    device: ProbedDevice,
     standing: MemberStanding,
 }
 
@@ -103,6 +117,13 @@ impl HeldMember {
     #[must_use]
     pub const fn membership(&self) -> u64 {
         self.membership
+    }
+
+    /// The kernel-attested process instance of the agent holding the
+    /// membership open: when it exits, the membership is over.
+    #[must_use]
+    pub const fn agent(&self) -> ProcId {
+        self.agent
     }
 
     /// The transport the member's agent delegated.
@@ -115,7 +136,13 @@ impl HeldMember {
     /// which sizes the patience its array is assembled with.
     #[must_use]
     pub const fn class(&self) -> BlkDeviceClass {
-        self.class
+        self.device.class
+    }
+
+    /// The geometry the device reported when the composer connected to it.
+    #[must_use]
+    pub const fn geometry(&self) -> BlockGeometry {
+        self.device.geometry
     }
 
     /// Whether this member has been placed into a composed array.
@@ -321,6 +348,27 @@ impl MemberRegistry {
         self.members.iter().position(|held| held.offer.node == node)
     }
 
+    /// Whether a held membership already names the window handle
+    /// `window_grant`, so an offer of it is refused before it is mapped a
+    /// second time.
+    ///
+    /// Equal handles are the same region, since a handle is never reissued;
+    /// and while the composer's grant for a region lasts, re-delegating it
+    /// hands back that same handle.
+    #[must_use]
+    pub fn holds_window(&self, window_grant: u64) -> bool {
+        self.members
+            .iter()
+            .any(|held| held.offer.window_grant == window_grant)
+    }
+
+    /// The index of the member whose membership the agent process instance
+    /// `agent` holds open, or [`None`] when it holds none.
+    #[must_use]
+    pub fn index_of_agent(&self, agent: ProcId) -> Option<usize> {
+        self.members.iter().position(|held| held.agent == agent)
+    }
+
     /// The authoritative shape of `array_uuid` as the registered members
     /// describe it, or [`None`] when none of them claims that array.
     #[must_use]
@@ -329,8 +377,9 @@ impl MemberRegistry {
     }
 
     /// Register a member device: the membership call to answer when it leaves,
-    /// the transport its agent delegated, the class the device declared, and
-    /// the superblock read off the device itself.
+    /// the attested agent holding it, the transport that agent delegated, what
+    /// the device answered when connected to, and the superblock read off the
+    /// device itself.
     ///
     /// `superblock` must be one the caller decoded from the device
     /// ([`ArraySuperblock::decode`]); this engine never takes a member's array,
@@ -338,8 +387,9 @@ impl MemberRegistry {
     pub fn admit(
         &mut self,
         membership: u64,
+        agent: ProcId,
         offer: MemberOffer,
-        class: BlkDeviceClass,
+        device: ProbedDevice,
         superblock: ArraySuperblock,
         now_ns: u64,
     ) -> Admission {
@@ -367,8 +417,9 @@ impl MemberRegistry {
         let array_uuid = superblock.array_uuid;
         self.members.push(HeldMember {
             membership,
+            agent,
             offer,
-            class,
+            device,
             standing: MemberStanding::Held,
         });
         self.metadata.push(Some(superblock));
@@ -395,8 +446,9 @@ impl MemberRegistry {
     pub fn admit_candidate(
         &mut self,
         membership: u64,
+        agent: ProcId,
         offer: MemberOffer,
-        class: BlkDeviceClass,
+        device: ProbedDevice,
     ) -> Admission {
         if self
             .members
@@ -411,8 +463,9 @@ impl MemberRegistry {
         let index = self.members.len();
         self.members.push(HeldMember {
             membership,
+            agent,
             offer,
-            class,
+            device,
             standing: MemberStanding::Held,
         });
         // A blank candidate adds no affiliated entry, so the reassembly view is
@@ -692,8 +745,8 @@ impl MemberRegistry {
                 .is_some_and(|superblock| superblock.array_uuid == array_uuid)
             {
                 widest = Some(match widest {
-                    Some(held) => held.most_patient(member.class),
-                    None => member.class,
+                    Some(held) => held.most_patient(member.class()),
+                    None => member.class(),
                 });
             }
         }

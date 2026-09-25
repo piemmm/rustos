@@ -60,7 +60,7 @@
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::ops::Range;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -71,11 +71,12 @@ use tairix_abi::{
 };
 use tairix_caps::CapabilitySet;
 use tairix_collections::{RangeError, RangeKey, RangeMap, RangeSet};
-use tairix_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, PAGE_SIZE};
+use tairix_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, VirtAddr, PAGE_SIZE};
 use tairix_kernel_sec::{ProcessId, TaskId};
 
 use crate::filelock::OwnerId;
 use crate::pipe::PipeEnd;
+use crate::procspace::ProcessSpace;
 use crate::pty::{PtyMasterEnd, PtySlaveEnd};
 use crate::resource::ResourceBacking;
 use crate::rlimit::LimitSet;
@@ -202,6 +203,12 @@ pub struct AddressSpaceRegistry {
     /// [`Self::grant`] resolves to `None` — fail closed: a task can
     /// map only the windows it was actually granted.
     grants: BTreeMap<ProcessId, TaskGrants>,
+    /// Each process's live address space, weakly: its threads own it. The
+    /// one way to reach another process's mappings, which the revocation of
+    /// a removed device's authority must tear down. Every lookup upgrades
+    /// under this registry's lock and locks the space only after releasing
+    /// it, keeping the live-space-before-registry lock order.
+    live_spaces: BTreeMap<ProcessId, Weak<ProcessSpace>>,
     /// The discovered hardware-tree node each autoloaded **driver** task was
     /// loaded for. Recorded when a driver is spawned for
     /// a matched node, beside its grants, and keyed by the same kernel-trusted
@@ -216,6 +223,13 @@ pub struct AddressSpaceRegistry {
     /// Dropped at [`withdraw`](Self::withdraw) so a reused id never inherits a
     /// dead driver's node.
     loaded_nodes: BTreeMap<ProcessId, LoadedDriver>,
+    /// Each node's live driver: at most one, which is what lets the DMA
+    /// quarantine trust a reset by it over memory any earlier instance
+    /// carved. A driver holds its node from admission until its last thread
+    /// is down ([`Self::release_node`]), which precedes the withdrawal of its
+    /// load record, so a successor can be admitted the moment the exit is
+    /// observable.
+    node_drivers: BTreeMap<u32, ProcessId>,
     /// The admission generation the next driver load is given.
     next_driver_generation: u64,
     /// Each live task's open file/directory handles (the descriptors
@@ -979,8 +993,29 @@ struct TaskGrants {
     /// The next handle value to issue. Starts at `1`; only ever increases,
     /// so handles are unique for the task's whole lifetime.
     next_handle: u64,
-    /// The granted resource behind each issued handle.
-    by_handle: BTreeMap<u64, HwResource>,
+    /// The grant behind each issued handle.
+    by_handle: BTreeMap<u64, Grant>,
+}
+
+/// One device-resource grant and where its authority comes from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Grant {
+    resource: HwResource,
+    /// The hardware-tree node whose device the authority reaches, or `None`
+    /// for authority no device's removal ends: a region or endpoint its
+    /// holder made, or one delegated from such.
+    origin: Option<u32>,
+    /// The origin left the tree. A revoked grant authorises nothing; it stays
+    /// only until the holder's standing mappings and bindings of it are torn
+    /// down, so a revocation can tell which to tear down.
+    revoked: bool,
+}
+
+impl Grant {
+    /// The resource, while the grant still authorises it.
+    fn live(&self) -> Option<&HwResource> {
+        (!self.revoked).then_some(&self.resource)
+    }
 }
 
 /// The one-shot file delegations minted **to** one task and not yet
@@ -1020,25 +1055,51 @@ struct PendingFdDelegation {
     recipient: ProcId,
 }
 
-/// The handle already naming `value` in `by_handle`, if any — the
+/// The handle of the first entry in `by_handle` that `held` accepts — the
 /// duplicate suppression both delegation tables share.
 ///
 /// Delegation conveys a *set* of authority, so re-granting something a
 /// recipient already holds must hand back the handle it already has rather
-/// than append a second, identical entry. That is what bounds these
-/// kernel-side tables: without it a donor can drive an unbounded allocation
-/// in a victim's address-space record simply by repeating one delegation
-/// syscall. Both minting paths call this so their notion of "already held"
-/// cannot drift apart.
+/// than append a second entry. That is what bounds these kernel-side tables:
+/// without it a donor can drive an unbounded allocation in a victim's
+/// address-space record by repeating one delegation syscall. A grant matches
+/// on its live resource exactly, never on coverage, and a revoked one never
+/// absorbs a fresh grant; a file delegation matches whole.
 ///
 /// Linear over a table whose length is, by virtue of this very check, the
 /// number of *distinct* authorities the task holds — a handful for a driver,
 /// and never grown by repetition.
-fn existing_handle<V: PartialEq>(by_handle: &BTreeMap<u64, V>, value: &V) -> Option<u64> {
+fn existing_handle<V>(by_handle: &BTreeMap<u64, V>, held: impl Fn(&V) -> bool) -> Option<u64> {
     by_handle
         .iter()
-        .find(|(_, held)| *held == value)
+        .find(|(_, value)| held(value))
         .map(|(&handle, _)| handle)
+}
+
+/// The whole pages spanning `bytes`.
+pub(crate) fn pages_spanning(bytes: u64) -> u64 {
+    bytes.div_ceil(PAGE_SIZE as u64)
+}
+
+/// Apply `publish` to every page of the `page_count`-page region based at
+/// `base`, reporting whether all of them were published.
+///
+/// The one walk a region's mapping and its teardown share, so they can never
+/// disagree about which pages it holds. Every page is attempted, because a
+/// snapshot that refuses one delta must still receive the rest before the
+/// caller falls back; a page whose address overflows reports unpublished.
+pub(crate) fn fold_region_pages(
+    base: u64,
+    page_count: u64,
+    mut publish: impl FnMut(Page) -> bool,
+) -> bool {
+    (0..page_count).fold(true, |published, index| {
+        let page = index
+            .checked_mul(PAGE_SIZE as u64)
+            .and_then(|offset| base.checked_add(offset))
+            .and_then(|va| Page::from_addr(VirtAddr::new(va)).ok());
+        page.is_some_and(&mut publish) && published
+    })
 }
 
 impl Default for AddressSpaceRegistry {
@@ -1057,7 +1118,9 @@ impl AddressSpaceRegistry {
             streams: BTreeMap::new(),
             limits: BTreeMap::new(),
             grants: BTreeMap::new(),
+            live_spaces: BTreeMap::new(),
             loaded_nodes: BTreeMap::new(),
+            node_drivers: BTreeMap::new(),
             next_driver_generation: 1,
             open_files: BTreeMap::new(),
             mapped_aspace_bytes: BTreeMap::new(),
@@ -1160,6 +1223,15 @@ impl AddressSpaceRegistry {
         }
     }
 
+    /// Drop the `page_count` pages based at `base` from `task`'s snapshot as
+    /// in-place deltas, returning whether it absorbed them all; the caller
+    /// re-freezes one that did not from the task's own live space.
+    pub fn forget_region_pages(&mut self, task: ProcessId, base: u64, page_count: u64) -> bool {
+        fold_region_pages(base, page_count, |page| {
+            self.note_faulted_page(task, page, None)
+        })
+    }
+
     /// Withdraw `task`'s entry, returning `true` if one was present.
     ///
     /// Idempotent: withdrawing a task with no entry (e.g. a kernel task
@@ -1181,6 +1253,8 @@ impl AddressSpaceRegistry {
         let had_streams = self.streams.remove(&task).is_some();
         let had_limits = self.limits.remove(&task).is_some();
         let had_grants = self.grants.remove(&task).is_some();
+        let had_live_space = self.live_spaces.remove(&task).is_some();
+        self.release_node(task);
         let had_node = self.loaded_nodes.remove(&task).is_some();
         let had_files = self.open_files.remove(&task).is_some();
         let had_anon = self.mapped_aspace_bytes.remove(&task).is_some();
@@ -1208,6 +1282,7 @@ impl AddressSpaceRegistry {
             || had_streams
             || had_limits
             || had_grants
+            || had_live_space
             || had_node
             || had_files
             || had_anon
@@ -1265,8 +1340,14 @@ impl AddressSpaceRegistry {
         if self.grants.contains_key(&task) {
             return Some("grants");
         }
+        if self.live_spaces.contains_key(&task) {
+            return Some("live_spaces");
+        }
         if self.loaded_nodes.contains_key(&task) {
             return Some("loaded_nodes");
+        }
+        if self.node_drivers.values().any(|&driver| driver == task) {
+            return Some("node_drivers");
         }
         if self.open_files.contains_key(&task) {
             return Some("open_files");
@@ -1301,20 +1382,32 @@ impl AddressSpaceRegistry {
     /// Record that the autoloaded driver `task` was loaded for the discovered
     /// hardware-tree node `node_id`, giving it the next admission generation.
     ///
-    /// Called by the privileged driver-spawn path beside
-    /// [`mint_grant`](Self::mint_grant), under the same write lock, so a
-    /// driver's matched node and its grants are established together. The
+    /// Called by the privileged driver-spawn path before any other state of
+    /// the child is installed, so a refusal leaves nothing to undo. The
     /// `node_id` is kernel-sourced (the matched node the device manager
-    /// resolved), never caller-supplied. The ordinary
-    /// `spawn` path records nothing, so a non-driver task has no loaded node
-    /// and cannot publish a child (fail closed).
+    /// resolved), never caller-supplied. The ordinary `spawn` path records
+    /// nothing, so a non-driver task has no loaded node and cannot publish a
+    /// child (fail closed).
     ///
-    /// Generations order every driver load, so a later instance for a node
-    /// is always admitted with a greater one — what lets the DMA quarantine
-    /// trust a reset by it over memory an earlier instance carved.
-    pub fn set_loaded_node(&mut self, task: ProcessId, node_id: u32) {
+    /// Generations order every driver load, and a node has at most one live
+    /// driver, so the one driver a node has postdates every earlier instance's
+    /// last thread — what lets the DMA quarantine trust a reset by it over
+    /// memory an earlier instance carved.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::Busy`] while another driver holds `node_id`, and
+    /// [`Errno::AlreadyExists`] if `task` is already a loaded driver.
+    pub fn admit_driver(&mut self, task: ProcessId, node_id: u32) -> Result<(), Errno> {
+        if self.node_drivers.contains_key(&node_id) {
+            return Err(Errno::Busy);
+        }
+        if self.loaded_nodes.contains_key(&task) {
+            return Err(Errno::AlreadyExists);
+        }
         let generation = self.next_driver_generation;
         self.next_driver_generation = generation.saturating_add(1);
+        self.node_drivers.insert(node_id, task);
         self.loaded_nodes.insert(
             task,
             LoadedDriver {
@@ -1323,6 +1416,23 @@ impl AddressSpaceRegistry {
                 dma_bytes: 0,
             },
         );
+        Ok(())
+    }
+
+    /// Let the node the driver `task` holds take a successor: its last thread
+    /// is down, so nothing it runs can reach the device again.
+    ///
+    /// Called before the driver's exit is recorded, so a successor loaded on
+    /// seeing it is admitted rather than refused. The load record itself
+    /// stays until [`withdraw`](Self::withdraw), which the teardown still
+    /// reads. Idempotent, and a no-op for a node another driver now holds.
+    pub fn release_node(&mut self, task: ProcessId) {
+        let Some(driver) = self.loaded_nodes.get(&task) else {
+            return;
+        };
+        if self.node_drivers.get(&driver.node) == Some(&task) {
+            self.node_drivers.remove(&driver.node);
+        }
     }
 
     /// The discovered hardware-tree node `task` was loaded for, or `None`
@@ -1344,13 +1454,6 @@ impl AddressSpaceRegistry {
         self.loaded_nodes.get(&task).copied()
     }
 
-    /// The generation of the latest driver load, `0` before the first: every
-    /// driver loaded later is admitted above it.
-    #[must_use]
-    pub fn driver_generation_high_water(&self) -> u64 {
-        self.next_driver_generation - 1
-    }
-
     /// Tally `bytes` of DMA memory the driver `task` carved, so its teardown
     /// can report what it leaves to the quarantine. A task that is not a
     /// loaded driver carves nothing.
@@ -1367,59 +1470,86 @@ impl AddressSpaceRegistry {
         }
     }
 
-    /// Mint a device-resource grant for `task`, returning the unforgeable,
-    /// kernel-issued handle the task passes to `mmio_map` to reach exactly
-    /// `resource` and nothing else (resources are
-    /// capability-grant requests, never ambient handles; — a driver
-    /// reaches only the resources its matched node requested).
+    /// Mint `task` a grant for `resource` that no device removal ends,
+    /// returning the unforgeable, owner-bound handle it presents to reach
+    /// exactly `resource` (a region or endpoint it made itself).
     ///
-    /// Called by the driver-admission path when a node's requested
-    /// resources are granted to the driver task it loads, and by the
-    /// delegation syscalls when one task passes a resource it holds to
-    /// another. The returned handle is meaningful only when presented by
-    /// `task` itself: [`Self::grant`] is keyed by the kernel-trusted caller
-    /// id, so another task passing the same numeric value resolves to
-    /// nothing (handle forgery is refused).
-    ///
-    /// **Idempotent.** Granting `task` a resource it already holds returns
-    /// the handle it already has; only a resource new to `task` mints a
-    /// fresh handle (monotonic from `1`, so a handle number never aliases a
-    /// reclaimed grant). Authority is a set: repetition must not be able to
-    /// grow a recipient's kernel-side table.
+    /// **Idempotent.** A resource `task` already holds returns the handle it
+    /// has; only a resource new to it mints a fresh one (monotonic from `1`,
+    /// never reused). Authority is a set, so repetition cannot grow a
+    /// recipient's kernel-side table.
     pub fn mint_grant(&mut self, task: ProcessId, resource: HwResource) -> u64 {
+        self.mint_with_origin(task, resource, None)
+    }
+
+    /// [`Self::mint_grant`] for authority over the device of hardware-tree
+    /// node `node`: a node's requested resources at driver admission, or a
+    /// vector allocated for its device. It ends when the node leaves the
+    /// tree ([`Self::revoke_node_grants`]).
+    pub fn mint_node_grant(&mut self, task: ProcessId, resource: HwResource, node: u32) -> u64 {
+        self.mint_with_origin(task, resource, Some(node))
+    }
+
+    fn mint_with_origin(
+        &mut self,
+        task: ProcessId,
+        resource: HwResource,
+        origin: Option<u32>,
+    ) -> u64 {
         let entry = self.grants.entry(task).or_default();
-        // Authority is a set, not a multiset: a task that already holds
-        // exactly this resource is handed the handle it already has rather
-        // than a second entry naming the same thing. Without this, a donor
-        // holding one grant could call a delegation syscall in a loop and
-        // grow the *recipient's* kernel-side table without limit — an
-        // unbounded kernel allocation an unprivileged peer can drive. The
-        // match is exact, never `covers`: returning the handle of a *wider*
-        // grant would hand back authority the donor did not name.
-        if let Some(handle) = existing_handle(&entry.by_handle, &resource) {
+        if let Some(handle) =
+            existing_handle(&entry.by_handle, |grant| grant.live() == Some(&resource))
+        {
+            // Held twice, it lasts as long as its longest-lived source; two
+            // node origins keep the first, over-revoking rather than under.
+            if origin.is_none() {
+                if let Some(grant) = entry.by_handle.get_mut(&handle) {
+                    grant.origin = None;
+                }
+            }
             return handle;
         }
-        // Handle 0 is the reserved invalid value; the first minted handle
-        // is 1. `next_handle` only ever increases within a task's life, so
-        // a handle is never reused even after its grant is reclaimed.
+        // Handle 0 is the reserved invalid value; the first minted handle is
+        // 1, and `next_handle` only ever increases.
         entry.next_handle += 1;
         let handle = entry.next_handle;
-        entry.by_handle.insert(handle, resource);
+        entry.by_handle.insert(
+            handle,
+            Grant {
+                resource,
+                origin,
+                revoked: false,
+            },
+        );
         handle
     }
 
-    /// [`Self::mint_grant`] for a delegation: mints only while `task` is still
-    /// registered, returning `None` once it has been withdrawn.
+    /// Delegate `wanted` from `from`, which must hold a live grant covering
+    /// it, to `to`, returning `to`'s handle; `None` if `from` holds no such
+    /// grant or `to` has been withdrawn.
     ///
-    /// A delegation resolves its recipient before it mints, and the recipient
-    /// can end in between. Minting then would recreate the grant table
-    /// [`Self::withdraw`] just removed, for a later task that draws the same
-    /// id to inherit. Both happen under this registry's write lock, so the
-    /// check here cannot race the withdrawal.
-    pub fn mint_grant_live(&mut self, task: ProcessId, resource: HwResource) -> Option<u64> {
-        self.tasks
-            .contains_key(&task)
-            .then(|| self.mint_grant(task, resource))
+    /// The delegated grant inherits the covering grant's origin, so it ends
+    /// with the device the delegator's authority reached. The check and the
+    /// mint are one step under this registry's lock, so a revocation cannot
+    /// land between them and leave a copy it never saw.
+    pub fn delegate_grant(
+        &mut self,
+        from: ProcessId,
+        to: ProcessId,
+        wanted: HwResource,
+    ) -> Option<u64> {
+        let origin = self
+            .grants
+            .get(&from)?
+            .by_handle
+            .values()
+            .filter(|grant| grant.live().is_some_and(|held| held.covers(&wanted)))
+            .map(|grant| grant.origin)
+            .reduce(|kept, next| if next.is_none() { None } else { kept })?;
+        if !self.tasks.contains_key(&to) {
+            return None;
+        }
+        Some(self.mint_with_origin(to, wanted, origin))
     }
 
     /// Whether `task` holds the [`HwResourceKind::DmaController`] duty for the
@@ -1427,43 +1557,34 @@ impl AddressSpaceRegistry {
     /// consumer's request line naming the same endpoint never counts.
     #[must_use]
     pub fn holds_dma_controller_duty(&self, task: ProcessId, endpoint: u64) -> bool {
-        self.grants.get(&task).is_some_and(|entry| {
-            entry.by_handle.values().any(|grant| {
-                grant
-                    .dma_controller_duty()
-                    .is_ok_and(|duty| duty.endpoint() == endpoint)
-            })
+        self.live_grants(task).any(|grant| {
+            grant
+                .dma_controller_duty()
+                .is_ok_and(|duty| duty.endpoint() == endpoint)
         })
     }
 
     /// Withdraw every task's per-endpoint grant naming any call endpoint in
     /// `endpoints`, returning how many grants were revoked.
     ///
-    /// A [`HwResourceKind::Endpoint`] grant names an endpoint by its
-    /// **numeric id**, and that id is re-creatable: once an endpoint is
-    /// destroyed, a *different* task may bind the same number. A grant that
-    /// survived its endpoint would therefore silently retarget onto the new
-    /// instance and let its holder call a service it was never granted. The
-    /// endpoint teardown path calls this in the same step that destroys the
-    /// endpoints, so delegated authority can never outlive the endpoint
-    /// *instance* it was issued against and id reuse is safe by construction.
-    /// A holder's next call fails closed (`grant_covers` no longer matches),
-    /// never retargets.
+    /// An [`HwResourceKind::Endpoint`] grant names an endpoint by its
+    /// re-creatable numeric id, so a grant that survived its endpoint would
+    /// retarget onto whichever task binds that id next. The endpoint teardown
+    /// calls this in the step that destroys the endpoints, so a holder's next
+    /// call fails closed rather than reaching the new instance.
     ///
-    /// Deliberately a single pass over the grant tables rather than a
-    /// reverse `endpoint -> holders` index: teardown is a cold path (a
-    /// service process ending), while an index would be a second source of
-    /// truth to keep in step across every mint, withdrawal, and revocation —
-    /// and a desync in it would silently reopen exactly the hole this closes.
+    /// A single pass over the grant tables rather than a reverse index:
+    /// teardown is a cold path, and an index would be a second source of truth
+    /// whose drift would reopen exactly this hole.
     pub fn revoke_endpoint_grants(&mut self, endpoints: &BTreeSet<u64>) -> usize {
         if endpoints.is_empty() {
             return 0;
         }
         let mut revoked = 0;
         for entry in self.grants.values_mut() {
-            entry.by_handle.retain(|_, resource| {
-                let doomed = resource.kind() == Some(HwResourceKind::Endpoint)
-                    && endpoints.contains(&resource.base());
+            entry.by_handle.retain(|_, grant| {
+                let doomed = grant.resource.kind() == Some(HwResourceKind::Endpoint)
+                    && endpoints.contains(&grant.resource.base());
                 revoked += usize::from(doomed);
                 !doomed
             });
@@ -1471,61 +1592,202 @@ impl AddressSpaceRegistry {
         revoked
     }
 
+    /// Revoke, in every task, each live grant whose origin is one of
+    /// `nodes` (sorted ascending), returning how many were revoked.
+    ///
+    /// Every such grant stops authorising anything at once; each stays
+    /// flagged until its holder's standing mappings and bindings are torn
+    /// down and [`Self::retire_revoked`] drops it.
+    pub fn revoke_node_grants(&mut self, nodes: &[u32]) -> usize {
+        let mut revoked = 0;
+        for entry in self.grants.values_mut() {
+            for grant in entry.by_handle.values_mut() {
+                if !grant.revoked
+                    && grant
+                        .origin
+                        .is_some_and(|origin| nodes.binary_search(&origin).is_ok())
+                {
+                    grant.revoked = true;
+                    revoked += 1;
+                }
+            }
+        }
+        revoked
+    }
+
+    /// The lowest task above `after` (or the lowest of all) holding a
+    /// revoked grant: a cursor over the holders a revocation must visit.
+    #[must_use]
+    pub fn next_revoked_holder(&self, after: Option<ProcessId>) -> Option<ProcessId> {
+        let mut holders = match after {
+            Some(after) => self.grants.range((
+                core::ops::Bound::Excluded(after),
+                core::ops::Bound::Unbounded,
+            )),
+            None => self.grants.range(..),
+        };
+        holders
+            .find(|(_, entry)| entry.by_handle.values().any(|grant| grant.revoked))
+            .map(|(&task, _)| task)
+    }
+
+    /// `task`'s revoked grant with the lowest handle above `after` (or the
+    /// lowest of all), with that handle.
+    #[must_use]
+    pub fn next_revoked_grant(
+        &self,
+        task: ProcessId,
+        after: Option<u64>,
+    ) -> Option<(u64, HwResource)> {
+        let from = after.map_or(Some(0), |handle| handle.checked_add(1))?;
+        self.grants
+            .get(&task)?
+            .by_handle
+            .range(from..)
+            .find(|(_, grant)| grant.revoked)
+            .map(|(&handle, grant)| (handle, grant.resource))
+    }
+
+    /// Drop every revoked grant of `task`, once its holder's standing
+    /// mappings and bindings of them are gone, returning how many.
+    pub fn retire_revoked(&mut self, task: ProcessId) -> usize {
+        let Some(entry) = self.grants.get_mut(&task) else {
+            return 0;
+        };
+        let before = entry.by_handle.len();
+        entry.by_handle.retain(|_, grant| !grant.revoked);
+        before - entry.by_handle.len()
+    }
+
+    /// Whether a live grant of `task` still authorises a mapping of the
+    /// device span `[phys, phys + len)`: a register window, bus aperture or
+    /// scan-out surface wholly containing it.
+    #[must_use]
+    pub fn maps_window(&self, task: ProcessId, phys: u64, len: u64) -> bool {
+        self.live_grants(task).any(|grant| {
+            matches!(
+                grant.kind(),
+                Some(
+                    HwResourceKind::Mmio | HwResourceKind::BusWindow | HwResourceKind::Framebuffer
+                )
+            ) && grant.spans(phys, len)
+        })
+    }
+
+    /// Whether a node still in the tree confers shared region `region` on
+    /// some task: a live grant for it whose authority comes from a device.
+    #[must_use]
+    pub fn region_conferred_live(&self, region: u64) -> bool {
+        let wanted = HwResource::shared(region);
+        self.grants.values().any(|entry| {
+            entry
+                .by_handle
+                .values()
+                .any(|grant| grant.origin.is_some() && grant.live() == Some(&wanted))
+        })
+    }
+
+    /// Whether a live grant of `task` names interrupt line `line`.
+    #[must_use]
+    pub fn holds_irq_line(&self, task: ProcessId, line: u32) -> bool {
+        self.live_grants(task).any(|grant| {
+            grant.kind() == Some(HwResourceKind::Irq) && grant.spans(u64::from(line), 1)
+        })
+    }
+
+    /// `task`'s grants that still authorise, in handle order.
+    fn live_grants(&self, task: ProcessId) -> impl Iterator<Item = &HwResource> + '_ {
+        self.grants
+            .get(&task)
+            .into_iter()
+            .flat_map(|entry| entry.by_handle.values().filter_map(Grant::live))
+    }
+
+    /// Record `space` as `task`'s live address space, so a revocation can
+    /// reach its mappings.
+    pub fn set_live_space(&mut self, task: ProcessId, space: &Arc<ProcessSpace>) {
+        self.live_spaces.insert(task, Arc::downgrade(space));
+    }
+
+    /// `task`'s live address space while any of its threads still holds it.
+    ///
+    /// Lock the returned space only once this registry's guard is dropped:
+    /// the live space is always taken before the registry, never after.
+    #[must_use]
+    pub fn live_space(&self, task: ProcessId) -> Option<Arc<ProcessSpace>> {
+        self.live_spaces.get(&task)?.upgrade()
+    }
+
     /// Resolve the device-resource grant identified by `handle` for the
     /// owning `task`, or `None` (fail closed).
     ///
-    /// Returns the granted [`HwResource`] iff `handle` was minted for
-    /// `task`; `None` for an unknown handle, the reserved `0` handle, a
-    /// handle minted for a *different* task (forgery — a driver cannot
-    /// reach another driver's window by guessing a handle value), or a
-    /// grant since reclaimed on exit. The `task` argument is the
-    /// kernel-trusted caller id, never a caller-supplied value, so it is
-    /// the security spine of the `mmio_map` handler (no
-    /// trusted-caller shortcut;).
+    /// `None` for an unknown handle, the reserved `0`, a handle minted for a
+    /// *different* task (forgery), a grant reclaimed on exit, or one whose
+    /// device has left the tree. `task` is the kernel-trusted caller id, so
+    /// this is the security spine of every handle-taking device syscall.
     #[must_use]
     pub fn grant(&self, task: ProcessId, handle: u64) -> Option<HwResource> {
-        self.grants.get(&task)?.by_handle.get(&handle).copied()
+        self.grants
+            .get(&task)?
+            .by_handle
+            .get(&handle)?
+            .live()
+            .copied()
     }
 
-    /// Serialise `task`'s device-resource grants as consecutive
+    /// Serialise `task`'s live device-resource grants as consecutive
     /// [`GrantedResource`] records (each [`GrantedResource::WIRE_LEN`]
-    /// bytes), in ascending handle order, for delivery to the task through
-    /// the `resource_grants` syscall.
+    /// bytes), in ascending handle order, for the `resource_grants` syscall.
     ///
-    /// Returns an empty vector for a task with no grants — a valid, empty
-    /// result, not an error (an unbound node is
-    /// normal). The set is bounded by construction: handles are minted only
-    /// by the kernel's driver-admission path, one per [`HwResource`] the
-    /// matched node requested (no ambient authority), so a
-    /// node's fixed resource maximum bounds the record count. Ascending
-    /// handle order makes the delivered sequence deterministic
-    /// ([`BTreeMap`] iterates by key).
+    /// Empty for a task with no grants, which is valid: an unbound node is
+    /// normal. Bounded by construction, since only admission and a holder's
+    /// own delegations mint.
     #[must_use]
     pub fn grants_to_le_bytes(&self, task: ProcessId) -> Vec<u8> {
         let mut out = Vec::new();
         if let Some(entry) = self.grants.get(&task) {
             out.reserve(entry.by_handle.len() * GrantedResource::WIRE_LEN);
-            for (&handle, &resource) in &entry.by_handle {
-                out.extend_from_slice(&GrantedResource::new(handle, resource).to_le_bytes());
+            for (&handle, grant) in &entry.by_handle {
+                if let Some(&resource) = grant.live() {
+                    out.extend_from_slice(&GrantedResource::new(handle, resource).to_le_bytes());
+                }
             }
         }
         out
     }
 
-    /// Returns `true` iff one of `task`'s minted device-resource grants
-    /// fully covers `resource` (`HwResource::covers`).
+    /// Whether a live grant of `task` covers `resource` for a child it
+    /// publishes under `node`: one whose authority comes from `node` itself
+    /// or from no device.
     ///
-    /// This is the security spine of `hw_emit_node`: a
-    /// user-space bus driver may publish a child node requesting `resource`
-    /// only when it already holds a grant covering it, so an autoloaded
-    /// child can never be minted authority its emitter lacks (no ambient authority). A `task` with no grants covers nothing,
-    /// so an ungranted task fails closed. The `task` argument is the
-    /// kernel-trusted caller id, never a caller-supplied value.
+    /// A grant delegated from another device's authority is refused, since
+    /// the child's driver is minted the resource under the child's own
+    /// origin, and removing that other device would not reach it.
+    #[must_use]
+    pub fn grant_covers_for_child(
+        &self,
+        task: ProcessId,
+        resource: &HwResource,
+        node: u32,
+    ) -> bool {
+        self.grants.get(&task).is_some_and(|entry| {
+            entry.by_handle.values().any(|grant| {
+                grant.origin.is_none_or(|origin| origin == node)
+                    && grant.live().is_some_and(|held| held.covers(resource))
+            })
+        })
+    }
+
+    /// Returns `true` iff one of `task`'s live device-resource grants fully
+    /// covers `resource` (`HwResource::covers`).
+    ///
+    /// The security spine of `hw_emit_node` and the delegation checks: a
+    /// child or a delegate is never minted authority its source lacks. A
+    /// `task` with no grants covers nothing. `task` is the kernel-trusted
+    /// caller id, never a caller-supplied value.
     #[must_use]
     pub fn grant_covers(&self, task: ProcessId, resource: &HwResource) -> bool {
-        self.grants
-            .get(&task)
-            .is_some_and(|entry| entry.by_handle.values().any(|grant| grant.covers(resource)))
+        self.live_grants(task).any(|grant| grant.covers(resource))
     }
 
     /// Establish `task`'s standard-stream descriptor table.
@@ -2243,7 +2505,7 @@ impl AddressSpaceRegistry {
     ///
     /// The single insertion point shared by [`Self::open_file`] and
     /// [`Self::open_resource`], so every descriptor — whatever backs it —
-    /// comes from one allocator and one number space (: one definition).
+    /// comes from one allocator and one number space.
     fn open_backed(
         &mut self,
         task: ProcessId,
@@ -2295,7 +2557,7 @@ impl AddressSpaceRegistry {
         // table without limit by repeating one call. Hand back the pending
         // handle instead; once redeemed the entry is consumed, so a later
         // grant of the same file legitimately mints afresh.
-        if let Some(handle) = existing_handle(&entry.by_handle, &pending) {
+        if let Some(handle) = existing_handle(&entry.by_handle, |held| *held == pending) {
             return handle;
         }
         // Handle 0 is the reserved invalid value; the first minted handle
@@ -2850,6 +3112,70 @@ mod tests {
     }
 
     #[test]
+    fn a_node_has_at_most_one_live_driver() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.admit_driver(ProcessId(2), 9).expect("a free node");
+        assert_eq!(
+            reg.admit_driver(ProcessId(3), 9),
+            Err(Errno::Busy),
+            "a second instance would share the device"
+        );
+        assert_eq!(
+            reg.admit_driver(ProcessId(2), 10),
+            Err(Errno::AlreadyExists),
+            "a driver is loaded for one node"
+        );
+        assert_eq!(
+            reg.loaded_node(ProcessId(3)),
+            None,
+            "a refusal records nothing"
+        );
+
+        assert!(reg.withdraw(ProcessId(2)));
+        assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
+        reg.admit_driver(ProcessId(3), 9)
+            .expect("the node is free once its driver is down");
+        let first = reg.loaded_driver(ProcessId(3)).expect("recorded");
+        assert_eq!(first.node, 9);
+        reg.admit_driver(ProcessId(4), 10).expect("another node");
+        assert!(
+            reg.loaded_driver(ProcessId(4))
+                .expect("recorded")
+                .generation
+                > first.generation,
+            "every later load is admitted above every earlier one"
+        );
+    }
+
+    #[test]
+    fn a_released_node_takes_a_successor_before_its_driver_is_withdrawn() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.admit_driver(ProcessId(2), 9).expect("a free node");
+        reg.release_node(ProcessId(2));
+        assert_eq!(
+            reg.loaded_node(ProcessId(2)),
+            Some(9),
+            "the load record outlives the claim, for the teardown to read"
+        );
+        reg.admit_driver(ProcessId(3), 9)
+            .expect("the node is free once its driver's last thread is down");
+
+        // The earlier driver's teardown finishing must not free the node its
+        // successor now holds.
+        reg.release_node(ProcessId(2));
+        assert!(reg.withdraw(ProcessId(2)));
+        assert_eq!(
+            reg.admit_driver(ProcessId(4), 9),
+            Err(Errno::Busy),
+            "the successor still holds the node"
+        );
+        assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
+        assert!(reg.withdraw(ProcessId(3)));
+        reg.admit_driver(ProcessId(4), 9)
+            .expect("free again once the successor is down");
+    }
+
+    #[test]
     fn withdrawing_unknown_task_is_a_noop() {
         let mut reg = AddressSpaceRegistry::new();
         assert!(!reg.withdraw(ProcessId(42)));
@@ -3249,21 +3575,270 @@ mod tests {
     }
 
     #[test]
-    fn a_delegation_mints_only_to_a_registered_task() {
+    fn a_delegation_mints_only_what_the_donor_holds_to_a_registered_task() {
         let mut reg = AddressSpaceRegistry::new();
         reg.register(ProcessId(11), user_space(1, 1), sim())
             .expect("registers");
+        reg.mint_grant(ProcessId(2), window());
         let handle = reg
-            .mint_grant_live(ProcessId(11), window())
+            .delegate_grant(ProcessId(2), ProcessId(11), window())
             .expect("a live recipient is granted");
         assert_eq!(reg.grant(ProcessId(11), handle), Some(window()));
+        assert_eq!(
+            reg.delegate_grant(ProcessId(3), ProcessId(11), window()),
+            None,
+            "a donor holding nothing delegates nothing"
+        );
         // Once withdrawn the task receives nothing, so no grant table is
         // recreated for a later task that draws the same id.
         assert!(reg.withdraw(ProcessId(11)));
-        assert_eq!(reg.mint_grant_live(ProcessId(11), window()), None);
+        assert_eq!(
+            reg.delegate_grant(ProcessId(2), ProcessId(11), window()),
+            None
+        );
         assert_eq!(reg.grant(ProcessId(11), 1), None);
-        // A task that was never registered is refused the same way.
-        assert_eq!(reg.mint_grant_live(ProcessId(12), window()), None);
+        assert_eq!(
+            reg.delegate_grant(ProcessId(2), ProcessId(12), window()),
+            None
+        );
+    }
+
+    /// A registry with `tasks` registered, so delegations can land on them.
+    fn registry_with(tasks: &[u64]) -> AddressSpaceRegistry {
+        let mut reg = AddressSpaceRegistry::new();
+        for &task in tasks {
+            reg.register(ProcessId(task), user_space(1, 1), sim())
+                .expect("registers");
+        }
+        reg
+    }
+
+    #[test]
+    fn a_delegated_grant_ends_with_the_device_its_source_reached() {
+        let region = HwResource::shared(0x51);
+        let mut reg = registry_with(&[5, 6]);
+        let driver = reg.mint_node_grant(ProcessId(2), region, 7);
+        let delegated = reg
+            .delegate_grant(ProcessId(2), ProcessId(5), region)
+            .expect("delegates");
+        let onward = reg
+            .delegate_grant(ProcessId(5), ProcessId(6), region)
+            .expect("delegates onward");
+        let made = reg.mint_grant(ProcessId(3), region);
+
+        assert_eq!(reg.revoke_node_grants(&[7]), 3);
+        assert_eq!(reg.grant(ProcessId(2), driver), None);
+        assert_eq!(reg.grant(ProcessId(5), delegated), None);
+        assert_eq!(reg.grant(ProcessId(6), onward), None);
+        assert_eq!(
+            reg.grant(ProcessId(3), made),
+            Some(region),
+            "a region its holder made is no device's"
+        );
+    }
+
+    #[test]
+    fn a_grant_held_from_a_lasting_source_outlives_the_node() {
+        let region = HwResource::shared(0x52);
+        let mut reg = registry_with(&[5]);
+        let first = reg.mint_node_grant(ProcessId(2), region, 7);
+        assert_eq!(
+            reg.mint_grant(ProcessId(2), region),
+            first,
+            "held twice, still one grant"
+        );
+        let delegated = reg
+            .delegate_grant(ProcessId(2), ProcessId(5), region)
+            .expect("delegates");
+        assert_eq!(reg.revoke_node_grants(&[7]), 0);
+        assert_eq!(reg.grant(ProcessId(2), first), Some(region));
+        assert_eq!(reg.grant(ProcessId(5), delegated), Some(region));
+    }
+
+    #[test]
+    fn a_child_is_covered_only_by_its_emitters_own_node_or_by_no_device() {
+        let window = HwResource::mmio(0xFE00_0000, 0x1000);
+        let mut reg = AddressSpaceRegistry::new();
+        reg.mint_node_grant(ProcessId(2), window, 17);
+        assert!(
+            !reg.grant_covers_for_child(ProcessId(2), &window, 9),
+            "another device's"
+        );
+        assert!(
+            reg.grant_covers(ProcessId(2), &window),
+            "yet the emitter holds it"
+        );
+        reg.mint_node_grant(ProcessId(2), HwResource::mmio(0xFE00_0000, 0x2000), 9);
+        assert!(
+            reg.grant_covers_for_child(ProcessId(2), &window, 9),
+            "its own node's"
+        );
+        let region = HwResource::shared(0x60);
+        reg.mint_grant(ProcessId(2), region);
+        assert!(
+            reg.grant_covers_for_child(ProcessId(2), &region, 9),
+            "no device's"
+        );
+        reg.revoke_node_grants(&[9]);
+        assert!(
+            !reg.grant_covers_for_child(ProcessId(2), &window, 9),
+            "revoked"
+        );
+    }
+
+    #[test]
+    fn a_revoked_grant_authorises_nothing_and_a_revocation_touches_only_its_nodes() {
+        let window = window();
+        let line = HwResource::irq(40, 1);
+        let port = HwResource::port(0x70, 2);
+        let mut reg = AddressSpaceRegistry::new();
+        let w = reg.mint_node_grant(ProcessId(2), window, 7);
+        let l = reg.mint_node_grant(ProcessId(2), line, 7);
+        let p = reg.mint_node_grant(ProcessId(2), port, 8);
+
+        assert_eq!(reg.revoke_node_grants(&[3, 7]), 2);
+        assert_eq!(
+            (reg.grant(ProcessId(2), w), reg.grant(ProcessId(2), l)),
+            (None, None)
+        );
+        assert!(!reg.grant_covers(ProcessId(2), &window));
+        assert!(!reg.holds_irq_line(ProcessId(2), 40));
+        assert_eq!(
+            reg.grant(ProcessId(2), p),
+            Some(port),
+            "another node's grant stands"
+        );
+        assert_eq!(
+            reg.grants_to_le_bytes(ProcessId(2)),
+            GrantedResource::new(p, port).to_le_bytes(),
+            "a revoked grant is never enumerated"
+        );
+        assert_eq!(reg.revoke_node_grants(&[7]), 0, "idempotent");
+        assert_eq!(
+            reg.delegate_grant(ProcessId(2), ProcessId(2), window),
+            None,
+            "nor delegated"
+        );
+    }
+
+    #[test]
+    fn revoked_grants_are_visited_holder_by_holder_until_retired() {
+        let mut reg = AddressSpaceRegistry::new();
+        let low = reg.mint_node_grant(ProcessId(2), HwResource::mmio(0x1000, 0x1000), 7);
+        reg.mint_node_grant(ProcessId(3), HwResource::mmio(0x9000, 0x1000), 8);
+        let high = reg.mint_node_grant(ProcessId(2), HwResource::shared(0x53), 7);
+        reg.mint_node_grant(ProcessId(5), HwResource::irq(9, 1), 7);
+        assert_eq!(reg.next_revoked_holder(None), None, "nothing revoked yet");
+
+        assert_eq!(reg.revoke_node_grants(&[7]), 3);
+        assert_eq!(reg.next_revoked_holder(None), Some(ProcessId(2)));
+        assert_eq!(
+            reg.next_revoked_holder(Some(ProcessId(2))),
+            Some(ProcessId(5))
+        );
+        assert_eq!(reg.next_revoked_holder(Some(ProcessId(5))), None);
+        assert_eq!(
+            reg.next_revoked_grant(ProcessId(2), None),
+            Some((low, HwResource::mmio(0x1000, 0x1000)))
+        );
+        assert_eq!(
+            reg.next_revoked_grant(ProcessId(2), Some(low)),
+            Some((high, HwResource::shared(0x53)))
+        );
+        assert_eq!(reg.next_revoked_grant(ProcessId(2), Some(high)), None);
+        assert_eq!(reg.next_revoked_grant(ProcessId(2), Some(u64::MAX)), None);
+
+        assert_eq!(reg.retire_revoked(ProcessId(2)), 2);
+        assert_eq!(reg.retire_revoked(ProcessId(2)), 0);
+        assert_eq!(reg.next_revoked_holder(None), Some(ProcessId(5)));
+        assert_eq!(
+            reg.grant(ProcessId(3), 1),
+            Some(HwResource::mmio(0x9000, 0x1000))
+        );
+    }
+
+    #[test]
+    fn a_fresh_grant_is_not_absorbed_by_a_revoked_one() {
+        let region = HwResource::shared(0x54);
+        let mut reg = AddressSpaceRegistry::new();
+        let revoked = reg.mint_node_grant(ProcessId(2), region, 7);
+        reg.revoke_node_grants(&[7]);
+        let fresh = reg.mint_grant(ProcessId(2), region);
+        assert_ne!(fresh, revoked);
+        assert_eq!(reg.grant(ProcessId(2), fresh), Some(region));
+        assert_eq!(reg.retire_revoked(ProcessId(2)), 1);
+        assert_eq!(
+            reg.grant(ProcessId(2), fresh),
+            Some(region),
+            "retiring keeps it"
+        );
+    }
+
+    #[test]
+    fn a_window_is_authorised_only_while_a_live_window_grant_contains_it() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.mint_node_grant(ProcessId(2), HwResource::mmio(0x1000, 0x2000), 7);
+        reg.mint_node_grant(
+            ProcessId(2),
+            HwResource::bus_window(0x6000_0000, 0x10_0000, 0xF800_0000),
+            8,
+        );
+        reg.mint_node_grant(ProcessId(2), HwResource::dma(0x3FFF_FFFF, 0x1000), 7);
+        assert!(reg.maps_window(ProcessId(2), 0x1800, 0x100));
+        assert!(
+            reg.maps_window(ProcessId(2), 0x6000_1000, 0x1000),
+            "a BAR in an aperture"
+        );
+        assert!(
+            !reg.maps_window(ProcessId(2), 0x2F00, 0x200),
+            "past the window"
+        );
+        assert!(
+            !reg.maps_window(ProcessId(2), 0x100, 0x10),
+            "a DMA constraint maps nothing"
+        );
+        assert!(
+            !reg.maps_window(ProcessId(3), 0x1800, 0x100),
+            "another task's grant"
+        );
+        reg.revoke_node_grants(&[7]);
+        assert!(!reg.maps_window(ProcessId(2), 0x1800, 0x100));
+        assert!(reg.maps_window(ProcessId(2), 0x6000_1000, 0x1000));
+    }
+
+    #[test]
+    fn an_interrupt_line_is_held_only_through_a_live_irq_grant() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.mint_node_grant(ProcessId(2), HwResource::irq(40, 4), 7);
+        reg.mint_node_grant(ProcessId(2), HwResource::port(50, 4), 7);
+        assert!(reg.holds_irq_line(ProcessId(2), 43));
+        assert!(!reg.holds_irq_line(ProcessId(2), 44));
+        assert!(
+            !reg.holds_irq_line(ProcessId(2), 51),
+            "a port range is not a line"
+        );
+        assert!(!reg.holds_irq_line(ProcessId(3), 40));
+        reg.revoke_node_grants(&[7]);
+        assert!(!reg.holds_irq_line(ProcessId(2), 40));
+    }
+
+    #[test]
+    fn a_live_space_is_reachable_until_its_threads_drop_it_or_the_task_goes() {
+        let mut reg = AddressSpaceRegistry::new();
+        let space = Arc::new(ProcessSpace::for_test(crate::procspace::host_test_space!()));
+        reg.set_live_space(ProcessId(2), &space);
+        assert!(reg
+            .live_space(ProcessId(2))
+            .is_some_and(|found| Arc::ptr_eq(&found, &space)));
+        assert!(reg.live_space(ProcessId(3)).is_none());
+        drop(space);
+        assert!(reg.live_space(ProcessId(2)).is_none(), "held weakly");
+
+        let space = Arc::new(ProcessSpace::for_test(crate::procspace::host_test_space!()));
+        reg.set_live_space(ProcessId(2), &space);
+        assert!(reg.withdraw(ProcessId(2)));
+        assert!(reg.live_space(ProcessId(2)).is_none());
+        assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
     }
 
     #[test]

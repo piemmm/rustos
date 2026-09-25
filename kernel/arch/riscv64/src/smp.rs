@@ -104,8 +104,7 @@ impl SecondaryStackSlot {
     // A 16 KiB zero array is a deliberately large *static* backing (a
     // secondary hart's whole kernel stack), only ever const-evaluated
     // into a `static SecondaryStackPool` — never materialised on a
-    // runtime stack — so the large-array lint does not apply (: a per-stack size is a fixed bound, not a runtime stack
-    // allocation).
+    // runtime stack — so the large-array lint does not apply.
     #[allow(clippy::large_stack_arrays)]
     const fn new() -> Self {
         Self {

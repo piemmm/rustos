@@ -1418,7 +1418,7 @@ pub const fn load_failure_reason(code: i32) -> Option<&'static str> {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum StreamMode {
     /// No backing is attached to this descriptor: every access denies
-    /// (fail closed; — no fallback to a device).
+    /// (fail closed; no fallback to a device).
     Closed = 0,
     /// The descriptor is readable (a `stream_read` source). Writes deny.
     Read = 1,

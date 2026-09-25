@@ -8,18 +8,20 @@
 //! agent offers to, and one block-service endpoint per live array. All of them
 //! ride a single wait-set, and each turn the composer:
 //!
-//! 1. drains every pending offer, reading the offered device's superblock
+//! 1. ends the membership of every agent that has exited, taking its device
+//!    out of any array it was composed into;
+//! 2. drains every pending offer, reading the offered device's superblock
 //!    itself and feeding the registry;
-//! 2. does what the registry's [`ComposerAction`] says — assemble and publish
+//! 3. does what the registry's [`ComposerAction`] says — assemble and publish
 //!    a ready array, place a returning member into a live one, or wait;
-//! 3. serves every live array's queued block requests through the shared
+//! 4. serves every live array's queued block requests through the shared
 //!    fault-aware engine;
-//! 4. gives each array one bounded turn of self-maintenance — re-admitting a
+//! 5. gives each array one bounded turn of self-maintenance — re-admitting a
 //!    returning member, advancing a rebuild, verifying the array, or writing
 //!    down where it has got to; and
-//! 5. parks until the soonest of the registry's settle/backoff deadline, the
+//! 6. parks until the soonest of the registry's settle/backoff deadline, the
 //!    arrays' recovery grace windows, and their maintenance deadlines, or
-//!    until any endpoint signals.
+//!    until any endpoint signals or a watched agent exits.
 //!
 //! Nothing here spins: every wait is a one-shot timeout or a wait-set wake, so
 //! a quiet composer costs a quiet core. A turn that actually moved a rebuild
@@ -30,20 +32,22 @@
 //! # A member node is a pointer to look, never a datum to believe
 //!
 //! An offered endpoint, window, and node id are hostile until proven: the
-//! offer decodes fail-closed, the window must map at least the data length,
-//! the device must answer geometry, and its array, slot, and generation come
-//! from the superblock read off the disk — never from anything the agent said.
-//! Any failure refuses that one membership and never disturbs the others.
+//! offer decodes fail-closed; before anything it names is touched, the kernel
+//! must attest that its sender is the driver of a member or candidate node
+//! whose one endpoint and one region are exactly what the offer names, and
+//! that the endpoint is not the composer's own; the window must map at least
+//! the data length; the device must answer geometry; and its array, slot, and
+//! generation come from the superblock read off the disk — never from anything
+//! the agent said. Any failure refuses that one membership and never disturbs
+//! the others.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::{
-    recovery_wait_timeout, BlkDeviceClass, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_REQUEST_LEN,
-};
+use tairix_abi::blkio::{recovery_wait_timeout, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_REQUEST_LEN};
 use tairix_abi::driver::block::Block;
-use tairix_abi::hwtree::{HwRemoveFlags, HwResource, HW_NODE_ROOT};
+use tairix_abi::hwtree::{GrantedResource, HwRemoveFlags, HwResource, HW_NODE_ROOT};
 use tairix_abi::raid_admin::{
     RAID_CONTROL_ENDPOINT, RAID_CONTROL_MAX_REPLY, RAID_CONTROL_MAX_REQUEST,
 };
@@ -54,13 +58,16 @@ use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::sysinfo::BlkHealthTransition;
 use tairix_abi::time::Time64;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, Origin, ORIGIN_WIRE_LEN};
+use tairix_abi::{
+    CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, Origin, ProcId, ORIGIN_WIRE_LEN,
+};
 use tairix_blkclient::{RemoteBlock, RtBlkCall};
 use tairix_caps::CapabilitySet;
 use tairix_drv_storage_raid::{
-    assemble_array, handle_control, read_superblock, Admission, ArrayHealthEvent, ArrayRuntime,
-    Assembled, ComposerAction, ControlAudit, ControlEffects, LiveArrays, MaintenanceStep,
-    MemberRegistry, ServiceError,
+    assemble_array, granted_resource, handle_control, read_superblock, vet_offer, Admission,
+    ArrayHealthEvent, ArrayRuntime, Assembled, ComposerAction, ControlAudit, ControlEffects,
+    LiveArrays, MaintenanceStep, MemberDevice, MemberRegistry, MemberWindow, OfferRefusal,
+    ProbedDevice, ServiceError,
 };
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
@@ -77,8 +84,9 @@ const EXIT_NO_HOST: i32 = 90;
 /// supervision.
 const EXIT_NO_REGISTRY: i32 = 91;
 
-/// Exit code when the composer could not mint one of the two wait-sets it
-/// parks on — without them every wait would have to become a poll.
+/// Exit code when the composer could not mint the two wait-sets it parks on,
+/// or register what they watch — without them every wait would have to become
+/// a poll.
 const EXIT_NO_WAITSET: i32 = 92;
 
 /// Exit code when the composer could not bind its reserved control endpoint.
@@ -165,6 +173,15 @@ const RAID_CONTROL_UNATTESTED: EventId = EventId(4207);
 /// explicit administrative create or add.
 const RAID_CANDIDATE_HELD: EventId = EventId(4208);
 
+/// Diagnostic event id: the agent holding a membership open exited, so the
+/// membership is over and its device leaves any array it was composed into.
+const RAID_AGENT_EXITED: EventId = EventId(4215);
+
+/// Diagnostic event id: a membership that has ended stays held because its
+/// device is still composed into an array that cannot give it up (a stripe);
+/// it is released once that array lets the device go.
+const RAID_MEMBERSHIP_STILL_COMPOSED: EventId = EventId(4216);
+
 /// Outstanding-membership capacity of the reserved rendezvous. Each admitted
 /// member holds its offer call open for the life of its membership, so this
 /// bounds concurrent memberships — a fail-closed kernel memory bound, not a
@@ -206,22 +223,23 @@ const MAINTENANCE_CHUNK_BYTES: usize = 64 * 1024;
 /// never reissued.
 const ARRAY_ENDPOINT_BASE: u64 = 0x0052_4159_0000_0000;
 
+/// The block client the composer drives a member through, holding the loan of
+/// the member's data window.
+type MemberClient = MemberDevice<RemoteBlock<'static, RtBlkCall>>;
+
 /// A registered member, as the composer must reach it again: the block-service
-/// endpoint it offered, the region id of the data window it delegated, and the
-/// address that window is mapped at.
+/// endpoint it offered, the address its data window is mapped at, and the hold
+/// that lends that window to one client at a time.
 ///
-/// Nothing else is kept here — the device's metadata lives once in the
-/// registry's reassembly candidate at the same index. The composer connects a
-/// fresh client from the endpoint and base whenever it needs the device (at
-/// assembly, or to place a returning member), so a failed assembly attempt
-/// never strands a half-open client and a later retry simply reconnects. The
-/// region id is kept so a later offer naming a window a membership already
-/// holds is refused before it is mapped.
-#[derive(Copy, Clone)]
+/// Parallel to the registry's members, which hold the rest of the offer and the
+/// device's metadata. The composer connects a fresh client from the endpoint and
+/// base whenever it needs the device (at assembly, or to place a returning
+/// member), so a failed assembly attempt never strands a half-open client and a
+/// later retry simply reconnects.
 struct Member {
     endpoint: u64,
-    window: u64,
     window_base: usize,
+    window: MemberWindow,
 }
 
 /// The endpoint and data window one array will be served through, bound and
@@ -244,7 +262,7 @@ struct PendingResources {
 /// One live array: its fault-aware runtime and the data window its serve path
 /// stages each transfer through.
 struct LiveArray {
-    runtime: ArrayRuntime<RemoteBlock<'static, RtBlkCall>>,
+    runtime: ArrayRuntime<MemberClient>,
     window: &'static mut [u8],
 }
 
@@ -349,39 +367,71 @@ fn reply_refused(ticket: u64, errno: Errno) {
     let _ = tairix_rt::call_reply(RAID_REGISTRY_ENDPOINT, ticket, &frame);
 }
 
+/// The hardware-tree node the kernel attests the sender of the offer `ticket`
+/// was admitted for, or [`None`] when it names none.
+fn attested_node(ticket: u64) -> Option<HwNode> {
+    let mut bytes = [0u8; HwNode::WIRE_LEN];
+    let len = tairix_rt::call_peer_node(RAID_REGISTRY_ENDPOINT, ticket, &mut bytes).ok()?;
+    if len != bytes.len() {
+        return None;
+    }
+    HwNode::from_bytes(&bytes).ok()
+}
+
+/// What the audit trail records an offer refusal as.
+fn refusal_message(refusal: OfferRefusal) -> &'static str {
+    match refusal {
+        OfferRefusal::NotAMemberNode => "raid: offer is not from the driver of a member node",
+        OfferRefusal::NodeMismatch => "raid: offer claims a node other than its sender's",
+        OfferRefusal::EndpointMismatch => "raid: offer names an endpoint its node does not declare",
+        OfferRefusal::OwnEndpoint => "raid: offer names an endpoint the composer serves itself",
+        OfferRefusal::WindowMismatch => "raid: offer names a window its node does not declare",
+    }
+}
+
 /// Connect a read/write block client over `endpoint`, staging through the
-/// member's already-mapped data window at `window_base`.
+/// member's already-mapped data window at `window_base`, or [`None`] while
+/// another client holds that window or the device does not answer.
 ///
 /// The composer opens every member read/write from the one shared client
 /// definition: it both reads superblocks and, on a degraded start, re-stamps
 /// them.
 fn connect(
+    window: &MemberWindow,
     endpoint: u64,
     window_base: usize,
     member_set: u64,
-) -> Option<RemoteBlock<'static, RtBlkCall>> {
-    // SAFETY: `window_base` addresses a shared region this process mapped at
-    // `BLK_DATA_LEN` bytes when the member was offered, and the mapping lives
-    // for the rest of this process. No two live slices ever alias one window:
-    // a membership whose window id another membership already holds is refused
-    // before it is mapped, so each base belongs to exactly one member, and
-    // that member's device is read by one transient probe that dies inside
-    // `handle_offer` before any later client is connected over it.
-    let window = unsafe { core::slice::from_raw_parts_mut(window_base as *mut u8, BLK_DATA_LEN) };
-    RemoteBlock::connect_read_write(RtBlkCall::new(endpoint, member_set), window).ok()
+) -> Option<MemberClient> {
+    let lease = window.lend()?;
+    // SAFETY: `window_base` maps at least `BLK_DATA_LEN` bytes for this member
+    // alone: an offered window a membership already holds is refused before it
+    // is mapped. `lease` is the window's only loan, so this is the only slice
+    // over it; the device drops the slice before returning the loan, and
+    // `release_membership` unmaps only an unlent window. The kernel never
+    // unmaps it under this process: a removed node's region is retired in
+    // place, and one it must withdraw takes the process with it.
+    let slice = unsafe { core::slice::from_raw_parts_mut(window_base as *mut u8, BLK_DATA_LEN) };
+    let device =
+        RemoteBlock::connect_read_write(RtBlkCall::new(endpoint, member_set), slice).ok()?;
+    Some(MemberDevice::new(device, lease))
 }
 
 /// Reconnect the block client for a registered member, for assembly or for
 /// placing it into a live array.
-fn connect_member(member: &Member, member_set: u64) -> Option<RemoteBlock<'static, RtBlkCall>> {
-    connect(member.endpoint, member.window_base, member_set)
+fn connect_member(member: &Member, member_set: u64) -> Option<MemberClient> {
+    connect(
+        &member.window,
+        member.endpoint,
+        member.window_base,
+        member_set,
+    )
 }
 
 /// What reading an offered device's first block found.
 enum Probed {
     /// The device carries valid array metadata, so it is a member of the array
     /// that metadata names.
-    Member(ArraySuperblock, BlkDeviceClass),
+    Member(ArraySuperblock, ProbedDevice),
     /// The device answered and its first block holds no array record at all, so
     /// it is a blank candidate: held, part of no array, and reachable only by an
     /// explicit administrative create or add.
@@ -390,13 +440,13 @@ enum Probed {
     /// whose record is merely corrupt must never be mistaken for an empty disk a
     /// create may overwrite, so only the complete absence of a record counts as
     /// blank.
-    Blank(BlkDeviceClass),
+    Blank(ProbedDevice),
     /// The device did not answer, or answered with a record that could not be
     /// trusted, so nothing about it can be relied on.
     Unusable,
 }
 
-/// Read an offered device's own array metadata and its declared device class
+/// Read an offered device's own array metadata, declared class, and geometry
 /// over a transient client that dies with this call.
 ///
 /// Nothing the offering agent said about the device is believed: which array it
@@ -404,25 +454,37 @@ enum Probed {
 /// here. The same is true of what *kind* of device it is: an agent matched to a
 /// candidate node claims the disk is blank, and this is where that claim is
 /// checked against the disk itself.
-fn probe_member(endpoint: u64, window_base: usize, member_set: u64) -> Probed {
-    let Some(mut device) = connect(endpoint, window_base, member_set) else {
+fn probe_member(
+    window: &MemberWindow,
+    endpoint: u64,
+    window_base: usize,
+    member_set: u64,
+) -> Probed {
+    let Some(mut device) = connect(window, endpoint, window_base, member_set) else {
         return Probed::Unusable;
     };
-    let class = device.device_class();
+    let Ok(geometry) = device.geometry() else {
+        return Probed::Unusable;
+    };
+    let probed = ProbedDevice {
+        class: device.device_class(),
+        geometry,
+    };
     match read_superblock(&mut device) {
-        Ok(superblock) => Probed::Member(superblock, class),
-        Err(ServiceError::Superblock(SuperblockError::BadMagic)) => Probed::Blank(class),
+        Ok(superblock) => Probed::Member(superblock, probed),
+        Err(ServiceError::Superblock(SuperblockError::BadMagic)) => Probed::Blank(probed),
         Err(_) => Probed::Unusable,
     }
 }
 
-/// Map an offered data window, returning its mapped base address, or [`None`]
-/// when it cannot be mapped or is too small for the block data protocol. A
-/// window that maps but is too short is released again, so a stream of
-/// undersized offers cannot fill the composer's address space.
-fn map_offer_window(window_id: u64) -> Option<usize> {
+/// Map an offered data window by the composer's own grant handle for it,
+/// returning its mapped base address, or [`None`] when it cannot be mapped or
+/// is too small for the block data protocol. A window that maps but is too
+/// short is released again, so a stream of undersized offers cannot fill the
+/// composer's address space.
+fn map_offer_window(window_grant: u64) -> Option<usize> {
     let mut len = 0u64;
-    let base = tairix_rt::shm_map(window_id, &mut len);
+    let base = tairix_rt::shm_map(window_grant, &mut len);
     let base = usize::try_from(base).ok()?;
     if len < BLK_DATA_LEN as u64 {
         unmap_window(base);
@@ -437,12 +499,19 @@ fn unmap_window(base: usize) {
     let _ = tairix_rt::shm_unmap(base as u64, BLK_DATA_LEN);
 }
 
-/// Bind the reserved rendezvous the member agents offer to. Grant-restricted
-/// receive is unnecessary — the composer owns and drains it — but the id is
+/// Bind the reserved rendezvous the member agents offer to. The id is
 /// reserved, so binding it needs `CAP_IPC_BIND_PRIVILEGED`, which stops a
 /// squatter from claiming it first and harvesting members' transports.
+///
+/// Sending requires `CAP_SHM`: every genuine offer delegates a window, which
+/// needs it, so a task without it could only ever post a forgery. That only
+/// narrows who may queue an offer; each offer is still vetted against the
+/// node its sender was admitted for. `CAP_IPC_ENDPOINT` is deliberately not
+/// required, because naming it here would restrict sending to holders of a
+/// grant for this endpoint, which no agent has.
 fn create_registry_endpoint() -> bool {
-    let send_caps = CapabilitySet::empty();
+    let mut send_caps = CapabilitySet::empty();
+    send_caps.insert(CapabilityId::SHM);
     let recv_caps = CapabilitySet::empty();
     tairix_rt::call_create(
         RAID_REGISTRY_ENDPOINT,
@@ -522,7 +591,7 @@ fn build_array_node(endpoint: u64, window_id: u64) -> Option<HwNode> {
 struct Live<'a>(&'a mut [LiveArray]);
 
 impl LiveArrays for Live<'_> {
-    type Device = RemoteBlock<'static, RtBlkCall>;
+    type Device = MemberClient;
 
     fn count(&self) -> usize {
         self.0.len()
@@ -539,14 +608,15 @@ impl LiveArrays for Live<'_> {
     }
 }
 
-/// Read the kernel-attested identity of the caller holding `ticket`.
+/// Read the kernel-attested identity of the caller holding `ticket` on
+/// `endpoint`.
 ///
 /// Nothing in the request frame is consulted. The authority an operation is
 /// judged against comes from the kernel's own record of who called, which a
 /// caller can neither forge nor inflate.
-fn peer_origin(ticket: u64) -> Option<Origin> {
+fn peer_origin(endpoint: u64, ticket: u64) -> Option<Origin> {
     let mut bytes = [0u8; ORIGIN_WIRE_LEN];
-    let len = tairix_rt::call_peer_origin(RAID_CONTROL_ENDPOINT, ticket, &mut bytes).ok()?;
+    let len = tairix_rt::call_peer_origin(endpoint, ticket, &mut bytes).ok()?;
     if len != bytes.len() {
         return None;
     }
@@ -676,6 +746,89 @@ impl Composer {
         }
     }
 
+    /// The kernel-attested agent behind the offer `ticket`, once the kernel
+    /// also attests that the offer names exactly the transport of the member
+    /// node that agent was admitted for; otherwise the status to answer it
+    /// with.
+    ///
+    /// The membership is the agent's own call, so it lasts exactly as long as
+    /// that process, and only the kernel's record says which process it is.
+    fn authorise(&self, ticket: u64, offer: &MemberOffer) -> Result<ProcId, Errno> {
+        let Some(agent) =
+            peer_origin(RAID_REGISTRY_ENDPOINT, ticket).map(|origin| origin.proc_id())
+        else {
+            log_hex_event(
+                RAID_MEMBER_REFUSED,
+                Level::Warn,
+                "raid: offer could not be attributed to a live agent",
+                "endpoint_hex",
+                offer.endpoint,
+            );
+            return Err(Errno::NotFound);
+        };
+        let window = self.granted_window(offer.window_grant)?;
+        let node = attested_node(ticket);
+        vet_offer(offer, node.as_ref(), window, |endpoint| {
+            self.owns_endpoint(endpoint)
+        })
+        .map_err(|refusal| {
+            log_hex_event(
+                RAID_MEMBER_REFUSED,
+                Level::Warn,
+                refusal_message(refusal),
+                "endpoint_hex",
+                offer.endpoint,
+            );
+            Errno::PermissionDenied
+        })?;
+        Ok(agent)
+    }
+
+    /// Whether the composer bound `endpoint` itself: the rendezvous, the
+    /// control endpoint, or any array endpoint it has bound, which a stopped
+    /// array's id stays.
+    fn owns_endpoint(&self, endpoint: u64) -> bool {
+        endpoint == RAID_REGISTRY_ENDPOINT
+            || endpoint == RAID_CONTROL_ENDPOINT
+            || endpoint
+                .checked_sub(ARRAY_ENDPOINT_BASE)
+                .is_some_and(|index| index < u64::from(self.endpoint_counter))
+    }
+
+    /// The resource the composer's own grant `handle` names, read from the
+    /// kernel's record of its grants, or [`None`] when it names none.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when no buffer can hold the whole table; the
+    /// offer is deferred over that rather than refused.
+    fn granted_window(&self, handle: u64) -> Result<Option<HwResource>, Errno> {
+        // Two grants per membership and per array, plus the matched node's: a
+        // first guess the buffer grows past, never a ceiling.
+        let mut records = 2 * (self.members.len() + self.arrays.len()) + 8;
+        loop {
+            let len = records
+                .checked_mul(GrantedResource::WIRE_LEN)
+                .ok_or(Errno::OutOfMemory)?;
+            let mut table = Vec::new();
+            table
+                .try_reserve_exact(len)
+                .map_err(|_| Errno::OutOfMemory)?;
+            table.resize(len, 0);
+            let written = tairix_rt::resource_grants(&mut table);
+            match usize::try_from(written) {
+                Ok(written) => {
+                    let records = table.get(..written).unwrap_or_default();
+                    return Ok(granted_resource(records, handle));
+                }
+                Err(_) if Errno::from_syscall(written) == Errno::BufferTooSmall => {
+                    records = records.checked_mul(2).ok_or(Errno::OutOfMemory)?;
+                }
+                Err(_) => return Ok(None),
+            }
+        }
+    }
+
     /// The endpoint and window the next array will be served through: the pair
     /// a previous unfinished publish left behind, or a freshly bound and
     /// created one.
@@ -734,68 +887,105 @@ impl Composer {
                 return;
             }
         };
+        // Authority before state: nothing the offer names is mapped or reached
+        // until the kernel attests it is the sender's own member node's
+        // transport.
+        let agent = match self.authorise(ticket, &offer) {
+            Ok(agent) => agent,
+            Err(errno) => {
+                reply_refused(ticket, errno);
+                return;
+            }
+        };
         // A window another membership already holds is refused before it is
         // mapped: two members staging their transfers over one region would
         // corrupt each other's data, and mapping it a second time would make
-        // two exclusive slices over the same bytes.
-        if self.members.iter().any(|held| held.window == offer.window) {
-            reply_refused(ticket, Errno::AlreadyExists);
+        // two exclusive slices over the same bytes. It is deferred rather
+        // than refused, because the holder may be a membership about to end.
+        if self.registry.holds_window(offer.window_grant) {
+            reply_refused(ticket, Errno::Busy);
             log_hex_event(
                 RAID_MEMBER_REFUSED,
                 Level::Warn,
                 "raid: offered window is already held by another membership",
-                "window_hex",
-                offer.window,
+                "window_grant_hex",
+                offer.window_grant,
             );
             return;
         }
-        let Some(window_base) = map_offer_window(offer.window) else {
+        let Some(window_base) = map_offer_window(offer.window_grant) else {
             reply_refused(ticket, Errno::NotFound);
             log_hex_event(
                 RAID_MEMBER_REFUSED,
                 Level::Warn,
                 "raid: offered window could not be mapped",
-                "window_hex",
-                offer.window,
+                "window_grant_hex",
+                offer.window_grant,
             );
             return;
         };
-        let (admission, admitted) = match probe_member(offer.endpoint, window_base, self.member_set)
-        {
-            Probed::Member(superblock, class) => (
-                self.registry
-                    .admit(ticket, offer, class, superblock, now_ns),
-                (
-                    RAID_MEMBER_ADMITTED,
-                    "raid: member admitted and membership held open",
-                ),
-            ),
-            Probed::Blank(class) => (
-                self.registry.admit_candidate(ticket, offer, class),
-                (
-                    RAID_CANDIDATE_HELD,
-                    "raid: blank device held as an unaffiliated array candidate",
-                ),
-            ),
-            Probed::Unusable => {
-                unmap_window(window_base);
-                reply_refused(ticket, Errno::BadMagic);
-                log_hex_event(
-                    RAID_MEMBER_REFUSED,
-                    Level::Warn,
-                    "raid: offered device did not answer with metadata that can be trusted",
-                    "endpoint_hex",
-                    offer.endpoint,
-                );
-                return;
-            }
+        let member = Member {
+            endpoint: offer.endpoint,
+            window_base,
+            window: MemberWindow::new(),
         };
-        self.note_admission(admission, ticket, offer, window_base, admitted);
+        let (superblock, device, admitted) =
+            match probe_member(&member.window, offer.endpoint, window_base, self.member_set) {
+                Probed::Member(superblock, device) => (
+                    Some(superblock),
+                    device,
+                    (
+                        RAID_MEMBER_ADMITTED,
+                        "raid: member admitted and membership held open",
+                    ),
+                ),
+                Probed::Blank(device) => (
+                    None,
+                    device,
+                    (
+                        RAID_CANDIDATE_HELD,
+                        "raid: blank device held as an unaffiliated array candidate",
+                    ),
+                ),
+                Probed::Unusable => {
+                    unmap_window(window_base);
+                    reply_refused(ticket, Errno::BadMagic);
+                    log_hex_event(
+                        RAID_MEMBER_REFUSED,
+                        Level::Warn,
+                        "raid: offered device did not answer with metadata that can be trusted",
+                        "endpoint_hex",
+                        offer.endpoint,
+                    );
+                    return;
+                }
+            };
+        // Watched before it is registered, so a membership is never held for
+        // an agent whose exit the composer would not hear of.
+        if let Err(errno) = tairix_rt::peer_watch(agent) {
+            unmap_window(window_base);
+            reply_refused(ticket, errno);
+            log_hex_event(
+                RAID_MEMBER_REFUSED,
+                Level::Warn,
+                "raid: offering agent could not be watched; refusing",
+                "errno_hex",
+                errno as u64,
+            );
+            return;
+        }
+        let admission = match superblock {
+            Some(superblock) => self
+                .registry
+                .admit(ticket, agent, offer, device, superblock, now_ns),
+            None => self.registry.admit_candidate(ticket, agent, offer, device),
+        };
+        self.note_admission(admission, ticket, agent, member, admitted);
     }
 
     /// Record the registry's verdict on an offered device: hold its transport
-    /// when it was registered, and give back the window and the membership when
-    /// it was not.
+    /// when it was registered, and give back the window, the watch on its
+    /// agent, and the membership when it was not.
     ///
     /// `admitted` is the record to emit when the device was registered — a
     /// member of an array, or a blank candidate — which is the one thing that
@@ -804,11 +994,12 @@ impl Composer {
         &mut self,
         admission: Admission,
         ticket: u64,
-        offer: MemberOffer,
-        window_base: usize,
+        agent: ProcId,
+        member: Member,
         admitted: (EventId, &'static str),
     ) {
-        match admission {
+        let endpoint = member.endpoint;
+        let refusal = match admission {
             // The registry's index is the reassembly tag the composer will be
             // asked to supply a device for, and this table is what resolves
             // that tag to a physical disk. Checking that the two agree rather
@@ -816,21 +1007,15 @@ impl Composer {
             // silently hand one member's slot another member's device, so a
             // rebuild would overwrite a healthy disk with a sibling's data.
             Admission::Registered { index } if index == self.members.len() => {
-                self.members.push(Member {
-                    endpoint: offer.endpoint,
-                    window: offer.window,
-                    window_base,
-                });
+                self.members.push(member);
                 let (id, message) = admitted;
-                log_hex_event(id, Level::Info, message, "endpoint_hex", offer.endpoint);
+                log_hex_event(id, Level::Info, message, "endpoint_hex", endpoint);
+                return;
             }
             Admission::Registered { index } => {
-                // Unreachable while the composer never releases a member, and
-                // fatal to data integrity if it ever became reachable, so the
-                // membership is refused and the disk left untouched.
+                // Fatal to data integrity if the two tables ever fell out of
+                // step, so the membership is refused and the disk untouched.
                 self.registry.release(index);
-                unmap_window(window_base);
-                reply_refused(ticket, Errno::OutOfRange);
                 log_hex_event(
                     RAID_MEMBER_REFUSED,
                     Level::Error,
@@ -838,16 +1023,16 @@ impl Composer {
                     "index_hex",
                     index as u64,
                 );
+                Errno::OutOfRange
             }
-            Admission::Duplicate => {
-                unmap_window(window_base);
-                reply_refused(ticket, Errno::AlreadyExists);
-            }
-            Admission::OutOfMemory => {
-                unmap_window(window_base);
-                reply_refused(ticket, Errno::OutOfMemory);
-            }
-        }
+            // A membership naming this endpoint has yet to end, or there was
+            // no room: neither is a verdict on the device, so it is deferred.
+            Admission::Duplicate => Errno::Busy,
+            Admission::OutOfMemory => Errno::OutOfMemory,
+        };
+        let _ = tairix_rt::peer_unwatch(agent);
+        unmap_window(member.window_base);
+        reply_refused(ticket, refusal);
     }
 
     /// Drain every pending administration or status request, without blocking.
@@ -869,7 +1054,7 @@ impl Composer {
     /// kernel-attested authority, carry out what the decision requires of the
     /// transports the composer owns, record it, and answer the caller.
     fn serve_control(&mut self, ticket: u64, frame: &[u8], now_ns: u64, now_wall: Time64) {
-        let Some(origin) = peer_origin(ticket) else {
+        let Some(origin) = peer_origin(RAID_CONTROL_ENDPOINT, ticket) else {
             // The kernel attests every caller, so a call it will not name is one
             // already gone — its ticket cancelled or answered. Nothing is read,
             // written, or answered on its behalf.
@@ -935,20 +1120,65 @@ impl Composer {
         }
     }
 
-    /// End the membership of the registry member at `index`: give back the
-    /// window this process mapped for it and answer its outstanding offer, which
-    /// is what tells its agent the device is free to be offered again.
+    /// End the membership of the registry member at `index`: stop watching its
+    /// agent, give back the window this process mapped for it, and answer its
+    /// outstanding offer, which is what tells its agent the device is free to be
+    /// offered again.
+    ///
+    /// A window still lent to a client is never unmapped: the membership is
+    /// kept until the array holding that client lets the device go.
     fn release_membership(&mut self, index: usize) {
-        if index >= self.members.len() {
+        let Some(member) = self.members.get(index) else {
+            return;
+        };
+        if member.window.is_lent() {
+            log_hex_event(
+                RAID_MEMBERSHIP_STILL_COMPOSED,
+                Level::Warn,
+                "raid: membership kept until its array lets the device go",
+                "endpoint_hex",
+                member.endpoint,
+            );
             return;
         }
         let Some(held) = self.registry.release(index) else {
             return;
         };
         let member = self.members.remove(index);
+        let _ = tairix_rt::peer_unwatch(held.agent());
         unmap_window(member.window_base);
         let frame = encode_status_reply(Ok(()));
         let _ = tairix_rt::call_reply(RAID_REGISTRY_ENDPOINT, held.membership(), &frame);
+    }
+
+    /// End the membership of every agent that has exited, taking its device out
+    /// of any array it was composed into first.
+    ///
+    /// Run before anything else in a turn, so no client of a membership whose
+    /// agent is gone is used again, and so a re-enumerated disk's fresh offer
+    /// meets its old membership already ended rather than taken as a duplicate.
+    fn reap_exited_agents(&mut self, now_wall: Time64) {
+        while let Ok(agent) = tairix_rt::peer_exit_take() {
+            let Some(index) = self.registry.index_of_agent(agent) else {
+                continue;
+            };
+            let Some(member) = self.members.get(index) else {
+                continue;
+            };
+            member.window.depart();
+            log_hex_event(
+                RAID_AGENT_EXITED,
+                Level::Warn,
+                "raid: a member's agent exited; its membership is over",
+                "endpoint_hex",
+                member.endpoint,
+            );
+            for live in &mut self.arrays {
+                live.runtime
+                    .retire_departed(now_wall, |device| device.departed());
+            }
+            self.release_membership(index);
+        }
     }
 
     /// Tear down the serve state of the array at `position`, whose published
@@ -1054,7 +1284,7 @@ impl Composer {
         array_uuid: [u8; 16],
         now_wall: Time64,
         now_ns: u64,
-    ) -> Option<Assembled<RemoteBlock<'static, RtBlkCall>>> {
+    ) -> Option<Assembled<MemberClient>> {
         let Some(identity) = self.registry.identity(array_uuid) else {
             self.registry.note_assembly_failed(array_uuid, now_ns);
             return None;
@@ -1087,7 +1317,7 @@ impl Composer {
     /// publish that cannot finish costs nothing that cannot be retried.
     fn publish(
         &mut self,
-        assembled: Assembled<RemoteBlock<'static, RtBlkCall>>,
+        assembled: Assembled<MemberClient>,
         resources: PendingResources,
         node: &HwNode,
         array_uuid: [u8; 16],
@@ -1095,24 +1325,46 @@ impl Composer {
     ) {
         // The fields are copies; the pair itself is what a failure below hands
         // back, so the next attempt reuses the same bound endpoint and region.
+        // That is safe only because nothing below withdraws a published node:
+        // the node is emitted as the runtime's last act, and a window whose node
+        // was withdrawn is retired and could never be conferred again.
         let PendingResources {
             endpoint,
             window_id,
             window_base,
         } = resources;
-        let Ok(node_id) = u32::try_from(tairix_rt::hw_emit_node(node)) else {
-            self.pending = Some(resources);
-            self.registry.note_assembly_failed(array_uuid, now_ns);
-            log_hex_event(
-                RAID_ARRAY_FAILED,
-                Level::Warn,
-                "raid: array node could not be published; backing off",
-                "endpoint_hex",
-                endpoint,
-            );
-            return;
+        let degraded = assembled.degraded;
+        let resumed = assembled.resume.progress.is_active();
+        let built = ArrayRuntime::new(
+            assembled.identity,
+            assembled.array,
+            endpoint,
+            window_id,
+            assembled.resume,
+            now_ns,
+            || u32::try_from(tairix_rt::hw_emit_node(node)).ok(),
+        );
+        let runtime = match built {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                self.pending = Some(resources);
+                self.registry.note_assembly_failed(array_uuid, now_ns);
+                let message = if matches!(error, ServiceError::Unpublished) {
+                    "raid: array node could not be published; backing off"
+                } else {
+                    "raid: array runtime could not be built; backing off"
+                };
+                log_hex_event(
+                    RAID_ARRAY_FAILED,
+                    Level::Warn,
+                    message,
+                    "endpoint_hex",
+                    endpoint,
+                );
+                return;
+            }
         };
-        if assembled.degraded {
+        if degraded {
             log_hex_event(
                 RAID_ARRAY_DEGRADED,
                 Level::Warn,
@@ -1121,31 +1373,6 @@ impl Composer {
                 endpoint,
             );
         }
-        let resumed = assembled.resume.progress.is_active();
-        let Ok(runtime) = ArrayRuntime::new(
-            assembled.identity,
-            assembled.array,
-            endpoint,
-            window_id,
-            node_id,
-            assembled.resume,
-            now_ns,
-        ) else {
-            // The node is already published but nothing will serve it, so
-            // withdraw it rather than leave the volume manager driving an
-            // endpoint with no server behind it.
-            let _ = tairix_rt::hw_remove_node(node_id, tairix_abi::HwRemoveFlags::empty());
-            self.pending = Some(resources);
-            self.registry.note_assembly_failed(array_uuid, now_ns);
-            log_hex_event(
-                RAID_ARRAY_FAILED,
-                Level::Warn,
-                "raid: array runtime could not be built; backing off",
-                "endpoint_hex",
-                endpoint,
-            );
-            return;
-        };
         if resumed {
             log_hex_event(
                 RAID_ARRAY_RESUMED,
@@ -1157,10 +1384,10 @@ impl Composer {
         }
         self.registry.note_composed(array_uuid, &assembled.slots);
         // SAFETY: `window_base` addresses the `BLK_DATA_LEN` cacheable RW bytes
-        // `create_array_window` minted and mapped for this array, and the
-        // mapping lives for the rest of this process. The region is reached
-        // only through `pending`/`arrays`, each of which holds it at most once,
-        // so this is the only slice over it.
+        // `create_array_window` minted and mapped for this array, and it stays
+        // mapped until `retire_array` has dropped this slice with its array.
+        // The region is reached only through `pending`/`arrays`, each of which
+        // holds it at most once, so this is the only slice over it.
         let window =
             unsafe { core::slice::from_raw_parts_mut(window_base as *mut u8, BLK_DATA_LEN) };
         self.arrays.push(LiveArray { runtime, window });
@@ -1398,6 +1625,11 @@ fn main() -> i32 {
             return EXIT_NO_WAITSET;
         }
     }
+    // Each membership's agent is watched, and this one feed wakes the park when
+    // any of them exits, so a membership never outlives its agent.
+    if tairix_rt::waitset_ctl(set, WaitSetOp::Add, WaitSourceKind::PeerExit, 0, 0) < 0 {
+        return EXIT_NO_WAITSET;
+    }
     log_hex_event(
         RAID_COMPOSER_READY,
         Level::Info,
@@ -1413,6 +1645,7 @@ fn main() -> i32 {
             .map(|reading| reading.time())
             .unwrap_or_default();
 
+        composer.reap_exited_agents(now_wall);
         composer.drain_offers(now_ns);
         composer.drain_control(now_ns, now_wall);
         let wait_deadline_ns = composer.drive_actions(now_ns, now_wall);

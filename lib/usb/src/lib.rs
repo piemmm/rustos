@@ -5,10 +5,10 @@
 //! ([`regs`]), the TRB vocabulary ([`trb`]), the ring state machines
 //! ([`ring`]), the controller bring-up sequence ([`Xhci::open`] — `xHCI`
 //! 1.2 §4.2: halt, reset, wait ready), and the single-device enumeration
-//! engine ([`device::UsbDevice`]). It depends only on the stable ABI
-//! types in `lib/abi`, so it builds for every Tier-1 target and is
-//! identical across architectures — the USB protocol is the same on
-//! `aarch64`, `x86_64`, and `riscv64`.
+//! engine ([`device::UsbDevice`]). It depends only on other `lib/*`
+//! crates, so it builds for every Tier-1 target and is identical across
+//! architectures — the USB protocol is the same on `aarch64`, `x86_64`, and
+//! `riscv64`.
 //!
 //! It is the USB analogue of `lib/virtio`: the protocol lives here so a
 //! concrete host-controller *driver* (`drivers/bus/usb`, which adds the
@@ -99,8 +99,8 @@ pub const XHCI_BAR_INDEX: u8 = 0;
 /// copy in each.
 pub const XHCI_COMPATIBLE: &[u8] = b"usb,xhci";
 
-/// Highest doorbell target value (: endpoint IDs 1..=31 for device
-/// doorbells; 0 is the command-ring target on doorbell 0).
+/// Highest doorbell target value: endpoint IDs 1..=31 for device doorbells;
+/// 0 is the command-ring target on doorbell 0.
 const DOORBELL_TARGET_MAX: u32 = 31;
 
 /// The `xHCI` register-access seam.

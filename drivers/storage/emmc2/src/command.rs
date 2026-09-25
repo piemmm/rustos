@@ -1,4 +1,4 @@
-//! SD-protocol command set, response shapes, and CSD decoding.
+//! SD-protocol command set, response shapes, and CSD and card-status decoding.
 //!
 //! These types describe the SD commands the driver issues and the
 //! response register layout the SDHCI controller exposes. The block
@@ -77,6 +77,9 @@ pub struct SdCommand {
     /// `true` when the command transfers data on the DAT lines (the
     /// direction is carried by the `CMDTM` transfer-mode half).
     pub transfers_data: bool,
+    /// `true` when the controller issues the command as an abort (the
+    /// `CMDTM` command type), stopping the transfer in progress.
+    pub aborts: bool,
 }
 
 impl SdCommand {
@@ -85,6 +88,7 @@ impl SdCommand {
             index,
             response,
             transfers_data: false,
+            aborts: false,
         }
     }
 
@@ -93,6 +97,7 @@ impl SdCommand {
             index,
             response,
             transfers_data: true,
+            aborts: false,
         }
     }
 
@@ -102,6 +107,9 @@ impl SdCommand {
         let mut word = ((self.index as u32) << regs::CMD_INDEX_SHIFT) | self.response.cmd_flags();
         if self.transfers_data {
             word |= regs::CMD_IS_DATA;
+        }
+        if self.aborts {
+            word |= regs::CMD_TYPE_ABORT;
         }
         word
     }
@@ -119,6 +127,17 @@ pub const SELECT_CARD: SdCommand = SdCommand::new(7, ResponseKind::ShortBusy);
 pub const SEND_IF_COND: SdCommand = SdCommand::new(8, ResponseKind::Short);
 /// `CMD9` — `SEND_CSD`: the addressed card returns its CSD (R2).
 pub const SEND_CSD: SdCommand = SdCommand::new(9, ResponseKind::Long);
+/// `CMD12` — `STOP_TRANSMISSION`, issued as an abort (R1b): ends a failed
+/// multi-block transfer on the card.
+pub const STOP_TRANSMISSION: SdCommand = SdCommand {
+    aborts: true,
+    ..SdCommand::new(12, ResponseKind::ShortBusy)
+};
+/// `CMD13` — `SEND_STATUS`: the addressed card returns its card status (R1).
+pub const SEND_STATUS: SdCommand = SdCommand::new(13, ResponseKind::Short);
+/// [`SEND_STATUS`] issued as R1b, so the controller raises transfer-complete
+/// only once a programming card releases its busy on `DAT0`.
+pub const SEND_STATUS_BUSY: SdCommand = SdCommand::new(13, ResponseKind::ShortBusy);
 /// `CMD16` — `SET_BLOCKLEN`: set the block length (R1).
 pub const SET_BLOCKLEN: SdCommand = SdCommand::new(16, ResponseKind::Short);
 /// `CMD17` — `READ_SINGLE_BLOCK` (R1, reads data).
@@ -196,6 +215,52 @@ pub fn geometry_from_csd(resp: [u32; 4]) -> Result<BlockGeometry, DriverError> {
     })
 }
 
+/// Bit offset of the 4-bit card-status `CURRENT_STATE` field (`[12:9]`).
+pub(crate) const STATE_SHIFT: u32 = 9;
+/// `CURRENT_STATE` `tran`: the card takes data commands.
+pub(crate) const STATE_TRAN: u32 = 4;
+/// `CURRENT_STATE` `data`: the card is sending a read.
+pub(crate) const STATE_DATA: u32 = 5;
+/// `CURRENT_STATE` `rcv`: the card is receiving a write.
+pub(crate) const STATE_RCV: u32 = 6;
+/// `CURRENT_STATE` `prg`: the card is programming, busy on `DAT0`.
+pub(crate) const STATE_PRG: u32 = 7;
+/// Card-status bit 8: the card signals no busy.
+pub(crate) const READY_FOR_DATA: u32 = 1 << 8;
+/// Card-status bit 25: the card is password-locked.
+const CARD_IS_LOCKED: u32 = 1 << 25;
+
+/// What a card's [`SEND_STATUS`] answer requires before its next data command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CardCondition {
+    /// In `tran` and ready for data: a data command may be issued.
+    Ready,
+    /// In `data` or `rcv`: its transfer is still open and must be aborted.
+    Transferring,
+    /// In `prg`, or in `tran` but not yet ready for data: its busy must end.
+    Busy,
+    /// Locked, or in a state no data command is legal in.
+    Unusable,
+}
+
+/// Decode an R1 card status (SD Physical Layer Specification, "Card Status").
+///
+/// A locked card refuses every data command, whatever its state. Every error
+/// bit reports an earlier command — the failed transfer, or an abort sent to a
+/// card that had already finished it — and is cleared once read, so none bars
+/// the next.
+pub(crate) fn card_condition(status: u32) -> CardCondition {
+    if status & CARD_IS_LOCKED != 0 {
+        return CardCondition::Unusable;
+    }
+    match (status >> STATE_SHIFT) & 0xF {
+        STATE_TRAN if status & READY_FOR_DATA != 0 => CardCondition::Ready,
+        STATE_TRAN | STATE_PRG => CardCondition::Busy,
+        STATE_DATA | STATE_RCV => CardCondition::Transferring,
+        _ => CardCondition::Unusable,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +279,86 @@ mod tests {
         let idle = GO_IDLE_STATE.cmd_word();
         assert_eq!(idle & regs::CMD_IS_DATA, 0);
         assert_eq!((idle >> regs::CMD_RESP_TYPE_SHIFT) & 0b11, regs::RESP_NONE);
+    }
+
+    #[test]
+    fn stop_transmission_is_an_r1b_abort_and_nothing_else_is() {
+        let stop = STOP_TRANSMISSION.cmd_word();
+        assert_eq!((stop >> regs::CMD_INDEX_SHIFT) & 0x3F, 12);
+        assert_eq!(stop & regs::CMD_TYPE_ABORT, regs::CMD_TYPE_ABORT);
+        assert_eq!(
+            (stop >> regs::CMD_RESP_TYPE_SHIFT) & 0b11,
+            regs::RESP_48_BUSY
+        );
+        assert_eq!(stop & regs::CMD_IS_DATA, 0);
+
+        for normal in [GO_IDLE_STATE, SELECT_CARD, READ_MULTIPLE_BLOCK, WRITE_BLOCK] {
+            assert_eq!(normal.cmd_word() & regs::CMD_TYPE_ABORT, 0);
+        }
+    }
+
+    #[test]
+    fn send_status_is_a_checked_r1_command_and_its_busy_form_is_r1b() {
+        let checks = regs::CMD_CRCCHK_EN | regs::CMD_IXCHK_EN;
+        for (command, response) in [
+            (SEND_STATUS, regs::RESP_48),
+            (SEND_STATUS_BUSY, regs::RESP_48_BUSY),
+        ] {
+            let word = command.cmd_word();
+            assert_eq!((word >> regs::CMD_INDEX_SHIFT) & 0x3F, 13);
+            assert_eq!((word >> regs::CMD_RESP_TYPE_SHIFT) & 0b11, response);
+            assert_eq!(word & checks, checks);
+            assert_eq!(word & (regs::CMD_IS_DATA | regs::CMD_TYPE_ABORT), 0);
+        }
+    }
+
+    /// A card status in `state`, ready for data or not, at the bit positions
+    /// the SD Physical Layer Specification's "Card Status" table gives.
+    fn card_status(state: u32, ready: bool) -> u32 {
+        (state << 9) | (u32::from(ready) << 8)
+    }
+
+    #[test]
+    fn card_status_decodes_what_the_next_data_command_waits_on() {
+        assert_eq!(card_condition(card_status(4, true)), CardCondition::Ready);
+        assert_eq!(card_condition(card_status(4, false)), CardCondition::Busy);
+        assert_eq!(card_condition(card_status(7, false)), CardCondition::Busy);
+        assert_eq!(
+            card_condition(card_status(5, true)),
+            CardCondition::Transferring
+        );
+        assert_eq!(
+            card_condition(card_status(6, true)),
+            CardCondition::Transferring
+        );
+        // idle, ready, ident, stby, dis, the reserved values and I/O mode.
+        for state in [0, 1, 2, 3, 8, 9, 14, 15] {
+            assert_eq!(
+                card_condition(card_status(state, true)),
+                CardCondition::Unusable,
+                "state {state}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_locked_card_is_unusable_in_every_state() {
+        for state in 0..16 {
+            assert_eq!(
+                card_condition(card_status(state, true) | (1 << 25)),
+                CardCondition::Unusable,
+                "state {state}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ready_card_in_tran_is_ready_whatever_else_its_status_reports() {
+        let others = !((0xF << 9) | (1 << 8) | (1 << 25));
+        assert_eq!(
+            card_condition(card_status(4, true) | others),
+            CardCondition::Ready
+        );
     }
 
     #[test]

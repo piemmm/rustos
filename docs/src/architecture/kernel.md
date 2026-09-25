@@ -365,14 +365,20 @@ analogue of Linux's `note_interrupt` spurious-IRQ disable, adapted to the
 user-space IRQ model, and is what turns the "usb_mouse / xhci pegged at 100%
 CPU" storm into a bounded, logged, fail-closed event.
 
-`DMA_QUARANTINED` and `DMA_QUARANTINE_RELEASED` bracket a dead driver's DMA
-memory (`kernel/core::dmaquarantine`). The first is recorded when a driver
-ends still holding carves its device may be mastering, naming the `node`, the
-driver's admission `generation`, and the `bytes` its node's quarantine now
-holds; the second when memory leaves the quarantine, with `cause=reset` (a
-later driver declared its device reset through `dma_quiesced`) or
-`cause=removed` (a surprise removal retired the node). The mechanism and its
-ordering rule are in [the memory reference](memory.md) and
+`DMA_QUARANTINED` and `DMA_QUARANTINE_RELEASED` record a dead driver's DMA
+memory entering and leaving the quarantine (`kernel/core::dmaquarantine`). The
+first is recorded when a driver ends still holding DMA memory its device may
+be mastering, naming the `node`, the driver's admission `generation`, and the
+`bytes` it leaves — its own carves still live, plus the DMA shared regions it
+carved and still maps. The second is recorded with `cause=reset` at every
+`dma_quiesced` a later driver of the node makes, even one that freed nothing,
+and with `cause=removed` for each surprise-removed node that freed something;
+its `bytes` are those returned to the allocator, never a block that stayed
+allocated. The two do not pair one for one: memory surrendered after its node
+was already released or retired is freed on arrival with no record of its
+own, and memory an orderly removal leaves is released only by a reset by a
+driver of that node, which in practice never comes. The mechanism and
+its ordering rule are in [the memory reference](memory.md) and
 [the syscall reference](syscalls.md).
 
 These five records are the first-class CPU-lockup watchdog

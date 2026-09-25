@@ -6,7 +6,7 @@ use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use tairix_virtio::{ChainView, DmaHost, MockHost, MockTransport};
+use tairix_virtio::{ChainView, MockHost, MockTransport, MockWait, MAX_COMPLETION_WAKES};
 
 const SECTOR_SIZE: usize = 512;
 const SECTORS: u64 = 16;
@@ -97,177 +97,29 @@ fn build_device_with_sectors(sectors: u64) -> (MockTransport, Rc<RefCell<Vec<u8>
     (t, backing)
 }
 
-/// `VirtioHost` that auto-drains the transport's queue when
-/// notified, so the driver's synchronous `kick → notify_wait →
-/// poll_used` cycle completes inside one method call without test
-/// scaffolding.
-struct AutoDrainHost {
-    inner: MockHost,
-    transport: core::cell::UnsafeCell<*mut MockTransport>,
-    /// Number of leading `notify_wait` calls that return **without**
-    /// draining the queue — modelling advisory/spurious wakes whose
-    /// matching completion is not yet in the used ring. Each such wake
-    /// decrements the counter; once it reaches zero every wake drains as
-    /// usual. Zero (the [`Self::new`] default) is the ordinary
-    /// wake-and-complete host.
-    spurious_remaining: core::cell::Cell<u32>,
+/// The mock device, shared by the driver under test and the host playing it.
+type Device = Rc<RefCell<MockTransport>>;
+
+type Blk = Box<VirtioBlk<'static, Device>>;
+
+/// Open a driver on `t`, whose waits `host` answers by playing the device.
+fn open_played_by(t: MockTransport, host: MockHost) -> (Blk, Device, &'static MockHost) {
+    let host: &'static MockHost = Box::leak(Box::new(host));
+    let device = t.into_shared();
+    host.attach(&device);
+    let blk = Box::new(VirtioBlk::open(Rc::clone(&device), host).expect("open"));
+    (blk, device, host)
 }
 
-impl AutoDrainHost {
-    fn new() -> Self {
-        Self {
-            inner: MockHost::new(),
-            transport: core::cell::UnsafeCell::new(core::ptr::null_mut()),
-            spurious_remaining: core::cell::Cell::new(0),
-        }
-    }
-
-    /// An [`AutoDrainHost`] whose first `n` `notify_wait` calls wake the
-    /// driver **without** posting the completion (a spurious/early wake),
-    /// so the driver must re-poll and wait again. A never-completing
-    /// device is modelled with `n` above [`MAX_COMPLETION_WAKES`].
-    fn with_spurious_wakes(n: u32) -> Self {
-        let mut host = Self::new();
-        host.spurious_remaining = core::cell::Cell::new(n);
-        host
-    }
-    /// Plant the live transport's raw pointer so `notify_wait` can
-    /// drain it. Called once per driver instance, while no other
-    /// `&mut` to the transport is live.
-    fn install_transport(&self, t: *mut MockTransport) {
-        // SAFETY: tests are single-threaded with respect to a given
-        // `AutoDrainHost`; `auto_host()` returns a freshly-leaked
-        // instance per call, so no aliasing borrow of `self.transport`
-        // can exist when we write to it.
-        unsafe {
-            *self.transport.get() = t;
-        }
-    }
-
-    /// Total DMA bytes the underlying pool has handed out. Used to
-    /// assert the data path reuses its staging rather than re-granting.
-    fn bytes_allocated(&self) -> usize {
-        self.inner.bytes_allocated()
-    }
+fn open_with_autodrain(t: MockTransport) -> Blk {
+    open_played_by(t, MockHost::new()).0
 }
 
-impl DmaHost for AutoDrainHost {
-    fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
-        self.inner.alloc_dma_zeroed(size)
-    }
-
-    fn device_quiesced(&self) {
-        self.inner.device_quiesced();
-    }
-}
-
-impl tairix_virtio::VirtioHost for AutoDrainHost {
-    /// Always reports [`CompletionSignal::Fired`] — a wake is advisory
-    /// only, so this double reports one whether or not it actually drained
-    /// the queue this call, exactly like the mock host it wraps. A spurious
-    /// wake with an exhausted budget (`n` above `MAX_COMPLETION_WAKES`) is
-    /// therefore indistinguishable from a genuine one to the caller, which
-    /// is what lets this same double drive the wake-storm test below.
-    fn notify_wait(&self, queue_index: u16, timeout_ns: u64) -> CompletionSignal {
-        let signal = self.inner.notify_wait(queue_index, timeout_ns);
-        // A leading spurious/early wake returns without draining, so the
-        // completion is not yet in the used ring and the driver must
-        // re-poll and wait again.
-        let spurious = self.spurious_remaining.get();
-        if spurious > 0 {
-            self.spurious_remaining.set(spurious - 1);
-            return signal;
-        }
-        // SAFETY: the pointer was installed by `install_transport`
-        // while no other borrow of the transport was live; the
-        // driver releases its `&mut self.transport` borrow between
-        // `kick` and `notify_wait` (the `kick` call already
-        // returned), so this `&mut *t_ptr` is the unique live
-        // reference for the duration of `drain_queue`.
-        let t_ptr = unsafe { *self.transport.get() };
-        if !t_ptr.is_null() {
-            let t = unsafe { &mut *t_ptr };
-            let _ = t.drain_queue(queue_index);
-        }
-        signal
-    }
-}
-
-/// `VirtioHost` that never signals at all: models a device whose
-/// completion interrupt is permanently lost or absent, so every wait
-/// exhausts its caller-supplied budget. Mirrors the production kernel
-/// host's [`CompletionSignal::TimedOut`] outcome once its deadline
-/// elapses, and exercises the silent-device path (`DeviceOffline`)
-/// independently of [`AutoDrainHost`]'s wake-storm path (`DeviceFault`)
-/// above — a fired-without-completion wake and a device that never wakes
-/// at all are different failures with different typed errors.
-struct SilentHost {
-    inner: MockHost,
-}
-
-impl SilentHost {
-    fn new() -> Self {
-        Self {
-            inner: MockHost::new(),
-        }
-    }
-}
-
-impl DmaHost for SilentHost {
-    fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
-        self.inner.alloc_dma_zeroed(size)
-    }
-
-    fn device_quiesced(&self) {
-        self.inner.device_quiesced();
-    }
-}
-
-impl tairix_virtio::VirtioHost for SilentHost {
-    fn notify_wait(&self, _queue_index: u16, _timeout_ns: u64) -> CompletionSignal {
-        CompletionSignal::TimedOut
-    }
-}
-
-fn open_with_silent_host(t: MockTransport) -> Box<VirtioBlk<'static, MockTransport>> {
-    let host: &'static SilentHost = Box::leak(Box::new(SilentHost::new()));
-    Box::new(VirtioBlk::open(t, host).expect("open"))
-}
-
-fn auto_host() -> &'static AutoDrainHost {
-    Box::leak(Box::new(AutoDrainHost::new()))
-}
-
-fn open_with_autodrain(t: MockTransport) -> Box<VirtioBlk<'static, MockTransport>> {
-    open_with_autodrain_host(t).0
-}
-
-/// [`open_with_autodrain`] that also returns the leaked host, so a
-/// test can observe its DMA-allocation counter.
-fn open_with_autodrain_host(
-    t: MockTransport,
-) -> (
-    Box<VirtioBlk<'static, MockTransport>>,
-    &'static AutoDrainHost,
-) {
-    // Pin the driver behind a `Box` so the raw pointer we hand the
-    // host stays valid across the test function's stack frame
-    // (`Box` provides a stable heap address that `install_transport`
-    // can record once and reuse for every `notify_wait`).
-    let host = auto_host();
-    let mut blk = Box::new(VirtioBlk::open(t, host).expect("open"));
-    host.install_transport(core::ptr::from_mut::<MockTransport>(blk.transport_mut()));
-    (blk, host)
-}
-
-/// Open a driver whose host's first `n` completion wakes are spurious
-/// (they wake without posting the completion), so the driver's re-poll
-/// loop is exercised.
-fn open_with_spurious(t: MockTransport, n: u32) -> Box<VirtioBlk<'static, MockTransport>> {
-    let host: &'static AutoDrainHost = Box::leak(Box::new(AutoDrainHost::with_spurious_wakes(n)));
-    let mut blk = Box::new(VirtioBlk::open(t, host).expect("open"));
-    host.install_transport(core::ptr::from_mut::<MockTransport>(blk.transport_mut()));
-    blk
+/// A host whose first `n` wakes come with no completion posted.
+fn spurious_host(n: usize) -> MockHost {
+    let host = MockHost::new();
+    host.script_waits(core::iter::repeat_n(MockWait::Spurious { after_ns: 0 }, n));
+    host
 }
 
 /// A handful of early/spurious wakes before the completion lands must
@@ -280,7 +132,7 @@ fn spurious_wakes_before_completion_still_succeed() {
     let (t, backing) = build_device();
     backing.borrow_mut()[7 * SECTOR_SIZE..8 * SECTOR_SIZE].fill(0x5A);
     // Five leading wakes deliver no completion; the sixth drains it.
-    let mut blk = open_with_spurious(t, 5);
+    let (mut blk, _, _) = open_played_by(t, spurious_host(5));
     let mut buf = vec![0u8; SECTOR_SIZE];
     blk.read_blocks(7, &mut buf)
         .expect("read survives spurious wakes");
@@ -296,7 +148,8 @@ fn a_never_completing_device_fails_closed() {
     let (t, _backing) = build_device();
     // More spurious wakes than the driver will tolerate: the completion
     // never lands, so the bounded loop gives up.
-    let mut blk = open_with_spurious(t, MAX_COMPLETION_WAKES + 1);
+    let wakes = usize::try_from(MAX_COMPLETION_WAKES).unwrap_or(usize::MAX) + 1;
+    let (mut blk, _, _) = open_played_by(t, spurious_host(wakes));
     let mut buf = vec![0u8; SECTOR_SIZE];
     assert_eq!(
         blk.read_blocks(0, &mut buf),
@@ -312,7 +165,7 @@ fn a_never_completing_device_fails_closed() {
 #[test]
 fn a_silent_device_fails_closed_with_device_offline() {
     let (t, _backing) = build_device();
-    let mut blk = open_with_silent_host(t);
+    let (mut blk, _, _) = open_played_by(t, MockHost::silent());
     let mut buf = vec![0u8; SECTOR_SIZE];
     assert_eq!(
         blk.read_blocks(0, &mut buf),
@@ -343,23 +196,211 @@ fn a_device_whose_reset_never_confirms_is_refused_before_it_is_given_memory() {
 }
 
 #[test]
-fn a_confirmed_close_releases_every_region() {
+fn a_dropped_device_that_confirms_its_reset_releases_every_region() {
     let (t, _backing) = build_device();
     let host = MockHost::new();
-    VirtioBlk::open(t, &host).expect("open").close();
+    drop(VirtioBlk::open(t, &host).expect("open"));
     assert_eq!(host.slabs_outstanding(), 0);
 }
 
 #[test]
-fn a_close_whose_reset_never_confirms_releases_nothing() {
+fn a_dropped_device_whose_reset_never_confirms_releases_nothing() {
     let (t, _backing) = build_device();
-    let host = MockHost::new();
-    let mut blk = VirtioBlk::open(t, &host).expect("open");
+    let (blk, device, host) = open_played_by(t, MockHost::new());
     let held = host.slabs_outstanding();
     assert!(held > 0);
-    blk.transport_mut().refuse_resets_after(0);
-    blk.close();
+    device.borrow_mut().refuse_resets_after(0);
+    drop(blk);
     assert_eq!(host.slabs_outstanding(), held);
+}
+
+/// Open a driver whose host lets the first request's wait time out with the
+/// device still holding the chain.
+fn open_abandoning_first_request(t: MockTransport) -> (Blk, Device) {
+    let host = MockHost::new();
+    host.script_waits([MockWait::Silent]);
+    let (blk, device, _) = open_played_by(t, host);
+    (blk, device)
+}
+
+/// What a device that filled every device-write segment of `chain` reports.
+fn written_by(chain: &ChainView<'_>) -> Result<u32, VirtioError> {
+    let bytes: usize = chain.device_write.iter().map(|segment| segment.len()).sum();
+    u32::try_from(bytes).map_err(|_| VirtioError::DeviceFault)
+}
+
+#[test]
+fn a_read_whose_completion_does_not_cover_its_payload_hands_back_nothing() {
+    // The data staging is reused, so bytes the device does not report writing
+    // are an earlier request's.
+    let mut t = MockTransport::new(1, 8, 0, 8);
+    t.set_config(0, &SECTORS.to_le_bytes());
+    t.install_shim(
+        0,
+        Box::new(|chain: &mut ChainView<'_>| {
+            let last = chain.device_write.len() - 1;
+            chain.device_write[0].fill(0x3C);
+            chain.device_write[last][0] = wire::STATUS_OK;
+            Ok(1)
+        }),
+    );
+    let mut blk = open_with_autodrain(t);
+    let mut buf = vec![0u8; SECTOR_SIZE];
+    assert_eq!(blk.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
+    assert!(buf.iter().all(|b| *b == 0), "nothing handed back");
+}
+
+#[test]
+fn a_requestq_too_shallow_for_one_request_is_refused_before_it_is_programmed() {
+    let mut t = MockTransport::new(1, 2, 0, 8);
+    t.set_config(0, &SECTORS.to_le_bytes());
+    let device = t.into_shared();
+    let host = MockHost::new();
+    assert!(matches!(
+        VirtioBlk::open(Rc::clone(&device), &host),
+        Err(VirtioError::QueueTooShallow)
+    ));
+    assert_eq!(host.slabs_outstanding(), 0);
+    assert_eq!(
+        device.borrow_mut().publish_raw_used(0, 0, 0),
+        Err(VirtioError::DeviceFault),
+        "the device was never given the ring"
+    );
+}
+
+#[test]
+fn a_sensitive_payload_the_device_held_is_scrubbed_when_the_driver_is_dropped() {
+    let (t, _backing) = build_device();
+    let (mut blk, _device) = open_abandoning_first_request(t);
+    let payload = vec![0xC7u8; SECTOR_SIZE];
+    assert_eq!(
+        blk.write_blocks_with_class(4, &payload, BufferClass::Sensitive),
+        Err(DriverError::DeviceOffline)
+    );
+    let (phys, len) = blk
+        .data
+        .as_ref()
+        .map(|data| (data.phys(), data.len()))
+        .expect("the staging is put back");
+    drop(blk);
+    // SAFETY: the mock host leaks every slab's storage, so these bytes
+    // outlive the driver that freed them.
+    let staging = unsafe { core::slice::from_raw_parts(phys as *const u8, len) };
+    assert!(
+        staging.iter().all(|b| *b == 0),
+        "the confirmed reset took it back"
+    );
+}
+
+#[test]
+fn a_completion_that_wrote_no_status_is_refused() {
+    // The status staging is reused, so without a fresh sentinel a device
+    // that completes a read without answering it reads as the last one's OK.
+    let mut t = MockTransport::new(1, 8, 0, 8);
+    t.set_config(0, &SECTORS.to_le_bytes());
+    let answered = Rc::new(core::cell::Cell::new(0u32));
+    let answered_by_shim = Rc::clone(&answered);
+    t.install_shim(
+        0,
+        Box::new(move |chain: &mut ChainView<'_>| {
+            let last = chain.device_write.len() - 1;
+            chain.device_write[0].fill(0x3C);
+            if answered_by_shim.get() == 0 {
+                chain.device_write[last][0] = wire::STATUS_OK;
+            }
+            answered_by_shim.set(answered_by_shim.get() + 1);
+            written_by(chain)
+        }),
+    );
+    let mut blk = open_with_autodrain(t);
+    let mut buf = vec![0u8; SECTOR_SIZE];
+    blk.read_blocks(0, &mut buf).expect("answered");
+    buf.fill(0);
+    assert_eq!(blk.read_blocks(1, &mut buf), Err(DriverError::DeviceFault));
+    assert_eq!(answered.get(), 2);
+    assert!(buf.iter().all(|b| *b == 0), "nothing handed back");
+}
+
+#[test]
+fn a_late_completion_is_never_returned_as_a_later_reads_data() {
+    // The device answers the first read only after its deadline: its data
+    // must never be handed to the next read, which asked for another block.
+    let (t, backing) = build_device();
+    backing.borrow_mut()[3 * SECTOR_SIZE..4 * SECTOR_SIZE].fill(0xAA);
+    backing.borrow_mut()[5 * SECTOR_SIZE..6 * SECTOR_SIZE].fill(0x55);
+    let (mut blk, device) = open_abandoning_first_request(t);
+    let mut buf = vec![0u8; SECTOR_SIZE];
+    assert_eq!(
+        blk.read_blocks(3, &mut buf),
+        Err(DriverError::DeviceOffline)
+    );
+    assert_eq!(device.borrow_mut().drain_queue(0), Ok(1), "answered late");
+    blk.read_blocks(5, &mut buf)
+        .expect("the device answers again");
+    assert!(buf.iter().all(|b| *b == 0x55), "block 5's own data");
+}
+
+#[test]
+fn a_request_is_refused_while_the_device_still_holds_an_abandoned_one() {
+    let (t, _backing) = build_device();
+    let (mut blk, device) = open_abandoning_first_request(t);
+    let mut buf = vec![0u8; SECTOR_SIZE];
+    assert_eq!(
+        blk.read_blocks(0, &mut buf),
+        Err(DriverError::DeviceOffline)
+    );
+    assert_eq!(
+        blk.write_blocks(1, &buf),
+        Err(DriverError::DeviceOffline),
+        "its staging is the device's, so nothing is published over it"
+    );
+    assert_eq!(
+        device.borrow_mut().drain_queue(0),
+        Ok(1),
+        "only the abandoned chain was ever published"
+    );
+}
+
+#[test]
+fn a_sensitive_payload_the_device_held_is_scrubbed_when_it_comes_back() {
+    let (t, backing) = build_device();
+    backing.borrow_mut()[2 * SECTOR_SIZE..3 * SECTOR_SIZE].fill(0x5E);
+    let (mut blk, device) = open_abandoning_first_request(t);
+    let mut buf = vec![0u8; SECTOR_SIZE];
+    assert_eq!(
+        blk.read_blocks_with_class(2, &mut buf, BufferClass::Sensitive),
+        Err(DriverError::DeviceOffline)
+    );
+    assert_eq!(device.borrow_mut().drain_queue(0), Ok(1));
+    blk.reclaim_staging().expect("the chain came back");
+    let staging = blk
+        .data
+        .as_ref()
+        .expect("the staging is the driver's again");
+    assert!(staging.as_bytes().iter().all(|b| *b == 0));
+}
+
+#[test]
+fn an_abandoned_sensitive_write_still_carries_its_payload_to_the_device() {
+    // Scrubbing staging the device has yet to read would write zeros over
+    // the block the caller meant to write.
+    let (t, backing) = build_device();
+    let (mut blk, device) = open_abandoning_first_request(t);
+    let payload = vec![0xC7u8; SECTOR_SIZE];
+    assert_eq!(
+        blk.write_blocks_with_class(4, &payload, BufferClass::Sensitive),
+        Err(DriverError::DeviceOffline)
+    );
+    assert_eq!(device.borrow_mut().drain_queue(0), Ok(1));
+    assert!(backing.borrow()[4 * SECTOR_SIZE..5 * SECTOR_SIZE]
+        .iter()
+        .all(|b| *b == 0xC7));
+    blk.reclaim_staging().expect("the chain came back");
+    let staging = blk
+        .data
+        .as_ref()
+        .expect("the staging is the driver's again");
+    assert!(staging.as_bytes().iter().all(|b| *b == 0), "then scrubbed");
 }
 
 #[test]
@@ -462,7 +503,7 @@ fn steady_state_io_allocates_no_new_dma() {
     // churn (and the audit-log entry it emits every request) is exactly
     // the defect this driver must not reintroduce.
     let (t, _backing) = build_device();
-    let (mut blk, host) = open_with_autodrain_host(t);
+    let (mut blk, _, host) = open_played_by(t, MockHost::new());
     let after_open = host.bytes_allocated();
     let mut buf = vec![0u8; SECTOR_SIZE];
     for lba in 0..8u64 {
@@ -488,7 +529,7 @@ fn transfer_larger_than_staging_window_chunks_and_round_trips() {
     let blocks = bytes / SECTOR_SIZE;
     let sectors = u64::try_from(blocks).unwrap() + 4;
     let (t, _backing) = build_device_with_sectors(sectors);
-    let (mut blk, host) = open_with_autodrain_host(t);
+    let (mut blk, _, host) = open_played_by(t, MockHost::new());
     let after_open = host.bytes_allocated();
     // A recognisable per-block pattern so a mis-chunked copy is caught.
     let mut payload = vec![0u8; bytes];
@@ -579,7 +620,7 @@ fn discard_unsupported_device_refuses() {
 #[test]
 fn discard_capable_device_reports_negotiated_limits() {
     let (t, _log) = build_discard_device(8, 64);
-    let blk = open_with_autodrain(t);
+    let (blk, device, _) = open_played_by(t, MockHost::new());
     assert_eq!(
         blk.discard_capability().unwrap(),
         DiscardCapability {
@@ -589,7 +630,7 @@ fn discard_capable_device_reports_negotiated_limits() {
         }
     );
     assert_eq!(
-        blk.transport().negotiated_driver_features(),
+        device.borrow().negotiated_driver_features(),
         wire::VIRTIO_BLK_F_DISCARD
     );
 }
@@ -661,8 +702,8 @@ fn flush_without_feature_is_a_noop_success() {
     // A write-through device (no `VIRTIO_BLK_F_FLUSH`) has no volatile
     // cache: flush succeeds without issuing any request.
     let (t, _backing) = build_device();
-    let mut blk = open_with_autodrain(t);
-    assert_eq!(blk.transport().negotiated_driver_features(), 0);
+    let (mut blk, device, _) = open_played_by(t, MockHost::new());
+    assert_eq!(device.borrow().negotiated_driver_features(), 0);
     blk.flush()
         .expect("flush is a no-op success when write-through");
 }
@@ -670,9 +711,9 @@ fn flush_without_feature_is_a_noop_success() {
 #[test]
 fn flush_capable_device_issues_a_flush_command() {
     let (t, log) = build_flush_device();
-    let mut blk = open_with_autodrain(t);
+    let (mut blk, device, _) = open_played_by(t, MockHost::new());
     assert_eq!(
-        blk.transport().negotiated_driver_features(),
+        device.borrow().negotiated_driver_features(),
         wire::VIRTIO_BLK_F_FLUSH
     );
     blk.flush().expect("flush");

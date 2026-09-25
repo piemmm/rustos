@@ -9,7 +9,9 @@
 //! for exactly the devices it is serving: attaching a device allocates
 //! its region, detaching it frees the memory — the number of devices one
 //! controller serves is bounded by its silicon and genuine memory
-//! exhaustion, never a compile-time budget.
+//! exhaustion, never a compile-time budget. A chunk the controller may still
+//! reach is [withheld](DmaBank::withhold) instead, and returned only once the
+//! controller confirms it no longer reaches it or is proven reset.
 //!
 //! Chunk base offsets in the bank's virtual offset space are monotonic
 //! and never reused, so an offset kept past its chunk's release maps to
@@ -47,6 +49,9 @@ pub struct SlabBank<'h> {
     /// Live chunks, ascending by virtual base (grows monotonically and
     /// removal preserves order), so lookup is a binary search.
     chunks: Vec<Chunk>,
+    /// Chunks out of service that the controller may still reach, held until
+    /// it confirms it no longer does or is proven reset.
+    withheld: Vec<Chunk>,
     /// The next chunk's virtual base offset. Monotonic — released bases
     /// are never reused, so stale offsets fail closed.
     next_base: usize,
@@ -60,6 +65,7 @@ impl<'h> SlabBank<'h> {
             host,
             aperture_top: None,
             chunks: Vec::new(),
+            withheld: Vec::new(),
             next_base: 0,
         }
     }
@@ -74,6 +80,7 @@ impl<'h> SlabBank<'h> {
             host,
             aperture_top: Some(aperture_top),
             chunks: Vec::new(),
+            withheld: Vec::new(),
             next_base: 0,
         }
     }
@@ -155,6 +162,42 @@ impl DmaBank for SlabBank<'_> {
         // host's pool (its drop shim issues the free).
         self.chunks.remove(index);
         Ok(())
+    }
+
+    fn withhold(&mut self, base: usize) -> Result<(), DriverError> {
+        let index = self
+            .chunks
+            .iter()
+            .position(|chunk| chunk.base == base)
+            .ok_or(DriverError::NotFound)?;
+        let mut chunk = self.chunks.remove(index);
+        if self.withheld.try_reserve(1).is_ok() {
+            self.withheld.push(chunk);
+        } else {
+            // With no room to remember it, it is never returned at all.
+            chunk.slab.withhold();
+        }
+        Ok(())
+    }
+
+    fn release_withheld_chunk(&mut self, base: usize) -> Result<(), DriverError> {
+        let index = self
+            .withheld
+            .iter()
+            .position(|chunk| chunk.base == base)
+            .ok_or(DriverError::NotFound)?;
+        self.withheld.swap_remove(index);
+        Ok(())
+    }
+
+    fn release_withheld(&mut self) {
+        self.withheld.clear();
+    }
+
+    fn withhold_all(&mut self) {
+        for chunk in self.chunks.iter_mut().chain(self.withheld.iter_mut()) {
+            chunk.slab.withhold();
+        }
     }
 
     fn phys_of(&self, offset: usize) -> Result<u64, DriverError> {

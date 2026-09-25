@@ -357,6 +357,12 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         qemu_exit::exit_failure(FAIL_SPAWN);
     }
     let tree = [HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root), device];
+    // The inventory the node is matched in, which admission checks still
+    // holds it once the driver's grants are minted.
+    let inventory = tairix_kernel::hwtree_store::HwTreeStore::new();
+    if inventory.seed(tree.to_vec()).is_err() {
+        qemu_exit::exit_failure(FAIL_SPAWN);
+    }
 
     let bind_keys = [DriverBindKey::new(5, match_key)];
     let candidates = [DriverCandidate {
@@ -405,8 +411,17 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let args: [&[u8]; 1] = [b"drvstub"];
     // The matched node id (the device node, id 2) the kernel records against
     // the spawned driver.
-    let mut loader =
-        SpawnDriverLoader::new(&trusted, &source, &SERIAL_SINK, &spawn, &args, Some(2));
+    let mut loader = SpawnDriverLoader::new(
+        &trusted,
+        &source,
+        &SERIAL_SINK,
+        &spawn,
+        &args,
+        Some(tairix_kernel_core::DriverNode {
+            id: 2,
+            tree: &inventory,
+        }),
+    );
 
     // Autoload: match the node, run the signed gate, and spawn the driver
     // with the matched node's MMIO grant — the production discovery path.

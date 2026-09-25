@@ -6,7 +6,7 @@
 //! This moves the `VideoCore` mailbox out of the kernel (the floor stays
 //! storage-only) into a user-space service: it owns the
 //! discovered doorbell MMIO window and a DMA-carved property buffer, builds the
-//! BCM2711 `VideoCore` transport (`lib/vcmailbox::MmioMailbox`), and answers
+//! BCM2711 `VideoCore` transport (`lib/vcmailbox::DmaMailbox`), and answers
 //! *synchronous* property exchanges from other user-space drivers — the VL805
 //! USB firmware reload (`drivers/bus/usb/vl805`) — over the well-known
 //! `tairix_abi::mailbox_ipc::MAILBOX_ENDPOINT` call endpoint.
@@ -21,28 +21,33 @@
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `tairix-rt` (`_start`, the stack canary, the panic handler,
-//! and the `call_create` / `call_recv` / `call_reply` / `yield` syscall
-//! wrappers), never the C ABI. `main` wires the real seams:
+//! and the `call_*` and `clock_get` syscall wrappers), never the C ABI.
+//! `main` wires the real seams:
 //!
 //! * `RtDriverHost::from_grants_query` over `RtGrantSyscalls`: the host learns
-//!   its kernel-issued grants (the doorbell window + a DMA constraint) and
-//!   maps/carves them. Every capability and bound is re-checked kernel-side; the host adds no authority. The kernel carves
+//!   its kernel-issued grants (the doorbell window, its inbox interrupt, and a
+//!   DMA constraint) and maps/carves them. Every capability and bound is
+//!   re-checked kernel-side; the host adds no authority. The kernel carves
 //!   coherent DMA, so no architecture-specific cache shim is supplied
 //!   (`coherency = None`, keeping the program free of arch code).
 //! * `sole_register_window` over the delivered grants: the doorbell window
 //!   `(base, len)` comes from the grants, never a build-time board constant.
 //! * `host.alloc_dma_zeroed` carves the `PROPERTY_LEN_BYTES` property buffer;
 //!   its device-visible base is the firmware's bus address for the buffer.
-//! * `MmioMailbox::new` over the doorbell window and the property buffer, then
-//!   a firmware-revision probe whose answer proves the firmware has finished
-//!   with any request an earlier instance left in flight, so the kernel may
-//!   release that instance's quarantined buffer (`host.device_quiesced`),
-//!   then `call_create` to bind the restricted-sender endpoint, then the
-//!   serve loop.
+//! * `host.bind_irq` binds the granted inbox interrupt; a service that cannot
+//!   bind it exits rather than poll the doorbell.
+//! * `DmaMailbox::new` over the doorbell window and the property buffer, which
+//!   it withholds rather than frees while the firmware owes it a reply, and
+//!   whose reply waits park on that interrupt, each until its own deadline;
+//!   then a firmware-revision probe whose answer proves the firmware has
+//!   finished with any request an earlier instance left in flight, so the
+//!   kernel may release that instance's quarantined buffer
+//!   (`host.device_quiesced`), then `call_create` to bind the
+//!   restricted-sender endpoint, then the serve loop.
 //!
 //! After bring-up `main` serves forever: it blocks in `call_recv`, transforms
-//! each request, and answers with `call_reply` (a genuine
-//! block, never a busy spin). A bring-up failure exits with a reserved
+//! each request while parked on the inbox interrupt for the firmware's
+//! answer, and replies with `call_reply`. A bring-up failure exits with a reserved
 //! fail-closed code, leaving the system without a mailbox service rather than
 //! wedged; the spawning supervisor decides whether to
 //! relaunch.
@@ -58,18 +63,18 @@
 #[cfg(freestanding)]
 mod program {
     use core::cell::RefCell;
-    use core::ptr::NonNull;
 
     use tairix_abi::driver::dma::DmaHost;
     use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
     use tairix_abi::driver::sole_register_window;
     use tairix_abi::mailbox_ipc::{self, MAILBOX_ENDPOINT};
-    use tairix_abi::{CapabilityId, DriverError, MmioMapper, RegisterWindow};
+    use tairix_abi::time::MonotonicClock;
+    use tairix_abi::{CapabilityId, DriverError, MmioMapper};
     use tairix_caps::CapabilitySet;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_vcmailbox::{
-        decode_firmware_revision_response, encode_firmware_revision_query, MailboxError,
-        MailboxTransport, MmioMailbox, DEFAULT_POLL_BUDGET, PROPERTY_LEN_BYTES,
+        decode_firmware_revision_response, encode_firmware_revision_query, DmaMailbox,
+        InboxInterrupt, MailboxError, MailboxTransport, PROPERTY_LEN_BYTES,
     };
 
     /// Exit code when the rt-backed driver host could not be built from the
@@ -97,12 +102,15 @@ mod program {
     /// spawning supervisor decides whether to relaunch. A reserved value.
     const EXIT_SERVE_FAILED: i32 = 84;
 
-    /// Property-channel poll budget for a single exchange. The main consumer
-    /// is the VL805 firmware reload, which the kernel scaffold allowed a
-    /// generous budget; mirror that headroom so a slow firmware reply is not
-    /// spuriously timed out (sized by reasoning, not
-    /// guesswork).
-    const POLL_BUDGET: u32 = 10 * DEFAULT_POLL_BUDGET;
+    /// Exit code when the inbox interrupt every reply wait parks on could not
+    /// be bound (no line granted, or the bind refused). A reserved, fail-closed
+    /// value.
+    const EXIT_IRQ_UNBOUND: i32 = 85;
+
+    /// How long each reply wait parks for the firmware's answer: the ≈4 s the
+    /// ten-million-poll spin it replaces measured on metal, four times the
+    /// second Linux's firmware driver allows a property call.
+    const REPLY_WINDOW_NS: u64 = 4_000_000_000;
 
     /// Bound on the number of in-flight requests the endpoint queues. The
     /// service answers each request before receiving the next, so a small
@@ -110,14 +118,32 @@ mod program {
     const ENDPOINT_CAPACITY: usize = 4;
 
     /// The capability set the host re-checks before issuing a `mmio_map` /
-    /// `dma_alloc` trap, plus the bind privilege the service needs to create a
-    /// restricted-sender endpoint. The kernel re-checks every trap regardless.
+    /// `dma_alloc` / `irq_bind` trap, plus the bind privilege the service
+    /// needs to create a restricted-sender endpoint. The kernel re-checks
+    /// every trap regardless.
     fn driver_caps() -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
         caps.insert(CapabilityId::MMIO_MAP);
         caps.insert(CapabilityId::MEM_DMA);
+        caps.insert(CapabilityId::IRQ_BIND);
         caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
         caps
+    }
+
+    /// The inbox interrupt the host bound, and the clock the reply deadlines
+    /// run on.
+    struct HostInbox<'a>(&'a RtDriverHost<RtGrantSyscalls>);
+
+    impl MonotonicClock for HostInbox<'_> {
+        fn now_ns(&self) -> u64 {
+            tairix_rt::clock_get()
+        }
+    }
+
+    impl InboxInterrupt for HostInbox<'_> {
+        fn park(&mut self, timeout_ns: u64) -> bool {
+            self.0.wait_irq(timeout_ns)
+        }
     }
 
     /// The required-sender capability set of the served endpoint: a caller
@@ -136,11 +162,11 @@ mod program {
     /// [`MailboxError`] is mapped to the board-neutral [`DriverError`] the
     /// seam reports, which [`mailbox_ipc::serve_request`] then frames as an
     /// in-band error reply (fail closed).
-    struct ServiceChannel {
-        mailbox: RefCell<MmioMailbox>,
+    struct ServiceChannel<'a> {
+        mailbox: RefCell<DmaMailbox<HostInbox<'a>>>,
     }
 
-    impl MailboxChannel for ServiceChannel {
+    impl MailboxChannel for ServiceChannel<'_> {
         fn exchange(&self, message: &mut [u32; MAILBOX_PROPERTY_WORDS]) -> Result<(), DriverError> {
             self.mailbox
                 .borrow_mut()
@@ -167,31 +193,16 @@ mod program {
         let Ok(regs) = host.map_window(base, len) else {
             return EXIT_BRINGUP_FAILED;
         };
-        // Carve the DMA-visible property buffer; its device-visible base is
-        // the firmware's bus address for the buffer.
-        let Ok(mut slab) = host.alloc_dma_zeroed(PROPERTY_LEN_BYTES) else {
+        let Ok(buffer) = host.alloc_dma_zeroed(PROPERTY_LEN_BYTES) else {
             return EXIT_BRINGUP_FAILED;
         };
-        let buffer_phys = slab.phys();
-        let Ok(buffer_bus) = u32::try_from(buffer_phys) else {
-            // The VideoCore property channel addresses the buffer with a
-            // 32-bit bus address; a carve above 4 GiB cannot be reached
-            // (fail closed, never a truncated alias).
-            return EXIT_BRINGUP_FAILED;
-        };
-        let bytes = slab.as_bytes_mut();
-        let buffer_len = bytes.len();
-        let Some(buffer_ptr) = NonNull::new(bytes.as_mut_ptr()) else {
-            return EXIT_BRINGUP_FAILED;
-        };
-        // SAFETY: `buffer_ptr`/`buffer_len` name the DMA slab `host` just
-        // carved for this process; the slab is owned by `slab` (a local that
-        // lives for the whole serve loop, since `main` never returns), so the
-        // window never outlives its backing. The `MmioMailbox` bounds every
-        // access to the property message. `buffer_phys` is the slab's
-        // device-visible base, the correct `phys` for the window.
-        let buffer = unsafe { RegisterWindow::from_mapping(buffer_phys, buffer_ptr, buffer_len) };
-        let Ok(mut mailbox) = MmioMailbox::new(regs, buffer, buffer_bus, POLL_BUDGET) else {
+        // Bound before the mailbox turns the interrupt on, so a service that
+        // cannot take it leaves the controller as it found it.
+        if host.bind_irq().is_err() {
+            return EXIT_IRQ_UNBOUND;
+        }
+        let Ok(mut mailbox) = DmaMailbox::new(regs, buffer, HostInbox(&host), REPLY_WINDOW_NS)
+        else {
             return EXIT_BRINGUP_FAILED;
         };
         // The firmware answers property requests one at a time in posting
@@ -228,9 +239,6 @@ mod program {
         }
 
         serve(&channel)
-        // `slab` is intentionally kept alive until here (the serve loop runs
-        // for the life of the service); its drop after `serve` returns is
-        // what releases the buffer the mailbox referenced.
     }
 
     /// The serve loop: block in `call_recv` (a real park between requests),
@@ -244,7 +252,7 @@ mod program {
     /// a dead channel forever, which is a busy spin. A reply that fails to
     /// encode is dropped to a zero-length reply, which the client decodes
     /// as a fail-closed truncation.
-    fn serve(channel: &ServiceChannel) -> i32 {
+    fn serve(channel: &ServiceChannel<'_>) -> i32 {
         let mut request = [0u8; mailbox_ipc::REQUEST_LEN];
         let mut reply = [0u8; mailbox_ipc::REPLY_LEN];
         loop {

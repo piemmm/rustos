@@ -180,6 +180,26 @@ the number of completion parks as a fail-closed backstop against a storm of
 spurious wake-ups. The budget is a defence bound, not a scalable capacity
 (`AGENTS.md` §24.4).
 
+A failed transfer, DMA or PIO, is recovered by the SDHCI error-interrupt
+sequence before its error returns (`recover_transfer`): the command and data
+lines are reset, which halts the ADMA2 engine, and a multi-block transfer is
+then aborted with `CMD12` (`STOP_TRANSMISSION`, Abort command type), its busy
+awaited on the transfer-complete interrupt. A failed abort leaves the
+transfer's own error as the caller's. A controller whose line reset never
+confirms is sent no abort and may still be mastering the DMA region, so every
+later DMA transfer is refused without staging anything, and dropping the
+driver withholds the region for the kernel's DMA quarantine.
+
+Only an answered abort proves the card back in `tran`. After a single-block
+failure, a failed abort, or a line reset that never confirms, the next data
+command first asks the card with `CMD13` (`SEND_STATUS`): a transfer still open
+(`data`, `rcv`) is aborted and a programming card's busy awaited on the
+transfer-complete interrupt of an R1b `CMD13`, each asked again, for at most
+`CARD_STATE_ROUNDS` rounds. Any other answer — another state, a locked card, a
+failed `CMD13` — fails closed as `DeviceFault` with the state still unknown, so
+the next command asks again; the status error bits report earlier commands and
+bar nothing. A healthy card is never asked.
+
 `reset_and_clock` programs the controller's signal-enable register
 (`IRPT_EN`) so it raises its CPU interrupt line on each completion (and on
 every error bit); the kernel binds, routes, and arms that GIC line and
@@ -189,9 +209,12 @@ wakes the parked task (`crate::aarch64::root_unlock::emmc2_unlock`).
 
 `cargo test -p tairix-drv-storage-emmc2` exercises:
 
-- `CMDTM` command-word encoding and CSD-v2 capacity decode at the real
-  right-aligned register positions, including that a structure value placed
-  above the field is not mistaken for v2 (`command`).
+- `CMDTM` command-word encoding, with `CMD12` alone carrying the Abort
+  command type and `CMD13` an R1 with an R1b form, CSD-v2 capacity decode at
+  the real right-aligned register positions, including that a structure value
+  placed above the field is not mistaken for v2, and the card-status decode:
+  only `tran` with `READY_FOR_DATA` is ready, a locked card never is, and no
+  error bit decides it (`command`).
 - Full identification and reported geometry over `MockSdhci`.
 - Bring-up leaves the card on the 4-bit bus at the data clock: `ACMD6`
   carries the 4-bit argument, the `CONTROL0` data-width bit is set, the
@@ -219,6 +242,20 @@ wakes the parked task (`crate::aarch64::root_unlock::emmc2_unlock`).
   `SendCsd`).
 - Command-error (read and write) and stalled-controller fail-closed
   (`DeviceFault`; the stall is localised to the `GoIdle` stage).
+- Transfer-failure recovery: a failed multi-block transfer (DMA and PIO, read
+  and write) resets the lines and is then aborted by an Abort-type R1b
+  `CMD12`; a failed single-block transfer only resets the lines; an unanswered
+  abort leaves the transfer's error and the DMA staging usable; a controller
+  whose line reset never confirms is sent no abort and is handed the staging
+  no more.
+- The card-state check: a healthy card, or one an answered abort proved in
+  `tran`, is never sent `CMD13`; after any other recovery every transfer path
+  (DMA and PIO, read and write, single and multi) first sends one addressed
+  to the RCA, proceeds on `tran` and trusts the card after, aborts a card still
+  sending or receiving and waits out a programming card's busy on the
+  interrupt before asking again, and fails closed — asking again next time —
+  on an unexpected state, a failed `CMD13`, or a card still sending after
+  `CARD_STATE_ROUNDS` aborts.
 - An unpowered SD bus (a rail that never comes up) fails closed at the
   `GoIdle` stage, proving the engine depends on the bus-power write.
 - Every `BringUpStage` maps to a distinct, non-empty name and

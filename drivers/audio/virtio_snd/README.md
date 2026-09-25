@@ -95,9 +95,15 @@ total.
 ## Runtime load and unload
 
 Loadable and unloadable at runtime. A `Detach` releases the endpoint's
-device-side stream and unmaps its region; the process exits fail-closed with a
-reserved code (`tairix_audiochan::exit`) if it cannot serve at all, leaving the
-machine without sound rather than wedged.
+device-side stream and unmaps its region; a period the device still holds is
+kept until the device hands it back, never freed under it. A queue too shallow
+for what it carries — every period all the device's streams keep in flight,
+on each transfer queue — refuses the device at bring-up, before it is given
+the ring. The process exits
+fail-closed with a reserved code (`tairix_audiochan::exit`) if it cannot serve
+at all, leaving the machine without sound rather than wedged, and dropping the
+device resets it first: one that will not reset keeps every ring, pool and
+period for the kernel's DMA quarantine.
 
 ## Tests
 

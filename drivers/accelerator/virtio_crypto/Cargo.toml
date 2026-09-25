@@ -25,7 +25,11 @@ workspace = true
 # `CapabilityId` / `DriverError` types the driver fails closed with.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The bus-agnostic virtio split-virtqueue protocol (Transport trait,
-# SplitQueue, DMA slabs, the MockHost/MockTransport doubles). The driver
+# SplitQueue, DMA slabs; the test doubles come from the dev-dependency's
+# `mock` feature). The driver
 # consumes it from `lib/*` and never depends on the `drivers/bus/virtio`
 # transport crate: a driver may depend on `lib/*` but never on another driver.
 tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+
+[dev-dependencies]
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0", features = ["mock"] }

@@ -526,6 +526,17 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn call_peer_node(
+        &self,
+        _c: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _node: u64,
+        _node_cap: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn resource_grants(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         self.bump();
         Ok(0)

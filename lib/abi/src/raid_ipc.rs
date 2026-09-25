@@ -21,14 +21,16 @@
 //!
 //! # What the composer trusts, and what the delegation costs
 //!
-//! Nothing in the offer beyond the identity of the delegated resources. The
+//! Nothing in the offer beyond the identity of the delegated resources, and
+//! those only once the kernel attests they are exactly the transport of the
+//! member node the sender was admitted for (`call_peer_node`). The
 //! array a device belongs to, the slot it occupies, and the generation it last
 //! saw are **read from the device itself** through the shared on-disk metadata
 //! definition — never taken from the offering agent, which is an ordinary
 //! user-space process and could otherwise claim a slot in an array it has
-//! nothing to do with. Neither id in the offer conveys authority: the kernel
-//! minted the grants, and an id the composer holds no grant for simply fails
-//! closed the moment it is used.
+//! nothing to do with. Neither value in the offer conveys authority: the
+//! kernel minted the grants, and a value naming nothing the composer holds
+//! fails closed the moment it is used.
 //!
 //! Delegating necessarily precedes the verdict, because reading the metadata
 //! that decides the verdict *is* an access to the device. That is proportionate
@@ -41,7 +43,8 @@
 //! binding it demands `CAP_IPC_BIND_PRIVILEGED`. That gate is load-bearing
 //! rather than cosmetic: an unprivileged squatter that claimed the id first
 //! would be handed read/write authority over every array member on the machine
-//! as each agent delegated to it in turn.
+//! as each agent delegated to it in turn. Posting to it requires `CAP_SHM`,
+//! which delegating a window already needs.
 //!
 //! [`is_reserved_endpoint`]: crate::ipc::is_reserved_endpoint
 
@@ -122,11 +125,17 @@ pub const RAID_VERSION_V1: u16 = 1;
 /// composer's receive buffer is a compile-time constant.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MemberOffer {
-    /// The device's block-service call endpoint, already delegated to
-    /// [`RAID_REGISTRY_ENDPOINT`] with `call_grant`.
+    /// The device's block-service call endpoint id, already delegated to
+    /// [`RAID_REGISTRY_ENDPOINT`] with `call_grant`. A call is authorised
+    /// against the caller's grant for the id, so the id is what the composer
+    /// needs, not the handle `call_grant` returned.
     pub endpoint: u64,
-    /// The device's shared data window, already delegated with `shm_grant`.
-    pub window: u64,
+    /// The composer's own grant handle for the device's shared data window:
+    /// the value `shm_grant` returned when the agent delegated it. `shm_map`
+    /// resolves a handle against its caller's grants, and handles and region
+    /// ids are separate namespaces, so the region id would name nothing, or
+    /// another region, to the composer.
+    pub window_grant: u64,
     /// The agent's own hardware-tree node, so the composer can name the member
     /// in its audit trail and resolve the fault domain it sits in. An
     /// identifier only: the kernel assigned it, and the composer reads the node
@@ -135,8 +144,8 @@ pub struct MemberOffer {
 }
 
 impl MemberOffer {
-    /// Encoded width, in bytes: magic, version, the two delegated resource
-    /// ids, and the node id.
+    /// Encoded width, in bytes: magic, version, the endpoint id, the window
+    /// handle, and the node id.
     pub const WIRE_LEN: usize = 4 + 2 + 8 + 8 + 4;
 
     /// Encode into `buf`, returning the bytes written.
@@ -151,7 +160,7 @@ impl MemberOffer {
         put_u32(buf, 0, RAID_OFFER_MAGIC);
         buf[4..6].copy_from_slice(&RAID_VERSION_V1.to_le_bytes());
         put_u64(buf, 6, self.endpoint);
-        put_u64(buf, 14, self.window);
+        put_u64(buf, 14, self.window_grant);
         put_u32(buf, 22, self.node);
         Ok(Self::WIRE_LEN)
     }
@@ -164,8 +173,8 @@ impl MemberOffer {
     ///   [`Self::WIRE_LEN`].
     /// * [`Errno::BadMagic`] — the magic or the version is not this
     ///   protocol's.
-    /// * [`Errno::NotFound`] — a resource id of zero, which names no endpoint
-    ///   and no region, so the offer can only be malformed or a probe.
+    /// * [`Errno::NotFound`] — an endpoint id or window handle of zero, which
+    ///   names nothing, so the offer can only be malformed or a probe.
     pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::LengthOutOfRange);
@@ -174,13 +183,13 @@ impl MemberOffer {
             return Err(Errno::BadMagic);
         }
         let endpoint = read_u64(bytes, 6);
-        let window = read_u64(bytes, 14);
-        if endpoint == 0 || window == 0 {
+        let window_grant = read_u64(bytes, 14);
+        if endpoint == 0 || window_grant == 0 {
             return Err(Errno::NotFound);
         }
         Ok(Self {
             endpoint,
-            window,
+            window_grant,
             node: read_u32(bytes, 22),
         })
     }
@@ -202,6 +211,11 @@ pub enum MembershipEnd {
     /// this device was removed from it. The device is free, and offering it
     /// again is right while it is still present.
     Released,
+    /// The composer could not take the device on yet: [`Errno::Busy`] while a
+    /// membership for it has still to end, [`Errno::OutOfMemory`] when it had
+    /// no room to hold one more. Neither is a verdict on the device, so the
+    /// agent offers again on its paced cadence.
+    Deferred(Errno),
     /// The composer refused the offer: the device carries no array metadata it
     /// can compose, or metadata naming an array it cannot assemble the device
     /// into. That verdict came from reading the device itself, so re-offering
@@ -229,6 +243,7 @@ impl MembershipEnd {
         };
         match crate::reply::decode_status_reply(bytes) {
             Ok(()) => Self::Released,
+            Err(errno @ (Errno::Busy | Errno::OutOfMemory)) => Self::Deferred(errno),
             Err(errno) => Self::Refused(errno),
         }
     }
@@ -236,7 +251,10 @@ impl MembershipEnd {
     /// Whether the agent should offer its device again.
     #[must_use]
     pub const fn should_reoffer(&self) -> bool {
-        matches!(self, Self::Released | Self::ComposerGone)
+        matches!(
+            self,
+            Self::Released | Self::Deferred(_) | Self::ComposerGone
+        )
     }
 }
 

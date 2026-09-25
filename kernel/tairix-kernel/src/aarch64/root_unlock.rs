@@ -458,7 +458,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     if let Some(task_id) = admitted {
         // Publish the disk-owning kthread's scheduler id so its driver-store
         // serve loop registers on `SERVE_WAITQ` and is unparked the instant
-        // a request is posted (Design D D2b-2c; — a real
+        // a request is posted (Design D D2b-2c: a real
         // wake, never a busy-yield).
         crate::unlock_service::set_store_service_task(task_id);
     }

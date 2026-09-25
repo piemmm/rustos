@@ -201,8 +201,8 @@ pub const fn control_slot(slot: u8) -> u32 {
 }
 
 /// Encode an Endpoint ID (DCI) into the control-word Endpoint ID field
-/// (bits 20:16) of an endpoint-targeted command TRB — Reset Endpoint and
-/// Set TR Dequeue Pointer (§6.4.3.8 / §6.4.3.9).
+/// (bits 20:16) of an endpoint-targeted command TRB — Reset Endpoint, Stop
+/// Endpoint and Set TR Dequeue Pointer.
 #[must_use]
 pub const fn control_endpoint(dci: u8) -> u32 {
     ((dci as u32) & 0x1F) << 16
@@ -242,6 +242,9 @@ pub enum TrbType {
     /// Reset Endpoint command (§6.4.3.8): clear a halted endpoint's state
     /// after a STALL so it can be repositioned and resumed.
     ResetEndpoint = 14,
+    /// Stop Endpoint command (§4.6.9): take a running endpoint off a TD that
+    /// never completed, so its ring can be repositioned.
+    StopEndpoint = 15,
     /// Set TR Dequeue Pointer command (§6.4.3.9): reposition a stopped
     /// endpoint's transfer-ring dequeue pointer, dropping the TRBs the halt
     /// abandoned.
@@ -282,6 +285,7 @@ impl TrbType {
             12 => Ok(Self::ConfigureEndpoint),
             13 => Ok(Self::EvaluateContext),
             14 => Ok(Self::ResetEndpoint),
+            15 => Ok(Self::StopEndpoint),
             16 => Ok(Self::SetTrDequeuePointer),
             23 => Ok(Self::NoOpCommand),
             32 => Ok(Self::TransferEvent),

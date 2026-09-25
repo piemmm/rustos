@@ -20,6 +20,15 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::FaultDomainState;
 use tairix_abi::{Errno, HwNode};
 
+/// Whether a hardware-tree node is still in the live tree.
+///
+/// The tree never reissues a node id within a boot, so a node that is not live
+/// names a device that has gone, or one that never existed.
+pub trait HwNodeLiveness: Sync {
+    /// Whether the live tree holds a node with id `node_id`.
+    fn is_live(&self, node_id: u32) -> bool;
+}
+
 /// The kernel-held discovered hardware tree the hardware-tree syscalls
 /// serve.
 ///
@@ -31,7 +40,7 @@ use tairix_abi::{Errno, HwNode};
 ///
 /// `Sync` because the single installed source is shared by the per-CPU
 /// syscall handlers, exactly like [`crate::users::UsersDbSource`].
-pub trait HwTreeSource: Sync {
+pub trait HwTreeSource: HwNodeLiveness {
     /// The store's current mutation generation.
     ///
     /// Monotonically increasing; a `hw_tree_wait` caller blocks while this
@@ -70,12 +79,14 @@ pub trait HwTreeSource: Sync {
     /// position), and checked that every
     /// [`tairix_abi::hwtree::HwResource`] the node requests is covered by
     /// one of the caller's minted grants (no ambient
-    /// authority). The store **owns identity**: it assigns the node a
-    /// fresh, collision-free [`id`](tairix_abi::HwNode::id) and sets its
-    /// parent to `parent_id` ([`HwNode::set_identity`]) before recording
-    /// it, so an emitter-chosen id can never collide with an existing node — load-bearing, since the driver-store load path
-    /// resolves a matched node by its id. The node is always added, never
-    /// dropped, and only the generation advances.
+    /// authority). The store **owns identity**: it assigns the node an
+    /// [`id`](tairix_abi::HwNode::id) no node has held before in this boot
+    /// and sets its parent to `parent_id` ([`HwNode::set_identity`]) before
+    /// recording it. An id is never reissued, so one names one device for
+    /// the whole boot — load-bearing for the driver-store load path, which
+    /// resolves a matched node by its id, and for the DMA quarantine, whose
+    /// reset and removal proofs speak for the device an id named. Only the
+    /// generation advances.
     ///
     /// Returns the **kernel-assigned** [`id`](tairix_abi::HwNode::id) the
     /// store gave the published node, so the emitter can later name it to
@@ -86,8 +97,14 @@ pub trait HwTreeSource: Sync {
     ///
     /// # Errors
     ///
-    /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`] — a
-    /// build with no store wired never accepts a published node.
+    /// * [`Errno::NotImplemented`] from the default [`NullHwTreeSource`] — a
+    ///   build with no store wired never accepts a published node.
+    /// * [`Errno::NotFound`] when `parent_id` has left the tree — a driver
+    ///   whose device was removed may run until it is unloaded, and a child
+    ///   under an absent node could never be removed. Decided atomically with
+    ///   the publish.
+    /// * [`Errno::NoSpace`] once every id this boot can issue has been
+    ///   issued: reusing one would let it name two devices.
     fn publish(&self, parent_id: u32, node: HwNode) -> Result<u32, Errno>;
 
     /// Remove the child `node_id` — and its whole subtree — from the live
@@ -162,7 +179,8 @@ pub trait HwTreeSource: Sync {
     ///
     /// Unlike [`Self::publish`] this does **not** change the node set, so a
     /// health update that lands on the same value as before is idempotent
-    /// apart from the generation bump the reactive observers need.
+    /// apart from the generation bump; the leaf drivers beneath read the
+    /// health on their recovery path.
     ///
     /// # Errors
     ///
@@ -171,6 +189,14 @@ pub trait HwTreeSource: Sync {
     /// * [`Errno::NotFound`] if no live non-root node has id `node_id` — fail
     ///   closed, never fabricating a node.
     fn set_health(&self, node_id: u32, health: FaultDomainState) -> Result<(), Errno>;
+
+    /// The live node `node_id`, found by id rather than by walking a snapshot,
+    /// so a caller asking about one node pays for one.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`].
+    fn node(&self, node_id: u32) -> Result<Option<HwNode>, Errno>;
 }
 
 /// The hardware-tree source installed before any real store is wired.
@@ -179,6 +205,12 @@ pub trait HwTreeSource: Sync {
 /// with no hardware-tree store wired never fabricates an inventory.
 #[derive(Debug, Default, Copy, Clone)]
 pub struct NullHwTreeSource;
+
+impl HwNodeLiveness for NullHwTreeSource {
+    fn is_live(&self, _node_id: u32) -> bool {
+        false
+    }
+}
 
 impl HwTreeSource for NullHwTreeSource {
     fn generation(&self) -> Result<u64, Errno> {
@@ -202,6 +234,10 @@ impl HwTreeSource for NullHwTreeSource {
     }
 
     fn set_health(&self, _node_id: u32, _health: FaultDomainState) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn node(&self, _node_id: u32) -> Result<Option<HwNode>, Errno> {
         Err(Errno::NotImplemented)
     }
 }

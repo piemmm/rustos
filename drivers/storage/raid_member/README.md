@@ -33,14 +33,18 @@ a device whose own first block probed as array metadata — one instance:
 1. Resolves its two grants: the device's block-service call endpoint and its
    shared data window.
 2. **Delegates** both to the array composer's reserved rendezvous
-   (`call_grant`, `shm_grant`) and posts a `MemberOffer` naming them.
+   (`call_grant`, `shm_grant`) and posts a `MemberOffer` naming the endpoint
+   by its id and the window by the handle `shm_grant` minted the composer,
+   which is what the composer maps it by.
 3. Holds the membership open. The composer answers only when the membership
    ends, so one outstanding call carries the whole lifecycle: the agent parks
    on the reply, and the composer's endpoint being torn down cancels the call
    and wakes it.
-4. On a release or a vanished composer, offers again on a bounded escalating
-   cadence. On a refusal it stops: that verdict came from reading the device
-   itself, so the same unchanged device would only reach it again.
+4. On a release, a deferral (`Busy` while a previous membership for the device
+   has still to end, `OutOfMemory` when the composer had no room), or a
+   vanished composer, offers again on a bounded escalating cadence. On a
+   refusal it stops: that verdict came from reading the device itself, so the
+   same unchanged device would only reach it again.
 
 Nothing polls: the reply and the cancellation are events, and the only timed
 wait is the paced re-offer when no composer is listening yet. The pacing is the

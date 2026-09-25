@@ -356,6 +356,12 @@ impl KernelArch for Aarch64BinArch {
         }
     }
 
+    fn cross_cpu_tlb_shootdown(
+        arch: &'static Self,
+    ) -> Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)> {
+        Some(arch.arch())
+    }
+
     fn install_kernel_remap(
         arch: &'static Self,
         frames: &'static tairix_kernel_mem::FrameAllocator,

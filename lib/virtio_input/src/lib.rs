@@ -49,7 +49,8 @@ use tairix_abi::driver::input::{Input, InputEvent, InputEventKind, AXIS_X, AXIS_
 use tairix_abi::driver::BufferClass;
 use tairix_abi::DriverError;
 use tairix_virtio::{
-    BounceBuffer, ChainSegment, Direction, SplitQueue, Status, Transport, VirtioError, VirtioHost,
+    BounceBuffer, ChainSegment, CompletionSignal, Direction, SplitQueue, Status, Transport,
+    VirtioError, VirtioHost,
 };
 
 /// The virtio device id of an input device (virtio 1.1 §5.8 —
@@ -226,15 +227,15 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
         // events with no posted buffer), so take everything offered. A
         // device advertising a zero-sized queue is broken; refuse it
         // rather than run a driver that can never receive an event.
-        transport
-            .queue_select(wire::EVENT_QUEUE)
-            .map_err(VirtioError::as_driver_error)?;
-        let queue_size = transport.queue_max_size().min(wire::EVENT_QUEUE_SIZE);
-        if queue_size == 0 {
-            return Err(DriverError::DeviceFault);
-        }
-        let eventq = SplitQueue::new(&mut transport, host, wire::EVENT_QUEUE, queue_size)
-            .map_err(VirtioError::as_driver_error)?;
+        let eventq = SplitQueue::new(
+            &mut transport,
+            host,
+            wire::EVENT_QUEUE,
+            wire::EVENT_QUEUE_SIZE,
+            1,
+        )
+        .map_err(VirtioError::as_driver_error)?;
+        let queue_size = eventq.size();
         // One region carries every slot: the depth is bounded by the
         // 64-entry ceiling, so the whole pool is 512 bytes — never a DMA
         // page per 8-byte event.
@@ -250,10 +251,7 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
             event_pool,
             event_slots: core::array::from_fn(|_| None),
         };
-        if let Err(e) = input.post_pool(queue_size) {
-            input.close();
-            return Err(e);
-        }
+        input.post_pool(queue_size)?;
         Ok(input)
     }
 
@@ -262,7 +260,7 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
         for slot in 0..queue_size {
             Self::post_slot(
                 &mut self.eventq,
-                &self.event_pool,
+                &mut self.event_pool,
                 slot,
                 &mut self.event_slots,
             )?;
@@ -295,9 +293,9 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
     /// # Errors
     ///
     /// Propagates [`Self::open`]'s errors unchanged. If `arm` fails,
-    /// the device is torn down ([`Self::close`], so a live device is
-    /// never left DMA-writing into a driver that is about to exit)
-    /// and the `arm` error is returned.
+    /// the device is torn down — reset before its memory goes, so a live
+    /// device is never left DMA-writing into a driver that is about to
+    /// exit — and the `arm` error is returned.
     pub fn open_armed<F>(
         transport: T,
         host: &'h dyn VirtioHost,
@@ -307,38 +305,28 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
         F: FnOnce(&mut Self) -> Result<(), DriverError>,
     {
         let mut input = Self::open(transport, host)?;
-        if let Err(e) = arm(&mut input) {
-            input.close();
-            return Err(e);
-        }
+        arm(&mut input)?;
         Ok(input)
     }
 
-    /// Tear the device down for unload: reset it, then release its memory.
-    pub fn close(mut self) {
-        if self.transport.reset().is_err() {
-            // A wedged device may still master its ring and event pool: hold
-            // them for the kernel to quarantine when the driver exits.
-            core::mem::forget(self);
-        }
-    }
-
-    /// Borrow the underlying transport mutably for the in-process
-    /// software peer to drive on `kick`.
-    pub fn transport_mut(&mut self) -> &mut T {
-        &mut self.transport
-    }
-
-    /// Allocate one zeroed device-write event buffer, post it to the
-    /// eventq, and record it in `event_bufs` under the descriptor head
-    /// the queue assigned. The caller is responsible for the single
-    /// `kick` once a batch has been posted.
+    /// Zero event slot `slot`, post it to the eventq, and record it in
+    /// `event_slots` under the descriptor head the queue assigned. The caller
+    /// is responsible for the single `kick` once a batch has been posted.
+    ///
+    /// A zeroed slot decodes as a frame separator, so a completion that wrote
+    /// nothing surfaces no event rather than the slot's last one again.
     fn post_slot(
         eventq: &mut SplitQueue,
-        event_pool: &BounceBuffer,
+        event_pool: &mut BounceBuffer,
         slot: u16,
         event_slots: &mut [Option<u16>],
     ) -> Result<(), DriverError> {
+        let start = usize::from(slot) * wire::EVENT_LEN as usize;
+        event_pool
+            .full_region_mut()
+            .get_mut(start..start + wire::EVENT_LEN as usize)
+            .ok_or(DriverError::DeviceFault)?
+            .fill(0);
         let offset = u64::from(slot) * u64::from(wire::EVENT_LEN);
         let segments = [ChainSegment {
             phys: event_pool.phys() + offset,
@@ -357,6 +345,18 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
     }
 }
 
+impl<T: Transport> Drop for VirtioInput<'_, T> {
+    /// Reset the device before its memory goes: a device that will not confirm
+    /// may still master its ring and event pool, which are then held for the
+    /// kernel to quarantine when the driver exits.
+    fn drop(&mut self) {
+        if self.transport.reset().is_err() {
+            self.eventq.withhold();
+            self.event_pool.withhold();
+        }
+    }
+}
+
 impl<T: Transport> Input for VirtioInput<'_, T> {
     fn poll(&mut self, events: &mut [InputEvent]) -> Result<usize, DriverError> {
         if events.is_empty() {
@@ -371,8 +371,14 @@ impl<T: Transport> Input for VirtioInput<'_, T> {
         // a deadline for an event nothing promised would arrive.
         let mut count = self.drain_ready(events);
         if matches!(count, Ok(0)) {
-            self.host.notify_wait(self.eventq.index(), u64::MAX);
+            let signal = self.host.notify_wait(self.eventq.index(), u64::MAX);
             count = self.drain_ready(events);
+            // A wait with no deadline that still timed out could not be made
+            // at all — the binding was revoked or refused — so no interrupt
+            // will end the next one either, and polling again would spin.
+            if signal == CompletionSignal::TimedOut && matches!(count, Ok(0)) {
+                count = Err(DriverError::DeviceOffline);
+            }
         }
         // Acknowledge the device's interrupt now that its completions have
         // been observed, so it de-asserts its line before the next wait
@@ -397,10 +403,17 @@ impl<T: Transport> VirtioInput<'_, T> {
     /// `InputEvent` (fail closed — never decode stale bytes), so a
     /// single keypress's `EV_KEY`+`EV_SYN` pair surfaces exactly one
     /// event.
+    ///
+    /// At most a ring's worth of completions per call, whether or not they
+    /// decode: each buffer goes straight back, so a device completing them as
+    /// fast as they are reposted would otherwise hold the drain for ever.
     fn drain_ready(&mut self, events: &mut [InputEvent]) -> Result<usize, DriverError> {
         let mut count = 0;
         let mut reposted = false;
-        while count < events.len() {
+        for _ in 0..self.eventq.size() {
+            if count == events.len() {
+                break;
+            }
             let token = match self.eventq.poll_used() {
                 Ok(t) => t,
                 Err(VirtioError::NoCompletion) => break,
@@ -428,7 +441,7 @@ impl<T: Transport> VirtioInput<'_, T> {
             }
             Self::post_slot(
                 &mut self.eventq,
-                &self.event_pool,
+                &mut self.event_pool,
                 slot,
                 &mut self.event_slots,
             )?;

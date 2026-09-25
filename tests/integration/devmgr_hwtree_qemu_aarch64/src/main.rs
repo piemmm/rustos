@@ -42,7 +42,7 @@
 //!
 //! 1. **Armed → Bumped:** the first `generation()` call at which
 //!    `HW_TREE_WAITQ` is non-empty proves `devmgr` is about to park. The
-//!    source appends a node to the authoritative `HW_TREE` store — a **real**
+//!    source publishes a node into the authoritative `HW_TREE` store — a **real**
 //!    mutation that bumps the generation and calls `hw_tree_wake`, exactly a
 //!    hardware hotplug. `hw_tree_wait` then observes the changed generation
 //!    and returns, so `devmgr` never sleeps through the bump; it re-reads the
@@ -64,7 +64,7 @@
 //! ## Why acting from `generation()` is a safe context
 //!
 //! `generation()` runs inside the `hw_tree_wait` handler **before**
-//! `reschedule_current(Park)`, so no run-queue lock is held — appending to the
+//! `reschedule_current(Park)`, so no run-queue lock is held — publishing into the
 //! store (which takes the store lock, then `hw_tree_wake` → `wake_all` takes
 //! the wait-queue lock, both released before any `unpark`) is the same safe
 //! task-context hand-off an IPC `send` wakes a receiver from, never re-entrant
@@ -92,19 +92,20 @@ extern crate alloc;
 
 #[cfg(itest_aarch64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU8, Ordering};
 
     use alloc::vec::Vec;
 
-    use tairix_abi::hwtree::{HwDeviceClass, HwNode, HW_NODE_ROOT};
+    use tairix_abi::hwtree::{HwDeviceClass, HwNode, HW_NODE_ROOT, HW_NODE_ROOT_ID};
     use tairix_abi::Errno;
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SERIAL_SINK};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_kernel::hwtree_store::{HW_TREE, HW_TREE_SOURCE};
     use tairix_kernel_core::waitq::HW_TREE_WAITQ;
-    use tairix_kernel_core::HwTreeSource;
+    use tairix_kernel_core::{HwNodeLiveness, HwTreeSource};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -132,19 +133,28 @@ mod kernel {
     const BUMPED: u8 = 1;
     static PHASE: AtomicU8 = AtomicU8::new(ARMED);
 
-    /// The node the witness appends as the simulated hardware hotplug. Its
-    /// content is irrelevant to the proof — appending *anything* bumps the
-    /// `HwTreeStore` generation and wakes the parked `devmgr`; a distinctive
-    /// id keeps the serial transcript legible.
+    /// The node the witness publishes as the simulated hardware hotplug. Its
+    /// content is irrelevant to the proof — publishing *anything* bumps the
+    /// `HwTreeStore` generation and wakes the parked `devmgr`. Its id and
+    /// parent are placeholders the store overwrites, as for any emitter.
     fn hotplug_node() -> HwNode {
-        HwNode::new(0x7E57, HW_NODE_ROOT, HwDeviceClass::Other)
+        HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Other)
     }
+
+    /// The store refused the simulated hotplug.
+    const FAIL_PUBLISH: NonZeroU16 = NonZeroU16::MIN;
 
     /// The injected [`HwTreeSource`]: it forwards every read to the
     /// authoritative [`HW_TREE_SOURCE`] and drives the deterministic
     /// two-phase reactive proof off the `hw_tree_wait` handler's own
     /// [`generation`](HwTreeSource::generation) polls (see the module docs).
     struct WitnessSource;
+
+    impl HwNodeLiveness for WitnessSource {
+        fn is_live(&self, node_id: u32) -> bool {
+            HW_TREE_SOURCE.is_live(node_id)
+        }
+    }
 
     impl HwTreeSource for WitnessSource {
         fn generation(&self) -> Result<u64, Errno> {
@@ -160,11 +170,16 @@ mod kernel {
                     ARMED => {
                         // First park witnessed: deliver a real generation
                         // bump (simulated hotplug) via the authoritative
-                        // store — the same wake path the floor bus bring-up
-                        // uses, not a test back-channel. `hw_tree_wait` then
-                        // sees the changed generation and returns, so
-                        // `devmgr` wakes, re-reads, and re-parks.
-                        HW_TREE.append(&hotplug_node());
+                        // store — the same publish a bus driver's
+                        // `hw_emit_node` reaches, not a test back-channel.
+                        // `hw_tree_wait` then sees the changed generation and
+                        // returns, so `devmgr` wakes, re-reads, and re-parks.
+                        if HW_TREE
+                            .publish_child(HW_NODE_ROOT_ID, hotplug_node())
+                            .is_err()
+                        {
+                            qemu_exit::exit_failure(FAIL_PUBLISH);
+                        }
                         PHASE.store(BUMPED, Ordering::Release);
                     }
                     BUMPED => {
@@ -182,6 +197,10 @@ mod kernel {
 
         fn snapshot(&self) -> Result<Vec<u8>, Errno> {
             HW_TREE_SOURCE.snapshot()
+        }
+
+        fn node(&self, node_id: u32) -> Result<Option<HwNode>, Errno> {
+            HW_TREE_SOURCE.node(node_id)
         }
 
         fn publish(&self, parent_id: u32, node: HwNode) -> Result<u32, Errno> {

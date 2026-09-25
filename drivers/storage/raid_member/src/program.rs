@@ -23,7 +23,7 @@ use tairix_abi::reply::STATUS_REPLY_LEN;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
-use tairix_drv_storage_raid_member::{AgentStep, MemberAgent};
+use tairix_drv_storage_raid_member::{AgentStep, MemberAgent, Transport};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
@@ -56,6 +56,11 @@ const RAID_MEMBER_RELEASED: EventId = EventId(4188);
 /// Diagnostic event id: the composer refused this device; the agent stops.
 const RAID_MEMBER_REFUSED: EventId = EventId(4189);
 
+/// Diagnostic event id: the composer could not take this device on yet (a
+/// previous membership for it has still to end, or it had no room); the agent
+/// offers again on its paced cadence.
+const RAID_MEMBER_DEFERRED: EventId = EventId(4214);
+
 /// The capability set the driver host re-checks up front; the kernel is the
 /// authority and re-checks every trap. It is the least-privilege set the agent
 /// needs — no MMIO, DMA, IRQ, node emission, or mount authority, and no
@@ -86,28 +91,15 @@ fn log_hex_event(id: EventId, level: Level, message: &'static str, key: &'static
     );
 }
 
-/// The two resource ids the agent delegates, resolved once from the grants the
-/// matched member node carried.
-struct Transport {
-    /// The device's block-service call endpoint.
-    endpoint: u64,
-    /// The device's shared data window, named by its region id — the same id
-    /// `shm_grant` delegates, not the address it maps at. The agent never maps
-    /// the window: it has no reason to look at the device's bytes.
-    window: u64,
-}
-
-impl Transport {
-    /// Resolve the member's transport from the driver host's grants, or
-    /// [`None`] when the matched node did not carry both.
-    fn resolve<S: tairix_drvrt::GrantSyscalls>(host: &RtDriverHost<S>) -> Option<Self> {
-        let endpoint = host.endpoint_grant()?;
-        let window = host
-            .resources()
-            .find(|resource| resource.kind() == Some(HwResourceKind::Shared))?
-            .base();
-        Some(Self { endpoint, window })
-    }
+/// Resolve the member's transport from the grants its matched node carried, or
+/// [`None`] when the node did not carry both.
+fn resolve_transport<S: tairix_drvrt::GrantSyscalls>(host: &RtDriverHost<S>) -> Option<Transport> {
+    let endpoint = host.endpoint_grant()?;
+    let window = host
+        .resources()
+        .find(|resource| resource.kind() == Some(HwResourceKind::Shared))?
+        .base();
+    Some(Transport { endpoint, window })
 }
 
 /// The agent's wait-set, holding the one `CallReply` member it parks on.
@@ -169,15 +161,10 @@ fn offer(transport: &Transport, node: u32) -> Result<u64, Errno> {
     if granted < 0 {
         return Err(Errno::from_syscall(granted));
     }
-    let shared = tairix_rt::shm_grant(transport.window, RAID_REGISTRY_ENDPOINT);
-    if shared < 0 {
-        return Err(Errno::from_syscall(shared));
-    }
-    let request = MemberOffer {
-        endpoint: transport.endpoint,
-        window: transport.window,
+    let request = transport.offer(
+        tairix_rt::shm_grant(transport.window, RAID_REGISTRY_ENDPOINT),
         node,
-    };
+    )?;
     let mut frame = [0u8; MemberOffer::WIRE_LEN];
     let len = request.encode(&mut frame)?;
     // No deadline: the membership lasts as long as the array holds the device,
@@ -206,7 +193,7 @@ fn main() -> i32 {
     let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
         return EXIT_NO_HOST;
     };
-    let Some(transport) = Transport::resolve(&host) else {
+    let Some(transport) = resolve_transport(&host) else {
         return EXIT_NO_TRANSPORT;
     };
     let Ok(mut waits) = Waits::create() else {
@@ -280,6 +267,13 @@ fn log_membership_end(end: MembershipEnd, endpoint: u64) {
             "raid: member released by the array composer",
             "endpoint_hex",
             endpoint,
+        ),
+        MembershipEnd::Deferred(errno) => log_hex_event(
+            RAID_MEMBER_DEFERRED,
+            Level::Info,
+            "raid: array composer cannot take this device yet; re-offering",
+            "errno_hex",
+            errno as u64,
         ),
         MembershipEnd::Refused(errno) => log_hex_event(
             RAID_MEMBER_REFUSED,

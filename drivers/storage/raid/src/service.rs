@@ -138,6 +138,9 @@ pub enum ServiceError {
     /// than assumed away, because a scheduler that cannot see every slot would
     /// leave one unable to rejoin.
     Maintenance,
+    /// The array's node could not be published. Nothing was published, so
+    /// there is nothing to withdraw.
+    Unpublished,
 }
 
 /// Read and decode the array superblock from block 0 of `device`, failing

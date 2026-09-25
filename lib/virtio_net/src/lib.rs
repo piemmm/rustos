@@ -80,12 +80,14 @@
 //! `Service` request), where parking would block the reply and the
 //! serve loop. Waiting for the next device event is the caller's job
 //! — the driver parks on the device interrupt and rings the stack's
-//! notify port. Each `service` reaps every completed transmission and
-//! then drains **every** queued frame the device can still hold into the
+//! notify port. Each `service` reaps completed transmissions and then
+//! drains **every** queued frame the device can still hold into the
 //! transmit ring — up to the ring's descriptor capacity, kept in flight
 //! at once — so a burst (a TCP data segment and the ACK queued right
 //! behind it) egresses together in one call rather than one frame per
-//! call. Back-pressure applies only when the transmit ring is genuinely
+//! call. A call consumes at most a ring's worth of completions from each
+//! queue, however fast the device posts them, and leaves the rest for the
+//! next. Back-pressure applies only when the transmit ring is genuinely
 //! full: the remaining queued frames are left in the frame ring for the
 //! next completion-driven call — never waited on, never dropped. A frame
 //! in flight has its completion reaped non-blockingly on a later call
@@ -118,7 +120,9 @@
 //! [`tairix_virtio::BounceBuffer::into_slab`] before the buffers are
 //! reused for the next packet, and by zeroing each receive buffer (and
 //! the reassembly buffer) after its frame is delivered, before it is
-//! re-posted to the device — never before delivery.
+//! re-posted to the device — never before delivery. A frame no call
+//! delivered has no class, so dropping the engine zeroes the whole receive
+//! pool and reassembly buffer once the device's reset confirms.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -135,8 +139,8 @@ use tairix_abi::BootFacts;
 use tairix_abi::DriverError;
 use tairix_abi::Errno;
 use tairix_virtio::{
-    BounceBuffer, ChainSegment, Direction, DmaSlab, SplitQueue, Status, Transport, VirtioError,
-    VirtioHost,
+    scrub, BounceBuffer, ChainSegment, Direction, DmaSlab, RequestQueue, SplitQueue, Status,
+    Transport, VirtioError, VirtioHost,
 };
 
 /// The virtio device id of a network device (virtio 1.1 §5.1 —
@@ -261,6 +265,11 @@ mod wire {
     /// small ring, since control commands are one-at-a-time handshakes —
     /// a fixed bound on a handshake channel, not a data-path capacity.
     pub const CTRL_QUEUE_SIZE: u16 = 4;
+    /// Descriptors one control command occupies: the command and its ack.
+    pub const CTRL_CHAIN_LEN: u16 = 2;
+    /// Descriptors one transmit frame occupies: its `virtio_net_hdr` and its
+    /// body.
+    pub const TX_CHAIN_LEN: u16 = 2;
     /// MAC address byte offset in the device-configuration window.
     pub const CONFIG_MAC_OFFSET: usize = 0;
     /// `max_virtqueue_pairs` (`le16`) byte offset in the device-config
@@ -365,7 +374,7 @@ impl QueueDepths {
     /// `virtio_net_hdr` and the frame body).
     #[must_use]
     pub const fn tx_queue_size(self) -> u16 {
-        self.tx_inflight * 2
+        self.tx_inflight * wire::TX_CHAIN_LEN
     }
 }
 
@@ -428,9 +437,29 @@ impl TxStaging {
 
     /// Record a frame just handed to the device, keyed by its descriptor
     /// `head`, so its completion reclaims exactly this staging pair.
-    fn record_inflight(&mut self, head: u16, header: BounceBuffer, data: BounceBuffer) {
+    ///
+    /// A pair only leaves the idle set to be recorded here, so a slot always
+    /// exists; were one ever missing, the device still owns the pair, which
+    /// is withheld rather than freed under it.
+    fn record_inflight(&mut self, head: u16, mut header: BounceBuffer, mut data: BounceBuffer) {
         if let Some(slot) = self.inflight.iter_mut().find(|s| s.is_none()) {
             *slot = Some(TxInflight { head, header, data });
+        } else {
+            header.withhold();
+            data.withhold();
+        }
+    }
+
+    /// Never return any staging pair to its pool: the device may still be
+    /// using them.
+    fn withhold(&mut self) {
+        for (header, data) in self.free.iter_mut().flatten() {
+            header.withhold();
+            data.withhold();
+        }
+        for frame in self.inflight.iter_mut().flatten() {
+            frame.header.withhold();
+            frame.data.withhold();
         }
     }
 
@@ -526,6 +555,16 @@ struct RxQueue {
 }
 
 impl RxQueue {
+    /// Never return the queue's rings or buffers to their pool: the device may
+    /// still be using them.
+    fn withhold(&mut self) {
+        self.queue.withhold();
+        self.pool.withhold();
+        if let Some(reasm) = self.reasm.as_mut() {
+            reasm.withhold();
+        }
+    }
+
     /// Bring one receive virtqueue online and carve its buffer pool +
     /// reassembly buffer.
     fn new<T: Transport>(
@@ -538,7 +577,7 @@ impl RxQueue {
         // One device-write descriptor per posted buffer, so the virtqueue
         // is exactly as deep as the pool; the transport clamps the request
         // to whatever the device advertises.
-        let queue = SplitQueue::new(transport, host, queue_index, depths.rx_pool())?;
+        let queue = SplitQueue::new(transport, host, queue_index, depths.rx_pool(), 1)?;
         let depth = usize::from(queue.size().min(depths.rx_pool()));
         let bytes = depth
             .checked_mul(rx_buf_len)
@@ -621,7 +660,11 @@ impl RxQueue {
     }
 
     /// Move delivered frames from this queue into its RX `ring` until the
-    /// device is drained or the ring is full.
+    /// device is drained, the ring is full, or the pass has consumed a ring's
+    /// worth of completions — and the rest of a merged frame begun inside
+    /// that. A delivered frame's buffers go straight back to the device, so
+    /// without the last bound a device refilling them as fast as frames are
+    /// shed would hold the pass for ever; what is left waits for the next.
     ///
     /// Each iteration first delivers any frame held from a previous
     /// ring-full call (back-pressure: a frame the device already handed
@@ -644,6 +687,7 @@ impl RxQueue {
         sensitive: bool,
         report: &mut ServiceReport,
     ) -> Result<(), DriverError> {
+        let mut budget = self.queue.size();
         loop {
             if self.pending.is_some() {
                 if !self.deliver_pending(rings, queue, transport, hdr_len, sensitive, report)? {
@@ -653,8 +697,9 @@ impl RxQueue {
                 continue;
             }
             // A produced frame is pending; loop to deliver it. Otherwise
-            // no completion remains: re-post the pool and stop.
-            if !self.collect_frame(hdr_len, max_frame_len, guest_csum, mergeable)? {
+            // no completion remains, or the pass is spent: re-post the pool
+            // and stop.
+            if !self.collect_frame(&mut budget, hdr_len, max_frame_len, guest_csum, mergeable)? {
                 self.post_all(transport)?;
                 return Ok(());
             }
@@ -721,15 +766,19 @@ impl RxQueue {
     }
 
     /// Reassemble the next completed frame from the buffer pool into
-    /// `pending`, returning whether one was produced.
+    /// `pending`, returning whether one was produced, consuming at most
+    /// `budget` completions — beyond it, only the rest of a merged frame
+    /// already begun.
     fn collect_frame(
         &mut self,
+        budget: &mut u16,
         hdr_len: usize,
         max_frame_len: usize,
         guest_csum: bool,
         mergeable: bool,
     ) -> Result<bool, DriverError> {
-        loop {
+        while *budget > 0 {
+            *budget -= 1;
             let token = match self.queue.poll_used() {
                 Ok(token) => token,
                 Err(VirtioError::NoCompletion) => return Ok(false),
@@ -766,6 +815,10 @@ impl RxQueue {
                 });
                 return Ok(true);
             }
+            // The merge takes its trailing buffers whatever is left of the
+            // budget — its first is already consumed — so they are charged.
+            let trailing = u16::try_from(num_buffers - 1).unwrap_or(u16::MAX);
+            *budget = budget.saturating_sub(trailing);
             // A merged frame is pending; otherwise the merge failed
             // closed (short/over-long) and its buffers are left held for
             // re-posting, so harvesting continues.
@@ -780,6 +833,7 @@ impl RxQueue {
                 return Ok(true);
             }
         }
+        Ok(false)
     }
 
     /// Reassemble a `num_buffers`-buffer merged frame beginning at
@@ -954,8 +1008,16 @@ impl RxQueue {
     /// left it).
     fn scrub_reasm(&mut self) {
         if let Some(reasm) = self.reasm.as_mut() {
-            reasm.as_bytes_mut().fill(0);
+            scrub(reasm);
         }
+    }
+
+    /// Zero the whole pool and the reassembly buffer, once the device can no
+    /// longer write them: a frame no `service` delivered has no ring class to
+    /// say whether it was sensitive.
+    fn scrub_all(&mut self) {
+        scrub(&mut self.pool);
+        self.scrub_reasm();
     }
 }
 
@@ -984,12 +1046,12 @@ pub struct VirtioNet<'h, T: Transport> {
     /// enabled pair to be configured before the pair count is set, so
     /// these are set up and then held (never used) to keep their
     /// device-visible rings alive. Empty on a single-queue device.
-    _idle_tx: [Option<SplitQueue>; MAX_RX_QUEUES as usize],
+    idle_tx: [Option<SplitQueue>; MAX_RX_QUEUES as usize],
     /// The control virtqueue, present only when `VIRTIO_NET_F_MQ` +
     /// `VIRTIO_NET_F_CTRL_VQ` were negotiated. Used once at bring-up to
     /// select the receive/transmit queue-pair count, then held alive (its
     /// ring stays device-visible). `None` on a single-queue device.
-    ctrl_queue: Option<SplitQueue>,
+    ctrl_queue: Option<RequestQueue>,
     /// The [`VirtioHost`] the DMA staging was allocated through, which must
     /// outlive this engine because the staging slabs free through its pool.
     /// Read only at bring-up: the service path never waits on the device.
@@ -1184,15 +1246,22 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
                 depths,
             )?);
         }
-        let tx_queue =
-            SplitQueue::new(&mut transport, host, wire::TX_QUEUE, depths.tx_queue_size())?;
+        let tx_queue = SplitQueue::new(
+            &mut transport,
+            host,
+            wire::TX_QUEUE,
+            depths.tx_queue_size(),
+            wire::TX_CHAIN_LEN,
+        )?;
         for pair in 1..pairs {
             let tx_index = wire::TX_QUEUE + pair * wire::QUEUE_PAIR_STRIDE;
+            // Held idle, so it carries nothing and any depth serves.
             idle_tx[usize::from(pair)] = Some(SplitQueue::new(
                 &mut transport,
                 host,
                 tx_index,
                 depths.tx_queue_size(),
+                1,
             )?);
         }
         // The control queue is the last virtqueue, at index
@@ -1200,12 +1269,13 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // multiqueue was negotiated.
         let ctrl_queue = if multiqueue {
             let ctrl_index = max_pairs.max(1) * wire::QUEUE_PAIR_STRIDE;
-            Some(SplitQueue::new(
+            Some(RequestQueue::new(SplitQueue::new(
                 &mut transport,
                 host,
                 ctrl_index,
                 wire::CTRL_QUEUE_SIZE,
-            )?)
+                wire::CTRL_CHAIN_LEN,
+            )?))
         } else {
             None
         };
@@ -1215,7 +1285,8 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // on the device.
         // Two descriptors per frame, so the ring the transport actually
         // granted bounds the staging depth as well as the request did.
-        let tx_inflight = usize::from((tx_queue.size() / 2).min(depths.tx_inflight()));
+        let tx_inflight =
+            usize::from((tx_queue.size() / wire::TX_CHAIN_LEN).min(depths.tx_inflight()));
         let mut tx_free: [Option<(DmaSlab, DmaSlab)>; TX_INFLIGHT_MAX] =
             core::array::from_fn(|_| None);
         for slot in tx_free.iter_mut().take(tx_inflight) {
@@ -1238,7 +1309,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             rx,
             rx_queue_count,
             tx_queue,
-            _idle_tx: idle_tx,
+            idle_tx,
             ctrl_queue,
             host,
             mac: MacAddress::new(mac),
@@ -1248,10 +1319,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             tx: TxStaging::new(tx_free),
             features: driver_features,
         };
-        if let Err(e) = net.arm(pairs) {
-            net.close();
-            return Err(e);
-        }
+        net.arm(pairs)?;
         Ok(net)
     }
 
@@ -1272,28 +1340,6 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
                 .map_err(|_| VirtioError::DeviceFault)?;
         }
         Ok(())
-    }
-
-    /// Tear the device down for unload: reset it, then release its memory.
-    pub fn close(mut self) {
-        if self.transport.reset().is_err() {
-            // A wedged device may still master its rings and staging: hold
-            // them for the kernel to quarantine when the driver exits.
-            core::mem::forget(self);
-        }
-    }
-
-    /// Borrow the underlying transport (host-side test access only;
-    /// not exposed across the driver-class trait surface).
-    #[must_use]
-    pub fn transport(&self) -> &T {
-        &self.transport
-    }
-
-    /// Borrow the underlying transport mutably for the in-process
-    /// software peer to drive on `kick`.
-    pub fn transport_mut(&mut self) -> &mut T {
-        &mut self.transport
     }
 
     /// Whether `VIRTIO_NET_F_GUEST_CSUM` was negotiated: only then does
@@ -1480,7 +1526,8 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
     /// driver can trust, so it reclaims no staging (fail closed) while the
     /// reap keeps draining the genuine completions behind it.
     fn reap_tx(&mut self) {
-        loop {
+        // At most a ring's worth per call, whatever the device claims.
+        for _ in 0..self.tx_queue.size() {
             match self.tx_queue.poll_used() {
                 Ok(token) => self.tx.reclaim(token.head),
                 // A device-fabricated / malformed completion: skip it (its
@@ -1602,14 +1649,9 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
     }
 }
 
-/// Bounded poll budget for a control-queue command completion.
-///
-/// The device processes a virtqueue notify synchronously on the
-/// triggering vmexit (a real QEMU / hardware handshake), so the ack is
-/// ready on the first poll; the budget is only a fail-closed ceiling on a
-/// device that never answers. This is a one-shot control handshake run
-/// once at open, before any frame flow — never a steady-state spin.
-const CTRL_POLL_BUDGET: usize = 1 << 20;
+/// Deadline for a control-queue command. A device answering at all acknowledges
+/// one in microseconds, so this trips only on a device that has stopped.
+const CTRL_DEADLINE_NS: u64 = 2_000_000_000;
 
 /// Issue the `VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET` control command, selecting
 /// how many receive/transmit queue pairs the device uses.
@@ -1621,7 +1663,7 @@ const CTRL_POLL_BUDGET: usize = 1 << 20;
 fn set_virtqueue_pairs<T: Transport>(
     transport: &mut T,
     host: &dyn VirtioHost,
-    ctrl: &mut SplitQueue,
+    ctrl: &mut RequestQueue,
     pairs: u16,
 ) -> Result<(), VirtioError> {
     let mut cmd = host
@@ -1649,30 +1691,49 @@ fn set_virtqueue_pairs<T: Transport>(
             direction: Direction::DeviceWrite,
         },
     ];
-    ctrl.add_chain(&segments)?;
-    ctrl.kick(transport);
-    let mut failure = VirtioError::DeviceFault;
-    for _ in 0..CTRL_POLL_BUDGET {
-        match ctrl.poll_used() {
-            Ok(_) => {
-                // Acquire the device's ack write before reading it.
-                cmd.sync_range(0, 5);
-                return if cmd.as_bytes()[4] == wire::VIRTIO_NET_OK {
-                    Ok(())
-                } else {
-                    Err(VirtioError::DeviceFault)
-                };
+    if ctrl
+        .submit_and_wait(transport, host, &segments, CTRL_DEADLINE_NS)
+        .is_err()
+    {
+        if ctrl.is_abandoned() {
+            // The device may yet answer into it.
+            cmd.withhold();
+        }
+        return Err(VirtioError::DeviceFault);
+    }
+    // Acquire the device's ack write before reading it.
+    cmd.sync_range(0, 5);
+    if cmd.as_bytes()[4] == wire::VIRTIO_NET_OK {
+        Ok(())
+    } else {
+        Err(VirtioError::DeviceFault)
+    }
+}
+
+impl<T: Transport> Drop for VirtioNet<'_, T> {
+    /// Reset the device before its memory goes: a device that will not confirm
+    /// may still master its rings and staging, which are then held for the
+    /// kernel to quarantine when the driver exits. A confirmed reset hands the
+    /// receive staging back, and all of it is scrubbed before it is freed.
+    fn drop(&mut self) {
+        if self.transport.reset().is_err() {
+            for queue in self.rx.iter_mut().flatten() {
+                queue.withhold();
             }
-            Err(VirtioError::NoCompletion | VirtioError::MalformedCompletion) => {}
-            Err(e) => {
-                failure = e;
-                break;
+            self.tx_queue.withhold();
+            for queue in self.idle_tx.iter_mut().flatten() {
+                queue.withhold();
+            }
+            if let Some(queue) = self.ctrl_queue.as_mut() {
+                queue.withhold();
+            }
+            self.tx.withhold();
+        } else {
+            for queue in self.rx.iter_mut().flatten() {
+                queue.scrub_all();
             }
         }
     }
-    // The device never returned the command, so it may yet answer into it.
-    core::mem::forget(cmd);
-    Err(failure)
 }
 
 /// Outcome of one TX-frame staging in [`VirtioNet::stage_and_post`].

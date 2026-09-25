@@ -34,6 +34,12 @@ use tairix_abi::DriverError;
 // to enjoy `alloc` access (`lib/abi` is no-alloc).
 pub use tairix_abi::driver::{DmaSlab, PoolId, SlabFreeFn};
 
+/// Zero every byte of `slab`: the one scrub staging that held a sensitive
+/// payload gets once the device has handed it back.
+pub fn scrub(slab: &mut DmaSlab) {
+    slab.as_bytes_mut().fill(0);
+}
+
 /// Bounce buffer wrapping an owned [`DmaSlab`] for a single virtio
 /// transaction.
 ///
@@ -153,11 +159,32 @@ impl BounceBuffer {
         unsafe { core::ptr::read(&raw const md.slab) }
     }
 
+    /// Never return the buffer to its pool, nor scrub it: the device may still
+    /// be reading it. The kernel zeroes it when the process's memory is
+    /// finally reclaimed.
+    pub fn withhold(&mut self) {
+        self.slab.withhold();
+        self.class = BufferClass::NonSensitive;
+    }
+
+    /// Consume the bounce buffer once its request has ended, as
+    /// [`Self::into_slab`] does — unless `device_holds_it`, the request having
+    /// been abandoned with the device still holding it
+    /// ([`crate::RequestQueue::is_abandoned`]). Then the slab comes back
+    /// unscrubbed: a scrub now could overwrite a payload the device has yet to
+    /// read, and a write it has yet to make would land after it, so whoever
+    /// takes the buffer back from the device scrubs it then.
+    #[must_use]
+    pub fn into_slab_after(mut self, device_holds_it: bool) -> DmaSlab {
+        if device_holds_it {
+            self.class = BufferClass::NonSensitive;
+        }
+        self.into_slab()
+    }
+
     fn scrub_if_sensitive(&mut self) {
         if self.class.is_sensitive() {
-            for byte in self.slab.as_bytes_mut() {
-                *byte = 0;
-            }
+            scrub(&mut self.slab);
             self.used = 0;
         }
     }
@@ -204,17 +231,18 @@ mod tests {
         }
     }
 
-    /// Build a [`DmaSlab`] backed by a leaked `Vec<u8>`. Tests use
-    /// this in place of the production pool to exercise the slab
-    /// surface in isolation.
-    fn leaked_slab(len: usize, pool_id: PoolId, slot: usize, fill: u8) -> DmaSlab {
-        let storage = vec![fill; len].into_boxed_slice();
+    /// A slab lent over `storage`, whose drop frees nothing, so the
+    /// interpreter accounts for every byte a test touches.
+    ///
+    /// # Safety
+    ///
+    /// `storage` must outlive the slab and be reached only through it until
+    /// the slab is gone.
+    unsafe fn lent_slab(storage: &mut [u8], pool_id: PoolId, slot: usize) -> DmaSlab {
+        let len = storage.len();
         let phys = storage.as_ptr() as u64;
-        let bytes: &'static mut [u8] = alloc::boxed::Box::leak(storage);
-        let ptr = NonNull::new(bytes.as_mut_ptr()).expect("box leak is non-null");
-        // SAFETY: `Box::leak` yields a `'static` buffer of exactly
-        // `len` bytes; nothing else holds a reference to it.
-        unsafe { DmaSlab::from_leaked(phys, ptr, len, pool_id, slot) }
+        // SAFETY: per the function contract.
+        unsafe { DmaSlab::from_leaked(phys, NonNull::from(storage).cast(), len, pool_id, slot) }
     }
 
     /// File-scope recorder for the [`DmaSlab::sync_range`] hook. A
@@ -241,7 +269,10 @@ mod tests {
         use coherency_test_state as rec;
         use core::sync::atomic::Ordering;
 
-        let slab = leaked_slab(64, PoolId::MOCK, 0, 0).with_coherency(rec::record);
+        let mut storage = [0u8; 64];
+        let mut plain_storage = [0u8; 64];
+        // SAFETY: both stores outlive their slabs, reached only through them.
+        let slab = unsafe { lent_slab(&mut storage, PoolId::MOCK, 0) }.with_coherency(rec::record);
         let base = slab.as_bytes().as_ptr() as usize;
 
         // An in-bounds range is maintained at the right address and length.
@@ -259,14 +290,56 @@ mod tests {
 
         // A slab minted without a coherency shim never calls the hook
         // (coherent interconnect / mock host).
-        let plain = leaked_slab(64, PoolId::MOCK, 1, 0);
+        // SAFETY: as above.
+        let plain = unsafe { lent_slab(&mut plain_storage, PoolId::MOCK, 1) };
         plain.sync_range(0, 16);
         assert_eq!(rec::CALLS.load(Ordering::SeqCst), 1);
+        assert!(slab.needs_cache_maintenance());
+        assert!(!plain.needs_cache_maintenance());
+    }
+
+    #[test]
+    fn a_withheld_bounce_buffer_is_neither_freed_nor_scrubbed() {
+        /// Counts a free into the `Cell` its pool pointer names.
+        ///
+        /// # Safety
+        ///
+        /// `pool` must point at a live `Cell<usize>`.
+        unsafe fn count(pool: *const (), _cpu: NonNull<u8>, _slot: usize, _len: usize) {
+            // SAFETY: per the function contract.
+            let frees = unsafe { &*pool.cast::<core::cell::Cell<usize>>() };
+            frees.set(frees.get() + 1);
+        }
+
+        // The device may still be reading it; the kernel zeroes it later.
+        let frees = core::cell::Cell::new(0usize);
+        let mut storage = vec![0xABu8; 32];
+        let ptr = NonNull::new(storage.as_mut_ptr()).expect("non-null");
+        // SAFETY: `storage` holds 32 bytes, outlives the slab, and is reached
+        // only through it until the slab is gone; `frees` outlives it too.
+        let slab = unsafe {
+            DmaSlab::from_pool(
+                0,
+                ptr,
+                32,
+                PoolId::MOCK,
+                7,
+                core::ptr::from_ref(&frees).cast(),
+                count,
+            )
+        };
+        let mut bounce = BounceBuffer::new(slab, BufferClass::Sensitive);
+        bounce.withhold();
+        drop(bounce);
+        assert_eq!(frees.get(), 0);
+        assert!(storage.iter().all(|b| *b == 0xAB));
     }
 
     #[test]
     fn dma_slab_round_trip() {
-        let mut slab = leaked_slab(16, PoolId::MOCK, 0, 0);
+        let mut storage = [0u8; 16];
+        // SAFETY: `storage` outlives the slab, reached only through it.
+        let mut slab = unsafe { lent_slab(&mut storage, PoolId::MOCK, 0) };
         assert_eq!(slab.len(), 16);
         assert!(!slab.is_empty());
         assert_eq!(slab.pool_id(), PoolId::MOCK);
@@ -281,9 +354,15 @@ mod tests {
         // logical pool, each with a distinct slot, can be held with
         // three simultaneously-live `&mut [u8]`s. We write a
         // distinct pattern to each and observe no cross-talk.
-        let mut a = leaked_slab(8, PoolId::MOCK, 0, 0);
-        let mut b = leaked_slab(8, PoolId::MOCK, 1, 0);
-        let mut c = leaked_slab(8, PoolId::MOCK, 2, 0);
+        let (mut a_storage, mut b_storage, mut c_storage) = ([0u8; 8], [0u8; 8], [0u8; 8]);
+        // SAFETY: each store outlives its slab, reached only through it.
+        let (mut a, mut b, mut c) = unsafe {
+            (
+                lent_slab(&mut a_storage, PoolId::MOCK, 0),
+                lent_slab(&mut b_storage, PoolId::MOCK, 1),
+                lent_slab(&mut c_storage, PoolId::MOCK, 2),
+            )
+        };
         let a_bytes = a.as_bytes_mut();
         let b_bytes = b.as_bytes_mut();
         let c_bytes = c.as_bytes_mut();
@@ -305,14 +384,13 @@ mod tests {
         drop_test_state::FREED.store(0, Ordering::SeqCst);
         drop_test_state::LAST_SLOT.store(usize::MAX, Ordering::SeqCst);
         drop_test_state::LAST_LEN.store(0, Ordering::SeqCst);
-        let storage = vec![0u8; 32].into_boxed_slice();
+        let mut storage = [0u8; 32];
         let phys = storage.as_ptr() as u64;
-        let bytes: &'static mut [u8] = alloc::boxed::Box::leak(storage);
-        let ptr = NonNull::new(bytes.as_mut_ptr()).unwrap();
+        let ptr = NonNull::from(&mut storage).cast::<u8>();
         let pool_id = PoolId::fresh();
         {
-            // SAFETY: pool_ptr is null but the shim ignores it; the
-            // bytes are leaked, so they outlive the slab.
+            // SAFETY: pool_ptr is null but the shim ignores it; `storage`
+            // outlives the slab and is reached only through it meanwhile.
             let slab = unsafe {
                 DmaSlab::from_pool(
                     phys,
@@ -341,8 +419,14 @@ mod tests {
         let id_b = PoolId::fresh();
         assert_ne!(id_a, id_b);
         assert_ne!(id_a, PoolId::MOCK);
-        let a = leaked_slab(4, id_a, 0, 0);
-        let b = leaked_slab(4, id_b, 0, 0);
+        let (mut a_storage, mut b_storage) = ([0u8; 4], [0u8; 4]);
+        // SAFETY: each store outlives its slab, reached only through it.
+        let (a, b) = unsafe {
+            (
+                lent_slab(&mut a_storage, id_a, 0),
+                lent_slab(&mut b_storage, id_b, 0),
+            )
+        };
         assert_ne!(a.pool_id(), b.pool_id());
         // Same slot index, different pool — disambiguated only by
         // the `pool_id` field. A consumer that mistakenly tries to
@@ -357,7 +441,9 @@ mod tests {
 
     #[test]
     fn bounce_buffer_stages_payload() {
-        let slab = leaked_slab(32, PoolId::MOCK, 0, 0);
+        let mut storage = [0u8; 32];
+        // SAFETY: `storage` outlives the slab, reached only through it.
+        let slab = unsafe { lent_slab(&mut storage, PoolId::MOCK, 0) };
         let phys = slab.phys();
         let mut bb = BounceBuffer::new(slab, BufferClass::NonSensitive);
         assert!(bb.stage(&[1, 2, 3, 4]).is_ok());
@@ -368,42 +454,43 @@ mod tests {
 
     #[test]
     fn bounce_buffer_rejects_overflow() {
-        let slab = leaked_slab(4, PoolId::MOCK, 0, 0);
+        let mut storage = [0u8; 4];
+        // SAFETY: `storage` outlives the slab, reached only through it.
+        let slab = unsafe { lent_slab(&mut storage, PoolId::MOCK, 0) };
         let mut bb = BounceBuffer::new(slab, BufferClass::NonSensitive);
         assert_eq!(bb.stage(&[0u8; 8]), Err(DriverError::BufferTooSmall));
     }
 
     #[test]
     fn bounce_buffer_scrubs_on_sensitive_drop() {
-        let slab = leaked_slab(16, PoolId::MOCK, 0, 0);
-        let phys = slab.phys();
+        let mut storage = [0u8; 16];
         {
+            // SAFETY: `storage` outlives the slab, reached only through it.
+            let slab = unsafe { lent_slab(&mut storage, PoolId::MOCK, 0) };
             let mut bb = BounceBuffer::new(slab, BufferClass::Sensitive);
             bb.stage(&[0xAA; 16]).unwrap();
             assert_eq!(bb.staged(), &[0xAA; 16]);
         }
-        // SAFETY: the leaked `Box` keeps the bytes at `phys` alive
-        // for the duration of the test process.
-        let view: &[u8] = unsafe { core::slice::from_raw_parts(phys as *const u8, 16) };
-        assert!(view.iter().all(|b| *b == 0));
+        assert!(storage.iter().all(|b| *b == 0));
     }
 
     #[test]
     fn bounce_buffer_preserves_on_non_sensitive_drop() {
-        let slab = leaked_slab(16, PoolId::MOCK, 0, 0);
-        let phys = slab.phys();
+        let mut storage = [0u8; 16];
         {
+            // SAFETY: `storage` outlives the slab, reached only through it.
+            let slab = unsafe { lent_slab(&mut storage, PoolId::MOCK, 0) };
             let mut bb = BounceBuffer::new(slab, BufferClass::NonSensitive);
             bb.stage(&[0xBB; 16]).unwrap();
         }
-        // SAFETY: as above.
-        let view: &[u8] = unsafe { core::slice::from_raw_parts(phys as *const u8, 16) };
-        assert!(view.iter().all(|b| *b == 0xBB));
+        assert!(storage.iter().all(|b| *b == 0xBB));
     }
 
     #[test]
     fn bounce_buffer_into_slab_scrubs_on_sensitive() {
-        let slab = leaked_slab(12, PoolId::MOCK, 0, 0);
+        let mut storage = [0u8; 12];
+        // SAFETY: `storage` outlives the slab, reached only through it.
+        let slab = unsafe { lent_slab(&mut storage, PoolId::MOCK, 0) };
         let mut bb = BounceBuffer::new(slab, BufferClass::Sensitive);
         bb.stage(&[0x77; 12]).unwrap();
         let returned = bb.into_slab();
@@ -412,8 +499,37 @@ mod tests {
     }
 
     #[test]
+    fn a_buffer_the_device_still_holds_comes_back_unscrubbed() {
+        let mut storage = [0u8; 8];
+        // SAFETY: `storage` outlives the slab, reached only through it.
+        let slab = unsafe { lent_slab(&mut storage, PoolId::MOCK, 0) };
+        let mut bb = BounceBuffer::new(slab, BufferClass::Sensitive);
+        bb.stage(&[0x5A; 8]).unwrap();
+        let held = bb.into_slab_after(true);
+        assert!(
+            held.as_bytes().iter().all(|b| *b == 0x5A),
+            "the device may yet read it"
+        );
+        let mut bb = BounceBuffer::new(held, BufferClass::Sensitive);
+        bb.stage(&[0x5A; 8]).unwrap();
+        let returned = bb.into_slab_after(false);
+        assert!(returned.as_bytes().iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn scrub_zeroes_the_whole_slab() {
+        let mut storage = [0xEEu8; 8];
+        // SAFETY: `storage` outlives the slab, reached only through it.
+        let mut slab = unsafe { lent_slab(&mut storage, PoolId::MOCK, 0) };
+        scrub(&mut slab);
+        assert!(slab.as_bytes().iter().all(|b| *b == 0));
+    }
+
+    #[test]
     fn fill_from_device_updates_used() {
-        let slab = leaked_slab(32, PoolId::MOCK, 0, 0);
+        let mut storage = [0u8; 32];
+        // SAFETY: `storage` outlives the slab, reached only through it.
+        let slab = unsafe { lent_slab(&mut storage, PoolId::MOCK, 0) };
         let mut bb = BounceBuffer::new(slab, BufferClass::NonSensitive);
         bb.full_region_mut()[..5].copy_from_slice(b"hello");
         let view = bb.fill_from_device(5).expect("fit");

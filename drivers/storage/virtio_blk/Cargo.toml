@@ -11,11 +11,14 @@ publish.workspace = true
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The bus-agnostic virtio split-virtqueue protocol (Transport trait,
-# SplitQueue, DMA slabs, the MockHost/MockTransport doubles) lives in
-# `lib/virtio`. The driver consumes it from `lib/*` and never depends on
+# SplitQueue, DMA slabs) lives in `lib/virtio`; its test doubles come from the
+# dev-dependency's `mock` feature. The driver consumes it from `lib/*` and never depends on
 # the `drivers/bus/virtio` transport crate (a driver
 # may depend on `lib/*` but never on another driver).
 tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0", features = ["mock"] }

@@ -551,6 +551,12 @@ impl KernelArch for BinArch {
         self.calibration.tsc_ticks_to_ns(ticks)
     }
 
+    fn cross_cpu_tlb_shootdown(
+        arch: &'static Self,
+    ) -> Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)> {
+        Some(arch.arch())
+    }
+
     fn install_kernel_remap(
         arch: &'static Self,
         frames: &'static tairix_kernel_mem::FrameAllocator,
@@ -638,8 +644,8 @@ const _BIN_ARCH_HALT_RETURNS_NEVER: fn(&BinArch) -> ! = <BinArch as KernelArch>:
 // SAFETY-INVARIANT: `BinArch` implements `SchedulerArch`. A regression
 // that broke the super-trait impl (e.g. a missing `current_cpu`)
 // would surface at this `const _` coercion before the kernel binary
-// linked. — no interface creep — applies in both
-// directions: shrinking the surface is a defect too.
+// linked. The check applies in both directions: shrinking the surface is a
+// defect too.
 const _BIN_ARCH_IS_SCHED_ARCH: fn(&BinArch) -> u32 = <BinArch as SchedulerArch>::current_cpu;
 
 #[cfg(test)]

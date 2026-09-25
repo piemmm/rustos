@@ -28,8 +28,9 @@
 //! composer's endpoint being torn down, which cancels the call. Nothing polls
 //! the composer and nothing polls the device.
 //!
-//! [`MemberAgent`] is that lifecycle as pure, host-tested logic; the `Run`
-//! program supplies the clock, the syscalls, and the audit trail.
+//! [`MemberAgent`] is that lifecycle and [`Transport::offer`] what each offer
+//! names, both pure and host-tested; the `Run` program supplies the clock, the
+//! syscalls, and the audit trail.
 //!
 //! # Why this is its own bundle
 //!
@@ -48,8 +49,10 @@
 #![deny(missing_docs)]
 
 mod agent;
+mod offer;
 
 pub use agent::{AgentStep, MemberAgent, REOFFER_BASE_NS, REOFFER_CEILING_NS};
+pub use offer::Transport;
 
 use tairix_abi::raid_ipc::{RAID_CANDIDATE_COMPATIBLE, RAID_MEMBER_COMPATIBLE};
 use tairix_abi::{DriverBindKey, HwMatchKey};

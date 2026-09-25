@@ -22,14 +22,16 @@ tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 # layering holds (drvhost never links a userland or kernel crate).
 tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
-# Home of the `VirtioHostFactory` host seam and the bus-agnostic
-# `MockHost`/`VirtioHost`. `HostConfig::virtio_host_factory` names the
+# Home of the `VirtioHostFactory` host seam and `VirtioHost` (its `MockHost`
+# double comes from the dev-dependency's `mock` feature).
+# `HostConfig::virtio_host_factory` names the
 # trait, so it is a production dependency. It pulls in only `lib/*`
 # (never a driver or kernel crate), keeping a kernel-side factory impl
 # free to plug into the same seam without `kernel/virtio -> drvhost`.
 tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 
 [dev-dependencies]
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0", features = ["mock"] }
 # Test-only: `tests/devmgr_autoload.rs` proves the device manager's
 # autoload walk drives this host's load gate end-to-end. The production
 # edge points the other way round (devmgr names only its `DriverLoader`

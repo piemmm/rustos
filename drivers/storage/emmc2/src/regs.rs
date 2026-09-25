@@ -95,6 +95,10 @@ pub const CONTROL1_CLK_STABLE: u32 = 1 << 1;
 pub const CONTROL1_CLK_EN: u32 = 1 << 2;
 /// Reset the complete host controller.
 pub const CONTROL1_SRST_HC: u32 = 1 << 24;
+/// Reset the command line.
+pub const CONTROL1_SRST_CMD: u32 = 1 << 25;
+/// Reset the data line, which also halts the DMA engine.
+pub const CONTROL1_SRST_DATA: u32 = 1 << 26;
 
 /// Bit offset of the 10-bit SD-clock frequency-select field (`[15:6]`).
 pub const CONTROL1_CLK_FREQ_SHIFT: u32 = 8;
@@ -144,6 +148,9 @@ pub const CMD_CRCCHK_EN: u32 = 1 << 19;
 pub const CMD_IXCHK_EN: u32 = 1 << 20;
 /// Command transfers data on the DAT lines (`[21]`).
 pub const CMD_IS_DATA: u32 = 1 << 21;
+/// Command type = Abort (`[23:22]` = `0b11`): the command stops the data
+/// transfer in progress.
+pub const CMD_TYPE_ABORT: u32 = 0b11 << 22;
 
 /// Response-type select: no response.
 pub const RESP_NONE: u32 = 0b00;

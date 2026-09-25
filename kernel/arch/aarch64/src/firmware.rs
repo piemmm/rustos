@@ -76,8 +76,8 @@ pub fn find_mailbox(fdt: &Fdt<'_>) -> Option<DiscoveredMailbox> {
     })
 }
 
-/// Raise the ARM core clock to the highest rate the firmware will deliver,
-/// returning that rate in Hz.
+/// Raise the ARM core clock to the highest rate the firmware behind
+/// `transport` will deliver, returning that rate in Hz.
 ///
 /// The firmware leaves the ARM clock wherever it last put it, which after the
 /// boot window is `arm_freq_min` — 600 MHz on a Pi 4B whose parts are rated
@@ -92,21 +92,12 @@ pub fn find_mailbox(fdt: &Fdt<'_>) -> Option<DiscoveredMailbox> {
 ///
 /// The ceiling is read from the firmware rather than assumed, so a board
 /// whose `config.txt` raises `arm_freq` is raised to *its* ceiling. Returns
-/// `None` on any failure — no mailbox, a short doorbell window, an
-/// unreachable or unhelpful firmware — leaving the clock as it was.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-#[must_use]
-pub fn raise_cpu_clock(fdt: &Fdt<'_>) -> Option<u32> {
-    let mailbox = find_mailbox(fdt)?;
-    with_transport(mailbox, raise_over).flatten()
-}
-
-/// Ask the firmware behind `transport` for the ARM clock's ceiling and set
-/// the clock to it, returning the rate it applied.
+/// `None` when the firmware is unreachable or unhelpful, leaving the clock as
+/// it was.
 ///
-/// The exchange half of `raise_cpu_clock`, separated so it is host-testable
-/// against the protocol-faithful mock firmware — QEMU models no `VideoCore`,
-/// so this is the only way to prove the sequence before it runs on metal.
+/// Host-testable against the protocol-faithful mock firmware — QEMU models no
+/// `VideoCore`, so this is the only way to prove the sequence before it runs
+/// on metal.
 ///
 /// A zero ceiling is how the property interface spells "no such clock", so it
 /// yields `None` rather than a request for a stopped clock.
@@ -121,6 +112,12 @@ pub fn raise_over(transport: &mut dyn MailboxTransport) -> Option<u32> {
 
 /// Run `body` against a transport over `mailbox`'s doorbell and the shared
 /// property buffer.
+///
+/// The boot path holds its whole conversation with the firmware inside one
+/// call: a request the firmware leaves unanswered stays owed on that
+/// transport, so the next exchange waits for its reply rather than taking it
+/// as its own, which a second transport over the same buffer could not know
+/// to do.
 ///
 /// `None` when the doorbell window is shorter than the register block, its
 /// base cannot be addressed, or the buffer's bus address cannot be formed —

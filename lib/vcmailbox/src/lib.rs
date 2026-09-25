@@ -25,7 +25,11 @@
 //!   and returns the firmware-mutated words. [`MmioMailbox`] is the
 //!   metal implementation over two capability-gated
 //!   [`RegisterWindow`]s (the doorbell register block and the DMA
-//!   property buffer); emulation and host tests supply a mock
+//!   property buffer), spinning between looks at the inbox as the pre-MMU
+//!   boot path must; [`DmaMailbox`] is the same over a carved buffer it
+//!   owns and never frees while the firmware owes it a reply, parking on
+//!   the inbox interrupt ([`InboxInterrupt`]) instead.
+//!   Emulation and host tests supply a mock
 //!   transport instead — QEMU does not model the firmware, so the
 //!   protocol semantics are proven here and on metal, never faked.
 //!
@@ -39,8 +43,12 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+use core::ptr::NonNull;
+
 use tairix_abi::driver::display::DisplayFormat;
+use tairix_abi::driver::dma::DmaSlab;
 use tairix_abi::driver::mailbox::MAILBOX_PROPERTY_WORDS;
+use tairix_abi::time::MonotonicClock;
 use tairix_abi::{DriverBindKey, DriverError, HwMatchKey, RegisterWindow};
 
 #[cfg(test)]
@@ -1106,6 +1114,8 @@ pub const MAILBOX_REGS_LEN_BYTES: usize = 0x40;
 const REG_MBOX0_READ: usize = 0x00;
 /// Mailbox 0 status register.
 const REG_MBOX0_STATUS: usize = 0x18;
+/// Mailbox 0 configuration register: the conditions that raise its interrupt.
+const REG_MBOX0_CONFIG: usize = 0x1C;
 /// Mailbox write register for ARM→VC posts.
 const REG_MBOX1_WRITE: usize = 0x20;
 
@@ -1114,17 +1124,20 @@ const STATUS_EMPTY: u32 = 1 << 30;
 /// Status bit: the mailbox is full (no room to write).
 const STATUS_FULL: u32 = 1 << 31;
 
+/// Configuration bit: interrupt while mailbox 0 holds a word (Linux's
+/// `ARM_MC_IHAVEDATAIRQEN`).
+const CONFIG_DATA_IRQ: u32 = 1 << 0;
+
 /// The ARM→VC property-tags channel number.
 const CHANNEL_PROPERTY: u32 = 8;
 /// Mask selecting the channel nibble of a mailbox word.
 const CHANNEL_MASK: u32 = 0xF;
 
-/// Default doorbell poll budget. A bound on a *defence* against
-/// unresponsive firmware, not a scalable capacity:
-/// the firmware answers a property call in well under a millisecond,
-/// so a million polls is orders of magnitude past any honest response
-/// and the exchange fails closed with [`MailboxError::Timeout`]
-/// rather than spinning forever.
+/// Default doorbell poll budget, spent afresh by every spinning wait of an
+/// exchange: about 400 ms of polling on a Pi 4 (`docs/src/platform/aarch64.md`),
+/// past any property call the boot path makes. A bound on a *defence*
+/// against unresponsive firmware, not a scalable capacity: the wait fails
+/// closed with [`MailboxError::Timeout`].
 pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 
 /// Cache-maintenance hooks for the property buffer when the transport
@@ -1191,10 +1204,14 @@ pub enum TimeoutStage {
     /// Timed out waiting for write room before the request could be
     /// posted (the firmware never drained the inbox).
     PostRoom,
-    /// The request was posted, but no completion ever arrived on the
-    /// property channel within the budget (the firmware never replied —
+    /// The request was posted, but its completion had not arrived on the
+    /// property channel when the wait ran out (the firmware never replied —
     /// e.g. it silently dropped the tag).
     Response,
+    /// An earlier request's reply still had not arrived, so this one was
+    /// neither staged nor posted: the firmware may yet write that reply into
+    /// the buffer.
+    Unanswered,
 }
 
 /// Diagnostics from the most recent [`MmioMailbox::exchange`], retained
@@ -1216,8 +1233,9 @@ pub struct ExchangeStats {
     pub posted_word: u32,
     /// Polls spent waiting for write room before posting.
     pub post_room_polls: u32,
-    /// Completion reads taken while waiting for our channel's reply
-    /// (each either ours or a drained foreign-channel or stale post).
+    /// Completion reads taken while waiting for replies — an unanswered
+    /// earlier request's, then this one's — each either the awaited reply or
+    /// a drained foreign-channel or stale post.
     pub response_reads: u32,
     /// Of those, how many were completions for a *different* channel,
     /// drained and ignored.
@@ -1232,22 +1250,152 @@ pub struct ExchangeStats {
     pub timeout_stage: TimeoutStage,
 }
 
-/// The metal mailbox transport: the doorbell register block plus a
-/// DMA-visible property buffer, both reached through capability-gated
-/// [`RegisterWindow`]s (no ambient authority).
-pub struct MmioMailbox {
+/// The mailbox's inbox interrupt, bound for the task that waits on it, and
+/// the clock that task's reply deadlines are kept on.
+pub trait InboxInterrupt: MonotonicClock {
+    /// Park until the inbox interrupt fires or `timeout_ns` elapses, `true`
+    /// only on a fire.
+    ///
+    /// A line that cannot be waited on answers `false`, which ends the reply
+    /// wait rather than spinning on it.
+    fn park(&mut self, timeout_ns: u64) -> bool;
+}
+
+/// How a reply wait passes the time between looks at the inbox.
+trait ReplyWait {
+    /// Begin a wait with a whole allowance of its own.
+    fn start(&mut self);
+
+    /// Spend the allowance on one more look, first giving the CPU up when the
+    /// last look found the inbox empty; `false` ends the wait.
+    fn next_look(&mut self, inbox_empty: bool) -> bool;
+}
+
+/// Reply waits that spin, each allowed `looks` looks: the pre-MMU boot path
+/// has no scheduler to park on.
+struct SpinWait {
+    looks: u32,
+    left: u32,
+}
+
+impl ReplyWait for SpinWait {
+    fn start(&mut self) {
+        self.left = self.looks;
+    }
+
+    fn next_look(&mut self, inbox_empty: bool) -> bool {
+        let Some(left) = self.left.checked_sub(1) else {
+            return false;
+        };
+        self.left = left;
+        if inbox_empty {
+            core::hint::spin_loop();
+        }
+        true
+    }
+}
+
+/// Reply waits that park on the inbox interrupt, each until a deadline
+/// `window_ns` after it starts.
+struct InterruptWait<I> {
+    inbox: I,
+    window_ns: u64,
+    deadline_ns: u64,
+}
+
+impl<I: InboxInterrupt> ReplyWait for InterruptWait<I> {
+    fn start(&mut self) {
+        self.deadline_ns = self.inbox.now_ns().saturating_add(self.window_ns);
+    }
+
+    fn next_look(&mut self, inbox_empty: bool) -> bool {
+        let now = self.inbox.now_ns();
+        if now >= self.deadline_ns {
+            return false;
+        }
+        !inbox_empty || self.inbox.park(self.deadline_ns - now)
+    }
+}
+
+/// The doorbell transport both mailboxes are built on: the register block
+/// plus a DMA-visible property buffer, both reached through capability-gated
+/// [`RegisterWindow`]s (no ambient authority), and `W`, how its reply waits
+/// pass the time.
+struct Doorbell<W> {
     regs: RegisterWindow,
     buffer: RegisterWindow,
     buffer_bus_addr: u32,
-    poll_budget: u32,
+    /// Polls the wait for write room may take.
+    post_room_budget: u32,
     coherency: BufferCoherency,
     last_exchange: ExchangeStats,
+    /// A posted request whose reply was never read: the property buffer is
+    /// the firmware's until it lands.
+    outstanding: bool,
+    replies: W,
+}
+
+impl<W: ReplyWait> Doorbell<W> {
+    /// Validate the windows and the buffer's bus address, refusing what
+    /// [`MmioMailbox::new`] documents.
+    fn new(
+        regs: RegisterWindow,
+        buffer: RegisterWindow,
+        buffer_bus_addr: u32,
+        post_room_budget: u32,
+        coherency: BufferCoherency,
+        replies: W,
+    ) -> Result<Self, MailboxError> {
+        if regs.len() < MAILBOX_REGS_LEN_BYTES || buffer.len() < PROPERTY_LEN_BYTES {
+            return Err(MailboxError::Window);
+        }
+        if buffer_bus_addr & CHANNEL_MASK != 0 {
+            return Err(MailboxError::BadAperture);
+        }
+        let base = u64::from(buffer_bus_addr & !BUS_ALIAS_MASK);
+        let end = base
+            .checked_add(u64::from(words_to_bytes(PROPERTY_WORDS)))
+            .ok_or(MailboxError::BadAperture)?;
+        if base == 0 || end > APERTURE_LIMIT {
+            return Err(MailboxError::BadAperture);
+        }
+        Ok(Self {
+            regs,
+            buffer,
+            buffer_bus_addr,
+            post_room_budget,
+            coherency,
+            last_exchange: ExchangeStats::default(),
+            outstanding: false,
+            replies,
+        })
+    }
+
+    /// One exchange, its diagnostics kept whatever it returns.
+    fn exchange(&mut self, message: &mut [u32; PROPERTY_WORDS]) -> Result<(), MailboxError> {
+        let mut stats = ExchangeStats::default();
+        let result = self.run_exchange(message, &mut stats);
+        self.last_exchange = stats;
+        result
+    }
+}
+
+/// The metal mailbox transport: the doorbell register block plus a
+/// DMA-visible property buffer, both reached through capability-gated
+/// [`RegisterWindow`]s (no ambient authority).
+///
+/// Its reply waits spin, each within a poll budget of its own: it is the
+/// pre-MMU boot path's transport, and that path has no scheduler to park on.
+/// A caller that can park uses [`DmaMailbox`].
+pub struct MmioMailbox {
+    doorbell: Doorbell<SpinWait>,
 }
 
 impl MmioMailbox {
     /// Bring the transport up over the mapped doorbell `regs` and the
     /// mapped property `buffer` whose memory the firmware addresses
-    /// via `buffer_bus_addr`.
+    /// via `buffer_bus_addr`, each wait of an exchange allowed
+    /// `poll_budget` polls.
     ///
     /// # Errors
     ///
@@ -1287,27 +1435,27 @@ impl MmioMailbox {
         poll_budget: u32,
         coherency: BufferCoherency,
     ) -> Result<Self, MailboxError> {
-        if regs.len() < MAILBOX_REGS_LEN_BYTES || buffer.len() < PROPERTY_LEN_BYTES {
-            return Err(MailboxError::Window);
-        }
-        if buffer_bus_addr & CHANNEL_MASK != 0 {
-            return Err(MailboxError::BadAperture);
-        }
-        let base = u64::from(buffer_bus_addr & !BUS_ALIAS_MASK);
-        let end = base
-            .checked_add(u64::from(words_to_bytes(PROPERTY_WORDS)))
-            .ok_or(MailboxError::BadAperture)?;
-        if base == 0 || end > APERTURE_LIMIT {
-            return Err(MailboxError::BadAperture);
-        }
-        Ok(Self {
+        let replies = SpinWait {
+            looks: poll_budget,
+            left: 0,
+        };
+        let doorbell = Doorbell::new(
             regs,
             buffer,
             buffer_bus_addr,
             poll_budget,
             coherency,
-            last_exchange: ExchangeStats::default(),
-        })
+            replies,
+        )?;
+        Ok(Self { doorbell })
+    }
+
+    /// Whether a request posted to the firmware was never answered, so it
+    /// may still write its reply into the property buffer.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn request_outstanding(&self) -> bool {
+        self.doorbell.outstanding
     }
 
     /// Diagnostics from the most recent [`MmioMailbox::exchange`] (a
@@ -1316,40 +1464,48 @@ impl MmioMailbox {
     /// and counts without re-running it.
     #[must_use]
     pub fn last_exchange_stats(&self) -> ExchangeStats {
-        self.last_exchange
+        self.doorbell.last_exchange
     }
+}
 
-    /// Poll `status_reg` until `busy_bit` clears, within the budget,
-    /// returning `(polls, last_status)` on success.
+impl<W: ReplyWait> Doorbell<W> {
+    /// Poll for write room within the post-room budget, a brief handshake
+    /// that fails closed, returning `(polls, last_status)`.
     ///
-    /// A faulting register read fails closed with
-    /// [`MailboxError::Window`]; exhausting the budget fails with
-    /// [`MailboxError::Timeout`]. The caller records the returned counts
-    /// (and the timeout stage) into [`ExchangeStats`].
-    fn wait_clear(&self, status_reg: usize, busy_bit: u32) -> Result<(u32, u32), MailboxError> {
-        for poll in 0..self.poll_budget {
+    /// A faulting register read fails closed with [`MailboxError::Window`];
+    /// exhausting the budget fails with [`MailboxError::Timeout`].
+    fn await_room(&self) -> Result<(u32, u32), MailboxError> {
+        for poll in 0..self.post_room_budget {
             let status = self
                 .regs
-                .read_u32(status_reg)
+                .read_u32(REG_MBOX0_STATUS)
                 .map_err(|_| MailboxError::Window)?;
-            if status & busy_bit == 0 {
+            if status & STATUS_FULL == 0 {
                 return Ok((poll, status));
             }
             core::hint::spin_loop();
         }
         Err(MailboxError::Timeout)
     }
-}
 
-impl MmioMailbox {
-    /// The instrumented body of [`MmioMailbox::exchange`], threading
-    /// diagnostics into `stats` so the public method records them on
-    /// every return path.
+    /// The instrumented body of [`Self::exchange`], threading diagnostics
+    /// into `stats` so they are recorded on every return path.
     fn run_exchange(
         &mut self,
         message: &mut [u32; PROPERTY_WORDS],
         stats: &mut ExchangeStats,
     ) -> Result<(), MailboxError> {
+        if self.outstanding {
+            // The firmware answers in posting order, so the next completion
+            // for our buffer is the unanswered request's.
+            self.await_reply(stats).inspect_err(|&e| {
+                if e == MailboxError::Timeout {
+                    stats.timeout_stage = TimeoutStage::Unanswered;
+                }
+            })?;
+            self.outstanding = false;
+        }
+
         // Stage the request into the DMA-visible property buffer.
         for (i, &word) in message.iter().enumerate() {
             self.buffer
@@ -1364,13 +1520,11 @@ impl MmioMailbox {
 
         // Ring the doorbell: wait for write room, then post the
         // buffer's bus address tagged with the property channel.
-        let (post_polls, post_status) = self
-            .wait_clear(REG_MBOX0_STATUS, STATUS_FULL)
-            .inspect_err(|&e| {
-                if e == MailboxError::Timeout {
-                    stats.timeout_stage = TimeoutStage::PostRoom;
-                }
-            })?;
+        let (post_polls, post_status) = self.await_room().inspect_err(|&e| {
+            if e == MailboxError::Timeout {
+                stats.timeout_stage = TimeoutStage::PostRoom;
+            }
+        })?;
         stats.post_room_polls = post_polls;
         stats.last_status = post_status;
         let posted = self.buffer_bus_addr | CHANNEL_PROPERTY;
@@ -1378,40 +1532,14 @@ impl MmioMailbox {
         self.regs
             .write_u32(REG_MBOX1_WRITE, posted)
             .map_err(|_| MailboxError::Window)?;
+        self.outstanding = true;
 
-        // Wait for the firmware's completion post on our channel,
-        // discarding traffic for other channels within the budget.
-        loop {
-            if stats.response_reads >= self.poll_budget {
+        self.await_reply(stats).inspect_err(|&e| {
+            if e == MailboxError::Timeout {
                 stats.timeout_stage = TimeoutStage::Response;
-                return Err(MailboxError::Timeout);
             }
-            stats.response_reads += 1;
-            let (_, empty_status) = self
-                .wait_clear(REG_MBOX0_STATUS, STATUS_EMPTY)
-                .inspect_err(|&e| {
-                    if e == MailboxError::Timeout {
-                        stats.timeout_stage = TimeoutStage::Response;
-                    }
-                })?;
-            stats.last_status = empty_status;
-            let word = self
-                .regs
-                .read_u32(REG_MBOX0_READ)
-                .map_err(|_| MailboxError::Window)?;
-            if word & CHANNEL_MASK == CHANNEL_PROPERTY {
-                if word & !CHANNEL_MASK == self.buffer_bus_addr {
-                    break;
-                }
-                // The firmware answers in posting order, so this completion
-                // precedes ours; taking it for ours would read a reply the
-                // firmware has not yet written.
-                stats.stale_reads += 1;
-            } else {
-                stats.foreign_channel_reads += 1;
-            }
-            core::hint::spin_loop();
-        }
+        })?;
+        self.outstanding = false;
 
         // Drop any stale cached copy so the read-back observes the
         // firmware's writes from memory, not the request we staged.
@@ -1427,13 +1555,135 @@ impl MmioMailbox {
         }
         Ok(())
     }
+
+    /// Wait for the firmware's completion post for our buffer on the property
+    /// channel, discarding traffic for other channels and buffers.
+    ///
+    /// Every look spends one allowance, begun afresh for each wait, so neither
+    /// other posts nor draining an unanswered request's reply can stretch a
+    /// wait or starve the one after it.
+    fn await_reply(&mut self, stats: &mut ExchangeStats) -> Result<(), MailboxError> {
+        self.replies.start();
+        let mut inbox_empty = false;
+        while self.replies.next_look(inbox_empty) {
+            let flags = self
+                .regs
+                .read_u32(REG_MBOX0_STATUS)
+                .map_err(|_| MailboxError::Window)?;
+            stats.last_status = flags;
+            inbox_empty = flags & STATUS_EMPTY != 0;
+            if inbox_empty {
+                continue;
+            }
+            let word = self
+                .regs
+                .read_u32(REG_MBOX0_READ)
+                .map_err(|_| MailboxError::Window)?;
+            stats.response_reads = stats.response_reads.saturating_add(1);
+            if word & CHANNEL_MASK == CHANNEL_PROPERTY {
+                if word & !CHANNEL_MASK == self.buffer_bus_addr {
+                    return Ok(());
+                }
+                // The firmware answers in posting order, so this completion
+                // precedes ours; taking it for ours would read a reply the
+                // firmware has not yet written.
+                stats.stale_reads = stats.stale_reads.saturating_add(1);
+            } else {
+                stats.foreign_channel_reads = stats.foreign_channel_reads.saturating_add(1);
+            }
+        }
+        Err(MailboxError::Timeout)
+    }
 }
 
 impl MailboxTransport for MmioMailbox {
     fn exchange(&mut self, message: &mut [u32; PROPERTY_WORDS]) -> Result<(), MailboxError> {
-        let mut stats = ExchangeStats::default();
-        let result = self.run_exchange(message, &mut stats);
-        self.last_exchange = stats;
-        result
+        self.doorbell.exchange(message)
+    }
+}
+
+/// A mailbox over a property buffer carved for it and owned by it, whose
+/// reply waits park on the inbox interrupt rather than poll the doorbell.
+///
+/// Dropped while the firmware still owes a reply, it withholds the buffer
+/// rather than freeing it, since the reply may yet be written there; the
+/// kernel quarantines a withheld buffer when the process exits. The buffer
+/// must be carved coherent: the transport performs no cache maintenance, and
+/// refuses a buffer that needs it.
+pub struct DmaMailbox<I> {
+    doorbell: Doorbell<InterruptWait<I>>,
+    // Declared after `doorbell`, whose buffer window aliases it, so it drops
+    // last.
+    buffer: DmaSlab,
+}
+
+impl<I: InboxInterrupt> DmaMailbox<I> {
+    /// Bring the transport up over the doorbell `regs` and the carved
+    /// `buffer`, whose device-visible base is the bus address the firmware
+    /// reaches it through, and turn on the inbox interrupt `inbox` parks on.
+    /// Each reply wait lasts at most `reply_window_ns`.
+    ///
+    /// # Errors
+    ///
+    /// [`MailboxError::Window`] if the buffer is not word-aligned or needs
+    /// cache maintenance, which this transport does not perform, or the
+    /// interrupt cannot be turned on; [`MailboxError::BadAperture`] if its
+    /// base lies beyond the firmware's 32-bit bus, and every refusal of
+    /// [`MmioMailbox::new`]. The buffer is freed with the refusal: nothing was
+    /// ever posted from it.
+    pub fn new(
+        regs: RegisterWindow,
+        mut buffer: DmaSlab,
+        inbox: I,
+        reply_window_ns: u64,
+    ) -> Result<Self, MailboxError> {
+        if buffer.needs_cache_maintenance() {
+            return Err(MailboxError::Window);
+        }
+        let phys = buffer.phys();
+        let bus = u32::try_from(phys).map_err(|_| MailboxError::BadAperture)?;
+        let len = buffer.len();
+        let base = NonNull::from(buffer.as_bytes_mut()).cast::<u8>();
+        if !base.cast::<u32>().is_aligned() {
+            return Err(MailboxError::Window);
+        }
+        // SAFETY: the window covers exactly the slab's `len` readable and
+        // writable bytes at its device-visible base, word-aligned as just
+        // checked, and lives only in `doorbell`, which drops before `buffer`
+        // on every path and so never outlives its backing. Nothing else
+        // reaches those bytes once the slab is moved in below.
+        let window = unsafe { RegisterWindow::from_mapping(phys, base, len) };
+        let replies = InterruptWait {
+            inbox,
+            window_ns: reply_window_ns,
+            deadline_ns: 0,
+        };
+        let doorbell = Doorbell::new(
+            regs,
+            window,
+            bus,
+            DEFAULT_POLL_BUDGET,
+            BufferCoherency::none(),
+            replies,
+        )?;
+        doorbell
+            .regs
+            .write_u32(REG_MBOX0_CONFIG, CONFIG_DATA_IRQ)
+            .map_err(|_| MailboxError::Window)?;
+        Ok(Self { doorbell, buffer })
+    }
+}
+
+impl<I: InboxInterrupt> MailboxTransport for DmaMailbox<I> {
+    fn exchange(&mut self, message: &mut [u32; PROPERTY_WORDS]) -> Result<(), MailboxError> {
+        self.doorbell.exchange(message)
+    }
+}
+
+impl<I> Drop for DmaMailbox<I> {
+    fn drop(&mut self) {
+        if self.doorbell.outstanding {
+            self.buffer.withhold();
+        }
     }
 }

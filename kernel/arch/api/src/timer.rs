@@ -136,8 +136,8 @@ pub trait Timer: Send + Sync {
     /// request). It acts on the **calling** CPU's timer only — a one-shot
     /// deadline is inherently a write to a per-CPU register — so the
     /// scheduler calls it from the CPU whose running task it wants to
-    /// bound (: armed to the next event the scheduler
-    /// needs, never at a fixed frequency). A `ticks_from_now` of `0` is
+    /// bound, armed to the next event the scheduler needs, never at a fixed
+    /// frequency. A `ticks_from_now` of `0` is
     /// clamped by the port to at least one tick so a degenerate deadline
     /// cannot wedge the CPU re-trapping with no progress.
     ///
@@ -150,8 +150,8 @@ pub trait Timer: Send + Sync {
     ///
     /// The scheduler disarms when the calling CPU has nothing to preempt
     /// to — it is idle or runs a single runnable task — so an otherwise
-    /// quiet core takes no timer interrupts at all (
-    /// tickless / `NO_HZ`; — work paid off the hot path). Like
+    /// quiet core takes no timer interrupts at all (tickless / `NO_HZ`: work
+    /// paid off the hot path). Like
     /// [`Self::arm_oneshot`] it acts on the calling CPU's per-CPU timer
     /// only. Disarming an already-stopped timer is a harmless no-op.
     fn disarm(&self);

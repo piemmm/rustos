@@ -126,6 +126,9 @@ pub enum DmaError {
     /// No custody can take this space's DMA memory at teardown, so it may
     /// not carve any.
     NoCustody,
+    /// The carve names a hardware-tree node that has left the tree: no driver
+    /// of it may hand its device more memory.
+    DeviceGone,
 }
 
 impl From<AllocError> for DmaError {
@@ -154,6 +157,7 @@ impl fmt::Display for DmaError {
                 f.write_str("dma carve names a custodian the space is not bound to")
             }
             Self::NoCustody => f.write_str("no custody can take this space's dma memory"),
+            Self::DeviceGone => f.write_str("dma carve names a node that has left the tree"),
         }
     }
 }
@@ -181,34 +185,44 @@ impl DmaBlock {
     }
 }
 
-/// Custody of DMA memory whose device may outlive the address space that
-/// carved it (`plans/OPEN-DEFECTS.md` D167).
+/// Custody of DMA memory whose device may outlive the owner that carved it
+/// (`plans/OPEN-DEFECTS.md` D167, D225).
 ///
 /// With no IOMMU a device keeps the bus addresses it was handed, so memory
-/// carved for it must not return to the allocator just because the driver's
-/// address space died. The custodian holds it until the device is proven
-/// quiet.
+/// carved for it must not return to the allocator just because its owner
+/// died. The custodian holds it until the device is proven quiet.
+///
+/// Room to hold a block is reserved when the block is carved, so the
+/// surrender that ends an owner's life can neither fail nor allocate: the
+/// owner may be dying under the very memory pressure it is about to relieve.
 pub trait DmaCustody: Sync {
-    /// Record one address space as able to carve for hardware-tree `node`.
+    /// Reserve room to take one more block carved for hardware-tree `node`.
     ///
-    /// Called once per space, before its first carve.
+    /// Called before every carve. Each reservation is spent by exactly one
+    /// [`Self::hold`] or returned by exactly one [`Self::unreserve`].
     ///
     /// # Errors
     ///
-    /// [`DmaError::Alloc`] when the custodian cannot record the space; the
-    /// carve is then refused, since nothing could take its memory at teardown.
-    fn bind(&self, node: u32) -> Result<(), DmaError>;
+    /// [`DmaError::Alloc`] when the room cannot be made,
+    /// [`DmaError::DeviceGone`] when `node` has left the hardware tree, by
+    /// either kind of removal, and [`DmaError::NoCustody`] where no custody
+    /// is wired. The carve is then refused, since nothing could take its
+    /// memory at teardown.
+    fn reserve(&self, node: u32) -> Result<(), DmaError>;
+
+    /// Return a reservation whose block can no longer reach custody: freed
+    /// (or its release abandoned) while its owner lived, or never carved.
+    fn unreserve(&self, node: u32);
 
     /// Take `block`, carved for `node` by the driver instance admitted as
-    /// `generation`, from a torn-down space.
+    /// `generation`, from an owner being torn down, spending one
+    /// reservation.
     ///
     /// The block's frames stay allocated and are mapped nowhere; the
-    /// custodian alone decides when they return to the allocator. It must
-    /// never fail: a block it cannot record is leaked, never freed.
+    /// custodian alone decides when they return to the allocator. It never
+    /// fails and never allocates: a block no reservation stands behind is
+    /// leaked, never freed.
     fn hold(&self, node: u32, generation: u64, block: DmaBlock);
-
-    /// The space bound for `node` has surrendered every block it held.
-    fn unbind(&self, node: u32);
 }
 
 /// The custodian an address space's DMA memory is surrendered to, and the
@@ -449,7 +463,9 @@ impl DmaWindowMap {
     ///
     /// # Errors
     ///
-    /// As [`DmaPool::free`].
+    /// As [`DmaPool::free`]. Every error but [`DmaError::UnknownBuffer`] comes
+    /// after the record is removed, so the block will not be surrendered at
+    /// teardown whether or not its frames went back.
     pub fn free_at<P: PageTable>(
         &mut self,
         space: &mut AddressSpace<P>,

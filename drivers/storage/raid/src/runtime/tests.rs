@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use super::{ArrayHealthEvent, ArrayRuntime, MaintenanceStep};
+use crate::member::{MemberDevice, MemberWindow};
 use crate::service::{assemble_array, read_maintenance_record, Assembled, ServiceError};
 use crate::testkit::{
     candidates, identity_of, request, stamped, superblock, MemberDisk, BLOCK_SIZE, DATA_BLOCKS,
@@ -62,9 +63,9 @@ fn live(assembled: Assembled<MemberDisk>) -> ArrayRuntime<MemberDisk> {
         assembled.array,
         ENDPOINT,
         WINDOW,
-        NODE,
         assembled.resume,
         0,
+        || Some(NODE),
     )
     .expect("the runtime is built from the array's own width")
 }
@@ -254,6 +255,141 @@ fn a_runtime_reports_the_ids_it_was_published_on() {
     assert_eq!(array.node_id(), 42);
     assert_eq!(array.identity().array_uuid, UUID_A);
     assert_eq!(array.identity().generation, 3);
+}
+
+#[test]
+fn an_array_publishes_its_node_only_once_its_runtime_is_built() {
+    // Publishing the node confers the array's window, and withdrawing a node
+    // retires its window for good, so the node is emitted as the runtime's
+    // last act, after everything that could fail.
+    let members = mirror_pair(0);
+    let disks = [stamped(&members[0]), stamped(&members[1])];
+    let assembled = assemble_mirror(&members, &disks);
+    let mut publications = 0;
+    let array = ArrayRuntime::new(
+        assembled.identity,
+        assembled.array,
+        ENDPOINT,
+        WINDOW,
+        assembled.resume,
+        0,
+        || {
+            publications += 1;
+            Some(NODE)
+        },
+    )
+    .expect("the runtime is built");
+    assert_eq!(publications, 1);
+    assert_eq!(array.node_id(), NODE);
+}
+
+#[test]
+fn a_refused_publication_leaves_no_runtime_and_nothing_to_withdraw() {
+    let members = mirror_pair(0);
+    let disks = [stamped(&members[0]), stamped(&members[1])];
+    let assembled = assemble_mirror(&members, &disks);
+    let refused = ArrayRuntime::new(
+        assembled.identity,
+        assembled.array,
+        ENDPOINT,
+        WINDOW,
+        assembled.resume,
+        0,
+        || None,
+    );
+    assert!(matches!(refused, Err(ServiceError::Unpublished)));
+}
+
+/// A live array over `disks`, each member device holding the loan of its own
+/// window from `windows`, as the composer composes them.
+fn leased_runtime(
+    members: &[ArraySuperblock],
+    disks: &[MemberDisk],
+    windows: &[MemberWindow],
+) -> ArrayRuntime<MemberDevice<MemberDisk>> {
+    let mut supply: Vec<Option<MemberDevice<MemberDisk>>> = disks
+        .iter()
+        .zip(windows)
+        .map(|(disk, window)| {
+            Some(MemberDevice::new(
+                disk.clone(),
+                window.lend().expect("a fresh window is free"),
+            ))
+        })
+        .collect();
+    let assembled = assemble_array(
+        identity_of(members[0].array_uuid, members),
+        &candidates(members),
+        NOW,
+        |tag| supply[tag].take(),
+    )
+    .expect("the members compose their array");
+    ArrayRuntime::new(
+        assembled.identity,
+        assembled.array,
+        ENDPOINT,
+        WINDOW,
+        assembled.resume,
+        0,
+        || Some(NODE),
+    )
+    .expect("the runtime is built")
+}
+
+#[test]
+fn a_departed_member_is_taken_out_so_its_returning_disk_can_be_placed() {
+    // A member whose agent exited stays composed until something takes it out,
+    // and while it occupies its slot the same disk offering itself again from
+    // a fresh agent cannot be placed: it could never rejoin its array.
+    let members = mirror_pair(0);
+    let disks = [stamped(&members[0]), stamped(&members[1])];
+    let windows = [MemberWindow::new(), MemberWindow::new()];
+    let mut array = leased_runtime(&members, &disks, &windows);
+    let rejoin = || {
+        MemberDevice::new(
+            stamped(&members[1]),
+            MemberWindow::new().lend().expect("a fresh window is free"),
+        )
+    };
+    assert_eq!(
+        array.place_member(1, rejoin()),
+        Err(ServiceError::Assembly),
+        "the premise: an occupied slot takes no returning disk"
+    );
+
+    windows[1].depart();
+    array.retire_departed(NOW, |device| device.departed());
+    assert_eq!(array.member_state(1), Some(MemberState::Absent));
+    assert!(
+        !windows[1].is_lent(),
+        "its window is handed back, so its membership can be released"
+    );
+    assert!(windows[0].is_lent(), "the survivor keeps serving");
+    assert_eq!(
+        array.identity().generation,
+        members[0].generation + 1,
+        "the departed disk is fenced out, so it returns as a rebuild target"
+    );
+    assert_eq!(array.place_member(1, rejoin()), Ok(()));
+}
+
+#[test]
+fn a_level_that_cannot_give_a_member_up_keeps_its_departed_member() {
+    // A stripe has no redundancy to fall back on, so its departed member stays
+    // where it is and its window stays lent: the membership cannot end until
+    // the array itself lets the device go.
+    let members = [
+        superblock(RaidLevel::Stripe, UUID_A, 2, 0, 1),
+        superblock(RaidLevel::Stripe, UUID_A, 2, 1, 1),
+    ];
+    let disks = [stamped(&members[0]), stamped(&members[1])];
+    let windows = [MemberWindow::new(), MemberWindow::new()];
+    let mut array = leased_runtime(&members, &disks, &windows);
+
+    windows[1].depart();
+    array.retire_departed(NOW, |device| device.departed());
+    assert!(windows[1].is_lent());
+    assert_eq!(array.identity().generation, 1, "nothing was retired");
 }
 
 #[test]

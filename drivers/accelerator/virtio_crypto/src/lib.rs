@@ -56,11 +56,11 @@ use tairix_abi::driver::accelerator::{
     Accelerator, AcceleratorDeviceReport, CipherAlgorithm, CipherAlgorithms, CipherDirection,
     CipherJob,
 };
-use tairix_abi::driver::{BufferClass, CompletionSignal};
+use tairix_abi::driver::BufferClass;
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 use tairix_virtio::{
-    BounceBuffer, ChainSegment, Direction, DmaSlab, SplitQueue, Status, Transport, VirtioError,
-    VirtioHost,
+    scrub, BounceBuffer, ChainSegment, Direction, DmaSlab, RequestQueue, SplitQueue, Status,
+    Transport, VirtioError, VirtioHost,
 };
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -133,17 +133,6 @@ const MAX_IV_BYTES: usize = 16;
 /// [`MAX_STAGED_JOB_BYTES`] ceiling is microseconds of work — so it can only
 /// ever trip on a device that has stopped.
 const JOB_DEADLINE_NS: u64 = 2_000_000_000;
-
-/// Upper bound on advisory completion wakes a single chain tolerates before
-/// failing closed.
-///
-/// Jobs are serialised by the owner, so exactly one completion is ever
-/// outstanding, and a healthy device posts it within a wake or two of the
-/// notify. A count far above that turns a pathological stream of wakes with no
-/// matching completion — a stuck or mis-routed shared interrupt — into a
-/// deterministic fault rather than an unbounded loop, without ever tripping in
-/// normal operation.
-const MAX_COMPLETION_WAKES: u32 = 1024;
 
 /// Driver entry point.
 ///
@@ -251,6 +240,10 @@ mod wire {
     pub const STATUS_NOSPC: u8 = 5;
     /// `VIRTIO_CRYPTO_KEY_REJECTED`: the device refused the key.
     pub const STATUS_KEY_REJECTED: u8 = 6;
+    /// Staged into every reply's status before its request. No device writes
+    /// it, so a completion that wrote no reply is refused rather than read as
+    /// the last request's.
+    pub const STATUS_UNANSWERED: u8 = 0xFF;
 }
 
 /// Map a virtio-crypto status word to a driver outcome.
@@ -288,10 +281,10 @@ pub struct VirtioCrypto<'h, T: Transport> {
     transport: T,
     /// The data queue jobs are submitted on (index 0 — the driver uses one of
     /// however many the device offers, because jobs are serialised).
-    dataq: SplitQueue,
+    dataq: RequestQueue,
     /// The control queue sessions are created and destroyed on (index
     /// `max_dataqueues`, wherever the device put it).
-    controlq: SplitQueue,
+    controlq: RequestQueue,
     host: &'h dyn VirtioHost,
     /// The device's own report, read once at bring-up: its memory, the
     /// algorithms it offered that this driver recognises, and the clamped
@@ -307,6 +300,24 @@ pub struct VirtioCrypto<'h, T: Transport> {
     dst: Option<DmaSlab>,
     session: Option<DmaSlab>,
     status: Option<DmaSlab>,
+    /// A session the device may hold whose key schedule no job may keep, left
+    /// by a chain the device answered only after it was abandoned.
+    stray: Option<StraySession>,
+}
+
+/// A device-side session left behind, destroyed once the device hands back
+/// every chain naming the staging a destroy reuses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StraySession {
+    /// A create the device never answered: its reply, once it comes, names
+    /// the session if one was made.
+    Unanswered,
+    /// A session whose job the device never answered, or whose destroy it
+    /// refused.
+    Made(u64),
+    /// A destroy the device never answered: its reply, once it comes, says
+    /// whether the session is gone.
+    Destroying(u64),
 }
 
 impl<'h, T: Transport> VirtioCrypto<'h, T> {
@@ -323,8 +334,9 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
     /// # Errors
     ///
     /// * [`DriverError::Unsupported`] if the device reports itself not ready,
-    ///   offers no cipher service, or offers no cipher algorithm this driver
-    ///   implements. A driver that bound such a device would accept jobs it
+    ///   offers no cipher service, offers no cipher algorithm this driver
+    ///   implements, or has a queue too shallow for the longest chain it
+    ///   carries. A driver that bound such a device would accept jobs it
     ///   could only fail.
     /// * [`DriverError::DeviceFault`] if the device never confirms its reset,
     ///   advertises no data queue, rejects the negotiated features, or a
@@ -368,8 +380,13 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
         }
         let control_index = u16::try_from(data_queues).map_err(|_| DriverError::DeviceFault)?;
 
-        let dataq = open_queue(&mut transport, host, DATA_QUEUE)?;
-        let controlq = open_queue(&mut transport, host, control_index)?;
+        let open_queue = |transport: &mut T, index, chain_len| {
+            SplitQueue::new(transport, host, index, QUEUE_SIZE, chain_len)
+                .map(RequestQueue::new)
+                .map_err(VirtioError::as_driver_error)
+        };
+        let dataq = open_queue(&mut transport, DATA_QUEUE, JOB_CHAIN_LEN)?;
+        let controlq = open_queue(&mut transport, control_index, SESSION_CHAIN_LEN)?;
 
         // The staged ceiling is the smaller of what the device will carry and
         // what this driver will allocate for it; a device declaring no
@@ -415,29 +432,60 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
             dst: Some(dst),
             session: Some(session),
             status: Some(request_status),
+            stray: None,
         })
     }
 
-    /// Tear the device down for unload: reset it, then release its memory.
-    pub fn close(mut self) {
-        if self.transport.reset().is_err() {
-            // A wedged device may still master its rings and staging: hold
-            // them for the kernel to quarantine when the driver exits.
-            core::mem::forget(self);
+    /// Take back what earlier abandoned chains named once the device has
+    /// answered them, and destroy any session they left: no staging is
+    /// reused, and no key schedule outlives its job, while the device still
+    /// holds a chain.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceOffline`] while the device still holds one, and
+    /// whatever destroying a stray session returns.
+    fn settle(&mut self) -> Result<(), DriverError> {
+        if self
+            .controlq
+            .settle(&mut self.transport, self.host)?
+            .is_some()
+        {
+            if let Some(key) = self.key.as_mut() {
+                scrub(key);
+            }
         }
-    }
-
-    /// Borrow the underlying transport (host-side test access only; not
-    /// exposed across the driver-class trait surface).
-    #[must_use]
-    pub fn transport(&self) -> &T {
-        &self.transport
-    }
-
-    /// Borrow the underlying transport mutably for the in-process software
-    /// peer to drive on `kick`.
-    pub fn transport_mut(&mut self) -> &mut T {
-        &mut self.transport
+        if self.dataq.settle(&mut self.transport, self.host)?.is_some() {
+            for payload in [&mut self.src, &mut self.dst].into_iter().flatten() {
+                scrub(payload);
+            }
+        }
+        let stray = match self.stray.take() {
+            None => return Ok(()),
+            Some(StraySession::Made(id)) => id,
+            Some(StraySession::Unanswered) => {
+                match self
+                    .session
+                    .as_ref()
+                    .map(|reply| session_reply(reply.as_bytes()))
+                {
+                    Some(Ok(id)) => id,
+                    // The device made no session.
+                    _ => return Ok(()),
+                }
+            }
+            Some(StraySession::Destroying(id)) => {
+                match self
+                    .status
+                    .as_ref()
+                    .map(|reply| destroy_reply(reply.as_bytes()[0]))
+                {
+                    Some(Ok(())) => return Ok(()),
+                    _ => id,
+                }
+            }
+        };
+        self.destroy_session(stray)
     }
 
     /// Create a device-side session for `job`'s key and direction, returning
@@ -457,8 +505,11 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
         let mut session_bb = BounceBuffer::new(session, BufferClass::NonSensitive);
         let result = self.exchange_create_session(&mut req_bb, &mut key_bb, &mut session_bb, job);
         self.req = Some(req_bb.into_slab());
-        self.key = Some(key_bb.into_slab());
+        self.key = Some(key_bb.into_slab_after(self.controlq.is_abandoned()));
         self.session = Some(session_bb.into_slab());
+        if self.controlq.is_abandoned() {
+            self.stray = Some(StraySession::Unanswered);
+        }
         result
     }
 
@@ -493,6 +544,9 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
         put_u32(&mut frame, wire::CTRL_SYM_OP_TYPE, wire::SYM_OP_CIPHER);
         req_bb.stage(&frame)?;
         key_bb.stage(job.key)?;
+        let mut unanswered = [0u8; wire::SESSION_INPUT_LEN];
+        put_u32(&mut unanswered, 8, u32::from(wire::STATUS_UNANSWERED));
+        session_bb.stage(&unanswered)?;
 
         let segments = [
             segment(req_bb.phys(), wire::REQ_LEN, Direction::DeviceRead)?,
@@ -503,17 +557,13 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
                 Direction::DeviceWrite,
             )?,
         ];
-        submit_and_wait(
-            &mut self.controlq,
+        self.controlq.submit_and_wait(
             &mut self.transport,
             self.host,
             &segments,
+            JOB_DEADLINE_NS,
         )?;
-        let reply = session_bb.full_region_mut();
-        let id = read_u64(reply, 0);
-        let status = u8::try_from(read_u32(reply, 8)).map_err(|_| DriverError::DeviceFault)?;
-        status_to_result(status)?;
-        Ok(id)
+        session_reply(session_bb.full_region_mut())
     }
 
     /// Destroy the device-side session `id`.
@@ -530,6 +580,15 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
         let result = self.exchange_destroy_session(&mut req_bb, &mut status_bb, id);
         self.req = Some(req_bb.into_slab());
         self.status = Some(status_bb.into_slab());
+        if result.is_err() {
+            // The device may still hold the key schedule: the session is
+            // destroyed again before the next job runs.
+            self.stray = Some(if self.controlq.is_abandoned() {
+                StraySession::Destroying(id)
+            } else {
+                StraySession::Made(id)
+            });
+        }
         result
     }
 
@@ -546,17 +605,18 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
         put_u32(&mut frame, 12, u32::from(DATA_QUEUE));
         put_u64(&mut frame, wire::CTRL_DESTROY_SESSION_ID, id);
         req_bb.stage(&frame)?;
+        status_bb.stage(&[wire::STATUS_UNANSWERED])?;
         let segments = [
             segment(req_bb.phys(), wire::REQ_LEN, Direction::DeviceRead)?,
             segment(status_bb.phys(), wire::INHDR_LEN, Direction::DeviceWrite)?,
         ];
-        submit_and_wait(
-            &mut self.controlq,
+        self.controlq.submit_and_wait(
             &mut self.transport,
             self.host,
             &segments,
+            JOB_DEADLINE_NS,
         )?;
-        status_to_result(status_bb.full_region_mut()[0])
+        destroy_reply(status_bb.full_region_mut()[0])
     }
 
     /// Run `job` against session `id` on the data queue, copying the device's
@@ -587,11 +647,15 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
             id,
             job,
         );
+        let device_holds_it = self.dataq.is_abandoned();
         self.req = Some(req_bb.into_slab());
         self.iv = Some(iv_bb.into_slab());
-        self.src = Some(src_bb.into_slab());
-        self.dst = Some(dst_bb.into_slab());
+        self.src = Some(src_bb.into_slab_after(device_holds_it));
+        self.dst = Some(dst_bb.into_slab_after(device_holds_it));
         self.status = Some(status_bb.into_slab());
+        if device_holds_it {
+            self.stray = Some(StraySession::Made(id));
+        }
         result
     }
 
@@ -623,6 +687,7 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
         req_bb.stage(&frame)?;
         iv_bb.stage(job.iv)?;
         src_bb.stage(job.input)?;
+        status_bb.stage(&[wire::STATUS_UNANSWERED])?;
 
         let segments = [
             segment(req_bb.phys(), wire::REQ_LEN, Direction::DeviceRead)?,
@@ -631,12 +696,20 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
             segment(dst_bb.phys(), job.output.len(), Direction::DeviceWrite)?,
             segment(status_bb.phys(), wire::INHDR_LEN, Direction::DeviceWrite)?,
         ];
-        submit_and_wait(&mut self.dataq, &mut self.transport, self.host, &segments)?;
-        // Gated on the status: the destination staging persists across jobs,
-        // so copying before this check could hand the caller bytes an earlier
-        // job left behind.
+        let token = self.dataq.submit_and_wait(
+            &mut self.transport,
+            self.host,
+            &segments,
+            JOB_DEADLINE_NS,
+        )?;
+        // The destination staging persists across jobs, so nothing is copied
+        // out that the device has not vouched for: a refused job, or one whose
+        // completion does not cover the output and the status behind it.
         status_to_result(status_bb.full_region_mut()[0])?;
         let produced = job.output.len();
+        if (token.written as usize) < produced + wire::INHDR_LEN {
+            return Err(DriverError::DeviceFault);
+        }
         job.output
             .copy_from_slice(&dst_bb.full_region_mut()[..produced]);
         Ok(())
@@ -654,8 +727,14 @@ impl<T: Transport> Accelerator for VirtioCrypto<'_, T> {
         if len > self.report.max_job_bytes {
             return Err(DriverError::LengthOutOfRange);
         }
+        self.settle()?;
         let id = self.create_session(&job)?;
         let outcome = self.run_job(id, &mut job);
+        if self.stray.is_some() {
+            // The device still holds the job, and a destroy would reuse
+            // staging it names: `settle` destroys the session once it is back.
+            return outcome;
+        }
         // The session is destroyed either way: a failed job must not leave
         // the device holding the caller's key schedule. A destroy that itself
         // fails is reported only when the job succeeded, so a job's own
@@ -672,94 +751,69 @@ impl<T: Transport> Accelerator for VirtioCrypto<'_, T> {
 /// not yet exist.
 const DATA_QUEUE: u16 = 0;
 
-/// Set up `queue`, taking the deepest ring the device offers up to the depth
-/// one serialised in-flight chain needs.
-///
-/// The chains this driver publishes are at most five descriptors, and exactly
-/// one is ever outstanding, so a deeper ring would be memory the driver can
-/// never use.
-fn open_queue<T: Transport>(
-    transport: &mut T,
-    host: &dyn VirtioHost,
-    index: u16,
-) -> Result<SplitQueue, DriverError> {
-    transport
-        .queue_select(index)
-        .map_err(VirtioError::as_driver_error)?;
-    let size = transport.queue_max_size().min(QUEUE_SIZE);
-    if size == 0 {
-        return Err(DriverError::DeviceFault);
-    }
-    SplitQueue::new(transport, host, index, size).map_err(VirtioError::as_driver_error)
-}
-
-/// Ring depth each queue is programmed with: enough for the longest chain
-/// this driver publishes, and no more.
+/// Ring depth each queue is programmed with: exactly one chain is ever
+/// outstanding, and the longest is [`JOB_CHAIN_LEN`], so a deeper ring would
+/// be memory the driver can never use.
 const QUEUE_SIZE: u16 = 8;
 
-/// Publish `segments` on `queue`, kick the device, and wait for the single
-/// outstanding completion, acknowledging the device interrupt before
-/// returning.
-///
-/// A wake is only *advisory*: the device's used-`idx` write and its interrupt
-/// can be observed in either order, and one shared line can wake the driver
-/// for another queue, so a single empty scan is never proof that no completion
-/// is coming. The ring is re-scanned after every wake and waited on again only
-/// when it is genuinely empty. Two independent bounds keep an unwell device
-/// from stalling the caller, because neither catches the other's failure
-/// shape: [`JOB_DEADLINE_NS`] releases the caller from *silence*, and
-/// [`MAX_COMPLETION_WAKES`] from *noise* — a wake storm with no matching
-/// completion, which no deadline would catch because each wake resets the
-/// wait. Both fail the job closed with a typed error.
-fn submit_and_wait<T: Transport>(
-    queue: &mut SplitQueue,
-    transport: &mut T,
-    host: &dyn VirtioHost,
-    segments: &[ChainSegment],
-) -> Result<(), DriverError> {
-    queue
-        .add_chain(segments)
-        .map_err(VirtioError::as_driver_error)?;
-    queue.kick(transport);
-    let mut outcome: Result<(), DriverError> = Err(DriverError::DeviceFault);
-    let mut silent = false;
-    for _ in 0..MAX_COMPLETION_WAKES {
-        match queue.poll_used() {
-            Ok(_token) => {
-                outcome = Ok(());
-                break;
+/// Descriptors in a data job: request, IV, source, destination, status.
+const JOB_CHAIN_LEN: u16 = 5;
+
+/// Descriptors in a session create, the longest control request: request,
+/// key, session reply.
+const SESSION_CHAIN_LEN: u16 = 3;
+
+impl<T: Transport> Drop for VirtioCrypto<'_, T> {
+    /// Reset the device before its memory goes, which also destroys every
+    /// session it holds: a device that will not confirm may still master its
+    /// rings and staging, which are then held for the kernel to quarantine
+    /// when the driver exits. A confirmed reset takes back whatever an
+    /// abandoned chain still held, so the key and payload staging are
+    /// scrubbed before they are freed.
+    fn drop(&mut self) {
+        if self.transport.reset().is_ok() {
+            for staging in [&mut self.key, &mut self.src, &mut self.dst]
+                .into_iter()
+                .flatten()
+            {
+                scrub(staging);
             }
-            Err(VirtioError::NoCompletion) => {
-                if silent {
-                    // The deadline elapsed and this final re-scan still finds
-                    // nothing: the device is present but not answering. Fail
-                    // closed rather than reissuing — the device may still own
-                    // the published chain, so re-publishing the same staging
-                    // could have it write an abandoned request's output into
-                    // the next job's buffers.
-                    outcome = Err(DriverError::DeviceOffline);
-                    break;
-                }
-                if host.notify_wait(queue.index(), JOB_DEADLINE_NS) == CompletionSignal::TimedOut {
-                    // Re-scan once before giving up: a completion whose
-                    // interrupt was lost or coalesced is already in the ring,
-                    // and a wait timing out says nothing about its contents.
-                    silent = true;
-                }
-            }
-            Err(e) => {
-                outcome = Err(e.as_driver_error());
-                break;
+        } else {
+            self.controlq.withhold();
+            self.dataq.withhold();
+            for slab in [
+                &mut self.req,
+                &mut self.key,
+                &mut self.iv,
+                &mut self.src,
+                &mut self.dst,
+                &mut self.session,
+                &mut self.status,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                slab.withhold();
             }
         }
     }
-    // Acknowledge the device's interrupt now its completion has been observed
-    // (or the wait gave up), so it de-asserts its line before the next chain
-    // re-arms the kernel IRQ — otherwise a stale edge re-delivers and the
-    // following chain mis-pairs its completion. A no-op on transports that
-    // need no device-side acknowledge.
-    transport.ack_interrupt();
-    outcome
+}
+
+/// Decode a session destroy's status: a session the device no longer has is
+/// as gone as one it just destroyed.
+fn destroy_reply(status: u8) -> Result<(), DriverError> {
+    if status == wire::STATUS_INVSESS {
+        Ok(())
+    } else {
+        status_to_result(status)
+    }
+}
+
+/// The session a create's reply names, or the refusal it reports.
+fn session_reply(reply: &[u8]) -> Result<u64, DriverError> {
+    let status = u8::try_from(read_u32(reply, 8)).map_err(|_| DriverError::DeviceFault)?;
+    status_to_result(status)?;
+    Ok(read_u64(reply, 0))
 }
 
 /// One chain descriptor over a staged buffer, refusing a length no

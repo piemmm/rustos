@@ -596,3 +596,107 @@ fn window_map_cacheable_chunks_rejects_a_bad_chunk_list() {
     assert_eq!(space.mapped_pages(), 0);
     assert_eq!(win.live(), 0);
 }
+
+#[test]
+fn retain_releases_exactly_the_windows_it_refuses() {
+    let mut space = borrowed_space();
+    let mut win = window(32);
+    let low = win.map_into(&mut space, 0xFEB0_0010, 0x20).expect("maps");
+    let mid = win.map_into(&mut space, 0xFEC0_0000, 0x2000).expect("maps");
+    let high = win.map_into(&mut space, 0xFED0_0000, 0x1000).expect("maps");
+    assert_eq!(space.mapped_pages(), 4);
+
+    let mut seen = alloc::vec::Vec::new();
+    let mut released = alloc::vec::Vec::new();
+    win.retain(
+        &mut space,
+        |phys, len| {
+            seen.push((phys, len));
+            phys != 0xFEC0_0000
+        },
+        |base, pages| released.push((base, pages)),
+    )
+    .expect("every unmap succeeds");
+
+    assert_eq!(
+        seen,
+        [
+            (0xFEB0_0010, 0x20),
+            (0xFEC0_0000, 0x2000),
+            (0xFED0_0000, 0x1000)
+        ],
+        "each window's exact span, in address order"
+    );
+    assert_eq!(released, [(mid.virt(), 2)]);
+    assert_eq!(win.live(), 2);
+    assert_eq!(space.mapped_pages(), 2);
+    for page in 0..2u64 {
+        let va = VirtAddr::new((mid.virt().as_u64() & !0xFFF) + page * PAGE_SIZE as u64);
+        assert!(space.translate(Page::from_addr(va).unwrap()).is_none());
+    }
+    assert_eq!(
+        win.unmap_from(&mut space, mid),
+        Err(MmioError::UnknownRegion),
+        "a released window is gone from the record"
+    );
+    win.unmap_from(&mut space, low)
+        .expect("a kept window stays live");
+    win.unmap_from(&mut space, high)
+        .expect("a kept window stays live");
+}
+
+#[test]
+fn retain_that_refuses_everything_frees_the_whole_window_for_reuse() {
+    let mut space = borrowed_space();
+    let mut win = window(8);
+    let first = win.map_into(&mut space, 0xFEB0_0000, 0x1000).expect("maps");
+    let second = win.map_into(&mut space, 0xFEC0_0000, 0x1000).expect("maps");
+    let mut released = alloc::vec::Vec::new();
+    win.retain(
+        &mut space,
+        |_, _| false,
+        |base, pages| released.push((base, pages)),
+    )
+    .expect("every unmap succeeds");
+    assert_eq!(released, [(first.virt(), 1), (second.virt(), 1)]);
+    assert_eq!((win.live(), space.mapped_pages()), (0, 0));
+    win.map_into(&mut space, 0xFED0_0000, 0x5000)
+        .expect("the released slots are free again");
+}
+
+#[test]
+fn a_window_whose_unmap_fails_part_way_is_still_reported() {
+    let mut space = borrowed_space();
+    let mut win = window(8);
+    let torn = win.map_into(&mut space, 0xFEB0_0000, 0x2000).expect("maps");
+    let second_page =
+        Page::from_addr(VirtAddr::new(torn.virt().as_u64() + PAGE_SIZE as u64)).unwrap();
+    let _ = space.unmap(second_page).expect("the page is mapped");
+    let mut released = alloc::vec::Vec::new();
+    assert!(win
+        .retain(
+            &mut space,
+            |_, _| false,
+            |base, pages| released.push((base, pages))
+        )
+        .is_err());
+    assert_eq!(
+        released,
+        [(torn.virt(), 2)],
+        "its first page is already gone"
+    );
+}
+
+#[test]
+fn retain_that_keeps_everything_touches_nothing() {
+    let mut space = borrowed_space();
+    let mut win = window(8);
+    win.map_into(&mut space, 0xFEB0_0000, 0x1000).expect("maps");
+    win.retain(
+        &mut space,
+        |_, _| true,
+        |_, _| panic!("nothing is released"),
+    )
+    .expect("nothing to unmap");
+    assert_eq!((win.live(), space.mapped_pages()), (1, 1));
+}

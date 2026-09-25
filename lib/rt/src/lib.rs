@@ -193,6 +193,9 @@ const NUM_CALL_PEER_HOLDS: u64 = SyscallNumber::CALL_PEER_HOLDS.as_u16() as u64;
 /// `peer_watch` syscall number (as above).
 const NUM_PEER_WATCH: u64 = SyscallNumber::PEER_WATCH.as_u16() as u64;
 
+/// `call_peer_node` syscall number (as above).
+const NUM_CALL_PEER_NODE: u64 = SyscallNumber::CALL_PEER_NODE.as_u16() as u64;
+
 /// `wait` syscall number (as above).
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 
@@ -4364,6 +4367,40 @@ pub fn call_peer_holds(
     ret as i64
 }
 
+/// Read the hardware-tree node the task whose call `ticket` on `endpoint` the
+/// caller is serving was admitted for (`SyscallNumber::CALL_PEER_NODE`),
+/// copying its wire record into `out` and returning its length; decode it with
+/// [`tairix_abi::HwNode::from_bytes`].
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): `PermissionDenied` when the
+/// caller does not serve `endpoint`, `BufferTooSmall` for a buffer shorter
+/// than [`tairix_abi::HwNode::WIRE_LEN`], and `NotFound` for an unknown
+/// endpoint, a call not in service, a caller that is no driver loaded for a
+/// node, or a node that has left the tree.
+pub fn call_peer_node(endpoint: u64, ticket: u64, out: &mut [u8]) -> Result<usize, i64> {
+    let out_ptr = out.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before writing.
+    // `out` is a live exclusive `&mut [u8]` for the duration of the call.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CALL_PEER_NODE,
+            [endpoint, ticket, out_ptr, out.len() as u64, 0, 0],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // A count past the buffer can never drive an out-of-bounds slice.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    Ok((ret as usize).min(out.len()))
+}
+
 /// Create a kernel **wait-set**: a multiplexing object that observes the
 /// readiness of several event sources so one task can service them all
 /// without a busy-poll (`SyscallNumber::WAITSET_CREATE`; `plans/USB.md` U3a3
@@ -6699,6 +6736,28 @@ mod tests {
         assert_eq!(&args[..2], &[0xD15_1001, 9]);
         assert_ne!(args[2], 0);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn call_peer_node_marshals_the_buffer_and_clamps_the_count_to_it() {
+        let mut out = [0u8; tairix_abi::HwNode::WIRE_LEN];
+        let (number, args) = capture(u64::MAX >> 1, || {
+            assert_eq!(
+                call_peer_node(0xD15_1001, 9, &mut out),
+                Ok(tairix_abi::HwNode::WIRE_LEN)
+            );
+        });
+        assert_eq!(number, NUM_CALL_PEER_NODE);
+        assert_eq!(&args[..2], &[0xD15_1001, 9]);
+        assert_ne!(args[2], 0);
+        assert_eq!(args[3], tairix_abi::HwNode::WIRE_LEN as u64);
+        assert_eq!(&args[4..], &[0, 0]);
+
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let _ = capture(neg, || {
+            assert_eq!(call_peer_node(0xD15_1001, 9, &mut out), Err(want));
+        });
     }
 
     #[test]

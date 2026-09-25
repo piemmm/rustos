@@ -1332,6 +1332,26 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Copy out the hardware-tree node record the task that posted the
+    /// in-service call `ticket` on `endpoint` was admitted for, returning its
+    /// byte length.
+    ///
+    /// The dispatcher has already checked `node` is a non-null `UserPtr`; the
+    /// implementation gates on the caller serving the endpoint and resolves
+    /// the poster by its process instance.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn call_peer_node(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _node: u64,
+        _node_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Enumerate the device-resource grants the kernel minted for the
     /// calling driver task, delivering its unforgeable handles
     /// (`plans/PI.md` P10 chunk 5d-2).
@@ -3491,6 +3511,14 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let len = decode_len(args.0[2])?;
                 self.handlers.peer_watch(caller, op, args.0[1], len)
             }
+            SyscallNumber::CALL_PEER_NODE => {
+                // args[0] is the endpoint id; args[1] the in-service ticket;
+                // args[2] is a non-null node-out `UserPtr` (dispatcher-
+                // checked); args[3] its capacity in bytes.
+                let node_cap = decode_len(args.0[3])?;
+                self.handlers
+                    .call_peer_node(caller, args.0[0], args.0[1], args.0[2], node_cap)
+            }
             SyscallNumber::RESOURCE_GRANTS => {
                 // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
                 // is the buffer capacity.
@@ -4898,6 +4926,18 @@ mod tests {
             _len: usize,
         ) -> SyscallResult {
             self.record("peer_watch");
+            Ok(0)
+        }
+
+        fn call_peer_node(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _ticket: u64,
+            _node: u64,
+            _node_cap: usize,
+        ) -> SyscallResult {
+            self.record("call_peer_node");
             Ok(0)
         }
 

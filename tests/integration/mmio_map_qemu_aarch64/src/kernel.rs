@@ -34,6 +34,7 @@ use tairix_itest_finisher::fail_code;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_core::dmaquarantine::DmaQuarantine;
+use tairix_kernel_core::HwNodeLiveness;
 use tairix_kernel_core::{
     spawn_image, spawn_user_kthread_with_stack_live, with_current_live_space, Admission, BoxStack,
     ProcessSpace, SpawnMode, SpawnRequest, Yielder,
@@ -486,6 +487,16 @@ static DMA_CUSTODY: Once<DmaQuarantine> = Once::new();
 const DMA_NODE: u32 = 1;
 const DMA_GENERATION: u64 = 1;
 
+/// The hardware tree this vertical stands in for: only the stand-in grant's
+/// node is present.
+struct StandInTree;
+
+impl HwNodeLiveness for StandInTree {
+    fn is_live(&self, node_id: u32) -> bool {
+        node_id == DMA_NODE
+    }
+}
+
 /// Build a leaked `'static` [`FrameAllocator`] over [`ANON_POOL`].
 fn leaked_anon_frames() -> &'static FrameAllocator {
     let base = core::ptr::addr_of!(ANON_POOL) as u64;
@@ -592,7 +603,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let custody_map: &'static DirectPhysMap = Box::leak(Box::new(custody_map));
     let frames = leaked_anon_frames();
     if DMA_CUSTODY
-        .call_once_infallible(|| DmaQuarantine::new(frames, custody_map))
+        .call_once_infallible(|| DmaQuarantine::new(frames, custody_map, &StandInTree))
         .is_err()
     {
         qemu_exit::exit_failure(FAIL_LIVE_BUILD);

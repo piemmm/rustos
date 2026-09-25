@@ -161,6 +161,8 @@ const FAIL_PARENT_STOPPED: NonZeroU16 = fail_point!(14);
 const FAIL_IDENTITY: NonZeroU16 = fail_point!(15);
 /// The direct physical map could not be installed over the board's RAM.
 const FAIL_PHYSMAP: NonZeroU16 = fail_point!(16);
+/// The hardware tree refused its seed.
+const FAIL_TREE_SEED: NonZeroU16 = fail_point!(17);
 /// Base finisher for a non-zero parent exit; the parent's diagnostic exit
 /// code is added so the failing role/site is identifiable in the finisher.
 const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
@@ -251,7 +253,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 /// fault-exit path.
 // The callback matches the arch `UserFaultResolveFn` type (a bare safe
 // `extern "C" fn`); the raw pointer is only forwarded into the guarded
-// `unsafe` call below, which narrows it with `as_ref`. — contained.
+// `unsafe` call below, which narrows it with `as_ref`.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 extern "C" fn service_ceiling_user_fault(
     far: u64,
@@ -465,7 +467,16 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // `hw_tree_read` check reads a genuinely populated snapshot. The
     // node's content is irrelevant to the proof; a distinctive id keeps
     // the serial transcript legible.
-    HW_TREE.append(&HwNode::new(0x0CE1, HW_NODE_ROOT, HwDeviceClass::Other));
+    if HW_TREE
+        .seed(alloc::vec![HwNode::new(
+            0x0CE1,
+            HW_NODE_ROOT,
+            HwDeviceClass::Other
+        )])
+        .is_err()
+    {
+        qemu_exit::exit_failure(FAIL_TREE_SEED);
+    }
 
     // Publish the wait-queue arch hook so parked waiters (the parent in
     // `wait`) are genuinely unparked by their wake events — the same
@@ -569,12 +580,19 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         TEST_SPAWNED,
         "aarch64 service-ceiling test: parent spawned through the production seam",
     );
+    drive_until_the_parent_exits(&sys, wait_producer, parent_pid)
+}
 
-    // The budget-bounded cooperative drive: step the scheduler and poll the
-    // wait producer for the parent's exit between steps. The parent
-    // switches svc into the devmgr account through the production spawn +
-    // wait; a parent exit of 0 is the PASS, anything else names the failing
-    // site through its diagnostic code.
+/// The budget-bounded cooperative drive: step the scheduler and poll the wait
+/// producer for the parent's exit between steps. The parent switches svc into
+/// the devmgr account through the production spawn + wait; a parent exit of 0
+/// is the PASS, anything else names the failing site through its diagnostic
+/// code.
+fn drive_until_the_parent_exits(
+    sys: &Subsystems,
+    wait_producer: &KernelProcessWait<Aarch64BinArch>,
+    parent_pid: u64,
+) -> ! {
     // A task id never exceeds the ABI's pid bound, so reinterpreting it as
     // the signed pid the wait ABI carries is exact.
     let parent_pid = parent_pid.cast_signed();

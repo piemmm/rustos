@@ -156,8 +156,7 @@ pub const SCTLR_RES1: u64 = (1 << 29) | (1 << 28) | (1 << 23) | (1 << 22) | (1 <
 /// pre-vectors hang on the Pi 4. The trampolines (`boot.s` `.Lin_el1`,
 /// `smp.s` `_start_secondary_aarch64`) therefore write this exact value
 /// — they hard-code `0x30D0_0800`, pinned by a unit test here — so EL1
-/// always starts from known ground (: fail closed, not
-/// "trust the reset state").
+/// always starts from known ground rather than trusting the reset state.
 pub const SCTLR_MMU_OFF: u64 = SCTLR_RES1;
 
 /// The full MMU-on `SCTLR_EL1` value `AddressSpace::switch` (freestanding
@@ -1200,8 +1199,8 @@ impl<const CAPACITY: usize> PageTablePool<CAPACITY> {
 
     /// Allocate a fresh, zero-initialised table page.
     ///
-    /// Returns `None` when the pool is exhausted — callers handle it as
-    /// a closed-fail (: deterministic OOM, never panic).
+    /// Returns `None` when the pool is exhausted, which callers fail closed
+    /// on as a deterministic OOM, never a panic.
     pub fn alloc(&self) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
         self.alloc_with(translation_enabled())
     }

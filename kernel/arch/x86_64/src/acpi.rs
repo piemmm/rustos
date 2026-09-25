@@ -676,8 +676,7 @@ const _: () = {
     // RSDP signature is 8 bytes by ACPI spec.
     assert!(size_of::<[u8; 8]>() == 8);
     // The public `ACPI_SDT_HEADER_LEN` and the module-private
-    // `SDT_HEADER_LEN` must agree exactly. — no
-    // duplicate-source-of-truth constants.
+    // `SDT_HEADER_LEN` must agree exactly.
     assert!(ACPI_SDT_HEADER_LEN == SDT_HEADER_LEN);
 };
 

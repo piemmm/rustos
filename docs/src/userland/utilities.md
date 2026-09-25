@@ -224,7 +224,7 @@ discovered physical USB device. The inventory records one node per
 *interface* (the driver-bind and grant unit), so the engine groups the
 interface nodes of one device truthfully by the bus-local device
 address the host controller reported on each node (`HwNode::address`,
-the device's xHCI slot id) — a composite keyboard+mouse receiver lists
+the device's bus position) — a composite keyboard+mouse receiver lists
 once, while two identical devices (distinct addresses) stay distinct,
 and a node whose emitter reported no address is never guessed into a
 group. It shares `lspci`'s whole posture: the same

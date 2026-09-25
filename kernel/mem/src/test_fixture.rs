@@ -74,28 +74,28 @@ pub(crate) use frame_backing;
 
 /// What a [`RecordingCustody`] was handed.
 pub(crate) struct CustodyRecord {
-    /// Spaces bound and not yet unbound.
-    pub(crate) bound: usize,
-    /// Every `bind` accepted.
-    pub(crate) binds: usize,
+    /// Reservations neither spent by a hold nor returned.
+    pub(crate) reserved: usize,
+    /// Every reservation accepted.
+    pub(crate) reservations: usize,
     /// Every block held, with the node and generation it came under.
     pub(crate) held: Vec<(u32, u64, DmaBlock)>,
 }
 
 /// A [`DmaCustody`] that records what it is given, optionally refusing every
-/// binding.
+/// reservation.
 pub(crate) struct RecordingCustody {
-    refuse_bind: bool,
+    refuse: bool,
     record: SpinLock<CustodyRecord>,
 }
 
 impl RecordingCustody {
-    pub(crate) const fn new(refuse_bind: bool) -> Self {
+    pub(crate) const fn new(refuse: bool) -> Self {
         Self {
-            refuse_bind,
+            refuse,
             record: SpinLock::new(CustodyRecord {
-                bound: 0,
-                binds: 0,
+                reserved: 0,
+                reservations: 0,
                 held: Vec::new(),
             }),
         }
@@ -108,28 +108,29 @@ impl RecordingCustody {
 }
 
 impl DmaCustody for RecordingCustody {
-    fn bind(&self, _node: u32) -> Result<(), DmaError> {
-        if self.refuse_bind {
+    fn reserve(&self, _node: u32) -> Result<(), DmaError> {
+        if self.refuse {
             return Err(DmaError::Alloc(AllocError::OutOfMemory));
         }
         let mut record = self.record.lock();
-        record.bound += 1;
-        record.binds += 1;
+        record.reserved += 1;
+        record.reservations += 1;
         Ok(())
     }
 
-    fn hold(&self, node: u32, generation: u64, block: DmaBlock) {
-        self.record.lock().held.push((node, generation, block));
+    fn unreserve(&self, _node: u32) {
+        self.record.lock().reserved -= 1;
     }
 
-    fn unbind(&self, _node: u32) {
+    fn hold(&self, node: u32, generation: u64, block: DmaBlock) {
         let mut record = self.record.lock();
-        record.bound -= 1;
+        record.reserved -= 1;
+        record.held.push((node, generation, block));
     }
 }
 
 /// A [`RecordingCustody`] in a cell of this expansion's own; `refusing`
-/// builds one that refuses every binding.
+/// builds one that refuses every reservation.
 macro_rules! custody {
     () => {{
         static CUSTODY: crate::test_fixture::RecordingCustody =

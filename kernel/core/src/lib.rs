@@ -125,6 +125,7 @@ pub mod procwait;
 pub mod pty;
 pub mod random;
 pub mod resource;
+pub(crate) mod revoke;
 pub mod rlimit;
 pub mod seat;
 pub mod sharedreg;
@@ -174,6 +175,8 @@ pub(crate) mod test_boot;
 // that models a login-capable account carries, derived once for the process.
 #[cfg(test)]
 pub(crate) mod test_identity;
+#[cfg(test)]
+pub(crate) mod test_live;
 // Shared host-test fixture for the reclaimable-cache pressure gauge (a
 // controllable free-memory source plus per-band readings), used by the
 // filesystem-cache, launch-cache, and cross-cache integration suites so
@@ -235,7 +238,7 @@ pub use groups::{
     build_identity_table, load_groups_db, system_identity_table, GroupsDbSource, GroupsLoadError,
     LateGroupsDb, NullGroupsDbSource, GROUPS_DB_PATH, NULL_GROUPS_DB,
 };
-pub use hwtree::{HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
+pub use hwtree::{HwNodeLiveness, HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
 pub use init::{kernel_main, InitError, KernelInitSpawner, Phase, SchedWaitQueueArch};
 pub use introspect::{IntrospectSource, NullIntrospectSource, NULL_INTROSPECT};
 pub use introspect_source::KernelIntrospectSource;
@@ -282,10 +285,10 @@ pub use sleeplock::{SleepGuard, SleepLock};
 pub use smp::{run_secondary, SecondaryExit};
 pub use spawn::{
     admit_errno, may_spawn_any_mode, refuse_build, spawn_and_enter, spawn_caller_errno,
-    spawn_image, thread_pre_resume, AdmitError, ArchImageBuilder, BuiltImage, EmbeddedProgram,
-    ImageBuildCtx, InitSpawn, InitSpawnCtx, NullArchImageBuilder, ProcessResume, ProgramRegistry,
-    SpawnCallerError, SpawnMode, SpawnRequest, UserThreadEntry, EMPTY_PROGRAM_REGISTRY,
-    NULL_ARCH_IMAGE_BUILDER,
+    spawn_image, thread_pre_resume, AdmitError, ArchImageBuilder, BuiltImage, DriverNode,
+    EmbeddedProgram, ImageBuildCtx, InitSpawn, InitSpawnCtx, NullArchImageBuilder, ProcessResume,
+    ProgramRegistry, SpawnCallerError, SpawnMode, SpawnRequest, UserThreadEntry,
+    EMPTY_PROGRAM_REGISTRY, NULL_ARCH_IMAGE_BUILDER,
 };
 pub use spawn_services::{
     install_spawn_services, installed_spawn_services, ArchSpawnRuntime, SpawnRuntime,

@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 83 open, 144 closed, 227 total.
+**closed**, and a partial fix stays **open**. 94 open, 172 closed, 266 total.
 
-### Open (83)
+### Open (94)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -52,8 +52,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
 | D118 | host tests that share one low task/process identity against process-global kernel state, and registries whose tests take no guard | partial — the registry guards and every reachable identity collision are closed, the latter as D147. Open: `console::cooked_foreground_maps_ctrl_c_to_a_queued_interrupt` failed once in 500 shuffled runs and is unexplained, its install-once-hook lead untested; and an isolated identity is still not the default — 300 of `syscalls.rs`'s 450 tests spell the literal `2` |
-| D123 | `kernel/core` is not under the UB oracle | `kernel/mem` is **closed** — enrolled and green (0 leaks) once `DirectPhysMap` gained a provenance root, every leaked fixture became a `Once` cell, `slab`'s proptest stopped wanting a cwd, the sample-sized sweeps were scaled, and the crate was dealt across the host's cores (`Spread::PerCore`) instead of taken serially in one process, which is what overran the runner's per-job budget; one 4-hour `dma` test is skipped by name. Stage 383 s. `kernel/core` is **not** budget-bound as previously recorded: 577 test-side `Box::leak` sites across ~40 fixture types had never been seen, because every whole-crate run aborted on provenance before the leak check ran — see the section |
 | D122 | kthread admission aborts the kernel on an allocation failure instead of failing closed | partial — the stack, the allocation that actually fails, is now a `Result`; the control block and the `Box<dyn>` around it still abort through the global allocator's handler |
+| D123 | `kernel/core` is not under the UB oracle | `kernel/mem` is **closed** — enrolled and green (0 leaks) once `DirectPhysMap` gained a provenance root, every leaked fixture became a `Once` cell, `slab`'s proptest stopped wanting a cwd, the sample-sized sweeps were scaled, and the crate was dealt across the host's cores (`Spread::PerCore`) instead of taken serially in one process, which is what overran the runner's per-job budget; one 4-hour `dma` test is skipped by name. Stage 383 s. `kernel/core` is **not** budget-bound as previously recorded: 577 test-side `Box::leak` sites across ~40 fixture types had never been seen, because every whole-crate run aborted on provenance before the leak check ran — see the section |
 | D127 | the tree carries `static mut`, which the charter names as a hack, in ~30 source files and 139 test kernels | noticed while enrolling `lib/kalloc`; not absorbed. Every site is a `.bss` arena or table (`HEAP`, `KERNEL_STACKS`, port scratch) reached only through `addr_of!`, so none creates a reference and none trips `static_mut_refs` — a spelling, not a known soundness bug. `SyncUnsafeCell` is the modern form. `tairix_kalloc::Heap` no longer forces it: the arena is a plain `static` reached through `Heap::as_mut_ptr`, and the Settings vertical is the first binary built that way, so the heap sites convert one line each. Either the sweep lands or a charter carve-out says why storage is not state; today neither is written down |
 | D131 | the interleaving oracle reaches only `lib/sync`, and `kernel/sched/mlfq`'s existing loom models are dead | `--cfg loom` does not compile the kernel crate graph at all: loom's atomics have no `const` constructor, so every `const fn`-built static below is rejected in a static initialiser — `kernel/arch/api`'s `static ACTIVE_FRAMES: Once<_> = Once::new()` is the first, and `WaitQueue::new` / `SleepLock::new` are the same shape. So `kernel/sched/mlfq/tests/loom.rs` has models that **cannot be built and are enrolled nowhere** (its doc claimed `cargo xtask test` ran them; corrected), and `kernel/core` cannot be enrolled, which is why D129's interleavings are driven deterministically instead of searched. Resolving it means removing that `const` construction across the graph, or a loom shim in each crate that owns such a static; `kernel/sched/api::park` would need one too. Distinct from D123, which is the UB oracle |
 | D132 | no run states whether a *double-click* in a file-manager window reaches `activate` on a guest | coverage gap with an unexplained observation behind it, not a confirmed defect. The `handover_qemu_aarch64` vertical originally injected the pair as one four-edge burst and never passed. The burst **was** delivered: four window events reached the manager's own event mailbox (`0xE117…` tagged with the `files` task) in the 60 ms after that window's first frame, and the manager repainted twice after them — yet no `fd_grant` followed. The aim was verified independently against the run's screendump and round-trips to the intended entry through the production hit-test, and the shared pairing rule accepts two presses 32 ms apart on one subject (neither `Moved` nor `Released` resets the tracker). So either the burst yielded one press rather than two, or the two resolved to different subjects — and **no existing record can tell them apart**: `MessageDelivered` carries a port, a sender and a length, every window event is 40 bytes, and no audit event anywhere names a pointer action. Answering it needs a witness that names the delivered event kind, plus re-adding injection (`PointerAction::DoubleClick` was deleted with its last consumer). The vertical now activates through the item's context-menu *Open* row, which runs the same `activate`, so the delegation chain is covered and only the pairing path is host-tested only |
@@ -71,7 +71,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D155 | the breadcrumb's collapse cell draws a private `...` where every other cut text ends in `…` | blocked on a decision: `plans/GUI-CONTROLS-DESIGN.md` §11 fixes "three periods, not `…`" so the mark renders under any coverage, but the console atlas covers U+2026 (`lib/font`'s `coverage_reaches_beyond_ascii`) and the shipped faces draw it (the Settings vertical's Appearance description ends in `…`). Either the plan's rule is retired and `nav.rs` draws `tairix_font::ELLIPSIS`, or it stands and its rationale is restated; a regression test lands with whichever |
 | D164 | 22 userland programs allocate fixed start-up buffers with `vec!`, whose allocation failure panics rather than returning a typed error | a sweep, one program at a time; new code takes `tairix_util::fallible::filled`. See the Scope bullet |
 | D166 | x86_64's only platform entropy source is `RDSEED`/`RDRAND`, so a part or hypervisor that does not enumerate them leaves the kernel's random reserve unseeded for the whole boot | noticed when `netstack` began refusing to serve without a keyed SYN-cookie secret, instead of running with an unkeyed one, and every x86_64 network vertical went red: the QEMU harness presented `qemu64`, which has neither instruction, so each x86_64 guest booted `entropy reserve unseeded cause=draw_failed` and every CSPRNG consumer failed closed. The harness now presents both (`tools/qemu/src/x86_64.rs` `CPU`), as current silicon does; that corrects the test machine, not this defect. The kernel still trusts one source alone where the randomness design mixes several (`plans/FIX-RANDOMNESS.md`), so older parts that predate the instructions and hypervisors that mask their CPUID bits get no randomness at all. The fix is a second source the port can always reach, mixed with the first — a seed the boot loader hands over (its UEFI shell can draw one from `EFI_RNG_PROTOCOL`, `plans/BOOTLOADER.md`), and conditioned interrupt-timing jitter — never a fallback to predictable bytes. **Re-check trigger:** the next change to `kernel/arch/x86_64/src/entropy.rs` or to the boot hand-off |
-| D167 | a dead driver's DMA memory was freed while its device could still master it | partly fixed: node custody (DMA shared regions included), admission generations and the drivers' reset-confirmed declarations are landed, but the guarantee does not yet hold where D225 (the kernel premises it rests on) and D226 (the drivers' own frees) record; it closes with them |
 | D168 | the shared device-tree walk emits nodes the firmware marked `status = "disabled"` or `"reserved"`, and drivers bind them | noticed against the pinned Pi 4 tree while designing SND5; not absorbed, because changing the rule can unbind a path metal already accepts. See the section |
 | D169 | stable audit event ids collide across components: about thirty are claimed by two or three unrelated emitters | noticed while allocating the D167 ids; not absorbed — the fix is an id registry, a renumbering, and a `ci` uniqueness check. See the section |
 | D170 | direct reclaim allocates on the kernel heap, infallibly, on the path memory pressure triggers | noticed while making `LiveSpace::drop`'s walk allocation-free (D167); not absorbed, because the cold scanner's interface changes. See the section |
@@ -106,11 +105,23 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D222 | the WinterSun figure plans and comments contradict the code | noticed merging the WinterSun designer; not absorbed. `plans/FIGURE.md` owes `Tints` on a species change where the code rebuilds the rig; `plausible.rs` says beastkin are never horned against odds of 3 in 16; `digest.rs` claims every clip outlasts its fade while the last does not; `AGENTS.md`, `plans/FIGURE.md` and `plans/WINTERSUN.md` still home presets in the figure crate; and `plans/WINTERSUN.md` promises an `artsheet` render of bundle presets no deliverable carries |
 | D223 | the kernel's shared-region and call registries are global statics | noticed merging the DMA engine; not absorbed. `sharedreg::REGIONS` and `callreg` keep their state in global `SpinLock` statics the syscall and teardown paths reach directly; the owned-registry shape `PeerWatch` took, injected where it is used, is the fix |
 | D224 | the tree has two secure-wipe primitives: the `zeroize` crate (a direct dependency of 12 crates) and the first-party `tairix_util::secret` (`wipe`, `Wiped`; used by nine crates, among them `kernel/core`, `lib/rt`, and `netstack`) | noticed while moving `lib/sandbox`'s session queue onto `lib/collections`' `ByteQueue`, which wipes through `zeroize` where the queue it replaced wiped through `lib/util`. Both are volatile stores behind a fence, so neither is weaker; the defect is that one job has two implementations, and their stated reasons contradict each other — `lib/log` and `lib/rng` chose `zeroize` for "no hand-rolled wiping", while `lib/util` is exactly a hand-rolled wipe. Needs a decision on which is canonical before a sweep: `zeroize` stays in the graph either way, because `lib/crypto`'s audited cipher crates depend on it, and the charter otherwise prefers the first-party one. Then every consumer moves to the one, and the other is deleted. **Re-check trigger:** the next crate that needs to wipe a secret |
-| D225 | the DMA quarantine rests on premises the kernel does not enforce | a node can hold two live drivers (`AddressSpaceRegistry::set_loaded_node` never refuses a second load), and `dma_quiesced` frees everything below the caller's generation without checking for a live earlier instance, so one instance's reset can free memory another still programs; an orderly removal leaves a node's blocks under the id the next published device reuses (`hwtree_store` assigns `max + 1`); a surprise removal reads the generation high-water mark after the removal is already visible; and `DmaQuarantine::hold` allocates on the teardown path and leaks the block when that fails. Found reviewing D167's change; latent today, since nothing re-binds a DMA-carving node |
-| D226 | live drivers free DMA memory their device may still own, outside the quarantine | no `Drop` guard on `VirtioNet`, `VirtioSnd`, `VirtioInput`, `Genet` or `lib/usb`'s `UsbDevice`/`SlabBank`, so an early return from `lib/netchan`/`lib/audiochan` `serve`, `virtio_kbd` or the xHCI main frees their slabs through `dma_free` while the device runs; `vcmailbox` frees its property buffer when the firmware-revision probe added with D167 fails after posting; `virtio_snd`'s `release()` drops its periods after a failed `PCM_STOP`/`PCM_RELEASE`; and `lib/usb` releases a slot's region before Disable Slot and drops the `SlabBank` when `start` fails after Run/Stop. Found reviewing D167's change |
-| D227 | `virtio_blk` and `virtio_crypto` take any completion as the current request's once a chain is abandoned | after `DeviceOffline` the device may still own the abandoned chain and the next request reuses its staging, so the late completion is returned as the new request's success: the wrong LBA's data, or one caller's output to the next. Found reviewing D167's change |
 | D228 | a grab takes the seat without carrying the seat's state across it | while a menu chain or the lock holds the seat, modifier edges never reach the window manager's modifier copy (`drain_menu_chain` drops `ModifiersChanged`; `LockedDrain` hands the shell nothing), so a click after the grab ends can be stamped with a modifier already released; and a key held into a grab never sees its release at the window that saw its press, so an application holding a key keeps it held. Needs the grab-entry contract decided first — what the focused surface is told when the seat is taken mid-press. Noticed fixing `plans/NEW-MENUS.md` D34 |
 | D229 | the seat's pointer and keyboard channels carry no shared order or time | two independent rings in `kernel/core/src/seat.rs`, no per-seat sequence or arrival stamp: the desktop cannot restore their interleaving, so under load keys typed into one window before a click on another reach the window the click focused, and every timed gesture (hold, double-click, key-repeat start) is measured when the desktop processes it — a stalled desktop reads a tap as a hold. Fix: a sequence and arrival stamp per record on the `pointer_read`/`keyboard_read` drain, merged in order by the session. Noticed fixing `plans/NEW-MENUS.md` D34 |
+| D234 | a user-space unmap on x86_64 or riscv64 invalidates only the calling CPU, so a sibling thread elsewhere keeps a translation to the freed frame | noticed revoking D230's device windows, which shoot down every CPU themselves; not absorbed — the fix is a gather-then-free unmap across every `LiveSpace` path. See the section |
+| D237 | the EMMC2 bring-up re-polls `ACMD41` back to back, with no interval, up to a million rounds | noticed with D227's card-state check; not absorbed — the fix is a timed park in the SDHCI host seam. See the section |
+| D241 | an orderly removal leaves its driver's DMA memory quarantined for the boot | noticed revoking D230's grants; not absorbed — needs an orderly-removal protocol that stops the driver first, or a parent-attested quiesce. See the section |
+| D242 | the kernel binary keeps `static mut` state (the boot heap in each port, x86_64's boot stacks) | noticed sweeping citation residue; not absorbed — linker-reserved memory for all three ports at once. See the section |
+| D243 | the device manager never learns that a driver died, so a crashed or failed-closed driver's device stays undriven | noticed with the devmgr review; not absorbed — needs the driver's `ProcId` in the store's load reply and a tree-plus-exit wait. See the section |
+| D244 | MSI vectors are never freed | noticed revoking D230's MSI grants; not absorbed — a free in each port's producer. See the section |
+| D245 | a re-plugged NIC or audio device can be handed no channel | noticed with the devmgr review; not absorbed — interface retirement in `netstack` and `audiod`. See the section |
+| D246 | writable-root configuration is not re-read after the root unlocks | noticed with the devmgr review; not absorbed. See the section |
+| D247 | the ports disagree on a partial boot hardware tree | noticed with the devmgr review; not absorbed. See the section |
+| D252 | no oracle can interpret the virtio drivers' tests | noticed fixing D251; not absorbed — the mock peer needs provenance-carrying access. See the section |
+| D261 | an endpoint grant names a numeric id another binding can take | noticed fixing D260; not absorbed — endpoint authority tied to one binding. See the section |
+| D263 | an unplug and re-plug folded into one root-port change is taken for a glitch | noticed fixing D235; not absorbed — needs the port-enable check, a rescan mark, and the SuperSpeed case. See the section |
+| D266 | `docs/src/platform/aarch64.md` documents the deleted in-kernel USB keyboard scaffold's diagnostics as live | noticed closing D226; not absorbed. Its "Discovery and bring-up logging" table and the `4129`–`4131` poll-loop paragraph describe events from `keyboard_service` and `usb_keyboard`, neither of which exists, under ids the audit vocabulary has since reissued (`4100` `FsNodeMutated`, `4101` `FsMutationDenied`, `4120` `CpuOpsRoutineSelected`, `4121` `CryptoSelfTestFailed`), so a live record in a capture reads as a USB diagnostic; the note above the table says the events are gone yet keeps it |
+| D267 | `docs-check` has no stale-symbol check | noticed closing D226; not absorbed. The charter's `docs-check` fails a `docs/src/` page that names a symbol which no longer exists; `run_docs_check` builds rustdoc and the book and checks relative links, and nothing else, which is how D266's page names deleted modules without failing |
+| D268 | a 512-byte sector is defined nine times over | `tools/qemu`, `tools/mkimage`, the `arxfs_image`, `encrypted_root_image`, `posix_fs_suite` and `virtio_qemu_support` fixtures, `virtio_blk` (its crate and again its tests) and `fat32`'s tests each carry their own `512` beside `tairix_partition::mbr::MBR_SECTOR_LEN`, so an image's author and the tool that plants it can drift apart. Needs deciding which are one quantity (a disk image's logical block) and which are genuinely their own (the virtio-blk wire sector, a FAT volume's chosen bytes-per-sector). Noticed merging the `/System` sizing change; not absorbed |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -137,7 +148,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (144)
+### Closed (172)
 
 | ID | Subject |
 |---|---|
@@ -262,6 +273,7 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D162 | the kernel never seeded its CSPRNG on a port whose hardware RNG is declared `Pending`, though the boot seed it had captured could have |
 | D163 | `netstack` exited on every start-up failure without stating why |
 | D165 | the SVG decoder admitted a pattern tile magnified past what the renderer can size, which the renderer then refused to draw at all |
+| D167 | a dead driver's DMA memory was freed while its device could still master it |
 | D173 | a DMA carve under an addressing limit took whichever block the free lists offered first, and refused it when that block lay above the limit |
 | D174 | adjacent usable boot-map regions were populated as separate runs, so the buddies at their seam never merged |
 | D176 | the userland runtime and its C stubs were outside the UB oracle, and three findings kept them there |
@@ -285,6 +297,33 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D197 | the idle lock could be held off: idle deadlines were served only on a wake that timed out, so a client keeping the loop busy postponed them indefinitely, and a key repeat the session made up counted as input, so a stuck key did too; both are closed in the serve loop (`is_due` pinned by `is_due_says_what_due_would_take_without_taking_it`; the loop wiring itself has no host test) |
 | D198 | the idle lock came up over the screensaver, because the restack keeping the saver on top ran only on a non-idle wake; the idle path now restacks too (loop wiring, no host test) |
 | D199 | a USB keyboard that went away left its held keys down, so the session repeated one for ever; the driver releases every key it last reported held before it exits (`tairix_hid::release_held`), pinned by `a_keyboard_leaving_releases_every_key_it_last_reported_held` and `a_release_delivers_what_was_latched_before_it` |
+| D225 | the DMA quarantine rested on premises the kernel did not enforce |
+| D227 | request drivers took any completion as the current request's once a chain was abandoned, and reused staging the device still held |
+| D230 | a removed node's grants outlived it: its driver, and whatever that driver delegated to, kept the device's windows and interrupt lines, and a republished transport reached the old driver |
+| D231 | `irq_bind` bound any line to any holder of `CAP_IRQ_BIND` |
+| D232 | a shared region's reference was released after a teardown that failed part-way, so its frames could be freed under live entries |
+| D233 | an xHCI enumeration retry replayed the requests its failed attempt left on the old EP0 ring, and retried without resetting the port |
+| D236 | the charter-citation strip left broken sentences behind: parentheticals opening on a colon, semicolons running into a dash, sentences opening on one |
+| D226 | live drivers freed DMA memory their device could still own |
+| D235 | a control transfer that did not complete left the device's EP0 unusable, so a device that never answered a string request failed its attach |
+| D238 | a configuration's stray descriptors were taken as real interfaces and endpoints |
+| D239 | the HID report parser misread hostile and unusual descriptors |
+| D240 | a RAID member offered its window's region id where the composer needed its handle |
+| D248 | the virtio test doubles were compiled into every production build |
+| D249 | the mailbox service busy-spun its reply waits |
+| D250 | virtio-net freed its receive buffers unscrubbed at teardown |
+| D251 | the virtio mock host handed out pointers its own leak had invalidated |
+| D253 | a device a controller reset moved to another index lost its node |
+| D254 | a controller halted on the submit path was never recovered |
+| D255 | a dead xHCI controller left the HCD idling, and a lost wait-set exited clean |
+| D256 | a re-plugged device's driver was handed the previous device's buffer |
+| D257 | an endpoint the event loop could not watch was bound again, never served |
+| D258 | any process could steer the RAID composer with a forged offer |
+| D259 | a member listing opened a second view of a window the array was using |
+| D260 | a re-enumerated disk could never rejoin its array |
+| D262 | any task could grow an endpoint server's grant table |
+| D264 | a kept USB node reported a slot id a controller reset reassigned |
+| D265 | a storage device without a serial number was kept across a reset on model and position alone |
 
 ## Scope
 
@@ -8346,71 +8385,70 @@ exposed it. The two halves of the witness are host-tested beside the service
 `a_bar_slot_whose_artwork_is_refused_settles_on_its_glyph`), each guard
 verified to fail the test when removed.
 
-## D167 — a dead driver's DMA memory was freed while its device could still master it — PARTLY FIXED (open: D225, D226)
+## D167 — a dead driver's DMA memory was freed while its device could still master it — FIXED
 
-A driver that ends with its device still running — a crash, a kill, an exit
-that skipped the reset — no longer returns its DMA memory to the allocator.
-A space's first carve binds a `DmaCustodian` (`kernel/mem/src/dma.rs`): the
-driver's hardware-tree node, its admission generation (`AddressSpaceRegistry`
-stamps one on every driver it admits), and the kernel's per-node custody
-(`kernel/core/src/dmaquarantine.rs`). `LiveSpace::drop` zeroes, cleans,
-unmaps and surrenders each block to it and records `DMA_QUARANTINED` (4091).
-A later driver for the node calls `dma_quiesced` (no. 126, `CAP_MEM_DMA`,
-audited) once its bring-up has confirmed the device reset, and the kernel
-frees, scrubbed, the node's blocks of every earlier generation, recording
-`DMA_QUARANTINE_RELEASED` (4092).
+A driver that ends with its device still running — a crash, a kill, an exit that
+skipped the reset — never returns its DMA memory to the allocator. A space binds
+a `DmaCustodian` (`kernel/mem/src/dma.rs`) on its first carve: the driver's
+hardware-tree node, its admission generation (`AddressSpaceRegistry` stamps one
+on every driver it admits), and the kernel's per-node custody
+(`kernel/core/src/dmaquarantine.rs`). `LiveSpace::drop` zeroes, cleans, unmaps
+and surrenders each block to it and records `DMA_QUARANTINED` (4091). A later
+driver for the node calls `dma_quiesced` (no. 126, `CAP_MEM_DMA`, audited) once
+its bring-up has confirmed the device reset, and the kernel frees, scrubbed, the
+node's blocks of every earlier generation, recording `DMA_QUARANTINE_RELEASED`
+(4092).
 
 What it guarantees:
 
-- **Generations, not ordering.** The exit is recorded — so `devmgr` may
-  spawn a successor — before the scheduler's reap drops the dead space, so a
-  block can reach custody after its successor released. The node's quiet
-  bound frees such a block on arrival; a block of the releaser's own or a
-  later generation is never freed. The bound assumes one live driver per
-  node, which the kernel does not yet enforce (D225).
-- **A surprise removal retires the node** at the admission high-water mark,
-  so a vanished device's memory frees and a reused node id's next driver keeps
-  its protection; an orderly removal leaves release to the next instance.
-  D225 records where each falls short: the mark is read after the removal is
-  visible, and an orderly removal's blocks wait under an id the next device
-  reuses.
-- **Custody never fails open.** A block for an unbound node, or one the
-  registry cannot record, keeps its frames allocated for good; a kernel with
-  no direct physical map wires `NULL_DMA_QUARANTINE`, which refuses the carve.
-- **A declaration is truthful.** Each DMA-mastering driver declares only
-  after a confirmed reset: virtio's `Transport::reset` fails with
-  `DeviceFault` unless the status reads back 0; xHCI declares in
-  `UsbDevice::start`, which only a completed `HCRST` can reach; GENET waits
-  for `DMA_DISABLED` on both engines; EMMC2 declares after its `SRST_HC`
-  bring-up; the VideoCore mailbox service declares after a firmware-revision
-  probe, resting on the firmware answering property requests in posting
-  order (its metal acceptance is pending, `plans/PI.md`), and an exchange
-  drains a stale property completion rather than failing on it.
-- **A live driver's own frees follow the same rule**, except where D226
-  records. The virtio drivers carve everything fallible before `DRIVER_OK`
-  and reset again before releasing when a later step fails; a `close` whose
-  reset does not confirm, a GENET engine that will not stop, and a virtio-net
-  control command the device never returned are withheld for the quarantine
-  rather than freed.
+- **Generations, not ordering.** The exit is recorded — so `devmgr` may spawn a
+  successor — before the scheduler's reap drops the dead space, so a block can
+  reach custody after its successor released; the node's quiet bound frees such
+  a block on arrival, and a block of the releaser's own or a later generation is
+  never freed. Sound because a node has at most one live driver (D225).
+- **A surprise removal retires the node for good**: what is held frees now, what
+  arrives later frees on arrival, and no carve is taken for the node again —
+  sound because a node id is never reissued (D225). An orderly removal proves
+  nothing about the device, so what its drivers left stays held for the boot.
+- **Custody never fails open, and a surrender never allocates.** Every carve
+  reserves room for its own surrender, and custody is opened only for a node the
+  tree holds (D225). A block no reservation stands behind keeps its frames
+  allocated for good; a kernel with no direct physical map wires
+  `NULL_DMA_QUARANTINE`, which refuses the carve.
+- **A declaration is truthful.** Each DMA-mastering driver declares only after a
+  confirmed reset: virtio's `Transport::reset` fails with `DeviceFault` unless
+  the status reads back 0; xHCI declares in `UsbDevice::start`, which only a
+  completed `HCRST` can reach; GENET waits for `DMA_DISABLED` on both engines;
+  EMMC2 declares after its `SRST_HC` bring-up; the VideoCore mailbox service
+  declares after a firmware-revision probe, resting on the firmware answering
+  property requests in posting order (its metal acceptance is pending,
+  `plans/PI.md`), and an exchange drains a stale property completion rather than
+  failing on it.
+- **A live driver's own frees follow the same rule** (D226, D227). Every
+  DMA-owning device type stops or resets its device when it is dropped and
+  withholds what it cannot prove released, and a request the device never
+  answered keeps its buffers the device's until it hands them back.
 - **DMA shared regions join the same custody.** A `shm_create_dma` region
-  binds its creator's node for its life; a creator that ends still mapping it
-  orphans it, and its frames reach the quarantine under the creator's
+  reserves its creator's node custody for its life; a creator that ends still
+  mapping it orphans it, and its frames reach the quarantine under the creator's
   generation when the last mapping goes (`plans/SOUND.md` SND5b).
 - **The teardown walk allocates nothing.** `LiveSpace::drop` drains its pages
-  through `AddressSpace::unmap_lowest`, so a space dying under memory
-  pressure cannot fail for want of the memory it is returning; recording each
-  block in custody still allocates (D225).
+  through `AddressSpace::unmap_lowest`, and custody records each block into room
+  its carve reserved, so a space dying under memory pressure cannot fail for want
+  of the memory it is returning.
 
-Regression tests: `kernel/core/src/dmaquarantine/tests.rs` (held until a
-later generation releases, late arrival freed, retire at the high-water mark
-spares a reused id, an unbound node's block leaked, the end-to-end
-`LiveSpace` surrender); `kernel/mem`'s surrender and one-custodian-per-space
-tests and the `unmap_lowest` drain; `kernel/core/src/syscalls.rs`'s
-caller-scoped release, surprise-only
-retire and quarantine audit; `lib/virtio`'s bounded reset wait; and per
-driver a declaration-after-reset test and a wedged-device test proving the
-memory withheld — except EMMC2, which has only the wedged-device test, and
-`vcmailbox`, which has neither.
+Regression tests: `kernel/core/src/dmaquarantine/tests.rs` (held until a later
+generation releases, late arrival freed, a removed device's memory freed now and
+on arrival, custody refused for a gone node, a surrender that allocates nothing,
+a block no reservation stands behind kept, the end-to-end `LiveSpace`
+surrender); `kernel/mem`'s surrender, reservation and one-custodian-per-space
+tests and the `unmap_lowest` drain; `kernel/core/src/syscalls.rs`'s caller-scoped
+release, surprise-only retire and quarantine audit; `lib/virtio`'s bounded reset
+wait; and per driver a declaration-after-reset test and a wedged-device test
+proving the memory withheld — except EMMC2, which has only the wedged-device
+tests, and `vcmailbox`, whose buffer is proven withheld on `DmaMailbox` but
+whose declaration, made by the freestanding service after its probe, has no
+test.
 
 ## D168 — the shared device-tree walk emits nodes the firmware marked disabled or reserved, and drivers bind them (OPEN)
 
@@ -8706,3 +8744,860 @@ aarch64 and riscv64 fail on their budgets and x86_64 on a silent exit. Host
 tests pin the record (`tairix_arch_api::fatal`), the runner's watch and
 outcome (`tairix_qemu`), the enrolment verdict (`qemu_tests::fatal_verdict`)
 and the boot tables' IST mapping.
+
+## D225 — the DMA quarantine rested on premises the kernel did not enforce — FIXED
+
+D167's release and retirement proofs assumed facts the kernel now enforces, and
+recording a surrendered block no longer allocates.
+
+- **One live driver per node.** `AddressSpaceRegistry::admit_driver` refuses a
+  second load for a node whose driver still has a thread running
+  (`Errno::Busy`); `node_drivers` indexes each node's live driver. Admission
+  claims the node before any other state of the child exists, so a refusal
+  (`AdmitError::NodeBusy`) leaves only the parked task, and every later
+  admission failure withdraws what the child was given, the claim included. An
+  exit is recorded only once the process's last thread is down, and the claim
+  is released just before it (`land_thread_down`, `retire_loading_child`), so
+  a successor loaded on seeing the exit is admitted rather than refused.
+  `dma_quiesced` therefore frees only what instances whose last thread is down
+  carved.
+- **A node id names one device for the boot.** `HwTreeStore` is seeded once,
+  before anything publishes into it, and has no `append`; ids come from a
+  high-water mark that seeding and publishing only raise, `publish_child`
+  refuses with `NoSpace` once the id space is spent, the inventory is kept in
+  id order, and a child is never published under a node the tree no longer
+  holds.
+- **A removal settles the node's custody.** A surprise removal retires the node
+  for good (`Standing::Gone`): what is held frees now, what arrives later frees
+  on arrival. An orderly removal detaches it (`Standing::Detached`): no carve is
+  taken for it again, and what it holds stays until a reset by a driver of the
+  node. Custody is opened only for a node the tree holds, asked under the lock
+  a removal takes, so a driver admitted just before its device vanished cannot
+  open a record the removal never saw (`DmaError::DeviceGone`, surfaced as
+  `DeviceOffline`).
+- **A removal revokes the node's authority** from its live driver and from
+  whatever it delegated to, and a driver admitted during the removal is either
+  refused or revoked (D230), so no task reaches a removed device while its
+  quarantine reasons about it.
+- **A bus driver keeps its children across its own reset.** The xHCI driver
+  matches each interface node by device identity to the index now serving its
+  device after a controller reset (`interfaces::Interfaces::reconcile`),
+  serial number included, so a device that came back keeps its node, buffer
+  and driver even at another index, while one swapped for another of its model
+  is replaced,
+  and the device manager's recovery hold, which kept a vanished child's driver
+  bound while its owner recovered, is deleted: a vanished child's driver is
+  unloaded at once.
+- **A surrender never allocates.** `DmaCustody` is `reserve` / `unreserve` /
+  `hold`: every carve and every DMA shared region reserves room for its own
+  surrender, a live free returns it, and `hold` records into that room.
+
+Regression tests: `aspace`'s `a_node_has_at_most_one_live_driver` and
+`a_released_node_takes_a_successor_before_its_driver_is_withdrawn`;
+`syscalls`' `a_second_driver_for_a_node_with_a_live_one_is_refused`,
+`an_admission_refused_at_its_wired_streams_leaves_its_node_free`,
+`a_drivers_node_takes_a_successor_as_soon_as_its_exit_is_recorded`,
+`an_exit_is_reapable_only_once_the_last_thread_is_down`,
+`a_child_killed_before_its_first_slice_is_reported_once_through_its_exit`,
+`hw_emit_node_under_a_removed_node_is_refused`,
+`dma_quiesced_quiets_only_the_callers_own_node_and_generation` and
+`only_a_surprise_removal_retires_the_quarantine`; `hwtree_store`'s
+`a_store_is_seeded_once`, `a_seed_naming_one_id_twice_is_refused_whole`,
+`a_removed_nodes_id_is_never_issued_again`,
+`a_published_id_stays_above_a_removed_seeded_one`,
+`publishing_fails_closed_once_the_id_space_is_spent`,
+`the_inventory_is_kept_in_ascending_id_order`,
+`a_child_is_never_published_under_a_node_the_tree_no_longer_holds` and
+`liveness_follows_the_inventory`; `dmaquarantine`'s
+`a_removed_devices_memory_is_freed_now_and_on_arrival`,
+`a_removed_device_is_handed_no_more_memory`,
+`a_removal_that_outran_the_first_carve_is_not_missed`,
+`an_orderly_removal_keeps_what_is_held_until_a_reset`,
+`a_carve_for_an_orderly_removed_node_is_refused_whether_or_not_its_record_exists`,
+`a_reset_proof_is_kept_while_the_node_is_in_the_tree`,
+`a_removed_nodes_record_goes_once_its_last_reservation_does`,
+`a_live_nodes_record_survives_going_idle`,
+`only_a_records_first_carve_asks_the_tree_and_under_the_removals_lock`,
+`a_block_no_reservation_stands_behind_stays_allocated_for_good`,
+`only_the_bytes_actually_freed_are_counted` and `a_surrender_never_allocates`;
+`live::tests::a_failed_carve_returns_its_reservation`;
+`live_producer::tests::a_carve_for_a_device_that_is_gone_is_refused_as_offline`;
+the xHCI driver's `reconcile` tests (among them
+`two_devices_of_one_model_that_traded_places_are_told_apart_by_serial_number`),
+`lib/usb`'s `a_controller_reset_tells_two_devices_of_one_model_apart_by_serial_number`,
+`a_storage_device_with_a_serial_number_enumerates_with_it_in_its_identity` and the
+malformed-string tests,
+`a_transfer_during_recovery_is_answered_reissuably_without_touching_the_controller`
+and `a_failed_reset_answers_a_held_transfer_reissuably`; `devmgr`'s
+`a_vanished_child_is_unloaded_at_once_even_while_its_owner_is_recovering`.
+
+## D226 — live drivers freed DMA memory their device could still own — FIXED
+
+A driver frees DMA memory only once its device can no longer reach it, and
+withholds whatever it cannot prove released: `DmaSlab::withhold` makes a slab's
+drop free nothing, leaving the region for the quarantine when the driver exits.
+
+- **Every DMA-owning device type has a teardown guard.** `VirtioBlk`,
+  `VirtioCrypto`, `VirtioNet`, `VirtioInput` and `VirtioSnd` reset the device
+  when dropped and withhold their rings and staging if the reset does not
+  confirm; their `close` methods are gone. `Genet` stops its DMA engines when
+  dropped, once it has started them over its frames, telling each to stop
+  whatever the other does. `UsbDevice` resets its
+  controller and withholds every chunk (`DmaBank::withhold_all`) if it will not
+  reset. `Emmc2` withholds its staging from a controller whose line reset never
+  confirmed. Every early return of `lib/netchan` and `lib/audiochan` `serve`,
+  `virtio_kbd` and the xHCI main is covered by these.
+- **A slot's memory follows the Disable Slot outcome.** `lib/usb`'s
+  `disable_slot_best_effort` reports whether the controller confirmed;
+  `detach_device`, `detach_hub` and a failed attach release a slot's chunks —
+  composite siblings' included — only then, and otherwise withhold them
+  (`DmaBank::withhold`) and keep its DCBAA entry, the local bookkeeping still
+  freed so a re-plug enumerates. The detaches unroute a slot's entries before
+  Disable Slot, so nothing arms or rings the slot being disabled; an attach
+  that serves nothing is refused before it is configured and takes the same
+  path; and a failed attach is re-driven only on a slot confirmed disabled. A
+  Disable Slot confirmed after the wait returns them then, the DCBAA entry
+  cleared first (`settle_awaited_disable`, `DmaBank::release_withheld_chunk`),
+  so repeated unplugs behind a hub withhold nothing for long, and a confirmed
+  controller reset releases every chunk still withheld (`release_withheld`). A `start` that fails once the controller may run
+  resets it before the bank drops, and withholds the bank if it will not
+  reset.
+- **An unanswered mailbox request keeps its buffer.** The service's property
+  buffer is owned by a `DmaMailbox`, which withholds it when dropped while
+  `MmioMailbox::request_outstanding` reports a posted request whose reply was
+  never read, so every exit of the service keeps a buffer the firmware still
+  owes a reply. It refuses a buffer that is not word-aligned or needs cache
+  maintenance, which its window could not soundly or coherently address.
+- **`virtio_snd` never frees a period the device holds.** Only an acknowledged
+  `PCM_RELEASE` promises every transfer complete, so release and reconfigure
+  collect the returned transfers before letting the periods go, and a period the
+  device still holds is lent into its transfer queue's per-head record
+  (`TransferQueue`), carved at bring-up so the lend never allocates, until its
+  completion arrives. A completion on the transfer queue a direction's streams
+  share goes to whichever stream posted it, so a second stream of a direction,
+  or a stream reconfigured after release, is not failed by a completion another
+  posted. The queue is sized at bring-up for every period all the device's
+  streams keep in flight, and a device whose queue cannot hold them is refused
+  then; a period is filled from the mixer's ring only when its queue has room
+  to post it, and the event pool posts only what the negotiated ring holds.
+- **A posted transmit pair is never dropped.** `TxStaging::record_inflight`
+  withholds a pair it has no slot for rather than dropping it, and a withheld
+  `BounceBuffer` is not scrubbed either, since the device may still be reading
+  it.
+
+Before `DRIVER_OK` a conformant virtio device reaches no ring, so a bring-up
+failure there still drops what it carved, as D167 left it.
+
+Regression tests: per device type a drop-after-confirmed-reset test and a
+wedged-drop test (`a_dropped_device_*` in `virtio_blk`, `virtio_crypto`,
+`lib/virtio_net`, `lib/virtio_input` and `virtio_snd`; `a_live_device_*` in
+`genet`, and its
+`a_live_device_with_one_engine_that_will_not_stop_still_stops_the_other_and_keeps_the_frames`;
+`a_dropped_engine_*` and `a_start_that_fails_*` in `lib/usb`;
+`a_controller_that_will_not_recover_is_handed_the_staging_no_more` in `emmc2`);
+`lib/usb`'s `split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed`,
+which now asserts the region withheld and the DCBAA entry kept, and
+`a_controller_reset_releases_what_unconfirmed_teardowns_withheld`,
+`a_late_disable_slot_confirmation_returns_what_the_unplug_withheld`,
+`repeated_unplugs_whose_disables_confirm_late_withhold_nothing` and
+`a_late_disable_slot_refusal_keeps_the_region_withheld`; `virtio_snd`'s
+`a_release_the_device_refuses_keeps_every_period_it_still_holds`,
+`a_stream_reconfigured_after_release_is_not_derailed_by_its_old_transfers`,
+`a_period_the_ring_has_no_room_for_leaves_its_frames_in_the_ring` and
+`a_period_lent_to_the_device_is_freed_when_it_finally_comes_back`,
+`a_released_streams_periods_are_freed_only_once_the_device_hands_them_back`,
+`two_streams_of_a_direction_keep_their_periods_in_flight_on_the_one_queue` and
+`a_device_with_a_shallow_event_queue_still_comes_up`; `lib/usb`'s
+`a_device_nothing_here_serves_gives_its_slot_back_on_every_attach`,
+`an_unserved_device_behind_a_hub_is_skipped_without_holding_a_slot`,
+`an_unserved_device_whose_slot_will_not_disable_keeps_its_region`,
+`a_transient_fault_on_a_slot_that_will_not_disable_is_not_retried`,
+`a_report_landing_while_a_detached_devices_slot_is_disabled_rings_no_doorbell`,
+`a_failed_composite_attach_on_a_slot_that_will_not_disable_withholds_every_region`,
+`a_hub_teardown_the_controller_will_not_confirm_withholds_the_whole_tier` and
+`a_controller_reset_that_fails_keeps_what_unconfirmed_teardowns_withheld`;
+`lib/virtio`'s `a_withheld_bounce_buffer_is_neither_freed_nor_scrubbed`;
+`lib/vcmailbox`'s `an_unanswered_request_keeps_the_buffer_until_its_reply_lands`,
+`an_owned_buffer_the_firmware_still_owes_a_reply_outlives_the_mailbox`,
+`an_owned_buffer_the_firmware_has_answered_for_is_freed_with_the_mailbox`,
+`an_owned_buffer_that_needs_cache_maintenance_is_refused_and_freed` and
+`an_owned_buffer_that_is_not_word_aligned_is_refused_and_freed`.
+
+## D227 — request drivers took any completion as the current request's once a chain was abandoned — FIXED
+
+A request the device leaves unanswered is failed to its caller, but its chain
+and every buffer it names stay the device's until the device hands them back:
+nothing is published over them, and no completion is attributed to a chain it
+does not belong to.
+
+- **The queue attributes completions.** `SplitQueue` keeps its free list and
+  chain links in driver memory and accepts a completion only for the head of a
+  chain it holds; a head outside the table, a free or interior descriptor is
+  refused (`MalformedCompletion`) and reclaims nothing, and a device writing
+  over the descriptor table cannot reach the free list. Descriptors are
+  reissued oldest-returned first, so a completion the device repeats for a
+  chain it returned names free descriptors, and is refused, for as long as
+  the ring allows. A queue that cannot hold the descriptors its driver keeps
+  on it is refused (`QueueTooShallow`) before any ring is handed over.
+- **One request at a time, once.** `tairix_virtio::RequestQueue` is the one
+  submit-and-wait for virtio-blk, virtio-crypto and the virtio-sound and
+  virtio-net control queues, replacing their per-driver loops (virtio-net's
+  spun on the ring without parking): a chain it gives up on stays abandoned
+  until `settle` sees it come back, notifying the device again meanwhile at
+  most once per the request's budget, and until then nothing is published and
+  every request fails `DeviceOffline`.
+  Nothing is published over a completion already in the ring, which with no
+  chain out answers nothing. A request waits at most its budget in all, each
+  wait given what is left of it on the host's clock (`VirtioHost::now_ns`),
+  so a device that keeps waking the driver cannot stretch it, and a storm of
+  wakes ends sooner at `MAX_COMPLETION_WAKES`. A wait that times out, or that
+  the host could not make at all, ends the request `DeviceOffline` once the
+  ring has been read again.
+- **A completion that answered nothing is refused.** Every virtio driver
+  stages a status no device writes into each reply before publishing —
+  virtio-blk's status byte, virtio-crypto's session reply and statuses,
+  virtio-sound's period status — so a completion that wrote no reply is
+  refused rather than read as the previous request's `OK`. A payload in reused
+  staging (virtio-blk read data, virtio-crypto job output) is taken only when
+  the completion's written length covers it and the status behind it, and an
+  event slot is zeroed before it is reposted.
+- **Bounded drains.** A bulk drain takes at most a ring's worth of
+  completions per call — virtio-net per `service` from each queue (a receive
+  pass also finishing a merged frame begun inside that bound), and the
+  virtio-sound and virtio-input event queues per drain — however far the
+  device claims to have got or however fast it refills what is reposted.
+- **Staging the device holds is neither reused nor scrubbed under it.**
+  `BounceBuffer::into_slab_after` hands an abandoned request's buffers back
+  unscrubbed — a scrub could overwrite a payload the device has yet to read, and
+  a write it has yet to make lands after it — and the driver scrubs a sensitive
+  payload once the device returns it or a confirmed reset takes it back when
+  the driver is dropped. virtio-crypto settles both queues before
+  any job, since they share staging, and destroys a session an abandoned or
+  refused create, job or destroy left before the next job runs; a destroy
+  answered "no such session" has done its job, and a device that will not let
+  a session go gets no further key.
+- **The same rule beyond virtio.** The mailbox waits for an unanswered
+  request's reply before it stages or posts another (`TimeoutStage::Unanswered`),
+  that wait and the request's own each given a whole allowance, and the aarch64
+  boot path holds its whole firmware conversation on one transport, so that
+  wait spans it. xHCI stages each device's control
+  transfers through that device's own region, so a transfer left armed after a
+  timeout can only write its own device's buffer. EMMC2 resets its command and
+  data lines after any failed transfer, DMA or PIO, before another stages into
+  its region, and aborts a multi-block one with `CMD12`; if the reset never
+  confirms it refuses every later DMA transfer. A recovery that cannot prove
+  the card back in `tran` (no abort sent, or one unanswered) makes the next
+  data command ask the card's state first (`CMD13`): a card still sending or
+  receiving is aborted and asked again, one still programming is awaited on
+  its busy interrupt, and any other state, or a lock, fails closed and is asked
+  again next time. A healthy card is never asked.
+
+Regression tests: `virtio_blk`'s
+`a_late_completion_is_never_returned_as_a_later_reads_data`,
+`a_request_is_refused_while_the_device_still_holds_an_abandoned_one`,
+`a_sensitive_payload_the_device_held_is_scrubbed_when_it_comes_back` and
+`an_abandoned_sensitive_write_still_carries_its_payload_to_the_device`;
+`virtio_crypto`'s `a_late_jobs_output_is_never_handed_to_the_next_caller`,
+`a_session_an_abandoned_create_made_is_destroyed_once_the_device_answers`,
+`no_job_is_published_while_the_device_still_holds_an_abandoned_chain` and
+`a_key_the_device_held_is_scrubbed_when_it_comes_back`; `virtio_snd`'s
+`a_control_request_left_unanswered_holds_back_the_next_until_it_is_answered`;
+`lib/virtio`'s `a_late_completion_is_never_taken_for_a_later_request`,
+`a_wake_storm_with_no_completion_fails_closed_and_abandons_the_chain`,
+`a_completion_for_anything_but_a_chain_the_device_holds_is_refused`,
+`a_device_writing_over_the_descriptor_table_cannot_corrupt_the_free_list`,
+`a_returned_chains_descriptors_are_reissued_last`,
+`a_repeated_completion_is_refused_before_anything_is_published_over_it`,
+`a_request_waits_no_longer_than_its_budget_however_often_it_is_woken`,
+`an_abandoned_chain_is_notified_again_while_it_is_out`,
+`an_abandoned_chain_is_notified_again_at_most_once_per_budget`,
+`a_wait_that_cannot_be_made_fails_the_request_offline_at_once`,
+`a_completion_whose_interrupt_was_lost_is_taken_when_its_wait_times_out`,
+`a_queue_too_shallow_for_what_the_driver_needs_is_refused_before_it_is_programmed`,
+`the_peer_refuses_a_chain_that_leaves_the_table_or_loops`, and
+`fuzz_poll_used_is_fail_closed_against_a_hostile_device`, which asserts exact
+attribution and descriptor identity; `virtio_blk`'s
+`a_read_whose_completion_does_not_cover_its_payload_hands_back_nothing` and
+`virtio_crypto`'s `a_job_whose_completion_does_not_cover_its_output_hands_back_nothing`;
+the event-slot and drain bounds' `an_event_slot_completed_without_a_write_is_not_read_as_its_last_event`
+and `one_drain_takes_no_more_than_a_ring_of_event_completions` (`virtio_snd`),
+`an_event_slot_completed_without_a_write_is_not_decoded_again`,
+`one_drain_takes_no_more_than_a_ring_of_completions` and
+`a_wait_that_cannot_be_made_fails_the_poll_rather_than_spinning`
+(`lib/virtio_input`), and
+`one_service_harvests_no_more_than_a_ring_while_the_device_keeps_refilling`
+(`lib/virtio_net`); the reply sentinels'
+`a_completion_that_wrote_no_status_is_refused` (`virtio_blk`),
+`a_job_the_device_completed_without_answering_hands_back_nothing` and
+`a_create_the_device_completed_without_answering_runs_no_job`
+(`virtio_crypto`), `a_transfer_the_device_completed_without_a_status_is_refused`
+(`virtio_snd`); `virtio_crypto`'s
+`a_destroy_the_device_refuses_is_retried_before_the_next_job` and
+`an_abandoned_destroy_the_device_then_refuses_is_retried_before_the_next_job`;
+`lib/virtio_net`'s `the_queue_pair_command_waits_for_a_device_that_answers_later`,
+`one_service_takes_no_more_than_a_ring_of_completions` and
+`one_service_reaps_no_more_than_a_ring_of_transmit_completions`;
+`lib/vcmailbox`'s `an_unanswered_request_keeps_the_buffer_until_its_reply_lands`
+and `draining_a_late_reply_leaves_the_next_request_its_whole_budget`;
+`lib/usb`'s `a_late_control_transfer_cannot_alter_another_devices_transfer_data`;
+`emmc2`'s `a_failed_dma_transfer_resets_the_lines_before_the_staging_is_reused`,
+`a_failed_multi_block_pio_read_is_aborted_after_the_line_reset`,
+`a_failed_single_block_transfer_resets_the_lines_but_is_not_aborted`,
+`a_healthy_card_is_never_asked_its_state`,
+`an_answered_abort_proves_the_card_in_tran_so_the_next_command_asks_nothing`,
+`a_failed_single_block_transfer_checks_the_card_state_before_the_next_command`,
+`an_unanswered_abort_leaves_the_card_state_for_the_next_command_to_check`,
+`a_recovery_whose_line_reset_never_confirms_leaves_the_card_state_unknown`,
+`a_card_still_sending_is_aborted_and_asked_again_before_the_next_command`,
+`a_card_still_receiving_is_aborted_and_asked_again_before_the_next_command`,
+`a_programming_card_is_awaited_on_its_busy_interrupt_before_the_next_command`,
+`a_card_in_an_unexpected_state_fails_closed_and_is_asked_again_next_time`,
+`a_failed_status_request_fails_closed_and_is_asked_again_next_time`,
+`a_card_that_stays_sending_after_every_abort_fails_closed_after_the_bound` and
+`every_transfer_path_asks_a_card_of_unknown_state_before_its_command`, with
+`command`'s `card_status_decodes_what_the_next_data_command_waits_on` and
+`a_locked_card_is_unusable_in_every_state`.
+
+## D230 — a removed node's grants outlived it — FIXED
+
+A node's removal left every grant its admission minted with the driver loaded
+for it, and with whatever that driver had delegated them to, until the device
+manager unloaded it. A driver still running kept its windows onto the vanished
+device's registers and its interrupt bindings, and a URB transport the HCD
+republished for a replacing device served the old driver's submits and let it
+read the new device's buffer (`plans/USB.md` U10).
+
+- **A grant records the device it reaches.** Each grant carries an origin: the
+  node a driver was admitted for (`mint_node_grant`), the node whose device an
+  `msi_alloc` vector serves, or none for a region or endpoint its holder made.
+  A delegation (`delegate_grant`, behind `shm_grant`, `shm_grant_peer` and
+  `call_grant`) inherits the covering grant's origin, checking and minting
+  under one lock, and `hw_emit_node` covers a child's resources only from
+  grants whose origin is the emitter's own node or none
+  (`grant_covers_for_child`), so a child's driver never holds authority
+  another device's removal would not reach.
+- **Removal revokes, then tears down the reach into the device.**
+  `hw_remove_node`, in either posture, revokes every grant whose origin is a
+  removed node, in every task, at once (`revoke_node_grants`); a revoked grant
+  authorises nothing and stays flagged only until its holder's teardown
+  finishes (`kernel/core/src/revoke.rs`). The walk releases the holder's
+  bindings of the nodes' lines — a parked `irq_wait` returns `NotFound`, a wait
+  set holding one fails `NotFound`, and a wait never re-arms a released line —
+  and unmaps its windows onto the nodes' registers (`MmioWindowMap::retain`),
+  reaching its space through the registry's weak live-space record and
+  dropping the pages from its snapshot. Every CPU stops translating each page
+  (`CrossCpuTlbShootdown`, wired per port through
+  `KernelArch::cross_cpu_tlb_shootdown`) before the removal returns. Walks are
+  serialised, so each finds only the grants it revoked. Audited
+  `HW_NODE_GRANTS_REVOKED` (4093).
+- **Shared RAM is retired, not pulled.** A region conferred through a removed
+  node stays mapped wherever it is mapped, so no holder is killed, or handed
+  fabricated contents in place of a reply that already landed, for a device
+  going away (the RAID composer keeps its member windows through a pulled
+  disk). The region is retired (`sharedreg::retire`): it takes no new
+  `shm_map` or kernel hold, `shm_grant` and `shm_grant_peer` refuse it, and
+  `hw_emit_node` refuses a child carrying it, all `PermissionDenied`, so it can
+  never carry another device's data and a server gives each node it publishes
+  a fresh region. Only a region a node still in the tree also confers
+  (`region_conferred_live`: a transport a parent republished on the removed
+  child) outlives the removed session; there each revoked holder's mappings are
+  withdrawn under its space's lock, shot down before the region's frames can
+  be freed, and the holder is killed, since its pointers into the region could
+  alias whatever is mapped there next. A holder whose access cannot be torn
+  down is killed too, and only while its live space is the one the walk found,
+  so a recycled id is never signalled.
+- **No interleaving leaves authority standing.** Tree removal precedes
+  revocation, admission checks the tree after it mints
+  (`AdmitError::NodeGone`), and so does `msi_alloc`, so a driver admitted or a
+  vector allocated during a removal is refused or revoked; `mmio_map`,
+  `shm_map` and `irq_bind` re-check their grant after the operation and undo
+  exactly what they made; a port access runs under the grant it was checked
+  against. A dying driver's lines, endpoints and regions are released before
+  its node claim, so a successor loaded as its exit is observed finds none of
+  them held.
+- **Outside it.** Calls a holder posted before the revocation stay queued for
+  their server, which drains a transport before it publishes a new node on it;
+  DMA carves are the holder's own memory and reach the quarantine at its exit
+  (D167; an orderly removal's carves stay there for the boot, D241).
+
+Regression tests: `revoke`'s
+`every_grant_a_removed_node_conferred_is_revoked_and_no_other`,
+`a_revocation_that_revokes_nothing_visits_no_holder`,
+`a_revoked_window_is_unmapped_dropped_from_the_snapshot_and_shot_down`,
+`a_region_whose_conferring_node_is_gone_stays_mapped_and_is_retired`,
+`a_region_a_live_node_still_confers_is_withdrawn_before_its_frames_are_freed`,
+`a_region_a_lasting_grant_still_covers_stays_mapped`,
+`a_holder_whose_space_is_gone_or_replaced_is_never_signalled`,
+`a_revoked_line_is_released_and_a_parked_wait_finds_it_gone`,
+`a_binding_made_as_its_grant_is_revoked_is_undone` and
+`a_holder_whose_windows_cannot_be_torn_down_is_killed`; `syscalls`'
+`a_node_removal_revokes_the_grants_its_subtree_conferred_in_either_posture`,
+`a_driver_admitted_while_its_node_is_removed_is_rolled_back_or_revoked`,
+`waitset_wait_fails_closed_once_an_irq_members_binding_is_revoked`,
+`a_window_mapped_as_its_grant_is_revoked_is_taken_back`,
+`a_region_mapped_as_its_grant_is_revoked_is_taken_back`,
+`a_retired_region_is_neither_delegated_nor_conferred`,
+`hw_emit_node_refuses_a_child_backed_by_another_devices_authority`,
+`msi_alloc_mints_a_line_that_ends_with_its_device`,
+`msi_alloc_for_a_device_already_gone_allocates_nothing`,
+`msi_alloc_for_a_device_removed_meanwhile_keeps_no_grant` and
+`a_driver_s_node_and_lines_are_free_when_its_exit_is_observed`; `aspace`'s
+`a_delegated_grant_ends_with_the_device_its_source_reached`,
+`a_grant_held_from_a_lasting_source_outlives_the_node`,
+`a_revoked_grant_authorises_nothing_and_a_revocation_touches_only_its_nodes`,
+`a_child_is_covered_only_by_its_emitters_own_node_or_by_no_device`,
+`revoked_grants_are_visited_holder_by_holder_until_retired`,
+`a_fresh_grant_is_not_absorbed_by_a_revoked_one`,
+`a_window_is_authorised_only_while_a_live_window_grant_contains_it`,
+`an_interrupt_line_is_held_only_through_a_live_irq_grant` and
+`a_live_space_is_reachable_until_its_threads_drop_it_or_the_task_goes`;
+`sharedreg`'s `a_retired_region_takes_no_new_mapping_or_hold_but_keeps_its_own`
+and `a_mapping_is_found_by_region_and_torn_down_in_the_space_named`; `mmio`'s
+`retain_releases_exactly_the_windows_it_refuses`,
+`retain_that_refuses_everything_frees_the_whole_window_for_reuse`,
+`retain_that_keeps_everything_touches_nothing` and
+`a_window_whose_unmap_fails_part_way_is_still_reported`;
+`live::tests::a_refused_device_window_is_unmapped_and_reported_page_aligned`;
+`kernel/irq`'s `a_released_binding_fails_its_wait_and_frees_its_line`,
+`a_stale_handle_does_not_release_the_line_rebound_under_a_new_one`,
+`the_owner_cursor_visits_only_the_owners_bindings_in_line_order` and
+`a_line_is_acted_on_only_while_its_owner_holds_the_binding`; `lib/abi`'s
+`a_span_is_inside_only_when_wholly_contained_and_its_end_representable`.
+
+## D231 — `irq_bind` bound any line to any holder of `CAP_IRQ_BIND` — FIXED
+
+`irq_bind` took a raw line number and checked only the capability, so a driver
+could bind an interrupt line its node never requested — another device's,
+first come — and a driver whose binding had been revoked could bind the line
+again. A line is now bound only while a live grant of the caller names it
+(`AddressSpaceRegistry::holds_irq_line`); any other is `PermissionDenied`.
+Regression test: `irq_bind_refuses_a_line_the_caller_holds_no_grant_for`.
+
+## D232 — a shared region's reference was released after a teardown that failed part-way — FIXED
+
+`sharedreg::unmap` released the mapping's reference whatever the facility's
+unmap returned, so an unmap that failed after tearing down some of a region's
+pages could free its frames under the entries left behind. `unmap_with` now
+releases the reference only once the entries are gone, or none was found
+(`NotFound`), and otherwise keeps the region allocated. Regression tests:
+`a_teardown_that_failed_keeps_the_region_allocated` and
+`a_teardown_that_found_nothing_mapped_releases_the_reference`.
+
+## D233 — an enumeration retry replayed the requests its failed attempt left on the old EP0 ring — FIXED
+
+After a transaction error on a descriptor read the xHCI engine re-drove the
+device on the EP0 ring the aborted attempt had used, so the newly addressed
+slot started at the ring base and replayed the abandoned requests, and the
+retry failed; and a retry after Address Device had succeeded could never
+succeed on real hardware, since the device held its new address and ignored a
+fresh slot's `SET_ADDRESS`. Each retry now resets the port first, returning
+the device to Default state, then binds EP0 to a fresh ring (`bind_control`).
+Regression tests:
+`a_transaction_fault_on_a_descriptor_read_re_drives_the_device_on_a_fresh_ep0_ring`,
+which asserts the port reset, and
+`a_transaction_fault_on_a_descriptor_read_behind_a_hub_re_drives_after_a_port_reset`,
+over a mock that now models device addresses.
+
+## D234 — a user-space unmap on x86_64 or riscv64 invalidates only the calling CPU (OPEN)
+
+`AddressSpace::unmap` flushes the page on the CPU that edits the table
+(`invlpg` on x86_64, a local `sfence.vma` on riscv64; aarch64's `TLBI VAAE1IS`
+broadcasts), and every `LiveSpace` unmap path — anonymous memory, a file
+region, a shared mapping, a DMA buffer, a compressed page, a thread stack —
+then frees or reuses the frame. A sibling thread of the same process running
+on another CPU can still hold the old translation and write the frame after it
+has been handed to another process; nothing confines a process's threads to
+one CPU (`plans/THREADS.md`). The revocation of a removed device's access
+(D230) shoots down every CPU itself, so it does not depend on this. Not
+absorbed: the fix is a gather-then-free unmap — clear the entries, shoot down
+the CPUs the space may be cached on, then free — across every unmap path in
+`kernel/mem`, with that CPU set tracked at switch-in and its cost measured on
+multi-threaded workloads against a plain broadcast. Its regression test is a
+two-CPU vertical on x86_64 and riscv64 in which one thread unmaps a page
+another keeps touching.
+
+## D235 — a control transfer that did not complete left the device's EP0 unusable — FIXED
+
+`complete_control_transfer` recovered the control endpoint only from a STALL:
+a transfer that timed out was left armed, and one that ended in babble or a
+transaction, split, buffer or TRB error left EP0 halted with its TRBs counted
+in flight, so the device's later control transfers queued behind it until it
+was re-plugged. The serial-number read (D226's identity) made this reachable
+during enumeration, failing the attach of a device that never answered a
+string request. Every control transfer that does not complete now has EP0
+taken back before its error returns — Reset Endpoint for a halt, Stop
+Endpoint for a timeout, each falling back to the other on a Context State
+Error, then Set TR Dequeue onto a rebuilt ring, with the abandoned transfer's
+late events drained — and an endpoint that cannot be recovered refuses
+further transfers rather than overwrite what the controller may still own.
+The serial is read only for a storage device, and any fault on it costs only
+the serial. Regression tests:
+`a_control_transfer_that_times_out_leaves_the_endpoint_serving_the_next`,
+`a_timed_out_transfer_that_halts_as_it_is_stopped_is_reset_instead`,
+`every_halting_control_completion_leaves_the_endpoint_serving_the_next`,
+`an_error_on_the_setup_stage_is_the_transfers_own_and_is_taken_back`,
+`a_serial_number_read_that_is_never_answered_costs_only_the_serial`,
+`a_serial_number_read_that_faults_costs_only_the_serial`,
+`a_device_serving_no_storage_interface_is_sent_no_string_request` and
+`a_late_control_transfer_cannot_alter_another_devices_transfer_data`.
+
+## D236 — the charter-citation strip left broken sentences behind — FIXED
+
+Removing a citation left three kinds of residue: a parenthetical opening on a
+colon (`(§4: deterministic OOM …)` became `(: deterministic OOM …)`), a
+semicolon running into the dash that introduced a gloss (`(fail closed; §5.4 —
+no fallback)` became `(fail closed; — no fallback)`), and a sentence opening on
+that dash (`… call site. §2.10 — every `#[allow]` …` became `… call site. —
+every …`), and in four module docs a quotation of the rule the citation had
+named. Every such sentence across the kernel, `lib/*`, the drivers, `xtask` and
+the QEMU fixtures now reads as prose, a restated rule dropped where it carried
+no reason of its own, and `charter-cite` refuses all three forms, so the residue
+cannot come back. Regression tests:
+`a_parenthetical_whose_citation_was_stripped_is_refused` and the workspace
+scan `workspace_carries_no_charter_citations`.
+
+## D237 — the EMMC2 bring-up re-polls `ACMD41` back to back (OPEN)
+
+`Emmc2::init` repeats `CMD55` + `ACMD41` until the card reports power-up, up
+to `DEFAULT_POLL_BUDGET` (1 000 000) rounds with no interval between them.
+Each command parks on the controller interrupt, so the CPU is not spun, but the
+card is polled as fast as the bus completes commands for as long as its
+power-up takes, where the SD Physical Layer specification expects a paced
+retry within a one-second budget. Not absorbed: pacing needs a timed park in
+the `SdhciHost` / `CompletionWait` seam, which the in-kernel bootstrap host
+implements as well as the mock. Its regression test is a card that takes N
+rounds to power up and is polled N times, one interval apart.
+
+## D238 — a configuration's stray descriptors were taken as real interfaces and endpoints — FIXED
+
+`InterfaceInfo::decode_all` accepted an endpoint descriptor for endpoint 0, an
+endpoint named twice in one configuration, and a second default setting of an
+interface number already taken, so a device's garbled configuration could make
+the engine program endpoint 0 as a data endpoint or bind one endpoint to two
+drivers. Each is now skipped, as Linux does, the used interface numbers and
+endpoint slots tracked in `lib/inline`'s `BitSet256`. Regression tests:
+`an_endpoint_descriptor_for_endpoint_zero_is_skipped`,
+`an_endpoint_named_twice_in_one_configuration_is_skipped`,
+`a_second_default_setting_of_one_interface_number_is_skipped_with_its_endpoints`
+and the `fuzz_descriptors` harness, whose model expects the same.
+
+## D239 — the HID report parser misread hostile and unusual descriptors — FIXED
+
+The first fuzz harness over `lib/hid` (`fuzz_hid_report`) found nine: a long
+item was skipped one byte short, and one cut off by the descriptor's end was
+accepted; a mouse's fields could be read from another report, so a click
+fabricated motion; re-entering a Report ID restarted its bit offset, so fields
+overlapped; Pop did not restore the Report ID; a map with a field the boot
+layout cannot read was accepted and then dropped every report rather than
+falling back to boot protocol; a modifier field narrower than a byte fabricated
+modifiers from its neighbours; a huge Report Count stalled enumeration in the
+axis search; the boot keyboard released a key listed in two slots twice; and a
+modifier usage in the key array pressed the modifier beside the bitmap.
+Regression tests: `a_long_item_is_skipped_whole`,
+`a_field_of_another_report_is_never_read_from_this_ones`,
+`a_report_s_fields_continue_where_its_last_item_left_off`,
+`a_pop_restores_the_report_id_its_push_saved`,
+`a_map_locating_a_field_the_boot_layout_cannot_read_is_refused`,
+`buttons_past_the_boot_byte_leave_its_eight_intact`,
+`a_narrow_modifier_field_yields_only_its_own_flags`,
+`an_axis_is_located_by_its_usages_whatever_report_count_is_declared`,
+`keyboard_duplicate_usage_releases_once` and
+`keyboard_modifier_usages_in_the_key_array_leave_the_bitmap_in_charge`, with
+the harness itself.
+
+## D240 — a RAID member offered its window's region id where the composer needed its handle — FIXED
+
+The member agent delegated its transport window to the composer and then sent
+the region id, discarding the handle `shm_grant` returned; the composer mapped
+that number as one of its own grant handles, so it mapped whichever of its
+grants had it (another member's window or its own array window) or none. The
+offer carries the composer's handle (`MemberOffer::window_grant`), and the
+composer recognises a window it already holds by that handle. Regression
+tests: `the_composer_maps_exactly_the_window_the_agent_delegated`,
+`a_region_id_that_names_another_of_the_composers_grants_is_never_mapped`,
+`a_refused_delegation_is_reported_rather_than_offered` and
+`a_held_window_is_recognised_by_the_handle_the_offer_names`.
+
+## D241 — an orderly removal leaves its driver's DMA memory quarantined for the boot (OPEN)
+
+`hw_remove_node` revokes the node's grants before its driver is told, so a
+driver of an orderly-removed node can neither quiesce its still-present device
+(its register windows are gone) nor `dma_free` a carve (its DMA grant is gone);
+the carves reach the quarantine at its exit as `Detached`, which only a reset by
+a driver of that node releases, and none can be admitted for a removed node.
+No current code orderly-removes a node whose driver holds DMA (the RAID
+composer's array nodes hold none). Not absorbed: the fix is an orderly-removal
+protocol that stops the node's driver before revoking, or a bus-level quiesce
+the parent attests (PCIe bus-master disable) that releases the node's
+quarantine. Its regression test is an orderly removal of a DMA-holding node
+whose carves return to the allocator once the device is proven quiet.
+
+## D242 — the kernel binary keeps `static mut` state (OPEN)
+
+Each port's `main.rs` backs the boot heap with `static mut HEAP`, and the
+x86_64 boot path keeps its per-CPU boot stacks in `static mut KERNEL_STACKS`;
+the charter forbids `static mut` outright. Not absorbed: the fix places both
+in memory the linker reserves and hands their bounds to the allocator and the
+bring-up, so no Rust static is mutable, across all three ports at once. Its
+regression check is a workspace scan refusing `static mut`.
+
+## D243 — the device manager never learns that a driver died (OPEN)
+
+`devmgr` wakes only on `hw_tree_wait`, and reloads only for node ids it has
+not seen, so a driver that crashes, or exits stating its reason (the xHCI HCD
+failing its controller closed, exit 85, or losing its wait-set, 86), leaves
+its device undriven for the boot, and a load refused `Busy` while a
+predecessor's teardown is deferred is never retried. A reloaded HCD would also
+inherit its controller node's recorded `Offline` health unless it publishes
+`Healthy` at bring-up. Not absorbed: the driver store's load reply must carry the driver's
+process instance (`ProcId`) for `PEER_WATCH`, and `devmgr` must wait on the
+tree and its drivers' exits at once (a tree-generation wait-set source).
+Its regression test is a driver that exits unasked being reloaded for its
+still-present node.
+
+## D244 — MSI vectors are never freed (OPEN)
+
+`MsiAllocFacility` has no release, so a vector allocated for a driver stays
+allocated after the driver exits or its device is removed, and repeated
+reloads exhaust the vector space. Not absorbed: each port's producer needs a
+free, driven by the driver's exit reclaim and by the revocation of the
+vector's grant. Its regression test is allocate-exit-allocate cycling beyond
+the vector space.
+
+## D245 — a re-plugged NIC or audio device can be handed no channel (OPEN)
+
+The device manager's network and audio binders never forget a channel
+endpoint they handed over, and a NIC driver takes the first free endpoint id,
+so a re-plugged device that reuses one is never handed to its service. Not
+absorbed: interface retirement in `netstack` and `audiod`, which the binders
+then drive on removal. Its regression test is unplug and replug of one NIC.
+
+## D246 — writable-root configuration is not re-read after the root unlocks (OPEN)
+
+`netcfg` re-reads `network.conf` and `system.conf` only on a tree-generation
+bump, and nothing bumps after the encrypted root is unlocked, so configuration
+on the writable root may never be delivered. Not absorbed: the unlock must
+publish an event `devmgr` waits on. Its regression test is a configuration
+that exists only on the unlocked root reaching `netstack`.
+
+## D247 — the ports disagree on a partial boot hardware tree (OPEN)
+
+On a malformed discovery walk aarch64 records no tree, while riscv64 and
+x86_64 seed the nodes they collected before the fault. Not absorbed: one rule
+for all three, decided and shared through the arch-neutral seeding path. Its
+regression test is a malformed walk treated alike on every port.
+
+## D248 — the virtio test doubles were compiled into every production build — FIXED
+
+`MockHost` and `MockTransport` were built unconditionally and re-exported by
+`drivers/bus/virtio`, which all three kernels link. They are now behind
+`lib/virtio`'s `mock` feature, enabled only from dev-dependencies, the mock
+peer's ring views gated with them, and the re-export is gone. The freestanding
+kernel builds are the regression check: they compile `lib/virtio` without the
+feature, so any mock item outside the gate fails them. The bus crate's
+register-window backends, which nothing constructed once the transports moved
+to `lib/virtio`, are deleted, and the crate re-exports only the two transports.
+
+## D249 — the mailbox service busy-spun its reply waits — FIXED
+
+The user-space mailbox service spun on the doorbell's status register for each
+reply, up to ten million reads (about four seconds of a core on metal), though
+the mailbox raises an interrupt, and a wait's reads were bounded by the square
+of its budget. The service now binds the discovered inbox interrupt (the
+bundle requests `CAP_IRQ_BIND`; a service that cannot bind it exits), turns it
+on, and parks each reply wait on it until a deadline of its own; the pre-MMU
+boot path keeps its bounded spin, one budget of looks per wait. Regression
+tests: `an_owned_mailboxs_reply_wait_parks_until_the_inbox_interrupt_fires`,
+`each_reply_wait_of_an_owned_mailbox_has_a_deadline_of_its_own`,
+`an_owned_mailboxs_wait_ends_at_its_deadline_however_the_inbox_floods`,
+`a_park_the_kernel_refuses_ends_the_owned_mailboxs_wait_at_once`,
+`the_owned_mailbox_turns_the_inbox_interrupt_on_and_the_boot_transport_leaves_it_off`
+and `a_spinning_wait_takes_one_budget_of_looks_however_the_inbox_chatters`.
+
+## D250 — virtio-net freed its receive buffers unscrubbed at teardown — FIXED
+
+The receive pool and the merged-frame reassembly buffer went back to the
+allocator unscrubbed when the driver was dropped, though a ring could carry
+sensitive traffic and its class is known only per service call. Once a reset
+confirms, `Drop` now scrubs every receive queue's whole pool and its
+reassembly buffer through the one `tairix_virtio::scrub`; a device that will
+not reset keeps everything withheld and nothing scrubbed. Regression tests:
+`a_frame_the_device_left_in_the_receive_pool_is_scrubbed_when_the_driver_is_dropped`
+and `a_merged_frame_is_scrubbed_from_the_reassembly_buffer_when_the_driver_is_dropped`,
+over the mock's `released_zeroed` record
+(`a_released_slab_reports_whether_it_came_back_zeroed`).
+
+## D251 — the virtio mock host handed out pointers its own leak had invalidated — FIXED
+
+`MockHost` exposed a slab pointer taken before `Box::leak`, which the leak
+invalidates, so every mock device's address-based ring access in every virtio
+driver's tests was undefined behaviour Miri reports. It now exposes the pointer
+the slab keeps after the leak; nothing changes at runtime. Two virtio-net tests
+that bound frame rings over byte-aligned `Vec<u8>` now use the aligned-buffer
+helpers. Regression check: the virtio suites pass under Miri with permissive
+provenance (D252 is why no gate stage runs them).
+
+## D252 — no oracle can interpret the virtio drivers' tests (OPEN)
+
+The virtio mock peer reaches the driver's rings through the physical addresses
+the driver planted, an integer-to-pointer design Miri's strict-provenance mode
+(the `miri` stage) refuses outright, so the drivers' unsafe-adjacent paths
+(ring views, bounce buffers, the scrub) have no enrolled undefined-behaviour
+oracle. Not absorbed: the mock needs a provenance-carrying handle from slab to
+peer (the peer resolving an address through the host's slab table instead of
+casting it), after which `lib/virtio` and its consumers enrol. Its regression
+check is those suites enrolled in `cargo xtask miri`.
+
+## D253 — a device a controller reset moved to another index lost its node — FIXED
+
+The xHCI HCD reconciled its interface nodes against the re-enumerated table
+index by index, but a reset re-enumerates in port-walk order, so a device a
+hole or an out-of-order hot-plug had placed elsewhere came back at another
+index and was retracted and republished: its class driver unloaded and its
+mounted filesystem surprise-removed. An allocation failure also skipped the
+whole pass, leaving nodes published over indices that now served other
+devices. Nodes now live on transport slots and follow their device's identity
+to the index serving it (`interfaces::Interfaces::reconcile`), with no two
+claiming one index, and the matching allocates nothing. Regression tests:
+`a_device_a_reset_moved_to_another_index_keeps_its_node_and_buffer`,
+`devices_a_reset_reordered_keep_their_nodes`,
+`a_moving_node_never_takes_an_index_another_node_serves` and
+`every_node_is_decided_even_when_nothing_new_can_be_published`.
+
+## D254 — a controller halted on the submit path was never recovered — FIXED
+
+A fault detach found while serving a submitted URB dropped its "detached"
+outcome, and the submit path could not start a recovery, so a controller that
+latched an error there raised no further interrupt and every URB timed out.
+The shared busy-drive now runs the recovery itself, on either path.
+Regression test: `a_device_leaving_on_the_submit_path_recovers_the_controller_it_halted`.
+
+## D255 — a dead xHCI controller left the HCD idling, and a lost wait-set exited clean — FIXED
+
+A controller that failed closed was neither retried nor served, so the HCD
+idled for the boot holding its DMA while its documentation promised recovery;
+and a wait-set failure exited 0, as a clean completion. A controller that
+misses its grace window now has every node retracted and the HCD exits with
+its reason logged (85); a lost wait-set does the same (86). Regression tests:
+`a_controller_that_misses_its_grace_window_retracts_every_node_and_is_never_reset_again`
+and `stopping_retracts_every_node_and_answers_its_held_urb`.
+
+## D256 — a re-plugged device's driver was handed the previous device's buffer — FIXED
+
+The HCD reused one URB transport's shared buffer for every device at an index,
+so a replacing device's class driver mapped frames still holding the previous
+device's last transfer. Every node is now published with a fresh region (the
+kernel retires a removed node's region, D230), and the HCD unmaps its own copy
+when the node goes. Regression test:
+`a_device_replugged_where_one_left_is_published_on_a_region_no_node_carried`.
+
+## D257 — an endpoint the event loop could not watch was bound again, never served — FIXED
+
+When binding a transport's endpoint succeeded but adding it to the wait-set
+failed, every later attempt tried to bind the endpoint again, which is taken,
+so the index never served again. It is now watched again, never re-bound, and
+no node is published on an endpoint the loop is not watching. Regression test:
+`an_endpoint_the_event_loop_could_not_watch_is_watched_again_never_bound_again`.
+
+## D258 — any process could steer the RAID composer with a forged offer — FIXED
+
+The rendezvous took offers from any task, naming any endpoint and window
+handle, so a forger could stall the composer on its own endpoints or feed it
+fabricated superblocks. `call_peer_node` (syscall 131, gated as
+`call_peer_holds`) now tells a server the hardware-tree node the poster of the
+call it is serving was admitted for, resolved by process instance so a
+recycled pid names nothing, and the composer admits an offer only from the
+driver of a `tairix,raid-member` or `tairix,raid-candidate` node whose one
+declared endpoint and one shared region are exactly the offered ones, the
+endpoint not its own. The rendezvous requires `CAP_SHM` to send. Regression
+tests: `call_peer_node_reads_the_node_the_caller_being_served_was_admitted_for`,
+`call_peer_node_refuses_an_owner_without_its_receive_capability`,
+`call_peer_node_names_nothing_for_a_poster_that_is_no_loaded_driver`,
+`a_genuine_offer_is_admitted`,
+`an_offer_from_a_task_no_member_node_admitted_is_refused`,
+`an_offer_claiming_a_node_other_than_its_senders_is_refused`,
+`an_offer_naming_an_endpoint_its_node_does_not_declare_is_refused`,
+`an_offer_naming_the_composers_own_endpoint_is_refused` and
+`an_offer_whose_window_grant_names_another_region_is_refused`.
+
+## D259 — a member listing opened a second view of a window the array was using — FIXED
+
+Listing an array's members connected a second block client over each member's
+window while the array held the first: two live `&mut` views of one buffer.
+Each window is now lent to one client at a time (`MemberWindow`), and a listing
+reports the geometry recorded at offer time without opening a client.
+Regression test: `listing_members_opens_no_client_over_any_window`.
+
+## D260 — a re-enumerated disk could never rejoin its array — FIXED
+
+The composer never learned that a member agent had exited, so the dead
+membership stayed and the device's fresh offer was refused for good.
+Memberships are now bound to the attested agent and watched: when it exits,
+the member is marked departed, the array flushed and the member retired, and
+the membership released; an offer that collides with one not yet ended is
+deferred (`MembershipEnd::Deferred`) and made again after a pace. Regression
+tests: `a_departed_member_is_taken_out_so_its_returning_disk_can_be_placed`,
+`a_composer_that_cannot_take_the_device_yet_defers_it_rather_than_refusing_it`
+and `a_deferred_offer_is_made_again_after_a_pace`.
+
+## D261 — an endpoint grant names a numeric id another binding can take (OPEN)
+
+A grant for a call endpoint names its numeric id, and destroying the endpoint
+revokes the grants naming it, but a new driver may bind the same id and have
+a fresh grant for it delegated to the old holder (the RAID composer, when a
+member disk re-enumerates). A client the holder built for the old binding and
+has not yet retired then reaches the new device. The composer narrows this to
+one turn (exits are reaped first, and a departed member's client refuses all
+I/O). Not absorbed: endpoint authority must be tied to one binding of an id,
+by a generation carried in the id or by calls made through the grant handle.
+Its regression test is a stale grant that fails against a re-created endpoint
+of the same id.
+
+## D262 — any task could grow an endpoint server's grant table — FIXED
+
+`shm_grant` and `call_grant` minted into the grant table of any endpoint's
+server without asking whether the donor may post to that endpoint, so any
+holder of `CAP_SHM` or `CAP_IPC_ENDPOINT` could grow a service's table without
+bound, which also made each of its grant lookups dearer. A delegation now
+requires the donor to be allowed to post to the recipient endpoint (its send
+capabilities and, for a grant-restricted endpoint, the per-endpoint grant),
+through the same `may_post` rule `ipc_call`, `call_post` and the wait-set
+share. Regression test: `a_delegation_reaches_only_a_server_the_donor_may_post_to`.
+
+## D263 — an unplug and re-plug folded into one root-port change is taken for a glitch (OPEN)
+
+`next_root_change` drains a connection change on a served root port that is
+connected again as a glitch, without asking whether the port is still
+enabled, so a device swapped fast enough that the disconnect and the connect
+latch as one change keeps the old device's node until its transfers fault,
+and nothing re-arms the scan to enumerate the new one. Linux's
+`hub_port_connect_change` treats "connected but no longer enabled" as a
+disconnect and re-enumerates. Not absorbed: the fix detaches the old
+attachment and attaches the new one in the same step when the port lost its
+enable, keeps a per-port rescan mark so a fault detach re-arms enumeration,
+and must settle the SuperSpeed case, where link training re-enables the port
+by itself; the mock must model the enable bit. Its regression test is a
+folded unplug and re-plug on a root port that ends with the new device
+published and the old node retracted.
+
+## D264 — a kept node reported a slot id a controller reset reassigned — FIXED
+
+A USB interface node's `HwNode::address` was the device's xHCI slot id, which
+a reset reassigns, so a node kept across a reset could collide with a newly
+published device's address or disagree with its composite sibling, and
+`lsusb` groups by address. The address is now the device's bus position, its
+root port above its Route String, which a reset keeps. Regression test:
+`a_nodes_address_is_its_devices_position_which_a_controller_reset_keeps`.
+
+## D265 — a storage device without a serial number was kept across a reset on model and position alone — FIXED
+
+Two serial-less sticks of one model swapped between the same two ports during
+a controller reset compared equal, so each kept the other's node, driver and
+mounted filesystem. `DeviceIdentity::recognises` now demands a serial number
+of a storage interface across a re-enumeration, and the HCD's post-reset
+reconcile matches by it, so such a stick is retracted and republished; within
+one enumeration plain equality still names the same device. Regression tests:
+`a_storage_device_without_a_serial_number_is_never_recognised_after_a_reset`,
+`a_device_is_recognised_by_every_fact_and_storage_by_its_serial_too`,
+`a_storage_device_without_a_serial_number_is_replaced_across_a_reset` and
+`a_storage_device_without_a_serial_number_keeps_its_node_across_a_hot_plug`.

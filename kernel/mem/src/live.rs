@@ -354,31 +354,54 @@ pub trait LiveUserSpace: Send {
         len: usize,
     ) -> Result<u64, LiveSpaceError>;
 
+    /// Unmap every device and framebuffer window whose physical span `keep`
+    /// refuses, handing each released window's page-aligned base and page
+    /// count to `unmapped` once its entries are gone.
+    ///
+    /// The frames are the device's, so nothing is freed. Each entry is
+    /// flushed on this CPU only; a caller that may share the space with
+    /// another CPU owes the cross-CPU shootdown.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Mmio`] from the first unmap that fails; the windows
+    /// before it are released.
+    fn retain_device_windows(
+        &mut self,
+        keep: &mut dyn FnMut(u64, u64) -> bool,
+        unmapped: &mut dyn FnMut(u64, u64),
+    ) -> Result<(), LiveSpaceError>;
+
     /// Carve a physically-contiguous, zeroed, coherent DMA buffer of `len`
     /// bytes into this space, returning its CPU virtual base and its
     /// physically-contiguous base ([`DmaMapping`]).
     ///
-    /// The block is mapped `RW|USER`, never executable,
-    /// guard-bracketed, and zeroed before it is user-visible. When `addr_limit` is non-zero the contiguous block
-    /// is bounded to lie wholly below it (the granted device addressing
-    /// constraint); a block that would exceed the limit is returned to
-    /// the allocator and the request refused fail-closed. `addr_limit == 0` declares no constraint.
+    /// The block is mapped `RW|USER`, never executable, guard-bracketed, and
+    /// zeroed before it is user-visible. When `addr_limit` is non-zero the
+    /// contiguous block is carved wholly below it (the granted device
+    /// addressing constraint), or the request is refused; `addr_limit == 0`
+    /// declares no constraint.
     ///
     /// The producer has already resolved and validated the grant the buffer
     /// is bounded by (owner-checked, kind, length); this only performs the
     /// carve and page-table mechanism.
     ///
-    /// Every carve names its `custodian`: the space binds to it on the first
-    /// carve and, when dropped, surrenders every buffer still live to it
-    /// rather than to the allocator, because the device may outlive the
-    /// driver. A space binds one custodian for its life.
+    /// Every carve names its `custodian` and first reserves room in its
+    /// custody for the block's surrender, returned if the carve fails. The
+    /// space takes the first carve's custodian as its own and refuses any
+    /// other, so its teardown has one place to surrender to: when dropped it
+    /// surrenders every buffer still live there rather than to the
+    /// allocator, because the device may outlive the driver.
     ///
     /// # Errors
     ///
-    /// [`LiveSpaceError::Dma`] carrying the precise [`DmaError`]
-    /// (zero length, exceeds the max buddy order, no contiguous block,
-    /// addressing-limit exceeded, no virtual slot, a custodian that refused
-    /// the binding or differs from the bound one, …).
+    /// [`LiveSpaceError::Dma`] carrying the precise [`DmaError`]: zero
+    /// length, past the max buddy order, no block below the limit
+    /// ([`AllocError::OutOfRange`](crate::AllocError::OutOfRange) when no RAM
+    /// lies below it), no virtual slot, a page-table or direct-map failure, a
+    /// custody that refused the reservation ([`DmaError::DeviceGone`],
+    /// [`DmaError::NoCustody`], [`DmaError::Alloc`]), or a custodian other
+    /// than the space's own ([`DmaError::CustodianMismatch`]).
     fn alloc_dma(
         &mut self,
         len: usize,
@@ -398,12 +421,16 @@ pub trait LiveUserSpace: Send {
     /// stale, or double free) without releasing anything.
     ///
     /// Reports the byte length released, so a caller can drop exactly those
-    /// pages from the address-space snapshot rather than rebuilding it.
+    /// pages from the address-space snapshot rather than rebuilding it. The
+    /// block's custody reservation is returned whether or not its release
+    /// completes, since once its record is gone it can never be surrendered.
     ///
     /// # Errors
     ///
     /// [`LiveSpaceError::Dma`] — [`DmaError::UnknownBuffer`] when `cpu_va` is
-    /// not the base of a live DMA carve of this space.
+    /// not the base of a live DMA carve of this space, or the direct-map,
+    /// page-table, or allocator refusal that stopped the release part-way; a
+    /// block that is not returned to the allocator stays allocated.
     fn free_dma(&mut self, cpu_va: u64) -> Result<usize, LiveSpaceError>;
 
     /// Map an existing, kernel-owned **shared-memory region** whose backing
@@ -581,7 +608,7 @@ pub trait LiveUserSpace: Send {
 /// * `dma` — the per-task guarded DMA-buffer allocator that carves a
 ///   physically-contiguous coherent buffer out of this task's DMA window,
 ///   and `dma_custodian`, the custody its buffers are surrendered to at
-///   teardown (bound on the first carve);
+///   teardown (the first carve's, which every later carve must name);
 /// * `shared` — the per-task guarded allocator that maps a kernel-owned
 ///   cross-process shared-memory region (cacheable RAM) into this task's
 ///   shared-memory window. It reuses the [`MmioWindowMap`] guarded-window
@@ -1021,25 +1048,37 @@ where
         Ok(region.virt().as_u64())
     }
 
+    fn retain_device_windows(
+        &mut self,
+        keep: &mut dyn FnMut(u64, u64) -> bool,
+        unmapped: &mut dyn FnMut(u64, u64),
+    ) -> Result<(), LiveSpaceError> {
+        let page_mask = PAGE_SIZE as u64 - 1;
+        self.mmio
+            .retain(&mut self.space, keep, |base, pages| {
+                unmapped(base.as_u64() & !page_mask, pages as u64);
+            })
+            .map_err(LiveSpaceError::from)
+    }
+
     fn alloc_dma(
         &mut self,
         len: usize,
         addr_limit: u64,
         custodian: DmaCustodian,
     ) -> Result<DmaMapping, LiveSpaceError> {
-        match &self.dma_custodian {
-            Some(bound) if !bound.same_as(&custodian) => {
-                return Err(DmaError::CustodianMismatch.into());
-            }
-            Some(_) => {}
-            None => {
-                custodian.custody.bind(custodian.node)?;
-                self.dma_custodian = Some(custodian);
-            }
+        if self
+            .dma_custodian
+            .is_some_and(|bound| !bound.same_as(&custodian))
+        {
+            return Err(DmaError::CustodianMismatch.into());
         }
-        let buf =
-            self.dma
-                .alloc_into(&mut self.space, self.frames, &self.physmap, len, addr_limit)?;
+        custodian.custody.reserve(custodian.node)?;
+        self.dma_custodian = Some(custodian);
+        let buf = self
+            .dma
+            .alloc_into(&mut self.space, self.frames, &self.physmap, len, addr_limit)
+            .inspect_err(|_| custodian.custody.unreserve(custodian.node))?;
         Ok(DmaMapping {
             cpu_va: buf.virt().as_u64(),
             phys_base: buf.phys().as_u64(),
@@ -1053,8 +1092,15 @@ where
             self.frames,
             &self.physmap,
             VirtAddr::new(cpu_va),
-        )?;
-        Ok(released)
+        );
+        // Past an unknown buffer the record is gone whether or not the release
+        // completed, so the block can never be surrendered for its room.
+        if !matches!(released, Err(DmaError::UnknownBuffer)) {
+            if let Some(custodian) = self.dma_custodian {
+                custodian.custody.unreserve(custodian.node);
+            }
+        }
+        Ok(released?)
     }
 
     fn map_shared_chunks(
@@ -1269,7 +1315,6 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
         if let Some(custodian) = self.dma_custodian.take() {
             self.dma
                 .surrender_into(&mut self.space, &self.physmap, &custodian);
-            custodian.custody.unbind(custodian.node);
         }
 
         // 2. Release every remaining tracked mapping. A page inside the
@@ -1339,7 +1384,7 @@ mod tests {
     use crate::phys::SimPhysMap;
     use crate::test_fixture::{custody, frame_backing};
     use crate::uaccess::{copy_in, copy_out};
-    use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
+    use crate::vmm::{AddressSpace, HostPageTable, Page, VirtAddr};
     use tairix_sync::Once;
 
     extern crate std;
@@ -1520,6 +1565,39 @@ mod tests {
         assert!(
             va > MMIO_WINDOW_BASE,
             "a leading guard page precedes the data"
+        );
+    }
+
+    #[test]
+    fn a_refused_device_window_is_unmapped_and_reported_page_aligned() {
+        let mut live = live_space!();
+        let kept = live
+            .map_device_window(0xFE98_0000, 0x1000)
+            .expect("a free slot exists");
+        let revoked = live
+            .map_framebuffer_window(0xFEA0_0100, 0x2000)
+            .expect("a free slot exists");
+        let mut released = std::vec::Vec::new();
+        live.retain_device_windows(
+            &mut |phys, len| (phys, len) != (0xFEA0_0100, 0x2000),
+            &mut |base, pages| released.push((base, pages)),
+        )
+        .expect("the unmap succeeds");
+
+        let page_at = |va: u64| Page::from_addr(VirtAddr::new(va & !(PAGE_SIZE as u64 - 1)));
+        let revoked_page = revoked & !(PAGE_SIZE as u64 - 1);
+        assert_eq!(
+            released,
+            [(revoked_page, 3)],
+            "an offset span spans three pages"
+        );
+        for page in 0..3 {
+            let va = revoked_page + page * PAGE_SIZE as u64;
+            assert_eq!(live.translate_page(page_at(va).unwrap()), None);
+        }
+        assert!(
+            live.translate_page(page_at(kept).unwrap()).is_some(),
+            "the kept window stays"
         );
     }
 
@@ -1992,7 +2070,7 @@ mod tests {
                 .alloc_dma(PAGE_SIZE, 0, custodian(held))
                 .expect("a second block");
             fill_phys(simmap, PhysAddr::new(first.phys_base), 64, 0xC3);
-            held.with(|r| assert_eq!((r.bound, r.binds), (1, 1), "one binding per space"));
+            held.with(|r| assert_eq!(r.reserved, 2, "each carve reserved its surrender"));
         }
         assert_eq!(
             frames.free_frames(),
@@ -2000,7 +2078,7 @@ mod tests {
             "no surrendered frame returned to the allocator"
         );
         held.with(|record| {
-            assert_eq!(record.bound, 0, "the space unbound once it surrendered");
+            assert_eq!(record.reserved, 0, "each surrender spent its reservation");
             let mut bases: alloc::vec::Vec<u64> = record
                 .held
                 .iter()
@@ -2032,7 +2110,6 @@ mod tests {
             .expect("the first carve binds");
         live.alloc_dma(PAGE_SIZE, 0, custodian(held))
             .expect("the bound custodian carves again");
-        held.with(|r| assert_eq!(r.binds, 1, "a space binds once"));
         assert_eq!(
             live.alloc_dma(PAGE_SIZE, 0, custodian(other)),
             Err(LiveSpaceError::Dma(DmaError::CustodianMismatch)),
@@ -2045,11 +2122,12 @@ mod tests {
             Err(LiveSpaceError::Dma(DmaError::CustodianMismatch)),
             "so is another driver instance's"
         );
-        other.with(|r| assert_eq!(r.binds, 0));
+        other.with(|r| assert_eq!(r.reservations, 0));
+        held.with(|r| assert_eq!(r.reservations, 2, "a refused carve reserved nothing"));
     }
 
     #[test]
-    fn a_refused_binding_refuses_the_carve() {
+    fn a_refused_reservation_refuses_the_carve() {
         let (frames, simmap) = backing!();
         let before = frames.free_frames();
         let mut live = shared_live_space!(frames, simmap);
@@ -2071,7 +2149,7 @@ mod tests {
             live.map_anonymous(0x4000, 1).expect("an ordinary mapping");
         }
         held.with(|r| {
-            assert_eq!((r.binds, r.bound), (0, 0));
+            assert_eq!(r.reservations, 0);
             assert!(r.held.is_empty());
         });
     }
@@ -2222,11 +2300,54 @@ mod tests {
                 "each free returns every frame — no leak across cycles"
             );
             assert_eq!(live.space().mapped_pages(), 0, "no data page left mapped");
+            held.with(|r| assert_eq!(r.reserved, 0, "the free returned its reservation"));
         }
         // A free of an address that names no live carve fails closed.
         assert_eq!(
             live.free_dma(DMA_WINDOW_BASE + PAGE_SIZE as u64),
             Err(LiveSpaceError::Dma(DmaError::UnknownBuffer))
+        );
+        held.with(|r| assert_eq!(r.reserved, 0, "a refused free returns nothing"));
+    }
+
+    #[test]
+    fn a_failed_carve_returns_its_reservation() {
+        let held = custody!();
+        let mut live = live_space!();
+        assert!(live.alloc_dma(0, 0, custodian(held)).is_err());
+        held.with(|r| {
+            assert_eq!(r.reservations, 1, "the carve reserved before it failed");
+            assert_eq!(r.reserved, 0, "and gave the room back");
+        });
+    }
+
+    #[test]
+    fn a_free_that_fails_part_way_still_returns_its_reservation() {
+        // The record goes before the release can fail, so the block will
+        // never be surrendered: a reservation kept for it would stop its
+        // node's custody from ever going idle.
+        let (frames, simmap) = backing!();
+        let held = custody!();
+        let mut live = shared_live_space!(frames, simmap);
+        let mapping = live
+            .alloc_dma(PAGE_SIZE, 0, custodian(held))
+            .expect("a free block exists");
+        let frame = crate::frame::Frame::containing(PhysAddr::new(mapping.phys_base));
+        frames
+            .free_order(frame, 0)
+            .expect("the block is freed behind the space's back");
+        assert_eq!(
+            live.free_dma(mapping.cpu_va),
+            Err(LiveSpaceError::Dma(DmaError::Alloc(
+                AllocError::InvariantViolation
+            ))),
+            "the allocator refuses the second free"
+        );
+        held.with(|r| assert_eq!(r.reserved, 0, "the room went back"));
+        assert_eq!(
+            live.free_dma(mapping.cpu_va),
+            Err(LiveSpaceError::Dma(DmaError::UnknownBuffer)),
+            "and a repeat returns nothing more"
         );
     }
 

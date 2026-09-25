@@ -75,7 +75,7 @@ use tairix_abi::driver::BufferClass;
 use tairix_abi::time::{MonotonicClock, Time64};
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 use tairix_virtio::{
-    BounceBuffer, ChainSegment, CompletionSignal, Direction, SplitQueue, Status, Transport,
+    BounceBuffer, ChainSegment, Direction, RequestQueue, SplitQueue, Status, Transport, UsedToken,
     VirtioError,
 };
 
@@ -114,11 +114,14 @@ const _: () = assert!(MAX_CHANNELS_U8 as usize == MAX_CHANNELS);
 
 /// Descriptors the control queue is programmed with.
 ///
-/// One request is outstanding at a time (the mixer's call is synchronous), so
-/// two descriptors carry it and a small surplus absorbs a completion racing
-/// the next request. A fixed containment bound on the queue this driver asks
-/// the device for, not a capacity.
+/// One two-descriptor request is outstanding at a time; the rest of the ring
+/// lets descriptors rotate, so a completion the device repeats names free
+/// ones rather than the next request's. A fixed containment bound on the queue
+/// this driver asks the device for, not a capacity.
 const CONTROL_QUEUE_SIZE: u16 = 8;
+
+/// Descriptors one control request occupies: the request and its reply.
+const CONTROL_CHAIN_DESCRIPTORS: u16 = 2;
 
 /// Descriptors the event queue is programmed with, and therefore the events
 /// the device may post between two driver wakes.
@@ -133,16 +136,47 @@ const EVENT_QUEUE_SIZE: u16 = 16;
 /// payload, and the status word the device writes back.
 const TRANSFER_CHAIN_DESCRIPTORS: usize = 3;
 
-/// Descriptors a transfer queue is programmed with.
+/// Descriptors every period a device of `streams` streams keeps in flight
+/// occupies at once on the transfer queue they share.
 ///
-/// Derived, not chosen: every period this driver keeps in flight must fit at
-/// once, or the last one is refused as a full queue and the device runs dry.
-/// The split-ring layout wants a power of two, so it is the next one up.
-const TRANSFER_QUEUE_SIZE: u16 = 16;
+/// Derived, not chosen: a queue that cannot hold them all refuses the last
+/// period as full, after its frames were taken, and the device runs dry.
+fn transfer_descriptors(streams: u16) -> u16 {
+    let descriptors = usize::from(streams) * PERIODS_IN_FLIGHT * TRANSFER_CHAIN_DESCRIPTORS;
+    u16::try_from(descriptors).unwrap_or(u16::MAX)
+}
 
-const _: () =
-    assert!(TRANSFER_QUEUE_SIZE as usize >= PERIODS_IN_FLIGHT * TRANSFER_CHAIN_DESCRIPTORS);
-const _: () = assert!(TRANSFER_QUEUE_SIZE.is_power_of_two());
+/// Descriptors a transfer queue is programmed with for a device of `streams`
+/// streams: [`transfer_descriptors`] in the power of two the split-ring
+/// layout wants.
+fn transfer_queue_size(streams: u16) -> u16 {
+    transfer_descriptors(streams)
+        .checked_next_power_of_two()
+        .unwrap_or(MAX_TRANSFER_QUEUE_SIZE)
+}
+
+/// The number of streams `config` announces.
+///
+/// An endpoint index must fit the contract's own ceiling, because the mixer
+/// addresses one by index and the interrupt bitmaps are that wide. A device
+/// claiming more is refused rather than truncated: a silently-hidden stream is
+/// a stream nobody can ever reach.
+fn stream_count(config: &[u8; wire::config::LEN]) -> Result<u16, DriverError> {
+    match u16::try_from(wire::read_u32(config, wire::config::STREAMS)) {
+        Ok(streams) if streams != 0 && streams <= MAX_DEVICE_ENDPOINTS => Ok(streams),
+        _ => Err(DriverError::DeviceFault),
+    }
+}
+
+/// The deepest ring [`transfer_queue_size`] asks for: a device at the endpoint
+/// ceiling, well inside what the split layout admits.
+const MAX_TRANSFER_QUEUE_SIZE: u16 = 1 << 15;
+
+const _: () = assert!(
+    (MAX_DEVICE_ENDPOINTS as usize * PERIODS_IN_FLIGHT * TRANSFER_CHAIN_DESCRIPTORS)
+        .next_power_of_two()
+        <= MAX_TRANSFER_QUEUE_SIZE as usize
+);
 
 /// Periods kept in flight per stream.
 ///
@@ -192,6 +226,160 @@ struct PeriodBuffer {
     /// The descriptor head the buffer is posted under, or [`None`] while it
     /// is free.
     posted: Option<u16>,
+    /// What the device reported writing when it handed the buffer back,
+    /// until the stream it belongs to is next serviced: the queue is shared
+    /// by every stream of a direction, so any stream's service may collect
+    /// another's completion.
+    returned: Option<u32>,
+}
+
+/// What a transfer chain the device holds carries.
+enum Transfer {
+    /// Period `slot` of stream `stream`.
+    Period { stream: usize, slot: usize },
+    /// A period a released stream let go of while the device still held it,
+    /// kept until the device hands it back so it is never freed under the
+    /// device.
+    Lent(BounceBuffer),
+}
+
+/// A transfer queue, which every stream of one direction shares, and what
+/// each chain it holds carries, by descriptor head.
+///
+/// The record is carved at bring-up, one entry per descriptor, so neither
+/// taking a completion back nor lending a period allocates or searches.
+struct TransferQueue {
+    ring: SplitQueue,
+    carried: Vec<Option<Transfer>>,
+}
+
+impl TransferQueue {
+    fn new(ring: SplitQueue) -> Result<Self, DriverError> {
+        let mut carried = Vec::new();
+        carried
+            .try_reserve_exact(usize::from(ring.size()))
+            .map_err(|_| DriverError::NoSpace)?;
+        carried.resize_with(usize::from(ring.size()), || None);
+        Ok(Self { ring, carried })
+    }
+
+    /// Post period `slot` of `stream` on this queue, carrying `frames` frames
+    /// in `bytes` payload bytes.
+    ///
+    /// The chain is the specification's: the transfer header is always
+    /// device-readable, the payload takes the stream's direction, and the
+    /// status word is always device-writable.
+    fn post<T: Transport>(
+        &mut self,
+        transport: &mut T,
+        stream: &mut Stream,
+        slot: usize,
+        frames: u32,
+        bytes: usize,
+    ) -> Result<(), DriverError> {
+        let playback = stream.direction == StreamDirection::Playback;
+        let Ok(stream_index) = usize::try_from(stream.id) else {
+            return Err(DriverError::OutOfRange);
+        };
+        let period = stream
+            .periods
+            .get_mut(slot)
+            .ok_or(DriverError::DeviceFault)?;
+        let base = period.dma.phys();
+        let (Ok(hdr_len), Ok(payload_len), Ok(status_len)) = (
+            u32::try_from(wire::XFER_HDR_LEN),
+            u32::try_from(bytes),
+            u32::try_from(wire::XFER_STATUS_LEN),
+        ) else {
+            return Err(DriverError::OutOfRange);
+        };
+        // The status word lives at the end of the *allocated* buffer, not at
+        // the end of this transfer: a short drain tail must not move it onto
+        // payload bytes the device is still reading.
+        let status_offset = period.dma.capacity() - wire::XFER_STATUS_LEN;
+        let (Ok(payload_at), Ok(status_at)) = (
+            u64::try_from(wire::XFER_HDR_LEN),
+            u64::try_from(status_offset),
+        ) else {
+            return Err(DriverError::OutOfRange);
+        };
+        let segments = [
+            ChainSegment {
+                phys: base,
+                len: hdr_len,
+                direction: Direction::DeviceRead,
+            },
+            ChainSegment {
+                phys: base + payload_at,
+                len: payload_len,
+                direction: if playback {
+                    Direction::DeviceRead
+                } else {
+                    Direction::DeviceWrite
+                },
+            },
+            ChainSegment {
+                phys: base + status_at,
+                len: status_len,
+                direction: Direction::DeviceWrite,
+            },
+        ];
+        // Zero is no status a device writes, so a completion that wrote none
+        // is refused rather than read as this buffer's last.
+        period.dma.full_region_mut()[status_offset..].fill(0);
+        let head = self
+            .ring
+            .add_chain(&segments)
+            .map_err(VirtioError::as_driver_error)?;
+        let Some(record) = self.carried.get_mut(usize::from(head)) else {
+            return Err(DriverError::DeviceFault);
+        };
+        *record = Some(Transfer::Period {
+            stream: stream_index,
+            slot,
+        });
+        period.posted = Some(head);
+        period.frames = frames;
+        if playback {
+            // Playback: the frames are the device's the moment it is handed
+            // them, so the position advances here. Capture credits on
+            // delivery instead, because frames nobody received are not frames
+            // that arrived.
+            stream.transferred = stream
+                .transferred
+                .checked_add(u64::from(frames))
+                .ok_or(DriverError::OutOfRange)?;
+        }
+        self.ring.kick(transport);
+        Ok(())
+    }
+
+    /// Keep each of `periods` the device still holds until it hands it back;
+    /// the rest are freed.
+    fn lend_held(&mut self, periods: Vec<PeriodBuffer>) {
+        for mut period in periods {
+            let Some(head) = period.posted else {
+                continue;
+            };
+            match self.carried.get_mut(usize::from(head)) {
+                Some(record) => *record = Some(Transfer::Lent(period.dma)),
+                // Every posted head has a record; one that does not is kept
+                // rather than freed under the device.
+                None => period.dma.withhold(),
+            }
+        }
+    }
+
+    /// Never return the ring, or a period lent to it, to its pool: the device
+    /// may still be using them.
+    fn withhold(&mut self) {
+        self.ring.withhold();
+        for record in &mut self.carried {
+            if let Some(Transfer::Lent(dma)) = record {
+                dma.withhold();
+            }
+        }
+    }
 }
 
 /// What one PCM stream of the device is and what it is doing.
@@ -249,10 +437,10 @@ pub struct VirtioSnd<'h, T: Transport> {
     /// rather than wall time because a clock step would otherwise corrupt
     /// every linear fit built on it.
     clock: &'h dyn MonotonicClock,
-    controlq: SplitQueue,
+    controlq: RequestQueue,
     eventq: SplitQueue,
-    txq: SplitQueue,
-    rxq: SplitQueue,
+    txq: TransferQueue,
+    rxq: TransferQueue,
     /// The one control request/response staging region: a request is
     /// outstanding at a time, so one buffer serves them all.
     control: BounceBuffer,
@@ -287,10 +475,11 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
     /// # Errors
     ///
     /// The transport's or queue setup's [`VirtioError`] mapped to a
-    /// [`DriverError`], [`DriverError::DeviceFault`] for a device that never
-    /// confirms its reset, clears `FEATURES_OK`, presents fewer than four
-    /// queues, or describes more streams than the contract admits, and any
-    /// [`DriverError`] a DMA allocation refuses.
+    /// [`DriverError`] — [`DriverError::Unsupported`] for a queue too shallow
+    /// for what it carries — [`DriverError::DeviceFault`] for a device that
+    /// never confirms its reset, clears `FEATURES_OK`, presents fewer than
+    /// four queues, or describes more streams than the contract admits, and
+    /// any [`DriverError`] a DMA allocation refuses.
     pub fn open(
         mut transport: T,
         host: &'h dyn VirtioHost,
@@ -312,17 +501,31 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         if transport.num_queues() < wire::QUEUE_COUNT {
             return Err(DriverError::DeviceFault);
         }
+        // One reading of the device's description sizes the transfer queues
+        // and is what the stream records are then read against, so it cannot
+        // change between the two.
+        let mut config = [0u8; wire::config::LEN];
+        transport.read_config(0, &mut config);
+        let streams = stream_count(&config)?;
 
-        let controlq = Self::program_queue(
+        let program = |transport: &mut T, index, size, needed| {
+            SplitQueue::new(transport, host, index, size, needed)
+                .map_err(VirtioError::as_driver_error)
+        };
+        let controlq = RequestQueue::new(program(
             &mut transport,
-            host,
             wire::CONTROL_QUEUE,
             CONTROL_QUEUE_SIZE,
-        )?;
-        let eventq =
-            Self::program_queue(&mut transport, host, wire::EVENT_QUEUE, EVENT_QUEUE_SIZE)?;
-        let txq = Self::program_queue(&mut transport, host, wire::TX_QUEUE, TRANSFER_QUEUE_SIZE)?;
-        let rxq = Self::program_queue(&mut transport, host, wire::RX_QUEUE, TRANSFER_QUEUE_SIZE)?;
+            CONTROL_CHAIN_DESCRIPTORS,
+        )?);
+        // The event pool posts whatever the ring holds, so any depth serves.
+        let eventq = program(&mut transport, wire::EVENT_QUEUE, EVENT_QUEUE_SIZE, 1)?;
+        // Each transfer queue is sized for every stream, not only its own
+        // direction's: a stream's direction is known only once it is
+        // enumerated, which needs the queues up.
+        let (size, needed) = (transfer_queue_size(streams), transfer_descriptors(streams));
+        let txq = TransferQueue::new(program(&mut transport, wire::TX_QUEUE, size, needed)?)?;
+        let rxq = TransferQueue::new(program(&mut transport, wire::RX_QUEUE, size, needed)?)?;
 
         let control = BounceBuffer::new(
             host.alloc_dma_zeroed(CONTROL_BUFFER_LEN * 2)?,
@@ -351,68 +554,34 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
             pending: AudioInterrupt::NONE,
             events_armed: false,
         };
-        if let Err(e) = device.arm() {
-            device.close();
-            return Err(e);
-        }
+        device.arm(&config, streams)?;
         Ok(device)
     }
 
     /// Post the event pool and read the device's description of itself: the
     /// bring-up steps a live device takes part in.
-    fn arm(&mut self) -> Result<(), DriverError> {
-        for slot in 0..EVENT_QUEUE_SIZE {
+    fn arm(&mut self, config: &[u8; wire::config::LEN], streams: u16) -> Result<(), DriverError> {
+        for slot in 0..self.eventq.size() {
             self.post_event_slot(slot)?;
         }
         self.eventq.kick(&mut self.transport);
-        self.enumerate()
+        self.enumerate(config, streams)
     }
 
-    /// Reset the device, then release its memory.
-    fn close(mut self) {
-        if self.transport.reset().is_err() {
-            // A wedged device may still master its rings and event pool: hold
-            // them for the kernel to quarantine when the driver exits.
-            core::mem::forget(self);
-        }
-    }
-
-    /// Program one virtqueue at the deepest size the device offers up to
-    /// `wanted`. A device advertising a zero-length queue is broken; refuse
-    /// it rather than run a driver that can never make progress.
-    fn program_queue(
-        transport: &mut T,
-        host: &'h dyn VirtioHost,
-        index: u16,
-        wanted: u16,
-    ) -> Result<SplitQueue, DriverError> {
-        transport
-            .queue_select(index)
-            .map_err(VirtioError::as_driver_error)?;
-        let size = transport.queue_max_size().min(wanted);
-        if size == 0 {
-            return Err(DriverError::DeviceFault);
-        }
-        SplitQueue::new(transport, host, index, size).map_err(VirtioError::as_driver_error)
-    }
-
-    /// Read the device's configuration and every jack, stream and channel-map
-    /// record it publishes, building the endpoint table this driver reports.
-    fn enumerate(&mut self) -> Result<(), DriverError> {
-        let mut config = [0u8; wire::config::LEN];
-        self.transport.read_config(0, &mut config);
-        let jacks = wire::read_u32(&config, wire::config::JACKS);
-        let streams = wire::read_u32(&config, wire::config::STREAMS);
-        let chmaps = wire::read_u32(&config, wire::config::CHMAPS);
-        // An endpoint index must fit the contract's own ceiling, because the
-        // mixer addresses one by index and the interrupt bitmaps are that
-        // wide. A device claiming more is refused rather than truncated: a
-        // silently-hidden stream is a stream nobody can ever reach.
-        if streams == 0 || streams > u32::from(MAX_DEVICE_ENDPOINTS) {
-            return Err(DriverError::DeviceFault);
-        }
-        self.streams.reserve_exact(streams as usize);
-        for id in 0..streams {
+    /// Read every jack, stream and channel-map record the device's
+    /// configuration announces, building the endpoint table this driver
+    /// reports.
+    fn enumerate(
+        &mut self,
+        config: &[u8; wire::config::LEN],
+        streams: u16,
+    ) -> Result<(), DriverError> {
+        let jacks = wire::read_u32(config, wire::config::JACKS);
+        let chmaps = wire::read_u32(config, wire::config::CHMAPS);
+        self.streams
+            .try_reserve_exact(usize::from(streams))
+            .map_err(|_| DriverError::NoSpace)?;
+        for id in 0..u32::from(streams) {
             let stream = self.read_stream_info(id)?;
             self.streams.push(stream);
         }
@@ -599,6 +768,9 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         if request.len() > CONTROL_BUFFER_LEN || reply_len > CONTROL_BUFFER_LEN {
             return Err(DriverError::BufferTooSmall);
         }
+        // The staging is the device's while a request it never answered is
+        // out.
+        self.controlq.settle(&mut self.transport, self.host)?;
         let region = self.control.full_region_mut();
         let (out, back) = region.split_at_mut(CONTROL_BUFFER_LEN);
         out[..request.len()].copy_from_slice(request);
@@ -625,12 +797,12 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
                 direction: Direction::DeviceWrite,
             },
         ];
-        let head = self
-            .controlq
-            .add_chain(&segments)
-            .map_err(VirtioError::as_driver_error)?;
-        self.controlq.kick(&mut self.transport);
-        let token = self.await_completion(wire::CONTROL_QUEUE, head)?;
+        let token = self.controlq.submit_and_wait(
+            &mut self.transport,
+            self.host,
+            &segments,
+            CONTROL_TIMEOUT_NS,
+        )?;
         if (token.written as usize) < wire::HDR_LEN {
             return Err(DriverError::DeviceFault);
         }
@@ -650,43 +822,11 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         }
     }
 
-    /// Wait for the completion of descriptor `head` on the control queue.
-    ///
-    /// A completion for a different head cannot arrive: one control request
-    /// is outstanding at a time, so anything else on this queue is a device
-    /// that answered something nobody asked, which fails closed.
-    fn await_completion(
-        &mut self,
-        queue: u16,
-        head: u16,
-    ) -> Result<tairix_virtio::UsedToken, DriverError> {
-        loop {
-            match self.controlq.poll_used() {
-                Ok(token) if token.head == head => {
-                    self.transport.ack_interrupt();
-                    return Ok(token);
-                }
-                Ok(_) => return Err(DriverError::DeviceFault),
-                Err(VirtioError::NoCompletion) => {}
-                Err(err) => return Err(err.as_driver_error()),
-            }
-            if matches!(
-                self.host.notify_wait(queue, CONTROL_TIMEOUT_NS),
-                CompletionSignal::TimedOut
-            ) {
-                // One more look: the used-ring write and the interrupt can be
-                // observed in either order, so a timeout is only believed
-                // once the ring has been re-read.
-                self.transport.ack_interrupt();
-                return match self.controlq.poll_used() {
-                    Ok(token) if token.head == head => Ok(token),
-                    _ => Err(DriverError::DeviceFault),
-                };
-            }
-        }
-    }
-
     /// Hand one event buffer back to the device.
+    ///
+    /// The slot is zeroed first — no event the device posts has code zero —
+    /// so a completion that wrote nothing is not read as the slot's last
+    /// event.
     fn post_event_slot(&mut self, slot: u16) -> Result<(), DriverError> {
         let offset = usize::from(slot) * wire::event::LEN;
         let Ok(offset_u64) = u64::try_from(offset) else {
@@ -695,6 +835,11 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         let Ok(len) = u32::try_from(wire::event::LEN) else {
             return Err(DriverError::OutOfRange);
         };
+        self.events
+            .full_region_mut()
+            .get_mut(offset..offset + wire::event::LEN)
+            .ok_or(DriverError::DeviceFault)?
+            .fill(0);
         let head = self
             .eventq
             .add_chain(&[ChainSegment {
@@ -711,9 +856,13 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
     }
 
     /// Drain the event queue into [`Self::pending`], reposting each buffer.
+    ///
+    /// At most a ring's worth per call: each buffer goes straight back, so a
+    /// device completing them as fast as they are reposted would otherwise
+    /// hold the drain for ever. What is left waits for the next call.
     fn drain_events(&mut self) -> Result<(), DriverError> {
         let mut reposted = false;
-        loop {
+        for _ in 0..self.eventq.size() {
             let token = match self.eventq.poll_used() {
                 Ok(token) => token,
                 Err(VirtioError::NoCompletion) => break,
@@ -797,14 +946,6 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         wire::put_u32(&mut request, 4, id);
         self.control_request(&request, wire::HDR_LEN)?;
         Ok(())
-    }
-
-    /// The transfer queue a stream's payload moves on.
-    fn transfer_queue(&mut self, direction: StreamDirection) -> (&mut SplitQueue, u16) {
-        match direction {
-            StreamDirection::Playback => (&mut self.txq, wire::TX_QUEUE),
-            StreamDirection::Capture => (&mut self.rxq, wire::RX_QUEUE),
-        }
     }
 }
 
@@ -1092,7 +1233,7 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
         // Release first: a stream the device still holds programmed refuses
         // its own re-programming, and this path is reached on every
         // reconfiguration.
-        let _ = self.stream_command(wire::request::PCM_RELEASE, id);
+        let _ = self.release_stream(endpoint);
 
         let mut request = [0u8; wire::SET_PARAMS_LEN];
         wire::put_u32(&mut request, 0, wire::request::PCM_SET_PARAMS);
@@ -1125,6 +1266,7 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
                 dma,
                 frames: 0,
                 posted: None,
+                returned: None,
             });
         }
 
@@ -1245,19 +1387,11 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
         if stream.configured.is_none() {
             return Ok(());
         }
-        let id = stream.id;
-        let running = stream.running;
-        if running {
+        if stream.running {
+            let id = stream.id;
             let _ = self.stream_command(wire::request::PCM_STOP, id);
         }
-        let outcome = self.stream_command(wire::request::PCM_RELEASE, id);
-        let stream = self.stream_mut(endpoint)?;
-        stream.configured = None;
-        stream.running = false;
-        stream.draining = false;
-        stream.periods = Vec::new();
-        stream.latency_frames = 0;
-        outcome
+        self.release_stream(endpoint)
     }
 
     fn take_interrupt(&mut self) -> Result<AudioInterrupt, DriverError> {
@@ -1268,7 +1402,11 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
         // would otherwise leave the mixer waiting for a wake that never
         // comes.
         for (index, stream) in self.streams.iter().enumerate() {
-            if stream.periods.iter().any(|p| p.posted.is_some()) {
+            if stream
+                .periods
+                .iter()
+                .any(|p| p.posted.is_some() || p.returned.is_some())
+            {
                 if let Ok(bit) = u16::try_from(index) {
                     if bit < MAX_DEVICE_ENDPOINTS {
                         self.pending.period_elapsed |= 1u32 << bit;
@@ -1283,8 +1421,8 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
         // The device has no interrupt-mask register: suppressing the used
         // rings' interrupts is what the split-virtqueue layout offers, and it
         // is exactly the "stop waking me" the serve loop wants.
-        self.txq.suppress_used_interrupts(!enabled);
-        self.rxq.suppress_used_interrupts(!enabled);
+        self.txq.ring.suppress_used_interrupts(!enabled);
+        self.rxq.ring.suppress_used_interrupts(!enabled);
         self.eventq.suppress_used_interrupts(!enabled);
         self.events_armed = enabled;
         Ok(())
@@ -1335,26 +1473,92 @@ impl<T: Transport> VirtioSnd<'_, T> {
 
     fn reap_transfers(&mut self, endpoint: u16, ring: &mut PcmRing<'_>) -> Result<(), DriverError> {
         let direction = self.stream(endpoint)?.direction;
-        let (queue, _) = self.transfer_queue(direction);
-        let mut tokens: [Option<(u16, u32)>; PERIODS_IN_FLIGHT] = [None; PERIODS_IN_FLIGHT];
-        let mut count = 0;
+        self.collect_transfers(direction)?;
+        for slot in 0..self.stream(endpoint)?.periods.len() {
+            let returned = self.stream_mut(endpoint)?.periods[slot].returned.take();
+            if let Some(written) = returned {
+                self.complete_transfer(endpoint, slot, written, ring)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Collect every transfer the device has handed back on `direction`'s
+    /// queue, marking it on the stream that posted it, or freeing it if a
+    /// released stream lent it.
+    fn collect_transfers(&mut self, direction: StreamDirection) -> Result<(), DriverError> {
         loop {
-            match queue.poll_used() {
-                Ok(token) => {
-                    if count == tokens.len() {
-                        break;
-                    }
-                    tokens[count] = Some((token.head, token.written));
-                    count += 1;
-                }
-                Err(VirtioError::NoCompletion) => break,
+            match self.transfer_queue(direction).ring.poll_used() {
+                Ok(token) => self.hand_back(direction, token)?,
+                Err(VirtioError::NoCompletion) => return Ok(()),
                 Err(err) => return Err(err.as_driver_error()),
             }
         }
-        for entry in tokens.into_iter().flatten() {
-            self.complete_transfer(endpoint, entry.0, entry.1, ring)?;
+    }
+
+    /// The transfer queue every stream of `direction` shares.
+    fn transfer_queue(&mut self, direction: StreamDirection) -> &mut TransferQueue {
+        match direction {
+            StreamDirection::Playback => &mut self.txq,
+            StreamDirection::Capture => &mut self.rxq,
         }
-        Ok(())
+    }
+
+    /// Take back the period buffer `token` names on `direction`'s queue.
+    fn hand_back(
+        &mut self,
+        direction: StreamDirection,
+        token: UsedToken,
+    ) -> Result<(), DriverError> {
+        // The queue answers only for a chain it holds, and every chain it
+        // holds was recorded when it was posted.
+        let carried = self
+            .transfer_queue(direction)
+            .carried
+            .get_mut(usize::from(token.head))
+            .and_then(Option::take);
+        match carried {
+            Some(Transfer::Period { stream, slot }) => {
+                let period = self
+                    .streams
+                    .get_mut(stream)
+                    .and_then(|owner| owner.periods.get_mut(slot))
+                    .ok_or(DriverError::DeviceFault)?;
+                period.posted = None;
+                period.returned = Some(token.written);
+                Ok(())
+            }
+            // Back at last, so the lent buffer is freed here.
+            Some(Transfer::Lent(_)) => Ok(()),
+            None => Err(DriverError::DeviceFault),
+        }
+    }
+
+    /// Have the device let go of `endpoint`'s buffers, then let go of them
+    /// here: what the device has handed back is freed, and a buffer it still
+    /// holds is lent until it does. The stream is left unprogrammed whatever
+    /// the device answers.
+    fn release_stream(&mut self, endpoint: u16) -> Result<(), DriverError> {
+        let (id, direction) = {
+            let stream = self.stream(endpoint)?;
+            (stream.id, stream.direction)
+        };
+        let released = self.stream_command(wire::request::PCM_RELEASE, id);
+        // A device completes every transfer it holds for a stream before it
+        // answers a release, so all of them are collectable now.
+        let collected = if released.is_ok() {
+            self.collect_transfers(direction)
+        } else {
+            Ok(())
+        };
+        let stream = self.stream_mut(endpoint)?;
+        stream.configured = None;
+        stream.running = false;
+        stream.draining = false;
+        stream.latency_frames = 0;
+        let periods = core::mem::take(&mut stream.periods);
+        self.transfer_queue(direction).lend_held(periods);
+        released.and(collected)
     }
 
     /// Fold one completed transfer buffer back into the stream.
@@ -1366,7 +1570,7 @@ impl<T: Transport> VirtioSnd<'_, T> {
     fn complete_transfer(
         &mut self,
         endpoint: u16,
-        head: u16,
+        slot: usize,
         written: u32,
         ring: &mut PcmRing<'_>,
     ) -> Result<(), DriverError> {
@@ -1379,18 +1583,10 @@ impl<T: Transport> VirtioSnd<'_, T> {
             .streams
             .get_mut(usize::from(endpoint))
             .ok_or(DriverError::NotFound)?;
-        let Some(slot) = stream
+        let period = stream
             .periods
-            .iter()
-            .position(|period| period.posted == Some(head))
-        else {
-            // A completion naming a head this stream never posted belongs to
-            // nothing here: refused rather than credited to a buffer at
-            // random.
-            return Err(DriverError::DeviceFault);
-        };
-        let period = &mut stream.periods[slot];
-        period.posted = None;
+            .get_mut(slot)
+            .ok_or(DriverError::DeviceFault)?;
         let asked = period.frames;
         period.frames = 0;
         let status_offset = period.dma.capacity() - wire::XFER_STATUS_LEN;
@@ -1462,6 +1658,12 @@ impl<T: Transport> VirtioSnd<'_, T> {
             if self.stream(endpoint)?.periods[slot].posted.is_some() {
                 continue;
             }
+            // Periods a refused release lent the device still hold
+            // descriptors, and frames taken for a period the ring cannot hold
+            // would be lost: they wait in the ring instead.
+            if usize::from(self.txq.ring.free_count()) < TRANSFER_CHAIN_DESCRIPTORS {
+                break;
+            }
             let readable = ring.readable_frames().map_err(|_| DriverError::BadMagic)?;
             let (take, shortfall) = if readable >= period_frames {
                 (period_frames, 0)
@@ -1510,15 +1712,7 @@ impl<T: Transport> VirtioSnd<'_, T> {
                 payload[taken_bytes..].fill(quiet);
                 stream.xrun_frames += u64::from(shortfall);
             }
-            Self::post_period(
-                txq,
-                transport,
-                stream,
-                slot,
-                carried,
-                payload_bytes,
-                Direction::DeviceRead,
-            )?;
+            txq.post(transport, stream, slot, carried, payload_bytes)?;
             in_flight += 1;
         }
         Ok(())
@@ -1540,6 +1734,10 @@ impl<T: Transport> VirtioSnd<'_, T> {
             if self.stream(endpoint)?.periods[slot].posted.is_some() {
                 continue;
             }
+            // As for playback: lent periods may still hold the room.
+            if usize::from(self.rxq.ring.free_count()) < TRANSFER_CHAIN_DESCRIPTORS {
+                break;
+            }
             let Self {
                 rxq,
                 transport,
@@ -1549,86 +1747,32 @@ impl<T: Transport> VirtioSnd<'_, T> {
             let stream = streams
                 .get_mut(usize::from(endpoint))
                 .ok_or(DriverError::NotFound)?;
-            Self::post_period(
-                rxq,
-                transport,
-                stream,
-                slot,
-                period_frames,
-                period_bytes,
-                Direction::DeviceWrite,
-            )?;
+            rxq.post(transport, stream, slot, period_frames, period_bytes)?;
         }
         Ok(())
     }
+}
 
-    /// Post one period buffer on its transfer queue.
-    ///
-    /// The chain is the specification's: the transfer header is always
-    /// device-readable, the payload takes the stream's direction, and the
-    /// status word is always device-writable.
-    fn post_period(
-        queue: &mut SplitQueue,
-        transport: &mut T,
-        stream: &mut Stream,
-        slot: usize,
-        period_frames: u32,
-        period_bytes: usize,
-        payload: Direction,
-    ) -> Result<(), DriverError> {
-        let period = &mut stream.periods[slot];
-        let base = period.dma.phys();
-        let (Ok(hdr_len), Ok(payload_len), Ok(status_len)) = (
-            u32::try_from(wire::XFER_HDR_LEN),
-            u32::try_from(period_bytes),
-            u32::try_from(wire::XFER_STATUS_LEN),
-        ) else {
-            return Err(DriverError::OutOfRange);
-        };
-        // The status word lives at the end of the *allocated* buffer, not at
-        // the end of this transfer: a short drain tail must not move it onto
-        // payload bytes the device is still reading.
-        let status_offset = period.dma.capacity() - wire::XFER_STATUS_LEN;
-        let (Ok(payload_at), Ok(status_at)) = (
-            u64::try_from(wire::XFER_HDR_LEN),
-            u64::try_from(status_offset),
-        ) else {
-            return Err(DriverError::OutOfRange);
-        };
-        let segments = [
-            ChainSegment {
-                phys: base,
-                len: hdr_len,
-                direction: Direction::DeviceRead,
-            },
-            ChainSegment {
-                phys: base + payload_at,
-                len: payload_len,
-                direction: payload,
-            },
-            ChainSegment {
-                phys: base + status_at,
-                len: status_len,
-                direction: Direction::DeviceWrite,
-            },
-        ];
-        let head = queue
-            .add_chain(&segments)
-            .map_err(VirtioError::as_driver_error)?;
-        period.posted = Some(head);
-        period.frames = period_frames;
-        if payload == Direction::DeviceRead {
-            // Playback: the frames are the device's the moment it is handed
-            // them, so the position advances here. Capture credits on
-            // delivery instead, because frames nobody received are not frames
-            // that arrived.
-            stream.transferred = stream
-                .transferred
-                .checked_add(u64::from(period_frames))
-                .ok_or(DriverError::OutOfRange)?;
+impl<T: Transport> Drop for VirtioSnd<'_, T> {
+    /// Reset the device before its memory goes: a device that will not confirm
+    /// may still master its rings, pools and periods, which are then held for
+    /// the kernel to quarantine when the driver exits.
+    fn drop(&mut self) {
+        if self.transport.reset().is_err() {
+            self.controlq.withhold();
+            self.eventq.withhold();
+            self.txq.withhold();
+            self.rxq.withhold();
+            self.control.withhold();
+            self.events.withhold();
+            for period in self
+                .streams
+                .iter_mut()
+                .flat_map(|stream| stream.periods.iter_mut())
+            {
+                period.dma.withhold();
+            }
         }
-        queue.kick(transport);
-        Ok(())
     }
 }
 

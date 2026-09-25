@@ -215,7 +215,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 /// wedging the machine.
 // The callback matches the arch `UserFaultResolveFn` type (a bare safe
 // `extern "C" fn`); the raw pointer is only forwarded into the guarded
-// `unsafe` call below, which narrows it with `as_ref`. — contained.
+// `unsafe` call below, which narrows it with `as_ref`.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 extern "C" fn sandbox_user_fault(
     far: u64,

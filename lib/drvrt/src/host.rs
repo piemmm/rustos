@@ -642,6 +642,10 @@ impl<S: GrantSyscalls> VirtioHost for RtDriverHost<S> {
             CompletionSignal::TimedOut
         }
     }
+
+    fn now_ns(&self) -> u64 {
+        self.syscalls.clock_get()
+    }
 }
 
 impl<S: GrantSyscalls> MailboxChannel for RtDriverHost<S> {

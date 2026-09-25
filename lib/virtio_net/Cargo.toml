@@ -14,10 +14,14 @@ publish.workspace = true
 # fails closed with — one ABI definition.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The bus-agnostic virtio split-virtqueue protocol (the `Transport` trait,
-# `SplitQueue`, DMA slabs, `VirtioHost`, and the `MockHost`/`MockTransport`
-# host doubles) the device-class logic is written against, so it consumes the
-# protocol without naming a concrete bus driver (`lib/* → lib/*` only).
+# `SplitQueue`, DMA slabs, `VirtioHost`) the device-class logic is written
+# against, so it consumes the protocol without naming a concrete bus driver
+# (`lib/* → lib/*` only).
 tairix-virtio = { path = "../virtio", version = "=0.0.0" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The host tests run on the in-process `MockHost`/`MockTransport` doubles.
+tairix-virtio = { path = "../virtio", version = "=0.0.0", features = ["mock"] }

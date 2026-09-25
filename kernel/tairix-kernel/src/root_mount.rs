@@ -183,7 +183,7 @@ pub enum RootMountError {
     /// [`DriverError::PermissionDenied`] for a wrong passphrase (the
     /// master key never unwraps), [`DriverError::BadMagic`] for a volume
     /// that is not arxfs, or a device fault. There is no plaintext-mount
-    /// fallback (encrypted by default; — fail
+    /// fallback (encrypted by default; fail
     /// closed).
     Mount(DriverError),
     /// The volume mounted but `/System/Security/Users` could not be read

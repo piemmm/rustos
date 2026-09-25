@@ -51,7 +51,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU64, AtomicU8};
-use tairix_abi::HwNode;
 use tairix_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz, SecondaryStart};
 use tairix_arch_aarch64::paging::{
     configure_device_gigapages, configure_kernel_gigapages, gigapage_mask_from_extents,
@@ -461,13 +460,9 @@ pub fn boot(
     // moved into `BootInfo` here, so it is built exactly once.
     if ready {
         if let Ok(map) = layout_result {
-            // Resolve + audit which discovered storage node binds the
-            // bootstrap root block driver before entering the core — the storage analogue of the
-            // keyboard bind gate. Read-only: it mounts nothing; the
-            // production mount path consumes the binding in the following
-            // increment (`plans/PI.md` Chunk B-2). The early-discovered
-            // video facts ride along so the boot display is published into
-            // the same buffered tree (`plans/DISPLAY.md` D7d).
+            // Record the discovered tree and the root block binding before
+            // entering the core. The early-discovered video facts ride along
+            // so the boot display joins the same tree (`plans/DISPLAY.md` D7d).
             audit_root_storage_binding(dtb, early.video, log_sink);
             enter_kernel_core(
                 arch,
@@ -1206,17 +1201,15 @@ extern "C" fn production_secondary_entry(cpu: u32) -> ! {
     halt_current_cpu()
 }
 
-/// Resolve and audit which discovered storage node binds the bootstrap
-/// root block driver.
+/// Collect the discovered hardware tree — the firmware tree, the
+/// bootstrap-floor virtio-MMIO devices, and the boot display — and hand it to
+/// the boot record ([`crate::unlock_service::record_boot`]), which resolves
+/// the root block binding from it and moves it into the live inventory.
 ///
-/// Read-only: it walks the firmware tree (safe with the MMU **on** — the
-/// caller enables it first; a whole-tree traversal faults MMU-off,
-/// `plans/PI.md` watch-out), resolves each node against the in-kernel
-/// bootstrap-floor catalogue, and audits the decision through `log_sink`.
-/// It mounts nothing; the production mount path ([`crate::root_mount`])
-/// consumes the binding in the following increment. A null/unreadable
-/// tree, a malformed walk, or no block device simply leaves the root
-/// unbound — never aborting the boot.
+/// Runs with the MMU **on** (the caller enables it first; a whole-tree
+/// traversal faults MMU-off, `plans/PI.md` watch-out). A null or unreadable
+/// tree, or a malformed walk, records nothing: the root stays unbound and
+/// the boot carries on.
 ///
 /// `video` carries the framebuffer boot console's discovered scan-out
 /// facts when one came up; the surface is published into the same
@@ -1367,24 +1360,9 @@ fn audit_root_storage_binding(
         );
     }
 
-    // Leak the buffered tree to `'static` (a one-shot boot publish, like the
-    // leaked `KernelState` — never a mutable global) so the
-    // unlock kthread can match every discovered node against the signed
-    // driver store during autoload. The tree
-    // outlives the boot frame and lives for the running kernel's lifetime.
-    let tree: &'static [HwNode] = sink.leak();
-
-    // Resolve + audit the root binding from the same buffered tree, then
-    // stash both (with the firmware DTB pointer) for the init seam, where the
-    // in-kernel root-unlock kthread reads it once (`plans/PI.md` P11 Chunk
-    // B-2 INCREMENT (2)). The MMU is on here (the caller enabled it), so the
-    // `SpinLock` stash's atomic read-modify-write is well-defined — the same
-    // post-MMU constraint the keyboard discovery stash carries. A `None`
-    // binding (no/ambiguous disk) leaves the unlock a no-op and `login` fails
-    // closed; the tree is still stashed so an input driver can still
-    // autoload on a diskless boot once a store is reachable.
-    let binding = crate::root_storage::resolve_root_block_driver(tree, log_sink);
-    crate::unlock_service::record_boot(binding, dtb, tree);
+    // The MMU is on here (the caller enabled it), as the boot record's
+    // `SpinLock` stash requires.
+    crate::unlock_service::record_boot(dtb, sink.into_vec(), log_sink);
 }
 
 /// The two memory figures the hand-off carries, which discovery produces
@@ -1539,10 +1517,10 @@ fn enter_kernel_core(
     .with_users_admin(&crate::root_mount::LATE_USERS_ADMIN)
     // Serve the discovered hardware tree through the injected `hw_tree`
     // source: the `hw_tree_read` / `hw_tree_wait` syscalls read the one
-    // authoritative `HW_TREE` the boot path seeds and the floor bus bring-up
-    // appends to (production installs `HW_TREE_SOURCE`), so the user-space
-    // device manager observes the same inventory the kernel discovered
-    // (Design D).
+    // authoritative `HW_TREE` the boot record seeds and user-space bus
+    // drivers publish into (production installs `HW_TREE_SOURCE`), so the
+    // user-space device manager observes the same inventory the kernel
+    // discovered (Design D).
     .with_hw_tree(hw_tree)
     // Serve the `fs_*` syscalls through the production filesystem service
     // (`PREREQUISITES.md` P-A): it routes each operation through the secured
@@ -1614,7 +1592,7 @@ struct EarlyDiscovered {
 ///
 /// All three discoveries are early-returning, `ranges`-aware walks
 /// ([`console::configure_from_fdt`] / [`gic::configure_from_fdt`] /
-/// [`video::configure_from_fdt`] over
+/// [`video::configure`] over
 /// [`tairix_fdt::scan_translated`]), so they are safe with
 /// the MMU off — and the video bring-up *requires* this phase: with the
 /// data caches off the CPU↔firmware mailbox exchange is coherent without
@@ -1658,8 +1636,15 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
     // run at 40% of the machine's speed. The frequency driver `devmgr`
     // autoloads takes over from here; this is the floor beneath it, and it
     // fails closed to whatever rate the firmware had chosen.
-    out.cpu_clock_hz = firmware::raise_cpu_clock(&fdt).map_or(0, u64::from);
-    out.video = video::configure_from_fdt(&fdt);
+    match firmware::find_mailbox(&fdt) {
+        Some(mailbox) => {
+            let _ = firmware::with_transport(mailbox, |transport| {
+                out.cpu_clock_hz = firmware::raise_over(transport).map_or(0, u64::from);
+                out.video = video::configure(&fdt, Some((mailbox, transport)));
+            });
+        }
+        None => out.video = video::configure(&fdt, None),
+    }
     // Discover the BCM2711 PCIe bridge's windows for the in-kernel
     // USB-keyboard service (`plans/PI.md` P10). The early-returning
     // `scan_translated` walk is MMU-off-safe (it reads only the matched

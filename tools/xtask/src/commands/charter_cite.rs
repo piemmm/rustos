@@ -447,6 +447,16 @@ fn comment_body<'a>(line: &'a str, state: &mut Lex, syntax: Syntax) -> Option<&'
     None
 }
 
+/// Where `text` has a full stop followed by a dash and a lower-case word: a
+/// sentence whose opening citation was stripped.
+fn stranded_dash(text: &str) -> Option<usize> {
+    text.match_indices(". — ").find_map(|(at, gap)| {
+        text[at + gap.len()..]
+            .starts_with(|c: char| c.is_ascii_lowercase())
+            .then_some(at)
+    })
+}
+
 /// Scan one comment paragraph for citations, each with its byte offset in
 /// `text` so the caller can name the line it sits on.
 ///
@@ -454,6 +464,17 @@ fn comment_body<'a>(line: &'a str, state: &mut Lex, syntax: Syntax) -> Option<&'
 /// across lines still finds the source named before it.
 fn scan_paragraph(text: &str, labels: &BTreeSet<String>) -> Vec<(usize, &'static str)> {
     let mut out = Vec::new();
+    // What a citation leaves behind once removed: leading a parenthetical,
+    // or between a clause and the dash that introduced its gloss.
+    if let Some(at) = text.find("(: ") {
+        out.push((at, "parenthesis opening on a colon"));
+    }
+    if let Some(at) = text.find("; —") {
+        out.push((at, "semicolon running into a dash"));
+    }
+    if let Some(at) = stranded_dash(text) {
+        out.push((at, "sentence opening on a dash"));
+    }
     if text.contains('§') {
         if let Some(at) = text.find(CHARTER) {
             out.push((at, "cites the charter by section"));
@@ -884,6 +905,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["section number with no source named beside it"]
         );
+    }
+
+    #[test]
+    fn a_parenthetical_whose_citation_was_stripped_is_refused() {
+        assert_eq!(
+            reasons("// callers fail closed (: deterministic OOM, never panic)"),
+            vec!["parenthesis opening on a colon"]
+        );
+        assert!(reasons("// a map (key: value) is fine").is_empty());
+        assert_eq!(
+            reasons("// every access denies (fail closed; — no fallback)"),
+            vec!["semicolon running into a dash"]
+        );
+        assert_eq!(
+            reasons("// the contract holds. — every `#[allow]` is justified."),
+            vec!["sentence opening on a dash"]
+        );
+        assert!(reasons("// the slot is set once. — Not later.").is_empty());
     }
 
     #[test]

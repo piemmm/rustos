@@ -10,7 +10,7 @@ use crate::Errno;
 
 const OFFER: MemberOffer = MemberOffer {
     endpoint: 0x0102_0304_0506_0708,
-    window: 0x1112_1314_1516_1718,
+    window_grant: 0x1112_1314_1516_1718,
     node: 0x2122_2324,
 };
 
@@ -68,23 +68,26 @@ fn an_offer_naming_no_resource_is_refused() {
             endpoint: 0,
             ..OFFER
         },
-        MemberOffer { window: 0, ..OFFER },
+        MemberOffer {
+            window_grant: 0,
+            ..OFFER
+        },
     ] {
         let mut buf = [0u8; MemberOffer::WIRE_LEN];
         assert_eq!(zeroed.encode(&mut buf), Ok(MemberOffer::WIRE_LEN));
         assert_eq!(
             MemberOffer::decode(&buf),
             Err(Errno::NotFound),
-            "an id of zero names nothing, so the offer can only be malformed or a probe"
+            "a zero id or handle names nothing, so the offer can only be malformed or a probe"
         );
     }
 }
 
 #[test]
 fn a_node_id_of_zero_is_carried_rather_than_refused() {
-    // Unlike the two resource ids, the node id conveys nothing the composer
-    // acts on directly, so an unknown one costs a poorer audit record, not a
-    // wrong access.
+    // Unlike the endpoint id and the window handle, the node id conveys
+    // nothing the composer acts on directly, so an unknown one costs a poorer
+    // audit record, not a wrong access.
     let offer = MemberOffer { node: 0, ..OFFER };
     let mut buf = [0u8; MemberOffer::WIRE_LEN];
     assert_eq!(offer.encode(&mut buf), Ok(MemberOffer::WIRE_LEN));
@@ -121,6 +124,19 @@ fn a_refusal_stops_the_agent_re_offering_an_unchanged_device() {
     let end = MembershipEnd::from_reply(Some(&reply));
     assert_eq!(end, MembershipEnd::Refused(Errno::NotFound));
     assert!(!end.should_reoffer());
+}
+
+#[test]
+fn a_composer_that_cannot_take_the_device_yet_defers_it_rather_than_refusing_it() {
+    for errno in [Errno::Busy, Errno::OutOfMemory] {
+        let reply = encode_status_reply(Err(errno));
+        let end = MembershipEnd::from_reply(Some(&reply));
+        assert_eq!(end, MembershipEnd::Deferred(errno));
+        assert!(
+            end.should_reoffer(),
+            "a device whose previous membership has not ended must be able to rejoin"
+        );
+    }
 }
 
 #[test]

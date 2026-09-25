@@ -69,6 +69,8 @@ struct MockSyscalls {
     irq_bind_calls: Rc<Cell<u32>>,
     /// How many times `irq_wait` was called.
     irq_wait_calls: Rc<Cell<u32>>,
+    /// What `clock_get` reads.
+    clock_ns: Cell<u64>,
     /// The raw signed result `irq_bind` returns: a positive handle by
     /// default, or `-errno` to model a refused bind.
     irq_bind_result: Cell<i64>,
@@ -102,6 +104,7 @@ impl MockSyscalls {
             irq_line_bound: Rc::new(Cell::new(0)),
             irq_bind_calls: Rc::new(Cell::new(0)),
             irq_wait_calls: Rc::new(Cell::new(0)),
+            clock_ns: Cell::new(0),
             irq_bind_result: Cell::new(7),
             ipc_endpoint: Cell::new(0),
             ipc_request: RefCell::new(Vec::new()),
@@ -292,6 +295,10 @@ impl GrantSyscalls for MockSyscalls {
     fn irq_wait(&self, _handle: u64, _timeout_ns: u64) -> i64 {
         self.irq_wait_calls.set(self.irq_wait_calls.get() + 1);
         0
+    }
+
+    fn clock_get(&self) -> u64 {
+        self.clock_ns.get()
     }
 
     fn ipc_call(&self, endpoint: u64, request: &[u8], reply: &mut [u8]) -> i64 {
@@ -906,6 +913,17 @@ fn notify_wait_binds_the_granted_line_once_then_parks_each_call() {
     assert_eq!(waits.get(), 2, "every call parks on irq_wait");
     assert_eq!(first, CompletionSignal::Fired, "the mock irq_wait fires");
     assert_eq!(second, CompletionSignal::Fired, "the mock irq_wait fires");
+}
+
+#[test]
+fn a_waits_clock_is_the_kernels_monotonic_clock() {
+    let mock = MockSyscalls::new();
+    mock.clock_ns.set(1_234_567);
+    let host = RtDriverHost::new(caps(&[]), mock, &[], None).unwrap();
+    assert_eq!(
+        tairix_abi::driver::virtio::VirtioHost::now_ns(&host),
+        1_234_567
+    );
 }
 
 #[test]

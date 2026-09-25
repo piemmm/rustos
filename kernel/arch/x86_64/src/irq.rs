@@ -174,8 +174,7 @@ pub fn external_irq_dispatch_addr() -> usize {
 #[cfg(test)]
 pub(crate) fn clear_external_irq_dispatch_for_tests() {
     // Test-only helper so back-to-back host tests can re-install a
-    // dispatcher. — permitted in tests; production
-    // code never clears the slot.
+    // dispatcher; production code never clears the slot.
     EXTERNAL_IRQ_DISPATCH_FN.clear();
 }
 

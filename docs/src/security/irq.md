@@ -48,6 +48,14 @@ dispatcher refuses with `Errno::PermissionDenied` and emits one
 holding no capabilities cannot observe a hardware interrupt under any
 circumstances.
 
+`CAP_IRQ_BIND` says a task may bind lines at all, never which: `irq_bind`
+binds a line only while one of the caller's live grants names it — a line
+its node requested, or a vector `msi_alloc` allocated for its device — and
+refuses any other with `PermissionDenied`. When the node leaves the tree the
+grant is revoked and the binding released, so a parked `irq_wait` returns
+`NotFound`, a wait set holding the handle fails `NotFound`, and the line
+cannot be bound again under the dead grant.
+
 The same capability gates both ends deliberately: a task that may
 bind a line must be able to wait on it, and the implementation of
 `irq_wait` re-checks that `handle` was minted for the calling task
@@ -93,9 +101,10 @@ error in the IRQ subsystem (`lib/abi/src/error.rs`).
 | `Errno`             | when                                                            | audit event                |
 | ------------------- | --------------------------------------------------------------- | -------------------------- |
 | `PermissionDenied`  | caller lacks `CAP_IRQ_BIND`                                     | `SyscallPermissionDenied`  |
+| `PermissionDenied`  | `irq_bind` `line` is named by no live grant of the caller       | `SyscallHandlerRejected`   |
 | `OutOfRange`        | `line` exceeds the platform's allowable range                   | `SyscallBadArguments`      |
 | `OutOfRange`        | `irq_bind` `line` argument carries non-zero upper 32 bits       | `SyscallBadArguments`      |
-| `NotFound`          | `irq_wait` `handle` was not minted for the calling task         | `SyscallHandlerRejected`   |
+| `NotFound`          | `irq_wait` `handle` was not minted for the calling task, or was released when its device's node was removed | `SyscallHandlerRejected`   |
 | `TimedOut`          | `irq_wait` timeout expired before the line fired                | none (per the audit policy)|
 | `NotImplemented`    | called from a WASM userland or before the IRQ subsystem is wired up | none                     |
 

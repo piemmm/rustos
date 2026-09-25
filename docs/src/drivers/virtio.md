@@ -33,14 +33,67 @@ and the device drivers carry only the device-specific wire format.
   `Transport::reset` confirms the reset by re-reading the status until it
   reads 0, bounded, and fails with `DeviceFault` otherwise: a device that has
   not reset may still master memory it was given. Each driver declares its
-  device quiesced (`DmaHost::device_quiesced`) only after a confirmed reset,
-  carves everything fallible before `DRIVER_OK`, resets again before
-  releasing memory when a step after `DRIVER_OK` fails, and on a `close`
-  whose reset does not confirm withholds its rings and staging for the
-  kernel's DMA quarantine rather than freeing them.
+  device quiesced (`DmaHost::device_quiesced`) only after a confirmed reset
+  and carves everything fallible before `DRIVER_OK`. Every device type resets
+  its device when it is dropped — whatever drops it, a serve loop's early
+  return included — and one whose reset does not confirm withholds its rings
+  and staging (`DmaSlab::withhold`) for the kernel's DMA quarantine rather
+  than freeing them. Once virtio-net's reset confirms, its whole receive
+  staging is zeroed before it is freed: a frame no `service` delivered has no
+  ring class to say whether it was sensitive.
 - The virtio 1.1 §2.6 **split virtqueue** (`SplitQueue`): descriptor
   table, avail ring, used ring, free-descriptor pool, descriptor
-  chaining.
+  chaining. The free list and every chain's links live in driver memory and
+  the device-visible table is written from them, never read back, and a
+  completion is accepted only for the head of a chain the device holds, so a
+  device writing over the table, or naming a head it was never given or a
+  chain's interior, can neither corrupt the free list nor have a completion
+  attributed to the wrong chain. Descriptors are reissued oldest-returned
+  first, so a completion the device repeats for a chain it already returned
+  names free descriptors, and is refused, for as long as the ring allows.
+  A returned chain's table entries are left as they were: nothing reads them
+  back and a reissue rewrites every field. `SplitQueue::new` (and
+  `PackedQueue::new`, which shares its sizing) takes the most descriptors the
+  driver keeps on the queue at once and refuses a device whose queue cannot
+  hold them with `VirtioError::QueueTooShallow`, before any ring is carved or
+  handed to the device, rather than capping the queue silently and failing a
+  request once the driver has begun it.
+- **One request at a time** (`RequestQueue`), over a split queue: the one
+  submit-and-wait the request/response drivers (virtio-blk, virtio-crypto, the
+  virtio-sound and virtio-net control queues) share. A request waits at most
+  its budget in all — each wait after a wake is given what is left of it,
+  measured on the host's clock (`VirtioHost::now_ns`), so a device that keeps
+  waking the driver cannot stretch it — and a storm of wakes ends sooner at
+  `MAX_COMPLETION_WAKES`. A wait that times out, or could not be made at all
+  (a host answers a revoked or refused interrupt binding with an immediate
+  `TimedOut`), ends the request `DeviceOffline` once the ring has been read
+  again, so a completion whose interrupt was lost is still taken. With
+  nothing out, a completion in the ring answers nothing, so a request is
+  refused rather than published over it. A request the device leaves
+  unanswered fails to its caller, but its chain and every buffer it names
+  stay the device's: `settle` retires the chain once the device hands it
+  back, notifying the device again meanwhile at most once per the request's
+  budget however often it is called, and until then nothing is published, so
+  a late completion is never taken for a later request's and no request
+  stages over memory the device may still read or write. Every driver stages
+  a status no device writes into each reply before the request, so a
+  completion that wrote none is refused rather than read as the last
+  request's, and a payload the device writes into reused staging — a
+  virtio-blk read, a virtio-crypto job's output — is handed back only when
+  the completion's reported length covers it and the status behind it. A
+  sensitive payload the device held is scrubbed when it comes back, or when
+  a confirmed reset takes it back as the driver is dropped, rather than while
+  the device may still be reading it, and a virtio-crypto session an
+  abandoned or refused create, job or destroy left is destroyed again before
+  the next job runs. `scrub` is the one zeroing every driver's staging gets.
+- **Drains are bounded.** A pass over a used ring the driver drains in bulk
+  takes at most a ring's worth of completions, however far the device claims
+  to have got or however fast it refills what is reposted, and leaves the
+  rest for the next call: virtio-net per `service` from each queue (a
+  receive pass also finishing a merged frame begun inside the bound), and
+  the virtio-sound and virtio-input event queues per drain. An event slot is
+  zeroed before it is reposted, so a completion that wrote nothing is never
+  read as the slot's last event.
 - The virtio 1.1 §2.7 **packed virtqueue** (`PackedQueue`): a single
   descriptor ring plus the driver- and device-event-suppression
   structures, with availability and completion signalled in-band
@@ -49,8 +102,9 @@ and the device drivers carry only the device-specific wire format.
   Both queues share the `ChainSegment` / `UsedToken` vocabulary and
   the same `Transport` seam.
 - A `VirtioHost` trait through which a driver requests DMA-backed
-  bounce buffers (`alloc_dma_zeroed`) and parks pending completion
-  (`notify_wait`). `alloc_dma_zeroed` returns an **owned**
+  bounce buffers (`alloc_dma_zeroed`), parks pending completion
+  (`notify_wait`), and reads the clock those waits run on (`now_ns`).
+  `alloc_dma_zeroed` returns an **owned**
   [`DmaSlab`](#dma-ownership-model) so a driver can hold several
   simultaneously-live regions (e.g. the descriptor table + avail
   ring + used ring inside `SplitQueue`) without re-borrowing the
@@ -58,40 +112,30 @@ and the device drivers carry only the device-specific wire format.
 - A `BounceBuffer` wrapper that honours
   [`BufferClass::Sensitive`](../abi/driver_traits.md) by zeroing its
   staging on drop (`AGENTS.md` §4).
-- A `MockTransport` + `ChainView` test seam used by the two device
-  driver crates' host-side tests.
-
-## Out of scope (intentionally deferred)
-
-| Feature                                    | Why deferred                                                                       | Tracked in                                  |
-|--------------------------------------------|------------------------------------------------------------------------------------|---------------------------------------------|
-| Driver-host `DmaPool` wiring               | The driver host does not yet thread a per-process `DmaPool` through to its modules | `plans/WIRING.md` item 0      |
-| IRQ routing into user-space drivers        | The kernel does not yet expose an IRQ capability                                   | `plans/WIRING.md` item 2      |
-| Boot-time PCI/MMIO walk → live driver host | The kernel binary does not yet enumerate the bus and construct a live `drvhost::Host` | `plans/WIRING.md` item 4   |
-| QEMU integration tests (PCI + MMIO)        | Depend on the boot-time bring-up above plus the userland net stack from `plans/WIRING.md` item 5 | `plans/WIRING.md` item 4      |
+- A `MockTransport` + `ChainView` test seam every virtio driver's host
+  tests run on, built only with `lib/virtio`'s `mock` feature: consumers
+  enable it in `[dev-dependencies]` alone, so no production build compiles
+  it.
 
 ## Layering picture
 
 ```
 +-------------------------------------+
-|  drivers/storage/virtio_blk         |  device-specific wire (virtio §5.2)
-|  drivers/network/virtio_net         |  device-specific wire (virtio §5.1)
+|  drivers/storage/virtio_blk  (and   |  device-specific wire formats
+|  the net, input, sound, crypto ones)|
 +-------------------+-----------------+
-                    | Transport, SplitQueue, BounceBuffer, VirtioHost
+                    | Transport, SplitQueue / PackedQueue, RequestQueue,
+                    | BounceBuffer, VirtioHost
                     v
 +-------------------------------------+
-|  lib/virtio                         |  virtio 1.1 §2.6 split + §2.7 packed
-|                                     |  queues, §3.1 init, MmioTransport
+|  lib/virtio                         |  split + packed queues, §3.1 init,
+|                                     |  MmioTransport, PciTransport
 +-------------------+-----------------+
-                    ^ PciTransport implements Transport
+                    ^ RegisterWindow (kernel-minted, capability-checked)
                     |
 +-------------------+-----------------+
-|  drivers/bus/virtio                 |  concrete PCI Transport impl
-+-------------------+-----------------+
-                    | PciBackend / MmioBackend (own a RegisterWindow)
-                    v
-+-------------------------------------+
-|  drivers/bus/pci  /  drivers/bus/mmio
+|  drivers/bus/pci  /  drivers/bus/mmio  discovery; drivers/bus/virtio
+|                                     |  re-exports the two transports
 +-------------------------------------+
 ```
 
@@ -283,8 +327,15 @@ used ring) and three more in a transaction (header + payload +
 status) without ever re-borrowing the pool.
 
 The in-process `MockHost` mints slabs with `PoolId::MOCK`, a
-monotonic `slot` counter, and a no-op free shim (the leak contract
-is unchanged).
+monotonic `slot` counter, and a free shim that records the release
+(`slabs_outstanding`) and whether the slab came back zeroed
+(`released_zeroed`). It is the one test host every virtio driver's tests
+run on: each wait plays a scripted `MockWait` (the device answers, a wake
+with nothing done, silence for the whole budget, a wait refused at once, or
+a completion whose interrupt is lost) and advances the host's clock by what
+that wait would have taken, and an attached shared
+`MockTransport` (`MockTransport::into_shared`) is drained on the waited
+queue, as a device completing on its interrupt would.
 
 ### Kernel host (`KernelVirtioHost`)
 
@@ -339,10 +390,12 @@ event with nothing pending (an idle input device) passes `u64::MAX`. A request
 wait must never be unbounded: the waiting task holds the device's lock for the
 duration of its request, so one lost or coalesced completion interrupt would
 park it forever and stall every other user of that disk behind it — silently,
-with no error to explain it. `virtio_blk` therefore fails a silent request
-closed with `DriverError::DeviceOffline` after one final used-ring re-scan
-(a completion whose interrupt was lost is already in the ring), and does not
-reissue in place: the device may still own the published descriptor chain, so
+with no error to explain it. A request whose wait times out — or whose wait
+the host could not make, which every non-fire outcome of the IRQ park
+reports as `TimedOut` at once — therefore fails closed with
+`DriverError::DeviceOffline` after one final used-ring re-scan (a completion
+whose interrupt was lost is already in the ring), and is not reissued in
+place: the device may still own the published descriptor chain, so
 re-publishing the same staging could have an abandoned request complete into
 the next one's buffers. Reissue policy belongs to the consumer above, which
 knows whether the request is safe to repeat.
@@ -389,18 +442,21 @@ minted it.
 
 ## Untrusted device input
 
-The used ring and the descriptor table are **device-written**: under
-the `AGENTS.md` §4 / §3.6 threat model a buggy or hostile device (a
-DMA-capable, Thunderclap-class peer, CWE-1257) may write a completion
-naming a descriptor head outside the granted table, or DMA-scribble a
-chain `next` link so the reclaim walk would leave the region.
-`SplitQueue::poll_used` therefore validates every device-supplied head
-against `queue_size` and bounds the reclaim walk to the table: an
-out-of-range head is rejected with `VirtioError::MalformedCompletion`
-(mapped to `DriverError::DeviceFault`) and no chain is reclaimed, while
-a corrupted `next` link makes the walk bail at the boundary. The driver
-never dereferences a descriptor outside the granted region — it fails
-closed (§5.4) rather than trusting the device.
+The used ring and the descriptor table are **device-written**: a buggy or
+hostile device (a DMA-capable, Thunderclap-class peer, CWE-1257) may write
+a completion naming anything, or DMA-scribble the descriptor table.
+`SplitQueue::poll_used` accepts a completion only for the head of a chain
+the device holds, read from the driver's own records: anything else is
+refused with `VirtioError::MalformedCompletion` (mapped to
+`DriverError::DeviceFault`) and reclaims nothing, and the reclaim walk
+follows the driver's private chain links, never the table the device can
+write. The driver never dereferences a descriptor outside the granted
+region — it fails closed rather than trusting the device. The mock peer
+holds itself to the same rule: it checks every descriptor index against the
+table before reading it and bounds a chain by the table's length, so a
+scribbled `next` link or a loop is refused rather than followed. A used
+entry's written length is untrusted too: nothing past it is read as data
+(virtio 1.1 §2.6.8.2).
 
 ## Test surface
 
@@ -420,11 +476,16 @@ them (`AGENTS.md` §7 — unit tests next to the code):
   slot consumption, mock-peer round-trip, empty/too-long and
   free-pool-exhaustion rejection, ring-wrap-with-reclaim across the
   ring boundary (toggling both wrap counters), and the empty
-  no-completion / no-op-drain paths. The §3.6 adversarial tests
+  no-completion / no-op-drain paths. The adversarial tests
   (`poll_used_rejects_a_device_head_outside_the_descriptor_table`,
-  `poll_used_reclaim_bails_on_a_corrupted_next_link`) and the
+  `a_completion_for_anything_but_a_chain_the_device_holds_is_refused`,
+  `a_device_writing_over_the_descriptor_table_cannot_corrupt_the_free_list`,
+  `a_returned_chains_descriptors_are_reissued_last`,
+  `the_peer_refuses_a_chain_that_leaves_the_table_or_loops`) and the
   `fuzz_virtqueue` harness drive a hostile device-written used ring /
-  descriptor table and assert the consumer fails closed. It also
+  descriptor table and assert the consumer fails closed, attributes every
+  completion exactly, and never hands out a descriptor a held chain owns.
+  It also
   covers the concrete virtio-MMIO transport (`transport_mmio`), which
   lives here for the riscv64 / `AArch64` MMIO bus seam: short-window,
   bad-magic, legacy-version and empty-slot rejection, status

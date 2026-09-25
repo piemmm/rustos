@@ -100,6 +100,12 @@ pub trait GrantSyscalls {
     /// Mirrors [`tairix_rt::irq_wait`].
     fn irq_wait(&self, handle: u64, timeout_ns: u64) -> i64;
 
+    /// Read the kernel monotonic clock in nanoseconds, the clock
+    /// [`Self::irq_wait`]'s timeouts run on.
+    ///
+    /// Mirrors [`tairix_rt::clock_get`].
+    fn clock_get(&self) -> u64;
+
     /// Make a synchronous capability-checked call to the kernel-owned call
     /// endpoint `endpoint`: post `request`, block until the reply arrives,
     /// and copy it into `reply`, returning the number of reply bytes written
@@ -197,6 +203,11 @@ impl GrantSyscalls for RtGrantSyscalls {
     #[inline]
     fn irq_wait(&self, handle: u64, timeout_ns: u64) -> i64 {
         tairix_rt::irq_wait(handle, timeout_ns)
+    }
+
+    #[inline]
+    fn clock_get(&self) -> u64 {
+        tairix_rt::clock_get()
     }
 
     #[inline]

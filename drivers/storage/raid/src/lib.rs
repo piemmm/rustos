@@ -25,6 +25,11 @@
 //! rebuilding it, verifying the array, and writing the position of a pass that
 //! outlives a reboot into its members' own records.
 //!
+//! Every member is reached through a [`MemberDevice`] holding the one loan of
+//! its [`MemberWindow`], so no two clients ever stage through the same window,
+//! and a member whose agent has exited refuses every transfer until its array
+//! gives it up.
+//!
 //! # Why the member agent is a sibling crate, not a second role here
 //!
 //! One signed bundle grants its whole manifest's capability set to every
@@ -43,13 +48,19 @@ extern crate alloc;
 
 mod admin;
 mod compose;
+mod intake;
+mod member;
 mod runtime;
 mod service;
 #[cfg(test)]
 mod testkit;
 
 pub use admin::{handle_control, ControlAudit, ControlEffects, LiveArrays};
-pub use compose::{Admission, ComposerAction, HeldMember, MemberRegistry, MemberStanding};
+pub use compose::{
+    Admission, ComposerAction, HeldMember, MemberRegistry, MemberStanding, ProbedDevice,
+};
+pub use intake::{granted_resource, vet_offer, OfferRefusal};
+pub use member::{MemberDevice, MemberWindow, WindowLease};
 pub use runtime::{ArrayHealthEvent, ArrayRuntime, MaintenanceStep};
 pub use service::{
     assemble_array, read_maintenance_record, read_superblock, write_maintenance_record,

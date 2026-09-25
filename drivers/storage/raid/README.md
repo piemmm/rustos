@@ -31,37 +31,60 @@ one node and the composer starts whether or not any array member exists yet.
 
 1. It binds the reserved rendezvous endpoint and waits. Each per-disk member
    agent delegates its device's block endpoint and data window there and posts
-   a `MemberOffer` naming them.
-2. For each offer it maps the window, connects a read/write block client, and
-   **reads that device's own superblock itself**. A member node says only
-   "look here": which array a device belongs to, which slot it fills and how
-   current it is are read off the disk, never taken from the offering agent.
-3. The registered members feed `MemberRegistry`, whose `next_action` says what
+   a `MemberOffer` naming the endpoint by its id and the window by the
+   composer's own grant handle for it.
+2. Before it touches anything an offer names, it asks the kernel which node
+   the sender was admitted for (`call_peer_node`) and what its own grant for
+   the offered window names (`resource_grants`). It admits the offer only from
+   the driver of a `tairix,raid-member` or `tairix,raid-candidate` node whose
+   one endpoint is the offered one — and not an endpoint the composer serves
+   itself — and whose one region is the one that grant names; anything else is
+   refused (`PermissionDenied`) with nothing mapped and no device reached.
+   Sending to the rendezvous also requires `CAP_SHM`, which every genuine
+   offer's window delegation needs.
+3. For each admitted offer it maps the window by that handle, connects a
+   read/write block client, and **reads that device's own superblock itself**.
+   A member node says only "look here": which array a device belongs to, which
+   slot it fills and how current it is are read off the disk, never taken from
+   the offering agent.
+4. The registered members feed `MemberRegistry`, whose `next_action` says what
    to do: assemble a ready array, place a member that turned up late into an
    array already serving, or wait until a deadline.
-4. An array it assembles gets its own block-service endpoint and shared data
+5. An array it assembles gets its own block-service endpoint and shared data
    window, and is published as a `tairix,raid-array` storage node carrying
    both. The volume manager binds that node exactly as it binds a disk's, so
-   the array's filesystems mount through the unchanged path — and an array can
-   itself become a member of another array, because its node is
-   indistinguishable in kind from a disk's.
-5. It then serves every live array's block requests through the same
+   the array's filesystems mount through the unchanged path. An array cannot
+   be a member of another array this same composer serves: driving it would
+   mean waiting on its own reply, so such an offer is refused.
+6. It then serves every live array's block requests through the same
    fault-aware engine a leaf device is served with, so an array is as
    fault-aware as a disk and there is no second serve path.
-6. Between requests it gives each array one bounded turn of **self-maintenance**
+7. Between requests it gives each array one bounded turn of **self-maintenance**
    — re-admitting a member whose backoff has elapsed, advancing a rebuild,
    verifying the array, or writing down where it has got to — and records every
    change in what the array can promise.
-7. It answers the **administration and status endpoint** (below), so arrays can
+8. It answers the **administration and status endpoint** (below), so arrays can
    be listed, created, grown, shrunk, and stopped on a running system.
 
 The membership is the agent's own parked call: an accepted member's offer is
-held open and answered only when the membership ends, so no separate liveness
-protocol exists. A member the registry refuses is answered at once. An agent
-re-offering a device is also taken as proof that disk is back, which brings its
-re-probe forward instead of leaving it to wait out an escalated backoff — the
-commonest reason a re-offer cannot be placed is that its slot still holds that
-very device as a faulted member.
+held open and answered only when the membership ends, and the composer watches
+the kernel-attested agent that posted it. When that agent exits — its disk was
+pulled, or re-enumerated — the membership ends at the start of the next turn:
+the device's client fails every transfer from then on, it is faulted and
+retired from its array (fencing the disk out, so it returns as a rebuild
+target), and its membership is released, so the disk's fresh offer meets no
+stale duplicate. A member the registry refuses is answered at once, but an
+offer that cannot be taken *yet* — its window or endpoint still held by a
+membership that has not ended, or no room to hold it — is deferred (`Busy`,
+`OutOfMemory`) and re-offered on the agent's paced cadence rather than
+abandoned. An agent re-offering a device is also taken as proof that disk is
+back, which brings its re-probe forward instead of leaving it to wait out an
+escalated backoff.
+
+Each member's data window is lent to one block client at a time
+(`MemberWindow`): a client over it can be built only while no other holds it,
+and dropping the client returns it, so no two exclusive views of one window
+ever coexist. A window is unmapped only while no client holds it.
 
 Nothing polls. One wait-set carries the rendezvous and every live array's
 endpoint, and the single park's timeout is the soonest of the registry's
@@ -101,7 +124,7 @@ request whose origin the kernel cannot attest is refused unread.
 | Operation | Authority | What it does |
 | --- | --- | --- |
 | `ListArrays` | `CAP_SYSINFO_HW` | Pages the live arrays: identity, level, width, active members, health, rebuild/scrub progress. |
-| `ListMembers` | `CAP_SYSINFO_HW` | Pages every held device — an array member's slot and state, a device whose metadata names an unassembled array (`Held`), or an unaffiliated blank `Candidate`. |
+| `ListMembers` | `CAP_SYSINFO_HW` | Pages every held device — an array member's slot and state, a device whose metadata names an unassembled array (`Held`), or an unaffiliated blank `Candidate` — with the geometry the device reported when it was offered, so a listing opens no client and waits on no device. |
 | `Create` | `CAP_STORAGE_ADMIN` | Creates an array over named blank candidates. |
 | `Add` | `CAP_STORAGE_ADMIN` | Admits a blank candidate into an absent slot and starts its rebuild. |
 | `Remove` | `CAP_STORAGE_ADMIN` | Retires a **faulted** member, vacating its slot. |
@@ -273,9 +296,9 @@ into transfers:
 
 ## Limitations
 
-- A member is released only when an administrative `Remove` or `Stop` says so, so
-  a device that simply *vanishes* leaves its slot held until the composer
-  restarts.
+- A stripe cannot give a member up, so a stripe member whose agent exits stays
+  composed — the array is lost — and its membership is released only once the
+  array is stopped; its disk's re-offers are deferred meanwhile.
 - A stopped array's members are released but not re-composed automatically: each
   agent re-offers its device, and the array reassembles from that metadata as it
   would after a restart.
@@ -296,8 +319,10 @@ restarting; an array its members cannot serve is never brought online; composing
 one array marks only its own members; a member that turns up late joins the
 array already serving as the stale rebuild target it is; a stale claimant of an
 occupied slot and a member that disagrees about the array's shape are both held
-unused rather than refused; a refused assembly backs off and escalates; and
-releasing the last member forgets the array.
+unused rather than refused; a refused assembly backs off and escalates;
+releasing the last member forgets the array; a held window is recognised by the
+handle the offer names; and a membership is found by the agent holding it, whose
+release lets the same device register again.
 
 The live half is proven the same way (`src/service/tests.rs`): a member's
 metadata is read back from its own first block; a device that cannot report its
@@ -331,7 +356,21 @@ rebuilt untouched; a rebuild interrupted by a restart resumes from the recorded
 position rather than starting over, with the array's generation left alone so
 the record stays valid; a finished rebuild is recorded so the next start finds
 the copy current; a position the members refuse is reported and still owed; and
-an array that regains a copy reports rebuilding and then whole, once each.
+an array that regains a copy reports rebuilding and then whole, once each. Its
+node is published only as the runtime's last act, and a refused publication
+builds no runtime; a member whose agent exited is faulted and retired so its
+returning disk can take the slot, while a stripe keeps its departed member.
+
+A member's window is lent to one client at a time, dropping the client returns
+it, and a departed member's client refuses every transfer without reaching the
+device (`src/member/tests.rs`).
+
+An offer is vetted against what the kernel attests (`src/intake/tests.rs`): a
+genuine member or candidate offer is admitted, while one from a task no member
+node admitted, one claiming a node other than its sender's, one naming an
+endpoint its node does not declare, one naming the composer's own endpoint,
+and one whose window grant names another region are each refused; a grant handle is resolved from the composer's own grant
+records, never from a torn one.
 
 The administration endpoint's judgement is proven over the same doubles
 (`src/admin/tests.rs`): a blank device is held and reported as available; a
@@ -348,9 +387,10 @@ the right records and clamps an over-large limit; `Add` refuses an occupied slot
 and a non-candidate device, and stamps an admitted one as the rebuild target it
 is; `Remove` refuses a live member, and vacates a faulted one — faulted by making
 its disk refuse a real write, not by reaching into private state — releasing it
-and leaving the survivors a generation ahead of the disk it dropped; and `Stop`
+and leaving the survivors a generation ahead of the disk it dropped; `Stop`
 releases nothing when the orderly node removal reports busy, while a permitted
-stop tears the array down and releases every member.
+stop tears the array down and releases every member; and listing members opens
+no client over any window.
 
 The reassembly, escalation and composition arithmetic underneath is proven once
 in `lib/raidmeta` and `lib/raid`.

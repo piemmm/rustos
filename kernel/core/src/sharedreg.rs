@@ -49,6 +49,9 @@ struct Region {
     refs: usize,
     /// Set for a region a DMA master may reach.
     dma: Option<DmaRegion>,
+    /// Its node left the tree: it takes no new mapping or hold, so nothing
+    /// outside the removed device's session ever reaches it.
+    retired: bool,
 }
 
 impl Region {
@@ -63,9 +66,9 @@ impl Region {
 
 /// Custody of a region a DMA master may reach (`plans/OPEN-DEFECTS.md` D167).
 ///
-/// The region holds its node's custody binding for its whole life, so its
-/// frames can reach the quarantine however long a grantee outlives its
-/// creator.
+/// The region holds a custody reservation for its one block for its whole
+/// life, so its frames can reach the quarantine however long a grantee
+/// outlives its creator.
 #[derive(Clone, Copy)]
 struct DmaRegion {
     custodian: DmaCustodian,
@@ -187,17 +190,18 @@ pub struct DmaRegionCreated {
 /// at least `pages` pages below `addr_limit`, carved for `custodian`'s device,
 /// owned by `owner` and mapped coherent into its live space.
 ///
-/// The region binds its node's custody for its life. `owner`'s own unmap is
+/// The region reserves its node's custody for its life. `owner`'s own unmap is
 /// its word that the device is done with the region; should `owner` end
 /// still mapping it, the frames pass to the quarantine when the last mapping
 /// goes, because the device may still be mastering them.
 ///
 /// # Errors
 ///
-/// The custody's refusal to record the region ([`Errno::NotImplemented`]
-/// where none is wired, [`Errno::OutOfMemory`] where it cannot record), or
+/// The custody's refusal to reserve room for the region
+/// ([`Errno::NotImplemented`] where none is wired, [`Errno::OutOfMemory`]
+/// where it cannot, [`Errno::DeviceOffline`] where the device is gone), or
 /// the facility's carve or map error. A failed create leaves nothing
-/// allocated or bound.
+/// allocated or reserved.
 pub fn create_dma(
     facility: &dyn SharedMemFacility,
     owner: ProcessId,
@@ -207,15 +211,15 @@ pub fn create_dma(
 ) -> Result<DmaRegionCreated, Errno> {
     custodian
         .custody
-        .bind(custodian.node)
+        .reserve(custodian.node)
         .map_err(crate::live_producer::dma_errno)?;
-    let unbind = || custodian.custody.unbind(custodian.node);
+    let unreserve = || custodian.custody.unreserve(custodian.node);
     let chunk = facility
         .alloc_dma_region(pages, addr_limit)
-        .inspect_err(|_| unbind())?;
+        .inspect_err(|_| unreserve())?;
     let abandon = |chunks: &[SharedChunk]| {
         facility.free_region(chunks, SharedMemory::DmaCoherent);
-        unbind();
+        unreserve();
     };
     let chunks = match copy_chunks(&[chunk]) {
         Ok(chunks) => chunks,
@@ -271,6 +275,7 @@ fn record(
         pages,
         refs: 1,
         dma,
+        retired: false,
     };
     if state.regions.try_insert(id, entry).is_err() {
         return Err(chunks);
@@ -294,7 +299,8 @@ fn record(
 ///
 /// # Errors
 ///
-/// [`Errno::NotFound`] if the region was torn down, or the facility error.
+/// [`Errno::NotFound`] if the region was torn down,
+/// [`Errno::PermissionDenied`] if it is [`retire`]d, or the facility error.
 pub fn map(
     facility: &dyn SharedMemFacility,
     process: ProcessId,
@@ -305,6 +311,9 @@ pub fn map(
     let (chunks, pages, memory) = {
         let mut state = REGIONS.lock();
         let region = state.regions.get_mut(&id).ok_or(Errno::NotFound)?;
+        if region.retired {
+            return Err(Errno::PermissionDenied);
+        }
         let chunks = copy_chunks(&region.chunks)?;
         region.refs += 1;
         (chunks, region.pages, region.memory())
@@ -359,21 +368,44 @@ impl Drop for Unmapped<'_> {
 }
 
 /// Release `process`'s shared mapping based at `base`, tearing down its
-/// page-table entries; the reference goes when the returned [`Unmapped`] is
-/// dropped, and the region's frames are zeroed and freed at the last one.
+/// page-table entries in the calling task's own space; the reference goes
+/// when the returned [`Unmapped`] is dropped, and the region's frames are
+/// zeroed and freed at the last one.
 ///
 /// The caller drops the region's pages from the process's address-space
 /// snapshot first, so no copy can reach frames a release has freed.
 ///
 /// # Errors
 ///
-/// [`Errno::NotFound`] if `base` does not name a live shared mapping of
-/// `process`, or the facility's unmap error (the reference is released
-/// either way).
+/// As [`unmap_with`].
 pub fn unmap(
     facility: &dyn SharedMemFacility,
     process: ProcessId,
     base: u64,
+) -> Result<Unmapped<'_>, Errno> {
+    unmap_with(facility, process, base, None, |base, len| {
+        facility.unmap_region(base, len)
+    })
+}
+
+/// [`unmap`], tearing the page-table entries down through `unmap_entries`,
+/// which may reach a space other than the caller's own. With `region`, only
+/// a mapping of that region is released, so a caller that looked the base up
+/// earlier cannot release whatever was mapped there since.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] if `base` names no live shared mapping of `process`
+/// (of `region`, when given), or `unmap_entries`' error. The reference is
+/// released only once the entries are gone, or `unmap_entries` found none
+/// ([`Errno::NotFound`]): after any other failure some may still map the
+/// frames, so the region is kept allocated rather than freed under them.
+pub fn unmap_with(
+    facility: &dyn SharedMemFacility,
+    process: ProcessId,
+    base: u64,
+    region: Option<u64>,
+    unmap_entries: impl FnOnce(u64, usize) -> Result<(), Errno>,
 ) -> Result<Unmapped<'_>, Errno> {
     // Find and remove the mapping record and recover its region's length
     // under the lock; the reference is held by the returned guard.
@@ -382,7 +414,7 @@ pub fn unmap(
         let list = state.mappings.get_mut(&process.0).ok_or(Errno::NotFound)?;
         let pos = list
             .iter()
-            .position(|&(b, _)| b == base)
+            .position(|&(b, id)| b == base && region.is_none_or(|region| region == id))
             .ok_or(Errno::NotFound)?;
         let (_, id) = list.remove(pos);
         if list.is_empty() {
@@ -392,8 +424,45 @@ pub fn unmap(
         (id, region_len_bytes(region.pages))
     };
     let unmapped = Unmapped { facility, id, len };
-    facility.unmap_region(base, len)?;
-    Ok(unmapped)
+    match unmap_entries(base, len) {
+        Ok(()) => Ok(unmapped),
+        Err(Errno::NotFound) => Err(Errno::NotFound),
+        Err(err) => {
+            core::mem::forget(unmapped);
+            Err(err)
+        }
+    }
+}
+
+/// The base at which `process` maps region `id`, if it maps it.
+#[must_use]
+pub fn mapping_of(process: ProcessId, id: u64) -> Option<u64> {
+    REGIONS
+        .lock()
+        .mappings
+        .get(&process.0)?
+        .iter()
+        .find(|&&(_, mapped)| mapped == id)
+        .map(|&(base, _)| base)
+}
+
+/// Retire region `id` once the node it was conferred through has left the
+/// tree: it takes no new mapping, hold, delegation or conferral, while the
+/// mappings already made keep it alive until they go.
+pub fn retire(id: u64) {
+    if let Some(region) = REGIONS.lock().regions.get_mut(&id) {
+        region.retired = true;
+    }
+}
+
+/// Whether region `id` is [`retire`]d. A region that no longer exists is not.
+#[must_use]
+pub fn is_retired(id: u64) -> bool {
+    REGIONS
+        .lock()
+        .regions
+        .get(&id)
+        .is_some_and(|region| region.retired)
 }
 
 /// Drop one reference to region `id`, releasing its frames if this was the
@@ -423,8 +492,8 @@ fn release_ref(facility: &dyn SharedMemFacility, id: u64) {
                 facility.surrender_region(&region.chunks, &dma.custodian);
             } else {
                 facility.free_region(&region.chunks, SharedMemory::DmaCoherent);
+                dma.custodian.custody.unreserve(dma.custodian.node);
             }
-            dma.custodian.custody.unbind(dma.custodian.node);
         }
     }
 }
@@ -505,7 +574,8 @@ impl KernelHold {
 ///
 /// # Errors
 ///
-/// [`Errno::NotFound`] if the region was torn down, or
+/// [`Errno::NotFound`] if the region was torn down,
+/// [`Errno::PermissionDenied`] if it is [`retire`]d, or
 /// [`Errno::NotImplemented`] for a DMA region, which the kernel cannot read
 /// coherently, or when the facility cannot reach the frames (fail closed; the
 /// reference is released again).
@@ -513,6 +583,9 @@ pub fn kernel_hold(facility: &'static dyn SharedMemFacility, id: u64) -> Result<
     let (chunks, pages) = {
         let mut state = REGIONS.lock();
         let region = state.regions.get_mut(&id).ok_or(Errno::NotFound)?;
+        if region.retired {
+            return Err(Errno::PermissionDenied);
+        }
         // A hold reads through the cacheable direct map, which a device's
         // writes to a coherent region bypass.
         if region.dma.is_some() {
@@ -814,6 +887,111 @@ mod tests {
     }
 
     #[test]
+    fn a_mapping_is_found_by_region_and_torn_down_in_the_space_named() {
+        let fac = FakeFacility::new();
+        let owner = ProcessId(0x5_0040);
+        let grantee = ProcessId(0x5_0041);
+        let (owner_va, id) = create(&fac, owner, 1).expect("create");
+        let (grantee_va, _) = map(&fac, grantee, id).expect("grantee maps");
+        assert_eq!(mapping_of(grantee, id), Some(grantee_va));
+        assert_eq!(mapping_of(owner, id), Some(owner_va));
+        assert_eq!(mapping_of(grantee, id + 1), None);
+
+        assert_eq!(
+            unmap_with(&fac, grantee, grantee_va, Some(id + 1), |_, _| Ok(())).err(),
+            Some(Errno::NotFound),
+            "a base that maps another region is left alone"
+        );
+        let mut torn = Vec::new();
+        let unmapped = unmap_with(&fac, grantee, grantee_va, Some(id), |base, len| {
+            torn.push((base, len));
+            Ok(())
+        })
+        .expect("the teardown succeeds");
+        assert_eq!(torn, [(grantee_va, PAGE_SIZE)]);
+        assert_eq!(
+            fac.unmaps.lock().unwrap().len(),
+            0,
+            "the named space, not the caller's"
+        );
+        assert_eq!(mapping_of(grantee, id), None);
+        drop(unmapped);
+        drop(unmap(&fac, owner, owner_va).expect("owner unmaps"));
+        assert_eq!(fac.frees.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_teardown_that_failed_keeps_the_region_allocated() {
+        let fac = FakeFacility::new();
+        let owner = ProcessId(0x5_0042);
+        let grantee = ProcessId(0x5_0043);
+        let (owner_va, id) = create(&fac, owner, 1).expect("create");
+        let (grantee_va, _) = map(&fac, grantee, id).expect("grantee maps");
+        assert_eq!(
+            unmap_with(&fac, grantee, grantee_va, None, |_, _| Err(
+                Errno::BadAddress
+            ))
+            .err(),
+            Some(Errno::BadAddress)
+        );
+        assert_eq!(mapping_of(grantee, id), None);
+        drop(unmap(&fac, owner, owner_va).expect("owner unmaps"));
+        assert!(
+            fac.frees.lock().unwrap().is_empty(),
+            "an entry may still map the frames"
+        );
+    }
+
+    #[test]
+    fn a_teardown_that_found_nothing_mapped_releases_the_reference() {
+        let fac = FakeFacility::new();
+        let owner = ProcessId(0x5_0044);
+        let grantee = ProcessId(0x5_0045);
+        let (owner_va, id) = create(&fac, owner, 1).expect("create");
+        let (grantee_va, _) = map(&fac, grantee, id).expect("grantee maps");
+        assert_eq!(
+            unmap_with(&fac, grantee, grantee_va, None, |_, _| Err(Errno::NotFound)).err(),
+            Some(Errno::NotFound)
+        );
+        drop(unmap(&fac, owner, owner_va).expect("owner unmaps"));
+        assert_eq!(fac.frees.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_retired_region_takes_no_new_mapping_or_hold_but_keeps_its_own() {
+        let fac = FakeFacility::new();
+        let owner = ProcessId(0x5_0046);
+        let grantee = ProcessId(0x5_0047);
+        let (owner_va, id) = create(&fac, owner, 1).expect("create");
+        let (grantee_va, _) = map(&fac, grantee, id).expect("grantee maps");
+        assert!(!is_retired(id));
+        retire(id);
+        assert!(is_retired(id));
+        assert_eq!(
+            map(&fac, ProcessId(0x5_0048), id).err(),
+            Some(Errno::PermissionDenied)
+        );
+        let hold_fac: &'static FakeFacility = Box::leak(Box::new(FakeFacility::new()));
+        assert_eq!(
+            kernel_hold(hold_fac, id).err(),
+            Some(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            mapping_of(grantee, id),
+            Some(grantee_va),
+            "standing mappings stay"
+        );
+        drop(unmap(&fac, grantee, grantee_va).expect("grantee unmaps"));
+        assert!(
+            fac.frees.lock().unwrap().is_empty(),
+            "the owner still maps it"
+        );
+        drop(unmap(&fac, owner, owner_va).expect("owner unmaps"));
+        assert_eq!(fac.frees.lock().unwrap().len(), 1);
+        assert!(!is_retired(id), "a region that is gone is not retired");
+    }
+
+    #[test]
     fn reclaim_process_drops_references_and_frees_at_zero() {
         let fac = FakeFacility::new();
         let owner = ProcessId(0x5_0004);
@@ -942,34 +1120,35 @@ mod tests {
         assert_eq!(fac.frees.lock().unwrap().len(), 1);
     }
 
-    /// A custody recording every binding, surrender and release, so a test can
-    /// assert a DMA region holds its node's record for exactly its life.
+    /// A custody recording every reservation, surrender and return, so a test
+    /// can assert a DMA region reserves its node's custody for exactly its
+    /// life.
     #[derive(Default)]
     struct FakeCustody {
-        binds: Mutex<Vec<u32>>,
-        unbinds: Mutex<Vec<u32>>,
+        reserves: Mutex<Vec<u32>>,
+        unreserves: Mutex<Vec<u32>>,
         held: Mutex<Vec<(u32, u64, u64)>>,
-        refuse_bind: bool,
+        refuse: bool,
     }
 
     impl tairix_kernel_mem::DmaCustody for FakeCustody {
-        fn bind(&self, node: u32) -> Result<(), tairix_kernel_mem::DmaError> {
-            if self.refuse_bind {
+        fn reserve(&self, node: u32) -> Result<(), tairix_kernel_mem::DmaError> {
+            if self.refuse {
                 return Err(tairix_kernel_mem::DmaError::Alloc(
                     tairix_kernel_mem::AllocError::OutOfMemory,
                 ));
             }
-            self.binds.lock().unwrap().push(node);
+            self.reserves.lock().unwrap().push(node);
             Ok(())
+        }
+        fn unreserve(&self, node: u32) {
+            self.unreserves.lock().unwrap().push(node);
         }
         fn hold(&self, node: u32, generation: u64, block: tairix_kernel_mem::DmaBlock) {
             self.held
                 .lock()
                 .unwrap()
                 .push((node, generation, block.frame.start().as_u64()));
-        }
-        fn unbind(&self, node: u32) {
-            self.unbinds.lock().unwrap().push(node);
         }
     }
 
@@ -1000,7 +1179,7 @@ mod tests {
             *fac.map_memory.lock().unwrap(),
             [SharedMemory::DmaCoherent, SharedMemory::DmaCoherent]
         );
-        assert_eq!(*custody.binds.lock().unwrap(), [7]);
+        assert_eq!(*custody.reserves.lock().unwrap(), [7]);
 
         // The creator releases its own mapping while alive — its claim that
         // the device is stopped — so the last release frees normally.
@@ -1013,7 +1192,7 @@ mod tests {
             [SharedMemory::DmaCoherent]
         );
         assert!(fac.surrendered.lock().unwrap().is_empty());
-        assert_eq!(*custody.unbinds.lock().unwrap(), [7]);
+        assert_eq!(*custody.unreserves.lock().unwrap(), [7]);
     }
 
     #[test]
@@ -1029,14 +1208,17 @@ mod tests {
         // block, so the bytes are reported and nothing is freed yet.
         assert_eq!(reclaim_process(&fac, creator), 4 * PAGE_SIZE as u64);
         assert!(fac.frees.lock().unwrap().is_empty());
-        assert!(custody.unbinds.lock().unwrap().is_empty());
+        assert!(custody.held.lock().unwrap().is_empty());
 
         // The consumer's release is the last: the block goes to the node's
         // quarantine under the dead driver's generation, never the allocator.
         drop(unmap(&fac, consumer, consumer_va).expect("consumer unmaps"));
         assert!(fac.frees.lock().unwrap().is_empty());
         assert_eq!(*custody.held.lock().unwrap(), [(7, 3, made.phys_base)]);
-        assert_eq!(*custody.unbinds.lock().unwrap(), [7]);
+        assert!(
+            custody.unreserves.lock().unwrap().is_empty(),
+            "the surrender spent the region's reservation"
+        );
     }
 
     #[test]
@@ -1047,7 +1229,7 @@ mod tests {
         let made = create_dma(&fac, creator, custodian(custody), 1, 0).expect("carves");
         assert_eq!(reclaim_process(&fac, creator), PAGE_SIZE as u64);
         assert_eq!(*custody.held.lock().unwrap(), [(7, 3, made.phys_base)]);
-        assert_eq!(*custody.unbinds.lock().unwrap(), [7]);
+        assert!(custody.unreserves.lock().unwrap().is_empty());
         assert!(fac.frees.lock().unwrap().is_empty());
         assert_eq!(map(&fac, creator, made.id), Err(Errno::NotFound));
     }
@@ -1081,9 +1263,9 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_dma_create_leaves_nothing_bound_or_allocated() {
+    fn a_failed_dma_create_leaves_nothing_reserved_or_allocated() {
         let refusing: &'static FakeCustody = Box::leak(Box::new(FakeCustody {
-            refuse_bind: true,
+            refuse: true,
             ..FakeCustody::default()
         }));
         let fac = FakeFacility::new();
@@ -1117,14 +1299,14 @@ mod tests {
             Err(Errno::OutOfMemory)
         );
         assert_eq!(failing_map.frees.lock().unwrap().len(), 1);
-        // A block past the device's reach is refused, and bound nothing.
+        // A block past the device's reach is refused, and reserves nothing.
         let fac = FakeFacility::new();
         assert_eq!(
             create_dma(&fac, ProcessId(0x5_010B), custodian(custody), 1, 0x1000),
             Err(Errno::OutOfRange)
         );
-        assert_eq!(*custody.binds.lock().unwrap(), [7, 7, 7]);
-        assert_eq!(*custody.unbinds.lock().unwrap(), [7, 7, 7]);
+        assert_eq!(*custody.reserves.lock().unwrap(), [7, 7, 7]);
+        assert_eq!(*custody.unreserves.lock().unwrap(), [7, 7, 7]);
     }
 
     #[test]

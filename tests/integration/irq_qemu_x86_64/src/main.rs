@@ -50,7 +50,7 @@
 //! for this crate so `cargo build -p tairix-test-irq-qemu-x86-64`
 //! and `cargo xtask test --qemu` do the obvious thing; release
 //! builds that enable it are rejected by the `compile_error!` guard
-//! below (no hacks; — fail closed).
+//! below (no hacks; fail closed).
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -116,7 +116,7 @@ mod kernel {
     /// Set once the IRQ scenario has been driven, so a stray
     /// duplicate `BootCompleted` (which the catalogue disallows but
     /// the audit pipeline cannot statically prove) never re-enters
-    /// the test logic. — fail closed.
+    /// the test logic.
     static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
     // --- Test parameters ----------------------------------------
@@ -444,8 +444,8 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // No audit observer, no IRQ scenario, no QEMU exit affordance:
     // the run will time out under `tools/qemu::Runner`, which is
     // the correct fail-loud signal for "test-hooks feature was
-    // disabled for a QEMU enrolment that needs it".
-    // — no flaky tests; the timeout is deterministic.
+    // disabled for a QEMU enrolment that needs it"; the timeout is
+    // deterministic.
     loop {
         // SAFETY: `cli; hlt` is the documented parked-CPU sequence.
         unsafe {

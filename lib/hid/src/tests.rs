@@ -184,6 +184,43 @@ fn keyboard_duplicate_usage_presses_once() {
 }
 
 #[test]
+fn keyboard_modifier_usages_in_the_key_array_leave_the_bitmap_in_charge() {
+    // RightGUI in both the array and the bitmap was pressed twice, and its
+    // release from the array left the console's modifier state wrong.
+    let right_gui = MODIFIER_USAGE_BASE + 7;
+    let mut src = MockSource::new();
+    src.push(&kbd_report(0x80, &[0xE7, 0x04]));
+    src.push(&kbd_report(0x80, &[0x04]));
+    src.push(&kbd_report(0x00, &[0xE7]));
+    let mut kbd = BootKeyboard::new(src);
+    let mut out = [key(0, 0); 8];
+    assert_eq!(kbd.poll(&mut out), Ok(4));
+    assert_eq!(
+        out[..4],
+        [
+            key(0x04, 1),
+            key(right_gui, 1),
+            key(0x04, 0),
+            key(right_gui, 0)
+        ],
+        "one press and one release, from the bitmap; the array's copy changes nothing"
+    );
+}
+
+#[test]
+fn keyboard_duplicate_usage_releases_once() {
+    // A key-up for a key no longer held reached the console as a second
+    // release record.
+    let mut src = MockSource::new();
+    src.push(&kbd_report(0, &[0x04, 0x04, 0x05, 0x04]));
+    src.push(&kbd_report(0, &[0x05]));
+    let mut kbd = BootKeyboard::new(src);
+    let mut out = [key(0, 0); 8];
+    assert_eq!(kbd.poll(&mut out), Ok(3));
+    assert_eq!(out[..3], [key(0x04, 1), key(0x05, 1), key(0x04, 0)]);
+}
+
+#[test]
 fn keyboard_rejects_report_below_minimum() {
     // A report with fewer than the modifier + reserved bytes carries no
     // interpretable field and is refused; two bytes is the floor.

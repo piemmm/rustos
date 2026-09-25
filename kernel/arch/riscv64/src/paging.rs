@@ -167,8 +167,8 @@ impl PageTablePool {
 
     /// Allocate a fresh, zero-initialised table page.
     ///
-    /// Returns `None` when the pool is exhausted — callers handle it as
-    /// a closed-fail (: deterministic OOM, never panic).
+    /// Returns `None` when the pool is exhausted, which callers fail closed
+    /// on as a deterministic OOM, never a panic.
     pub fn alloc(&self) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
         let idx = self.used.fetch_add(1, Ordering::SeqCst);
         if idx >= POOL_SIZE {

@@ -1,72 +1,24 @@
-//! TAIRiX virtio register-window backends + driver-crate entry point.
+//! TAIRiX virtio bus driver-crate entry point.
 //!
-//! This crate provides the **architecture-specific bus bindings** for
-//! the bus-agnostic virtio split-virtqueue protocol that lives in
-//! [`tairix_virtio`] (`lib/virtio`): the [`PciBackend`] / [`MmioBackend`]
-//! register-window adapters and the driver-crate [`register`] entry.
-//!
-//! Neither concrete [`Transport`] implementation lives here. Both the
-//! MMIO transport ([`MmioTransport`]) and the PCI transport
-//! ([`PciTransport`]) depend only on the bounds-checked [`tairix_abi`]
-//! register window and the protocol types, so both live in
-//! [`tairix_virtio`] where this crate's kernel-side consumers *and* an
-//! arch-neutral user-space virtio driver process can construct them
-//! without a `drivers/* → drivers/*` edge (the
-//! `lib/usb` ↔ `drivers/bus/usb` precedent). Both are re-exported below
-//! so existing `tairix_drv_bus_virtio::{MmioTransport, PciTransport}`
-//! import sites keep resolving.
-//!
-//! The queue management, owned DMA-slab abstraction, and the
-//! in-process [`MockHost`] / [`MockTransport`] doubles do **not** live
-//! here — they live in [`tairix_virtio`] so that the device-class
-//! drivers (`drivers/storage/virtio_blk`, `drivers/network/virtio_net`)
-//! consume them through `lib/*` rather than depending on this bus
-//! driver crate, which the charter forbids (`drivers/* → lib/*`
-//! only). The protocol surface is re-exported below so the kernel-side
-//! consumers that legitimately bind both a concrete transport and the
-//! protocol types (`kernel/virtio`, the production binary, the QEMU
-//! integration tests) can name it through this crate.
+//! Neither concrete transport lives here: the MMIO transport
+//! ([`MmioTransport`]) and the PCI transport ([`PciTransport`]) depend only
+//! on the bounds-checked [`tairix_abi`] register window and the protocol
+//! types, so they live in [`tairix_virtio`] with the queue management and the
+//! DMA-slab abstraction, where an arch-neutral user-space driver can build
+//! them without a `drivers/* → drivers/*` edge. The two transports and the PCI
+//! common-configuration table ([`transport_pci`]) are re-exported for the
+//! kernel-side consumers that bind a transport through this crate.
 //!
 //! # Public surface
 //!
-//! Per a driver crate's only public function is
-//! [`register`]. The other public items are *types* re-exported through
-//! the [`Transport`] surface so consumers can construct a concrete
-//! transport; they are not driver entry points.
+//! A driver crate's only public function is [`register`]; the re-exports
+//! are types, not driver entry points.
 //!
-//! # Safety
-//!
-//! The MMIO and PCI backends reach device registers exclusively through
-//! the bounds-checked accessors on [`tairix_abi::RegisterWindow`], the
-//! capability-checked window the kernel's MMIO-map facility mints for
-//! the bus driver. The backends themselves perform no raw pointer
-//! arithmetic and export no `unsafe` across this crate's public
-//! boundary; the single `unsafe` construction site for a window lives
-//! in `lib/abi` and is reached only by the kernel mapper.
-
 #![no_std]
-#![forbid(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-pub mod backend;
-
-pub use backend::{MmioBackend, PciBackend};
-
-// The bus-agnostic protocol now lives in `lib/virtio`. Re-export it so
-// existing `tairix_drv_bus_virtio::{...}` import sites in the kernel-side
-// consumers keep resolving without each one having to also name the
-// `tairix-virtio` crate directly (one canonical
-// definition, re-exported, never duplicated).
-pub use tairix_virtio::{
-    BounceBuffer, ChainSegment, ChainView, Direction, DmaSlab, MmioTransport, MockHost,
-    MockTransport, PciTransport, PciTransportWindows, PoolId, SlabFreeFn, SplitQueue, Status,
-    Transport, UsedToken, VirtioError, VirtioHost, VIRTIO_MSI_NO_VECTOR,
-};
-// The PCI transport's common-configuration offset table
-// (`transport_pci::common`) is named directly by the kernel-side
-// provisioning wiring; re-export the module so those sites keep
-// resolving through this crate.
-pub use tairix_virtio::transport_pci;
+pub use tairix_virtio::{transport_pci, MmioTransport, PciTransport};
 
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
@@ -81,11 +33,8 @@ const REGISTER_HANDLE_MARKER: u64 = 0x5654_4E54_0000_0001; // "VTNT" + tag.
 /// Driver entry point.
 ///
 /// Verifies the host already granted [`CapabilityId::DRV_LOAD`] and
-/// returns the registration marker handle. The cross-arch transport
-/// performs no probe work in `register`; concrete instantiation
-/// happens when [`Transport`] objects are constructed by the
-/// virtio-blk / virtio-net driver crates against an already-bound
-/// PCI or MMIO bus handle.
+/// returns the registration marker handle; it probes nothing, since a
+/// transport is built by the class driver over its node's register window.
 ///
 /// # Errors
 ///
@@ -100,4 +49,32 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
         return Err(DriverError::PermissionDenied);
     }
     DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
+}
+
+#[cfg(test)]
+mod tests {
+    use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind};
+
+    struct Host {
+        granted: bool,
+    }
+
+    impl DriverHost for Host {
+        fn has_capability(&self, cap: CapabilityId) -> bool {
+            self.granted && cap == CapabilityId::DRV_LOAD
+        }
+        fn kind(&self) -> DriverKind {
+            DriverKind::UserSpace
+        }
+    }
+
+    #[test]
+    fn register_requires_drv_load() {
+        assert_eq!(
+            crate::register(&Host { granted: false }),
+            Err(DriverError::PermissionDenied)
+        );
+        let handle = crate::register(&Host { granted: true }).expect("registers");
+        assert_ne!(handle.as_u64(), 0);
+    }
 }

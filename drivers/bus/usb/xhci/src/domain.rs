@@ -66,13 +66,11 @@ pub enum ControllerDomainEvent {
     /// The controller faulted and the whole subtree entered its one shared
     /// grace window.
     Recovering,
-    /// The controller demonstrably returned (a reset succeeded, or it began
-    /// answering again) — from inside the window or from an already-failed
-    /// state — and the subtree recovered with no reboot.
+    /// A reset brought the controller back inside the window and the subtree
+    /// recovered with no reboot.
     Recovered,
     /// The grace window elapsed with the controller still faulted: it is
-    /// failed closed, but stays *recoverable* — a later successful reset
-    /// clears it.
+    /// failed closed and nothing tries it again.
     FailedClosed,
 }
 
@@ -109,13 +107,11 @@ fn classify(before: FaultDomainState, after: FaultDomainState) -> Option<Control
 ///
 /// It owns exactly one [`FaultDomain`] (the controller node) and exposes the
 /// recovery sequencing the loop needs: open the window when a fault is first
-/// seen ([`begin_recovery`](Self::begin_recovery)), fold the outcome of each
-/// reset attempt ([`note_reset`](Self::note_reset)), fail closed on the
-/// event-timed one-shot ([`poll`](Self::poll) at the deadline
-/// [`wait_timeout`](Self::wait_timeout) names), and never busy-wait (all
-/// waiting is the loop's one-shot timer, never a spin). Every method is
-/// pure given the caller's monotonic reading, so the machine is proven
-/// host-side.
+/// seen ([`begin_recovery`](Self::begin_recovery)) and fold the outcome of
+/// each reset attempt ([`note_reset`](Self::note_reset)), the loop retrying
+/// on the one-shot [`wait_timeout`](Self::wait_timeout) names and never
+/// spinning. Every method is pure given the caller's monotonic reading, so
+/// the machine is proven host-side.
 pub struct ControllerHealth {
     domain: FaultDomain,
 }
@@ -147,14 +143,22 @@ impl ControllerHealth {
     /// Whether the controller has been failed closed (the grace window elapsed
     /// without it returning).
     ///
-    /// A failed-closed controller that raises no interrupt and will not reset
-    /// is declared dead: the serve loop stops retrying it (fail closed) rather
-    /// than re-opening its window forever, so a genuinely dead controller
-    /// cannot masquerade as merely recovering. Only a demonstrated return
-    /// ([`note_reset(true, …)`](Self::note_reset)) clears it.
+    /// Terminal: a controller that will not reset is not tried again, so a
+    /// dead one never passes for one still recovering.
     #[must_use]
     pub const fn is_failed_closed(&self) -> bool {
         matches!(self.domain.state(), FaultDomainState::Offline)
+    }
+
+    /// Whether a reset attempt is still owed: the controller faulted and no
+    /// reset has yet brought it back, with the grace window still open.
+    ///
+    /// The serve loop drives nothing through the controller in this state:
+    /// the device table a failed reset left behind is not trusted, so its
+    /// children stay published and wait for the next attempt.
+    #[must_use]
+    pub const fn is_recovering(&self) -> bool {
+        matches!(self.domain.state(), FaultDomainState::Recovering)
     }
 
     /// Record that a controller fault has been observed at monotonic `now_ns`,
@@ -174,9 +178,8 @@ impl ControllerHealth {
     /// edge to audit.
     ///
     /// A successful reset (`ok`) is the controller demonstrably returning: the
-    /// subtree recovers to `Healthy` (clearing an already-failed-closed
-    /// controller with no reboot). A failed reset advances the grace window on
-    /// this reading: while the window is still open the controller stays
+    /// subtree recovers to `Healthy`. A failed reset advances the grace window
+    /// on this reading: while the window is still open the controller stays
     /// `Recovering` (the loop re-arms its one-shot to retry), and once the
     /// window has elapsed it fails closed to `Offline`.
     pub fn note_reset(&mut self, ok: bool, now_ns: u64) -> Option<ControllerDomainEvent> {
@@ -186,15 +189,6 @@ impl ControllerHealth {
         } else {
             self.domain.poll(now_ns)
         };
-        classify(before, after)
-    }
-
-    /// Advance the grace window on a pure time tick at monotonic `now_ns`,
-    /// returning the edge to audit: a `Recovering` controller whose window has
-    /// closed fails closed to `Offline`.
-    pub fn poll(&mut self, now_ns: u64) -> Option<ControllerDomainEvent> {
-        let before = self.domain.state();
-        let after = self.domain.poll(now_ns);
         classify(before, after)
     }
 
@@ -286,6 +280,7 @@ mod tests {
         assert_eq!(health.state(), FaultDomainState::Healthy);
         assert_eq!(health.owner(), 0x1234);
         assert!(!health.is_failed_closed());
+        assert!(!health.is_recovering());
         assert_eq!(health.wait_timeout(0), None);
     }
 
@@ -332,6 +327,7 @@ mod tests {
             Some(ControllerDomainEvent::Recovered)
         );
         assert_eq!(health.state(), FaultDomainState::Healthy);
+        assert!(!health.is_recovering());
         // Recovered: no window left, so the loop parks unbounded again.
         assert_eq!(health.wait_timeout(MID), None);
     }
@@ -342,6 +338,7 @@ mod tests {
         health.begin_recovery(0);
         assert_eq!(health.note_reset(false, MID), None);
         assert_eq!(health.state(), FaultDomainState::Recovering);
+        assert!(health.is_recovering(), "another attempt is owed");
         assert_eq!(health.wait_timeout(MID), Some(CONTROLLER_GRACE_NS - MID));
     }
 
@@ -354,41 +351,12 @@ mod tests {
             Some(ControllerDomainEvent::FailedClosed)
         );
         assert!(health.is_failed_closed());
-        // Failed closed: no timer is armed, so the loop parks unbounded rather
-        // than spinning a retry against a dead controller.
-        assert_eq!(health.wait_timeout(PAST), None);
-    }
-
-    #[test]
-    fn an_idle_poll_fails_a_stale_recovering_controller_closed() {
-        let mut health = ControllerHealth::new(0);
-        health.begin_recovery(0);
-        // No reset attempt landed; the one-shot fires past the deadline.
-        assert_eq!(health.poll(PAST), Some(ControllerDomainEvent::FailedClosed));
-        assert!(health.is_failed_closed());
-    }
-
-    #[test]
-    fn a_poll_inside_the_window_is_a_no_op() {
-        let mut health = ControllerHealth::new(0);
-        health.begin_recovery(0);
-        assert_eq!(health.poll(MID), None);
-        assert_eq!(health.state(), FaultDomainState::Recovering);
-    }
-
-    #[test]
-    fn a_failed_closed_controller_recovers_on_a_later_successful_reset() {
-        // Sticky-but-recoverable: even after failing closed, a demonstrated
-        // return recovers the controller with no reboot.
-        let mut health = ControllerHealth::new(0);
-        health.begin_recovery(0);
-        health.poll(PAST);
-        assert!(health.is_failed_closed());
-        assert_eq!(
-            health.note_reset(true, PAST + 1),
-            Some(ControllerDomainEvent::Recovered)
+        assert!(
+            !health.is_recovering(),
+            "a failed-closed controller is owed nothing"
         );
-        assert_eq!(health.state(), FaultDomainState::Healthy);
+        // Failed closed: no timer is armed, so nothing is retried.
+        assert_eq!(health.wait_timeout(PAST), None);
     }
 
     #[test]

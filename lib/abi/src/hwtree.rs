@@ -1196,6 +1196,14 @@ impl HwResource {
         self.len
     }
 
+    /// Whether `[base, base + len)` lies wholly inside `[base, base +
+    /// length)` of this resource, whatever its kind; an end that overflows
+    /// is never inside.
+    #[must_use]
+    pub fn spans(&self, base: u64, len: u64) -> bool {
+        interval_contains(self.base, self.len, base, len)
+    }
+
     /// Per-resource flags: [`Self::DMA_TRANSLATED`] on a translated DMA
     /// window, and the kind's own bits on a duty or request record.
     #[must_use]
@@ -1250,8 +1258,8 @@ impl HwResource {
     /// admits a published child node **only** when every resource it
     /// requests is covered by one of the emitting bus driver's own grants,
     /// so an autoloaded child driver can never be minted more authority than
-    /// the driver that discovered it (no ambient authority;
-    /// — never widen a defence). It is defined once here, beside the
+    /// the driver that discovered it (no ambient authority). It is defined
+    /// once here, beside the
     /// type whose semantics it depends on, so the kernel
     /// never re-decides per-kind containment.
     ///
@@ -1685,11 +1693,11 @@ pub struct HwNode {
     /// bus/hub/controller/expander/root complex) that owns a group of
     /// devices beneath it can blip: its driver publishes the domain's
     /// [`FaultDomainState`] here through the `hw_node_health` syscall so the
-    /// reactive tree observers (the device manager) learn a hub/controller
-    /// reset is *one* fault-domain event rather than N spurious child
-    /// removals. A leaf device node has no domain of its own and always
-    /// reports [`FaultDomainState::Healthy`]; health is per *owner*, read
-    /// from the tree, never hard-coded.
+    /// leaf drivers beneath it attribute a stalled transfer to the owner's
+    /// reset rather than to their own device ([`ancestor_imposed_status`]).
+    /// A leaf device node has no domain of its own and always reports
+    /// [`FaultDomainState::Healthy`]; health is per *owner*, read from the
+    /// tree, never hard-coded.
     ///
     /// Stored as the raw [`FaultDomainState::as_u8`] discriminant (mirroring
     /// `class`) so the `#[repr(C)]` layout stays a deterministic single byte
@@ -1799,7 +1807,7 @@ impl HwNode {
     /// sibling function nodes of **one** physical device stay attributable
     /// to it: every function node of the same device under the same parent
     /// carries the same non-zero address (a USB host controller reports
-    /// the device's xHCI slot id), while two identical devices on one bus
+    /// the device's bus position), while two identical devices on one bus
     /// carry distinct addresses. Purely descriptive — driver binding
     /// matches [`HwMatchKey`]s and never reads the address.
     #[must_use]
@@ -3797,6 +3805,21 @@ mod tests {
         assert_eq!(
             ancestor_imposed_status_from_snapshot(&blob[..len - 1], 3),
             BlkStatus::Ok
+        );
+    }
+
+    #[test]
+    fn a_span_is_inside_only_when_wholly_contained_and_its_end_representable() {
+        let window = HwResource::mmio(0x1000, 0x2000);
+        assert!(window.spans(0x1000, 0x2000), "the whole window");
+        assert!(window.spans(0x1800, 0x10), "a strict interior");
+        assert!(!window.spans(0x0FFF, 0x10), "starts below");
+        assert!(!window.spans(0x2FF0, 0x20), "runs past the end");
+        assert!(!window.spans(u64::MAX, 2), "an end that overflows");
+        let lines = HwResource::irq(40, 4);
+        assert!(
+            lines.spans(43, 1) && !lines.spans(44, 1),
+            "a line range is a span too"
         );
     }
 }

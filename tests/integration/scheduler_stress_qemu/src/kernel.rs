@@ -678,9 +678,8 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     // timer ISR — not merely by the cooperative `step()` loop — on
     // every CPU. A silent regression to cooperative-only scheduling
     // would preserve the workload-correctness check above but break
-    // the security model (: a runaway task must not
-    // indefinitely block another CPU's progress); this is the test
-    // that catches it.
+    // the security model, since a runaway task must not block another
+    // CPU's progress indefinitely; this is the test that catches it.
     let total_preempts = sched.total_preemption_count();
     let _ = writeln!(
         com1,

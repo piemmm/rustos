@@ -218,7 +218,7 @@ adding it updates `AGENTS.md` §3 and `PLAN.md` in the same change, §6):
 - **Selection:** nodes with `HwMatchKind::Usb` keys (the per-interface
   nodes the HCD emits), grouped into physical devices by the bus-local
   device address each node carries (`HwNode::address`, the device's
-  xHCI slot id the HCD reports — `0` = unreported, never grouped), plus
+  bus position the HCD reports — `0` = unreported, never grouped), plus
   their parent controller nodes for the `-t` topology view.
 - **Output follows `usbutils`:** default `Bus NNN Device NNN: ID
   vvvv:pppp Vendor Product` lines — **one line per physical device**,
@@ -295,7 +295,7 @@ Each increment ends green on the whole-project gate (§7).
   database compiled through the real `lib/devids` pipeline.
   Reality-driven decisions: one line renders per *physical device* —
   the interface nodes the HCD emits are grouped by their shared
-  `HwNode::address` (the xHCI slot id; two identical devices carry
+  `HwNode::address` (the device's bus position; two identical devices carry
   distinct addresses, an address-less node is never guessed into a
   group) — with 1-based ordinal bus/device numbers in stable bus order
   (TAIRiX has no Linux devnum registry — the §1.4 documented

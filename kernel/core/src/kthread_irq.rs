@@ -104,9 +104,8 @@ where
         // A cooperative yield re-enqueues the kthread and resumes here on
         // the next dispatch; the shared loop then re-polls the table. A
         // service kthread cannot "vanish" mid-wait the way a user task
-        // can (no `exit` syscall reaps it), so the yield always succeeds —
-        // there is no scheduler error to surface (: the
-        // failure modes that exist on the syscall path do not apply here).
+        // can (no `exit` syscall reaps it), so the yield always succeeds and
+        // there is no scheduler error to surface.
         //
         // The deadline is intentionally not consulted here: this yield
         // always returns promptly on the kthread's next dispatch (it never

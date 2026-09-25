@@ -10,11 +10,12 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_log::{Event, Sink};
+use tairix_log::{Event, Level, Sink};
 
-/// One captured record: its id and its rendered fields.
+/// One captured record: its id, its level, and its rendered fields.
 struct Captured {
     id: u32,
+    level: Level,
     fields: Vec<(String, String)>,
 }
 
@@ -34,6 +35,15 @@ impl RecordingSink {
         self.events.borrow().iter().map(|e| e.id).collect()
     }
 
+    /// The level of the first record with `id`.
+    pub(crate) fn level_of(&self, id: u32) -> Option<Level> {
+        self.events
+            .borrow()
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.level)
+    }
+
     /// The rendered value of `key` on the first record with `id`.
     pub(crate) fn field_of(&self, id: u32, key: &str) -> Option<String> {
         self.events
@@ -49,6 +59,7 @@ impl Sink for RecordingSink {
     fn write_event(&self, event: &Event<'_>) {
         self.events.borrow_mut().push(Captured {
             id: event.id.0,
+            level: event.level,
             fields: event
                 .fields
                 .iter()

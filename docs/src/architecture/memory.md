@@ -625,8 +625,8 @@ the same `alloc_order_under`, zeroes it and cleans it to memory, and records
 it in the shared-region registry (`kernel/core::sharedreg`) like any other
 region — except that every mapping of it, the creator's and each grantee's,
 is `DMA_COHERENT` (`SharedMemory::DmaCoherent`), so no mapping can hold a
-line the device never sees. The region binds the creator's node quarantine
-at creation and unbinds it when freed. The creator's own unmap is its word
+line the device never sees. The region reserves room in the creator's node
+quarantine at creation, and returns it when freed. The creator's own unmap is its word
 that its device is done with the region, exactly as `dma_free` is for a
 carve, so a driver keeps its mapping while its device may master the
 region. Should the creator end — however it ends — still mapping it, the
@@ -638,21 +638,48 @@ driver programmed may still be mastering them. The syscall contract is in
 **A dead driver's DMA memory is quarantined, not freed.** A driver can end
 with its device still mastering a carve — a crash, a kill, an exit that
 skipped the reset — and a frame returned to the allocator then could be
-written by that device after another process owns it. So a space's first
-carve binds a [`DmaCustodian`][DmaCustodian]: the driver's hardware-tree node,
-its admission generation, and the custody (`kernel/core::dmaquarantine`) the
-kernel keeps per node. When the space drops,
-[`DmaWindowMap::surrender_into`][DmaWindowMap] zeroes each block, cleans it
-to the point of coherency, unmaps it, and hands the frames to that custody,
-which holds them until a later driver for the node declares its device reset
-(`dma_quiesced`); only blocks of an earlier generation than the declaring
+written by that device after another process owns it. So each carve names a
+[`DmaCustodian`][DmaCustodian] — the driver's hardware-tree node, its
+admission generation, and the custody (`kernel/core::dmaquarantine`) the
+kernel keeps per node — and the space keeps its first carve's custodian for
+its life. Every carve reserves room in that custody for its own surrender, so
+when the space drops, [`DmaWindowMap::surrender_into`][DmaWindowMap] zeroes
+each block, cleans it to the point of coherency, unmaps it, and hands the
+frames over without allocating; a `dma_free` returns the reservation, even one
+that fails part-way, since its block can no longer be surrendered. The custody
+holds the frames until a later driver for the node declares its device reset
+(`dma_quiesced`): only blocks of an earlier generation than the declaring
 driver's are freed, and a block that arrives after its node was already
 released at a higher generation is freed on arrival. A surprise hot-removal
-retires the node at the admission high-water mark. Custody never fails: a
-block it cannot record keeps its frames allocated for good. The syscall
-contract and the audit records are in
-[the syscall reference](syscalls.md); the design is
-`plans/OPEN-DEFECTS.md` D167.
+retires the node for good, freeing everything held for it now and on arrival;
+an orderly removal proves nothing about a device that may still run, so what
+its drivers left stays held until a reset by a driver of that node frees it.
+
+Three facts the kernel enforces make those proofs sound. A node has at most
+one driver whose threads may still run — the address-space registry refuses a
+second admission (`AdmitError::NodeBusy`) and frees the node once its driver's
+last thread is down, before the exit can be observed — so a reset by the live
+one postdates every transfer an earlier one programmed. A node id is never
+reissued within a boot: the hardware-tree store is seeded once with the boot
+discovery ids, issues every later id from a high-water mark, and refuses a
+publish once they are spent, so a reset or a removal speaks only for the
+device the memory was handed to. And no carve is taken for a node the tree
+has dropped: both kinds of removal are reported to the quarantine, which
+refuses the node from then on, and it opens a record only for a node the tree
+still holds, checked under the lock that report takes (`DmaError::DeviceGone`),
+so a carve between a removal and its report is one made just before it. A
+node's record lives while the node is in the tree, so a driver cycling one
+buffer never rebuilds it, and goes once the node has left and nothing is held
+or reserved for it.
+
+What keeps a driver of a removed node from holding its authority is
+admission itself: it claims the node, mints the node's grants, then checks the
+live tree and refuses the whole admission (`DeviceOffline`) if the node has
+gone, and a removal landing after that check finds the grants and revokes
+them. Such a driver can therefore carve nothing and publish no child. A block
+no reservation stands behind keeps its frames allocated for good. The syscall contract and
+the audit records are in [the syscall reference](syscalls.md); the design is
+`plans/OPEN-DEFECTS.md` D167 and D225.
 
 [DmaCustodian]: ../../tairix_kernel_mem/dma/struct.DmaCustodian.html
 
@@ -698,7 +725,10 @@ in `kernel/virtio`) turns an `MmioRegion` into an
 [ABI `RegisterWindow`](../drivers/bus.md#register-window-hand-off) for
 the in-kernel driver host, and the `mmio_map` syscall facility (`plans/PI.md`
 P10 chunk 5d-0), which maps a granted device window into the caller's
-*own running* address space (§7e).
+*own running* address space (§7e). A window lives only as long as its grant:
+when the device's node leaves the tree, `MmioWindowMap::retain` unmaps every
+window no remaining grant covers from the holder's space, and the kernel shoots
+each one down on every CPU before the removal returns.
 
 The mapper is **capability-agnostic**; the gate is
 `kernel/sec::mmio`, whose `map_mmio` / `unmap_mmio` verify

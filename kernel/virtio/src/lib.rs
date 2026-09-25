@@ -19,8 +19,8 @@
 //! Both walks are generic over the transport builder, so this crate
 //! names only `lib/*` types and never the concrete
 //! `drivers/bus/virtio` transports — keeping ring 0 off any
-//! `drivers/bus/*` crate (: `kernel/* → lib/*`, never
-//! a driver). The production builders are
+//! `drivers/bus/*` crate, since `kernel/*` depends on `lib/*` and never on a
+//! driver. The production builders are
 //! `tairix_drv_bus_virtio::{PciTransport, MmioTransport}::new`.
 //!
 //! # Why a separate crate

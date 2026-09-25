@@ -4645,7 +4645,7 @@ mod tests {
             "manifest struct mirror: {h}"
         );
         // The bind-table entry embeds the hwtree match key, so the header
-        // pulls in tairix_hwtree.h (: no re-declaration).
+        // pulls in tairix_hwtree.h rather than re-declaring it.
         assert!(
             h.contains("#include \"tairix_hwtree.h\""),
             "hwtree header included for tairix_hw_match_key_t: {h}"

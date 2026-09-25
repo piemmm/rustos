@@ -345,10 +345,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::U64,
-        // Drawing randomness needs no capability (: a
-        // normal request must not block and is available to every
-        // task); it is a pure observer, so — like `clock_get` — it is
-        // not audited, to avoid drowning the audit log.
+        // Drawing randomness needs no capability: a normal request must not
+        // block and is available to every task. It is a pure observer, so,
+        // like `clock_get`, it is not audited, to avoid drowning the log.
         required_capability: None,
         audit: false,
     },
@@ -3224,6 +3223,29 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // Watching grants nothing: the watch says only that a process has
         // gone. Not audited: a service watches once per client it holds
         // state for, and an exit is the audit trail's own record already.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CALL_PEER_NODE,
+        name: "call_peer_node",
+        arg_count: 4,
+        args: [
+            // The endpoint id, the in-service ticket, then the node-out
+            // pointer and its capacity.
+            AbiType::IpcEndpoint,
+            AbiType::Handle,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the record-bytes-written-or-`-errno` convention, like
+        // `call_peer_origin`.
+        ret: AbiType::U64,
+        // Gated like `call_peer_holds` by the endpoint's receive capability
+        // against its owner, in the handler. Not audited: a read whose
+        // decision is the server's to record.
         required_capability: None,
         audit: false,
     },

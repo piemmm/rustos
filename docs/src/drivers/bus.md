@@ -362,9 +362,10 @@ multi-device enumeration engine live in the `lib/usb`
 (`tairix-usb`) crate — the USB analogue of `lib/virtio` — so this driver
 and an arch-neutral user-space keyboard driver can both build on the same
 engine without depending on each other (`AGENTS.md` §17.4). This driver
-crate adds the §8 `register` entry, the §18.3 `BIND_KEYS` bind table, and
-the PCI BAR / hwtree `wiring` over that protocol; the live controller
-bring-up for the VL805 is the remaining P10 metal increment, and QEMU
+crate adds the §18.3 `BIND_KEYS` bind table and, host-tested in its `lib`
+target, the controller bring-up, the per-interface URB service, the table of
+published interface nodes and their transports, and the controller's fault
+domain, which its `Run` binary composes with the live kernel calls. QEMU
 models no Pi USB timing, so the host suite is the emulation artefact and
 metal acceptance stays a checklist. The protocol behaviour described
 below is implemented in `lib/usb` (see `docs/src/lib/usb.md`).
@@ -443,22 +444,35 @@ bytes live in a growable bank of DMA chunks behind the crate's
 `DmaBank` seam — the `SlabBank` over the host's owned `DmaSlab`
 allocations in production, a plain shared buffer in tests. The
 engine's first chunk holds the 64-byte-aligned shared `Layout` (DCBAA,
-ERST, command ring, event segment, input context, the root device's
-output context and EP0 ring, the control data buffer, the scratchpad),
+ERST, command ring, event segment, input context, the idle control
+binding the EP0 cursor rests on while no slot is active, the scratchpad),
 sized exactly to the controller's reported geometry and refused if its
 base is misaligned or the bank cannot supply it. Every concurrently
-served device's region (output context, EP0 / interrupt-IN / bulk
-transfer rings, report buffers, and bulk staging) and every addressed
-hub's status-change ring + report live in chunks grown on attach and
-released on detach, so the served-device count is bounded only by the
-controller's reported slots and genuine memory exhaustion — never a
-compile-time budget.
+served device's region (output context, EP0 ring and control data
+buffer, interrupt-IN / bulk transfer rings, report buffers, and bulk
+staging) and every addressed hub's status-change ring + report live in
+chunks grown on attach and released on detach, so the served-device count
+is bounded only by the controller's reported slots and genuine memory
+exhaustion — never a compile-time budget.
 
 `UsbDevice::start` first declares the controller quiesced to its DMA bank
 (`DmaBank::device_quiesced`) — an `Xhci` exists only once `open` has halted
 and reset it, so rings a dead predecessor left may leave the kernel's DMA
 quarantine — then zeroes the shared chunk, publishes the ERST entry and the
-rings' Link TRBs, and starts the controller through `Xhci::start`.
+rings' Link TRBs, and starts the controller through `Xhci::start`. A start
+that fails once the controller may be running resets it before the chunk goes,
+and keeps the chunk if the controller will not reset; a `UsbDevice` resets its
+controller the same way whenever it is dropped. Every slot the engine gives up
+— a detached device or hub, a failed attach, or a device with no interface the
+engine serves (refused `Unsupported` before anything is configured, never
+reported attached) — is disabled, and its chunks go back to the bank only once
+the controller confirms Disable Slot: an unconfirmed slot keeps its DCBAA entry
+and has its chunks withheld (`DmaBank::withhold`), the local bookkeeping is
+still freed so a re-plug enumerates, and a failed attach is not re-driven onto
+it. A teardown untracks the slot's endpoints before issuing Disable Slot, so a
+completion landing during the wait is drained rather than re-arming the slot. A
+confirmed controller reset (`reset_and_reenumerate`) releases every chunk so
+withheld; a reset that fails releases none.
 `UsbDevice::attach_root_port(port)` then brings the device on a root-hub
 port to the configured state (§4.3): port reset when the port is not
 yet enabled — awaited to completion exactly as a downstream hub port's is
@@ -485,7 +499,18 @@ or zero-configuration descriptor is `BadMagic`),
 `wTotalLength`, then exactly that many bytes — never an over-long
 request a buggy device might mishandle; the interface descriptors'
 class triples and `bConfigurationValue` / `bInterfaceNumber` drive the
-steps below — never assumed), and `SET_CONFIGURATION`.
+steps below — never assumed), and `SET_CONFIGURATION`. A device serving a
+mass-storage interface whose `iSerialNumber` is non-zero has its serial number
+read in between: the LANGID table, then the string in the first language
+listed (never an assumed one), each descriptor header first and then at
+exactly the `bLength` it claims. Any fault on that read — a STALL, a timeout,
+a transaction error — or a malformed answer only leaves the device without a
+serial. A transaction fault on an address or descriptor read re-drives the
+device after a port reset, on a fresh slot and a rebuilt EP0 ring, which the
+aborted read's TDs would otherwise be replayed from. Every control transfer
+that does not complete has EP0 taken back before its error returns (Reset
+Endpoint for a halt, Stop Endpoint for a timeout, then Set TR Dequeue onto a
+rebuilt ring).
 
 The interrupt-IN endpoint is configured (Configure Endpoint), and each
 HID interface is put in the protocol it needs. A **mouse** honours
@@ -562,14 +587,17 @@ selects the boot fallback, and a STALLed `GET_PROTOCOL` is taken as the boot
 protocol that was asked for). The endpoint is not
 primed during enumeration: `next_report` arms one transfer only when the
 class driver has submitted a URB and is waiting for that report. A hub
-reports interface class `0x09`, not HID: it keeps only its control endpoint,
-because this engine reads a hub's downstream ports over EP0 hub-class
-`GET_STATUS`, never its interrupt status-change endpoint. Arming that
-endpoint for a hub would make the hub deliver asynchronous status-change
-reports that interleave with — and fault — those EP0 control transfers (a
-transfer event whose interrupt-TRB pointer is not in the control wait's watch
-list → `REJECT_ADDRESS_MISMATCH`, then a wedged ring; the metal symptom was
-the hub's per-port `GET_STATUS` reads returning the all-ones sentinel).
+reports interface class `0x09`, not HID, and is served as a hub alone: no
+interface its configuration claims gets a device entry, which would alias the
+region its hub entry holds. Its interrupt status-change endpoint is captured
+during enumeration but armed only once the hub is installed and marked:
+arming it inline would make the hub deliver asynchronous status-change
+reports that interleave with — and fault — the EP0 hub-class transfers that
+follow (a transfer event whose interrupt-TRB pointer is not in the control
+wait's watch list → `REJECT_ADDRESS_MISMATCH`, then a wedged ring; the metal
+symptom was the hub's per-port `GET_STATUS` reads returning the all-ones
+sentinel). A hub reporting no such endpoint is left unwatched, never watched
+on an endpoint an earlier hub reported.
 
 Devices *downstream* of an enumerated hub (every external device on the
 Pi 4B hangs off the onboard `2109:3431` VIA hub) are each reached on
@@ -577,9 +605,10 @@ their **own xHCI slot** — the `bring_up` walk attaches every connected
 downstream port, so a keyboard and
 a storage stick are served together. `UsbDevice::attach_downstream_device
 (down_port, speed)` keeps the hub addressed on its slot and gives the
-new device the EP0 ring and output context of a freshly claimed device region
-(`control`/`address_device`/`next_report` follow the active slot through
-`ep0_ring_off`/`output_ctx_off`), then Enable Slot + Address Device
+new device the EP0 ring, output context, and control data buffer of a freshly
+claimed device region (`control`/`address_device`/`next_report` follow the
+active slot through `ep0_ring_off`/`output_ctx_off`/`ctrl_data_off`), then
+Enable Slot + Address Device
 with a slot context carrying the **Route String** (the hub's downstream
 port, §8.9) and — for a full/low-speed device behind the high-speed hub
 — the **transaction-translator** Hub Slot ID and Port Number (§6.2.2),
@@ -612,9 +641,10 @@ Before addressing anything behind it, the bring-up walk first
 **marks the hub as a hub** in its own slot context
 (`configure_hub_slot`): it reads the hub descriptor (`bNbrPorts` and the
 `wHubCharacteristics` TT Think Time, `read_hub_topology` — requested at
-the full base-descriptor size production stacks send, over a zeroed
-staging buffer, and retried a bounded three attempts when the hub
-answers with a refusal STALL or a reply that is not a hub descriptor;
+the full base-descriptor size production stacks send, only the bytes
+delivered decoded, by `HubDescriptor::decode` alone, and retried a bounded
+three attempts when the hub answers with a refusal STALL or a reply that is
+not a hub descriptor;
 a truncated 8-byte read is an exchange no mainstream host issues, and a
 real Realtek RTS5411 answered it with garbage on a successful transfer,
 refusing the whole tier behind it), copies the
@@ -682,7 +712,11 @@ Interrupt-on-Short-Packet on the IN data stage, and watch only the
 addresses of their own in-flight TRBs: a completion for a TRB never
 issued, an undecodable completion code, an unexpected event type, or a
 stalled request is a `DeviceFault`, and every wait is bounded by the
-engine's poll budget (`AGENTS.md` §2.1 / §2.9).
+engine's poll budget (`AGENTS.md` §2.1 / §2.9). A slot's data stages move
+through the control data buffer in its own region, and IN data is copied out
+before any other context is activated. A timed-out transfer stays armed, so a
+device that answers one late writes only its own region, never the data of
+another device's or a hub's transfer (a port status it could otherwise spoof).
 
 `UsbDevice` implements the `tairix_abi::driver::input::ReportSource`
 seam (hoisted into `lib/abi` because its consumer,
@@ -700,6 +734,60 @@ buffer — including a `BootKeyboard` polling decoded key events over
 the mock controller — plus the fail-closed paths (forged residual,
 stalled class request, empty port, double enumeration, undersized or
 misaligned DMA region).
+
+### Controller recovery keeps the devices that come back
+
+A controller that latches `USBSTS.HSE` or `HCHalted` raises no further
+interrupt until it is reset (xHCI §4.24.1); on the Pi 4 the VL805 does so
+during a downstream hot-removal teardown. The HCD recovers it the way the
+Linux USB core's `usb_reset_and_verify_device` does: **a controller reset does
+not remove the controller's children.**
+
+- Each recovery attempt runs `UsbDevice::reset_and_reenumerate` with every
+  interface node still published.
+- After a successful reset each node is matched by identity
+  (`interfaces::Interfaces::reconcile` over `UsbDevice::device_identity`) to
+  the device-table index now serving its device, wherever the walk placed it:
+  a device's bus position — root port and Route String — plus its descriptor
+  identity (vendor, product, `bcdDevice`, device class triple, and the served
+  interface's number and class triple) and, for a storage device, serial
+  number (`DeviceIdentity::recognises`). The walk
+  re-enumerates from index 0 in port order, so a device an earlier unplug left
+  behind a hole, or one hot-plugged out of port order, comes back at another
+  index and keeps its node, id, buffer, and bound class driver there. A node
+  whose device is found nowhere is retracted, and a served device no node
+  claims is published; no two nodes serve one index. Two storage devices of
+  one model that traded places are told apart by their serial numbers, and a
+  storage device without one is never recognised across the reset, so its
+  node is retracted and republished; a serial that no longer reads counts as
+  another device — a driver reload, never a driver bound to the wrong one.
+- A held URB is answered only once its device's fate is known: the reissuable
+  `WouldBlock` where the device came back (the reset discarded whatever
+  transfer it had armed, and the class driver submits again), `NotFound` where
+  its node was retracted. Told to reissue before the reset, a class driver
+  would submit again during it, and that submission could reach a device that
+  replaced its own.
+- A reset that fails leaves the nodes published while the controller's grace
+  window (`domain::ControllerHealth`) runs. Nothing is driven through the
+  controller meanwhile — the device table a failed reset leaves behind is not
+  trusted: a report poll is held for the next attempt, any other transfer is
+  answered `WouldBlock` so its class driver's own recovery paces the retry, and
+  the window's one-shot retries the reset. If the window elapses first the
+  subtree fails closed for good: every interface node is retracted, so the
+  device manager unloads their drivers, and the HCD exits with the reason
+  logged, handing the controller's memory to the kernel to quarantine.
+- Keeping the node is the only way a device survives the reset with its
+  driver, because node ids are never reissued: a retracted node's driver is
+  unloaded for good, and the device manager holds nothing across a reset.
+- Every node is published with a shared buffer created for it, which no other
+  node ever carries: removing a node retires the regions it conferred, so the
+  kernel refuses to confer them again, and a new node's driver finds nothing of
+  the previous device. The HCD releases its own mapping of a retracted node's
+  buffer; a driver still mapping it keeps it alive until it exits. The call
+  endpoint is reused. Removal revokes the previous driver's grant to it before
+  `hw_remove_node` returns, and a node is published on the endpoint only after
+  every call still queued there has been answered `NotFound`, so nothing the
+  previous driver posted reaches the new device (`plans/USB.md` U10).
 
 ## VL805 USB bus driver — `drivers/bus/usb/vl805`
 
@@ -749,8 +837,8 @@ DMA grants the bin received on the VL805 PCI node (`node A`), and
 so firmware-before-bring-up holds by construction (node B does not exist
 until the reload runs). The bin holds only `CAP_MAILBOX` + `CAP_HW_EMIT`:
 it forwards the BAR/DMA grants without ever mapping them (`AGENTS.md` §4
-— least privilege), and `drivers/input/usb_kbd` binds node B
-(`tairix_hid::KEYBOARD_BIND_KEYS`) to bring the controller up.
+— least privilege), and the host-controller driver `drivers/bus/usb/xhci`
+binds node B (its `BIND_KEYS`) to bring the controller up.
 
 The property-message *layout* lives once in `lib/vcmailbox`
 (`encode_xhci_reset` / `decode_xhci_reset_response` and the
@@ -765,7 +853,12 @@ firmware answers property requests one at a time in posting order, so that
 answer proves any request a dead predecessor left in flight is finished and
 its property buffer may leave the kernel's DMA quarantine. An exchange drains
 a property completion naming another buffer — that predecessor's, answered
-late — rather than taking it for its own. QEMU
+late — rather than taking it for its own. A request of its own the firmware
+leaves unanswered keeps the buffer the firmware's: the next exchange first
+waits for that reply and, until it lands, neither stages nor posts anything.
+The service's buffer is owned by a `DmaMailbox`, which withholds it rather
+than freeing it when dropped with such a request outstanding, so no exit path
+of the service can return memory the firmware may still write. QEMU
 models no `VideoCore`, so
 the policy is host-proven (in the driver crate's `lib` target) against the
 protocol-faithful `lib/vcmailbox` mock firmware and the reload-and-publish
@@ -821,7 +914,7 @@ resolve (phys_base, len)
                                                     2. MmioMap::map  (NO_CACHE, guard pages)
                                                     3. emit MmioMapped (audit 1040)
         ◄────────────── RegisterWindow ─────────────┘
-   wrap in PciBackend / MmioBackend (virtio transport)
+   hand to PciTransport / MmioTransport (lib/virtio)
 ```
 
 The kernel maps the device's *own* physical frames with caching
@@ -1076,9 +1169,9 @@ decided by the match key, not the class. An absent function (the all-ones
 vendor sentinel) fails closed with `NotFound`, never a fabricated node
 (`AGENTS.md` §2.9). The node's **identity is kernel-assigned on publish**:
 `describe_function` returns it with placeholder id/parent, and the
-`hw_emit_node` syscall stamps a fresh, collision-free id and the emitter's
-own matched node as parent, so a bus driver can neither forge its tree
-position nor collide with an existing id (`AGENTS.md` §4 / §5.4 / §18.1).
+`hw_emit_node` syscall stamps an id no node has held before in this boot and
+the emitter's own matched node as parent, so a bus driver can neither forge
+its tree position nor collide with an id (`AGENTS.md` §4 / §5.4 / §18.1).
 No resource capabilities are attached here either — those are minted at
 the load gate. This is the PCI half of `plans/PI.md` Stage 4.HW item 5b.
 
@@ -1124,7 +1217,8 @@ node, carrying one `HwMatchKey::usb` of the device's `vid:pid` and that
 captured interface class — never a fabricated one (`AGENTS.md` §18.5) —
 so the `usb_kbd`/`usb_mouse` class-wildcard `BIND_KEYS` resolve
 against it exactly as `devmgr` will. The node's `HwNode::address` is
-the device's xHCI slot id, so the sibling interface nodes of one
+the device's bus position (its root port above its Route String), which a
+controller reset keeps, so the sibling interface nodes of one
 composite device carry the same non-zero address and an inventory
 consumer (`lsusb`) attributes them to a single physical device —
 purely descriptive, never part of bind matching. It fails closed with

@@ -175,9 +175,8 @@ pub struct Scheduler<A: SchedulerArch> {
     /// counter exists so integration tests (and future audit code) can
     /// assert that preemption is actually firing — a silent regression
     /// to cooperative scheduling would otherwise pass the workload-
-    /// correctness checks while breaking the security model
-    /// (: a runaway task on one CPU must not be able to
-    /// indefinitely block another).
+    /// correctness checks while breaking the security model: a runaway task
+    /// on one CPU must not be able to block another indefinitely.
     preemptions: Box<[AtomicU64]>,
     /// Per-CPU **current-task** slot.
     ///
@@ -666,9 +665,8 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// On every call the per-CPU preemption counter is incremented.
     /// The counter is exposed via [`Self::preemption_count`] /
     /// [`Self::total_preemption_count`] so integration tests can
-    /// assert that preemption fires (: a silent
-    /// regression to cooperative scheduling must fail loudly, not
-    /// pass).
+    /// assert that preemption fires, so a silent regression to cooperative
+    /// scheduling fails loudly.
     ///
     /// # Why this entry point does *not* call [`Self::step`]
     ///

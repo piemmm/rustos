@@ -160,8 +160,8 @@ pub enum InitError {
     ///
     /// The slot is set-once per boot; a second publish indicates a
     /// programmer error (e.g. a test harness pre-installed a hook,
-    /// or `kernel_main` was re-entered). — fail
-    /// closed: report and halt, no silent recovery.
+    /// or `kernel_main` was re-entered): reported and halted, never silently
+    /// recovered.
     DispatcherAlreadyInstalled(AlreadyInstalledError),
 }
 
@@ -1609,6 +1609,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // the `unpark` just before the dispatch loop, once that state is
         // installed. It is also the one admission that names its id rather
         // than drawing one: `init` is expected at PID 1.
+        let registered_live = live.as_ref().map(alloc::sync::Arc::downgrade);
         let admitted = match live {
             Some(live) => crate::kthread::spawn_user_kthread_with_stack_live(
                 self.scheduler,
@@ -1690,6 +1691,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // stream rather than an ambient device.
         {
             let mut aspaces = self.aspaces.write();
+            if let Some(live) = registered_live.and_then(|weak| weak.upgrade()) {
+                aspaces.set_live_space(sec_id, &live);
+            }
             aspaces.set_streams(sec_id, DescriptorTable::standard());
             // Record PID 1's reserved user-stack span beside its streams,
             // under the same write lock, so the stack-growth fault path can
@@ -1772,7 +1776,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         caps: CapabilitySet,
         grants: &[HwResource],
         args: &[&[u8]],
-        node_id: Option<u32>,
+        node: Option<crate::spawn::DriverNode<'_>>,
     ) -> Result<u64, Errno> {
         // Build the production runtime-spawn context over the same live
         // subsystems PID-1 admission uses and drive the deferred-load admit
@@ -1814,7 +1818,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             // all-closed table above is the whole stream story.
             alloc::vec::Vec::new(),
             grants,
-            node_id,
+            node,
             // A boot-floor driver is a kernel-trusted bootstrap principal
             // admitted before any untrusted code runs; mint its
             // process-instance identity from the shared per-boot counter
@@ -1948,12 +1952,6 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             return Ok(());
         }
 
-        // Withdraw the address-space-registry entry: reclaims the driver's
-        // device-resource grants, standard streams, resource limits, and
-        // matched-node record together, so no stale grant or mapping survives
-        // the driver (the same withdrawal the `exit` syscall path will drive).
-        self.aspaces.write().withdraw(sec_id);
-
         // Release every shared-memory mapping the driver held, dropping each
         // reference and zeroing + freeing any region whose last reference this
         // releases. Mirrors the `exit` syscall's reclaim; the region frames
@@ -1984,6 +1982,11 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // the kernel unmasks no lines on teardown; a later driver that wants
         // the same line re-issues `irq_bind`.
         let _ = self.irq.release_for(sec_id);
+
+        // Withdraw the address-space-registry entry last of the driver's
+        // resources: its grants, streams, limits and matched-node record, so
+        // the node takes a successor only once nothing of this one holds on.
+        self.aspaces.write().withdraw(sec_id);
 
         // Drop the capability record last, so a concurrent `cap_query` racing
         // this teardown never observes a task whose caps vanished while the
@@ -2600,7 +2603,11 @@ fn run_phases<A: KernelArch>(
         .with_dma_quarantine(build_dma_quarantine(
             state.arch.as_ref(),
             state.frame_allocator,
+            hw_tree,
         ))
+        // Revoking a removed device's windows from its driver unmaps another
+        // process's pages, which every CPU must stop translating.
+        .with_tlb_shootdown(A::cross_cpu_tlb_shootdown(state.arch.as_ref()))
         // Serve `signal` through the scheduler-side producer built above
         // (`plans/SPAWN.md` SP7b); the default `NULL_PROCESS_SIGNAL` keeps
         // `signal` fail-closed `NotImplemented` until this is installed.
@@ -2726,16 +2733,18 @@ fn live_producers<A: KernelArch>(
     )
 }
 
-/// Build (and `Box::leak`) the DMA quarantine over the kernel frame allocator
-/// and the arch direct map it scrubs through, or the fail-closed
+/// Build (and `Box::leak`) the DMA quarantine over the kernel frame allocator,
+/// the arch direct map it scrubs through and the hardware tree whose devices
+/// it holds memory for, or the fail-closed
 /// [`crate::devres::NULL_DMA_QUARANTINE`] when the port wires no direct map.
 fn build_dma_quarantine<A: KernelArch>(
     arch: &'static A,
     frames: &'static FrameAllocator,
+    devices: &'static (dyn crate::hwtree::HwTreeSource + 'static),
 ) -> &'static (dyn crate::devres::DmaQuarantineFacility + 'static) {
     match arch.direct_phys_map() {
         Some(physmap) => Box::leak(Box::new(crate::dmaquarantine::DmaQuarantine::new(
-            frames, physmap,
+            frames, physmap, devices,
         ))),
         None => &crate::devres::NULL_DMA_QUARANTINE,
     }
@@ -3197,7 +3206,7 @@ mod tests {
                 caps,
                 &[],
                 &args,
-                Some(7),
+                Some(crate::spawn::DriverNode::matched(7)),
             )
             .expect("the deferred-load admit returns the driver's PID");
         assert_ne!(pid, 0, "a real scheduler task id is minted");

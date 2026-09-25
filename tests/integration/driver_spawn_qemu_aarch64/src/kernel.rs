@@ -342,8 +342,7 @@ fn bring_up_board() -> u64 {
 /// The leaked-`'static` kernel subsystems the production dispatch hook and
 /// spawn context borrow — the vertical's analogue of `KernelState`, lifted
 /// by one-shot `Box::leak` publishes exactly as `kernel_core::kernel_main`
-/// does (: a one-shot publish, not a global mutable
-/// static).
+/// does, never a global mutable static.
 struct Subsystems {
     frames: &'static FrameAllocator,
     sched: &'static Scheduler<Aarch64BinArch>,
@@ -516,6 +515,12 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         qemu_exit::exit_failure(FAIL_SPAWN);
     }
     let tree = [HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root), device];
+    // The inventory the node is matched in, which admission checks still
+    // holds it once the driver's grants are minted.
+    let inventory = tairix_kernel::hwtree_store::HwTreeStore::new();
+    if inventory.seed(tree.to_vec()).is_err() {
+        qemu_exit::exit_failure(FAIL_SPAWN);
+    }
 
     // The driver candidate the discovered store yields: the signed image at
     // `DRIVER_PATH_STR` with a bind table that matches the node.
@@ -571,8 +576,17 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let args: [&[u8]; 3] = [b"drvstub", REPLY_ENDPOINT_ARG, REPLY_PORT_NAME];
     // The matched node id (the device node, id 2) the kernel records against
     // the spawned driver so its `hw_emit_node` children parent under it.
-    let mut loader =
-        SpawnDriverLoader::new(&trusted, &source, &SERIAL_SINK, &spawn, &args, Some(2));
+    let mut loader = SpawnDriverLoader::new(
+        &trusted,
+        &source,
+        &SERIAL_SINK,
+        &spawn,
+        &args,
+        Some(tairix_kernel_core::DriverNode {
+            id: 2,
+            tree: &inventory,
+        }),
+    );
 
     // The autoload walk: match each node against the candidates, run
     // the signed `Host::load` gate on the winner, and spawn it with the

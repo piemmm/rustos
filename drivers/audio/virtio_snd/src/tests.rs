@@ -260,6 +260,15 @@ fn periods_in_flight() -> u32 {
     u32::try_from(PERIODS_IN_FLIGHT).expect("three")
 }
 
+/// Periods lent to the device on either transfer queue.
+fn lent<T: Transport>(device: &VirtioSnd<'_, T>) -> usize {
+    [&device.txq, &device.rxq]
+        .into_iter()
+        .flat_map(|queue| queue.carried.iter())
+        .filter(|carried| matches!(carried, Some(Transfer::Lent(_))))
+        .count()
+}
+
 fn params() -> ConfigureParams {
     ConfigureParams {
         endpoint: 0,
@@ -912,4 +921,427 @@ fn a_channel_map_naming_a_position_this_stack_cannot_place_is_left_unpublished()
     assert_eq!(decode_chmap(&record, 2), Some(ChannelMap::STEREO));
     assert_eq!(decode_chmap(&record, 0), None);
     assert_eq!(decode_chmap(&record, 9), None);
+}
+
+/// A device opened on the QEMU shape, with endpoint 0 configured, started,
+/// and one period's worth of frames handed to it.
+fn playing_device<'h>(
+    log: &Rc<RefCell<DeviceLog>>,
+    host: &'h MockHost,
+    clock: &'h StepClock,
+) -> VirtioSnd<'h, MockTransport> {
+    let mut device =
+        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), log), host, clock).expect("comes up");
+    device.configure(0, &params()).expect("configured");
+    device.start(0, Frames::ZERO).expect("started");
+    let mut ring = Ring::new();
+    ring.bind()
+        .write(&vec![0x21u8; PERIOD_FRAMES as usize * 4])
+        .expect("written");
+    device.service(0, &mut ring.bind()).expect("serviced");
+    assert!(
+        device.streams[0]
+            .periods
+            .iter()
+            .any(|period| period.posted.is_some()),
+        "the device holds a period"
+    );
+    device
+}
+
+/// Make the device answer every later control request with `status`.
+fn refuse_control_requests(transport: &mut MockTransport, status: u32) {
+    transport.install_shim(
+        wire::CONTROL_QUEUE,
+        Box::new(move |chain: &mut ChainView<'_>| {
+            let reply = chain
+                .device_write
+                .first_mut()
+                .ok_or(VirtioError::DeviceFault)?;
+            wire::put_u32(reply, 0, status);
+            Ok(u32::try_from(wire::HDR_LEN).expect("small"))
+        }),
+    );
+}
+
+#[test]
+fn a_release_the_device_refuses_keeps_every_period_it_still_holds() {
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let mut device = playing_device(&log, &host, &clock);
+    refuse_control_requests(&mut device.transport, wire::status::IO_ERR);
+    let posted = device.streams[0]
+        .periods
+        .iter()
+        .filter(|period| period.posted.is_some())
+        .count();
+    let held = host.slabs_outstanding();
+    assert_eq!(device.release(0), Err(DriverError::DeviceFault));
+    assert_eq!(
+        lent(&device),
+        posted,
+        "nothing the device may still be reading is freed under it"
+    );
+    assert_eq!(
+        host.slabs_outstanding(),
+        held - (PERIODS_IN_FLIGHT - posted),
+        "only the periods it was never handed are freed"
+    );
+    assert!(
+        device.streams[0].configured.is_none(),
+        "the stream is let go"
+    );
+}
+
+/// The mock device, shared by the driver under test and the host playing it.
+type Device = Rc<RefCell<MockTransport>>;
+
+/// Open `spec` on a host that answers the control queue on each wait while
+/// the device keeps every transfer until the test drains its queue.
+fn device_holding_transfers<'h>(
+    spec: &DeviceSpec,
+    log: &Rc<RefCell<DeviceLog>>,
+    host: &'h MockHost,
+    clock: &'h StepClock,
+) -> (VirtioSnd<'h, Device>, Device) {
+    let mut transport = mock_device(spec, log);
+    transport.set_synchronous_notify(false);
+    let transport = transport.into_shared();
+    host.attach(&transport);
+    let device = VirtioSnd::open(Rc::clone(&transport), host, clock).expect("comes up");
+    (device, transport)
+}
+
+/// Frames that fill every period a stream keeps in flight.
+fn every_period() -> alloc::vec::Vec<u8> {
+    vec![0x21u8; (PERIOD_FRAMES * periods_in_flight()) as usize * 4]
+}
+
+#[test]
+fn a_released_streams_periods_are_freed_only_once_the_device_hands_them_back() {
+    // A device answering a release with transfers still out breaks the
+    // specification, and freeing them anyway hands it memory it may still
+    // be reading.
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let (mut device, transport) =
+        device_holding_transfers(&DeviceSpec::qemu(), &log, &host, &clock);
+    device.configure(0, &params()).expect("configured");
+    device.start(0, Frames::ZERO).expect("started");
+    let mut ring = Ring::new();
+    ring.bind().write(&every_period()).expect("written");
+    device.service(0, &mut ring.bind()).expect("serviced");
+    let held = host.slabs_outstanding();
+    device.release(0).expect("released");
+    assert_eq!(lent(&device), PERIODS_IN_FLIGHT);
+    assert_eq!(
+        host.slabs_outstanding(),
+        held,
+        "none is freed under the device"
+    );
+    assert_eq!(
+        transport.borrow_mut().drain_queue(wire::TX_QUEUE),
+        Ok(PERIODS_IN_FLIGHT)
+    );
+    device.configure(0, &params()).expect("configured again");
+    assert_eq!(lent(&device), 0, "each came back and was freed");
+}
+
+#[test]
+fn two_streams_of_a_direction_keep_their_periods_in_flight_on_the_one_queue() {
+    // Each stream's completions reach it whichever of the two posted first,
+    // and the shared ring holds every period both keep in flight.
+    let mut spec = DeviceSpec::qemu();
+    spec.streams.insert(1, spec.streams[0]);
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let (mut device, transport) = device_holding_transfers(&spec, &log, &host, &clock);
+    let mut rings = [Ring::new(), Ring::new()];
+    for (endpoint, ring) in (0u16..).zip(rings.iter_mut()) {
+        let stream_params = ConfigureParams {
+            endpoint,
+            ..params()
+        };
+        device
+            .configure(endpoint, &stream_params)
+            .expect("configured");
+        device.start(endpoint, Frames::ZERO).expect("started");
+        ring.bind().write(&every_period()).expect("written");
+        let report = device
+            .service(endpoint, &mut ring.bind())
+            .expect("serviced");
+        assert_eq!(report.transferred, PERIOD_FRAMES * periods_in_flight());
+    }
+    assert_eq!(
+        transport.borrow_mut().drain_queue(wire::TX_QUEUE),
+        Ok(2 * PERIODS_IN_FLIGHT)
+    );
+    // The second stream collects first, and meets the first stream's
+    // completions ahead of its own.
+    device.service(1, &mut rings[1].bind()).expect("serviced");
+    device.service(0, &mut rings[0].bind()).expect("serviced");
+}
+
+#[test]
+fn a_transfer_queue_is_sized_for_every_stream_the_device_has() {
+    assert_eq!(transfer_queue_size(1), 16);
+    assert_eq!(transfer_queue_size(2), 32);
+    assert_eq!(transfer_queue_size(4), 64);
+    assert_eq!(transfer_queue_size(MAX_DEVICE_ENDPOINTS), 512);
+}
+
+#[test]
+fn a_device_with_a_shallow_event_queue_still_comes_up() {
+    // A fixed pool of event buffers overflowed a ring the device made smaller.
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let mut transport = mock_device(&DeviceSpec::qemu(), &log);
+    transport.set_queue_max(wire::EVENT_QUEUE, 8);
+    let device = VirtioSnd::open(transport, &host, &clock).expect("comes up");
+    assert_eq!(device.eventq.size(), 8);
+}
+
+#[test]
+fn a_queue_too_shallow_for_what_it_carries_is_refused_before_it_is_programmed() {
+    // Two streams keep eighteen transfer descriptors in flight; a ring capped
+    // below that refused the last period only after its frames were taken.
+    for (queue, max) in [
+        (wire::CONTROL_QUEUE, 1),
+        (wire::TX_QUEUE, 16),
+        (wire::RX_QUEUE, 16),
+    ] {
+        let log = Rc::new(RefCell::new(DeviceLog::default()));
+        let mut transport = mock_device(&DeviceSpec::qemu(), &log);
+        transport.set_queue_max(queue, max);
+        let transport = transport.into_shared();
+        let host = MockHost::new();
+        let clock = StepClock::new();
+        assert_eq!(
+            VirtioSnd::open(Rc::clone(&transport), &host, &clock).err(),
+            Some(DriverError::Unsupported),
+            "queue {queue}"
+        );
+        assert_eq!(
+            transport.borrow_mut().publish_raw_used(queue, 0, 0),
+            Err(VirtioError::DeviceFault),
+            "queue {queue} was never given its ring"
+        );
+    }
+}
+
+#[test]
+fn a_period_the_ring_has_no_room_for_leaves_its_frames_in_the_ring() {
+    // Periods a refused release lent the device still hold descriptors.
+    let mut spec = DeviceSpec::qemu();
+    spec.streams.truncate(1);
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let (mut device, transport) = device_holding_transfers(&spec, &log, &host, &clock);
+    device.configure(0, &params()).expect("configured");
+    device.start(0, Frames::ZERO).expect("started");
+    let mut ring = Ring::new();
+    ring.bind().write(&every_period()).expect("written");
+    device.service(0, &mut ring.bind()).expect("serviced");
+    refuse_control_requests(&mut transport.borrow_mut(), wire::status::IO_ERR);
+    assert!(device.release(0).is_err());
+    assert_eq!(lent(&device), PERIODS_IN_FLIGHT);
+
+    refuse_control_requests(&mut transport.borrow_mut(), wire::status::OK);
+    device.configure(0, &params()).expect("configured again");
+    device.start(0, Frames::ZERO).expect("started again");
+    ring.bind().write(&every_period()).expect("written");
+    let report = device.service(0, &mut ring.bind()).expect("serviced");
+    assert_eq!(report.transferred, 2 * PERIOD_FRAMES, "what the ring held");
+    assert_eq!(
+        ring.bind().readable_frames(),
+        Ok(PERIOD_FRAMES),
+        "the rest waits"
+    );
+}
+
+#[test]
+fn one_drain_takes_no_more_than_a_ring_of_event_completions() {
+    // Each buffer goes straight back, so a device completing them as fast as
+    // they are reposted would hold the drain for ever.
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let mut device =
+        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let ring = device.eventq.size();
+    // Head 0 is reposted under head 0 each time it comes back.
+    for _ in 0..2 * ring {
+        device
+            .transport
+            .publish_raw_used(wire::EVENT_QUEUE, 0, 0)
+            .expect("in the ring");
+    }
+    device.drain_events().expect("drained");
+    assert!(
+        device.eventq.poll_used().is_ok(),
+        "a ring's worth is still waiting"
+    );
+}
+
+#[test]
+fn an_event_slot_completed_without_a_write_is_not_read_as_its_last_event() {
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let mut device =
+        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let slot = device.event_slots[0].expect("head 0 is posted");
+    let at = usize::from(slot) * wire::event::LEN;
+    let len = u32::try_from(wire::event::LEN).expect("small");
+    let region = device.events.full_region_mut();
+    wire::put_u32(&mut region[at..], 0, wire::event::JACK_DISCONNECTED);
+    wire::put_u32(&mut region[at..], 4, 0);
+    device
+        .transport
+        .publish_raw_used(wire::EVENT_QUEUE, 0, len)
+        .expect("in the ring");
+    device.drain_events().expect("drained");
+    let first = core::mem::replace(&mut device.pending, AudioInterrupt::NONE);
+    assert_eq!(first.jack_changed, 1);
+    // Reposted under the same head, the slot comes back with nothing written.
+    device
+        .transport
+        .publish_raw_used(wire::EVENT_QUEUE, 0, len)
+        .expect("in the ring");
+    device.drain_events().expect("drained");
+    assert_eq!(device.pending.jack_changed, 0);
+}
+
+#[test]
+fn a_transfer_the_device_completed_without_a_status_is_refused() {
+    // A period buffer is reused, so without a fresh sentinel a completion that
+    // wrote no status reads as that buffer's last one.
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let mut transport = mock_device(&DeviceSpec::qemu(), &log);
+    let answered = Rc::new(core::cell::Cell::new(0usize));
+    let counter = Rc::clone(&answered);
+    transport.install_shim(
+        wire::TX_QUEUE,
+        Box::new(move |chain: &mut ChainView<'_>| {
+            let status = chain
+                .device_write
+                .last_mut()
+                .ok_or(VirtioError::DeviceFault)?;
+            if counter.get() < PERIODS_IN_FLIGHT {
+                wire::put_u32(status, 0, wire::status::OK);
+                wire::put_u32(status, 4, 0);
+            }
+            counter.set(counter.get() + 1);
+            Ok(u32::try_from(wire::XFER_STATUS_LEN).expect("small"))
+        }),
+    );
+    let mut device = VirtioSnd::open(transport, &host, &clock).expect("comes up");
+    device.configure(0, &params()).expect("configured");
+    device.start(0, Frames::ZERO).expect("started");
+    let mut ring = Ring::new();
+    ring.bind()
+        .write(&vec![0x61u8; RING_FRAMES as usize * 4])
+        .expect("written");
+    let outcomes: alloc::vec::Vec<_> = (0..3)
+        .map(|_| device.service(0, &mut ring.bind()).map(|_| ()))
+        .collect();
+    assert!(answered.get() > PERIODS_IN_FLIGHT, "a buffer was reused");
+    assert!(outcomes.contains(&Err(DriverError::DeviceFault)));
+}
+
+#[test]
+fn a_stream_reconfigured_after_release_is_not_derailed_by_its_old_transfers() {
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let mut device = playing_device(&log, &host, &clock);
+    device.release(0).expect("released");
+    device.configure(0, &params()).expect("configured again");
+    device.start(0, Frames::ZERO).expect("started again");
+    let mut ring = Ring::new();
+    ring.bind()
+        .write(&vec![0x42u8; PERIOD_FRAMES as usize * 4])
+        .expect("written");
+    let report = device.service(0, &mut ring.bind()).expect("serviced");
+    assert_eq!(report.transferred, PERIOD_FRAMES);
+}
+
+#[test]
+fn a_period_lent_to_the_device_is_freed_when_it_finally_comes_back() {
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let mut device = playing_device(&log, &host, &clock);
+    let before = host.slabs_outstanding();
+    refuse_control_requests(&mut device.transport, wire::status::IO_ERR);
+    assert!(device.release(0).is_err());
+    assert_ne!(lent(&device), 0);
+
+    // The device answers again: the next release it acknowledges collects the
+    // transfers it handed back, and the new configuration's periods take the
+    // lent ones' place.
+    refuse_control_requests(&mut device.transport, wire::status::OK);
+    device.configure(0, &params()).expect("configured again");
+    assert_eq!(lent(&device), 0, "every lent period came back");
+    assert_eq!(host.slabs_outstanding(), before);
+}
+
+#[test]
+fn a_control_request_left_unanswered_holds_back_the_next_until_it_is_answered() {
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let mut device =
+        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    // The device stops answering: every wait wakes with nothing in the ring.
+    device.transport.set_synchronous_notify(false);
+    assert_eq!(
+        device.start(0, Frames::ZERO),
+        Err(DriverError::DeviceFault),
+        "an unconfigured stream is refused without asking the device"
+    );
+    assert_eq!(
+        device.configure(0, &params()).err(),
+        Some(DriverError::DeviceOffline),
+        "the release went unanswered, so the next request is never posted"
+    );
+    assert_eq!(
+        device.transport.drain_queue(wire::CONTROL_QUEUE),
+        Ok(1),
+        "only the unanswered release reached the device"
+    );
+    device.transport.set_synchronous_notify(true);
+    device
+        .configure(0, &params())
+        .expect("the device answers again");
+}
+
+#[test]
+fn a_dropped_device_that_confirms_its_reset_releases_every_region() {
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    drop(playing_device(&log, &host, &clock));
+    assert_eq!(host.slabs_outstanding(), 0);
+}
+
+#[test]
+fn a_dropped_device_whose_reset_never_confirms_releases_nothing() {
+    // The channel server that owns the device may return on any failure with
+    // periods still posted.
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let mut device = playing_device(&log, &host, &clock);
+    device.transport.refuse_resets_after(0);
+    let held = host.slabs_outstanding();
+    drop(device);
+    assert_eq!(host.slabs_outstanding(), held);
 }

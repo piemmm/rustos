@@ -531,7 +531,7 @@ mod tests {
         dev.dev().write_u32(regs::QUEUE_NUM_MAX, 8).unwrap();
         let mut t = dev.transport();
         let host: &'static MockHost = Box::leak(Box::new(MockHost::new()));
-        let q = SplitQueue::new(&mut t, host, 0, 8).expect("queue setup");
+        let q = SplitQueue::new(&mut t, host, 0, 8, 1).expect("queue setup");
         assert_eq!(q.size(), 8);
         let c = dev.dev();
         let lo = c.read_u32(regs::QUEUE_DESC_LOW).unwrap();

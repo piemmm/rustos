@@ -270,8 +270,7 @@ pub fn gic_intid_from_cells(kind: u32, number: u32) -> Option<u32> {
 /// property names into its global GICv2 INTID.
 ///
 /// Reads the `<type number flags>` triple through the `lib/fdt` cell
-/// reader ([`Node::property`] + `read_be_u32`) — never a raw byte poke
-/// (: discovery uses the enumerable source only) — and
+/// reader ([`Node::property`] + `read_be_u32`), never a raw byte poke, and
 /// maps it through [`gic_intid_from_cells`]. Returns `None` when the node
 /// has no `interrupts` property, the property is shorter than the two
 /// cells the decode needs, or the specifier is not a GICv2 SPI/PPI this

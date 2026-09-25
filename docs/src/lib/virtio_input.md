@@ -22,11 +22,15 @@ in [`tairix-hid`](./hid.md) rather than the USB HID class drivers. The thin
   descriptor head the queue assigns. A single posted buffer is not enough: the
   device fills one buffer per event of a report, so a keypress's `EV_KEY` *and*
   its trailing `EV_SYN` each need a free buffer at once.
-- **`poll`** (`tairix_abi::driver::input::Input`): drains every completed event,
-  decodes it, and hands each buffer straight back so the pool stays full. The
-  wait is interrupt-driven through the host's `notify_wait` — never a busy spin
-  (`AGENTS.md` §2.1). An empty caller buffer is `DriverError::BufferTooSmall`;
-  the engine never panics (`AGENTS.md` §2.9).
+- **`poll`** (`tairix_abi::driver::input::Input`): drains the completed events,
+  decodes them, and hands each buffer straight back, zeroed, so the pool stays
+  full and a completion that wrote nothing surfaces no event. A drain takes at
+  most a ring's worth of completions, so a device refilling buffers as fast as
+  they are reposted cannot hold it. The wait is interrupt-driven through the
+  host's `notify_wait` — never a busy spin — and one that cannot be made at
+  all fails the poll `DriverError::DeviceOffline` rather than returning
+  nothing to be polled again at once. An empty caller buffer is
+  `DriverError::BufferTooSmall`; the engine never panics.
 - **`evdev` → `InputEvent` decode**: the wire record is
   `struct virtio_input_event { __le16 type; __le16 code; __le32 value; }`
   (virtio 1.1 §5.8.6) in the Linux `evdev` namespaces, mapped onto the
@@ -69,8 +73,11 @@ only through the `Transport` seam, holding no ambient authority (`AGENTS.md`
 - decode: key press/release, relative pointer (X/Y) and scroll-wheel, and the
   discard of `EV_SYN` frame markers / unmapped codes / unmodelled types;
 - poll-drain: a queued press, press-then-release in order, a frame marker
-  surfacing no event, the no-pending-event `Ok(0)`, and empty-buffer rejection;
-- teardown: the `open` → `close` (load → unload) round-trip;
+  surfacing no event, the no-pending-event `Ok(0)`, empty-buffer rejection,
+  the per-drain bound, a slot completed without a write, and a wait that
+  cannot be made;
+- teardown: a drop resets the device before its memory goes, and withholds it
+  from a device whose reset does not confirm;
 - `console`: `evdev`-keycode resolution (letters, shifted digits, named and
   keypad keys, function keys), caps/num-lock toggling, left/right modifier
   collapsing, and the fail-closed unknown-keycode / non-key / key-repeat cases.

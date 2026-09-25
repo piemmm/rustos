@@ -149,6 +149,9 @@ const NUM_SHM_GRANT_PEER: u64 = SyscallNumber::SHM_GRANT_PEER.as_u16() as u64;
 
 /// `call_peer_holds` syscall number (as above).
 const NUM_CALL_PEER_HOLDS: u64 = SyscallNumber::CALL_PEER_HOLDS.as_u16() as u64;
+
+/// `call_peer_node` syscall number (as above).
+const NUM_CALL_PEER_NODE: u64 = SyscallNumber::CALL_PEER_NODE.as_u16() as u64;
 const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 const NUM_HW_TREE_READ: u64 = SyscallNumber::HW_TREE_READ.as_u16() as u64;
 const NUM_HW_TREE_WAIT: u64 = SyscallNumber::HW_TREE_WAIT.as_u16() as u64;
@@ -2489,6 +2492,30 @@ pub extern "C" fn sys_call_peer_holds(endpoint: u64, ticket: u64, resource: *mut
     }
 }
 
+/// `call_peer_node`: read the hardware-tree node the task whose call `ticket`
+/// on `endpoint` the caller is serving was admitted for
+/// (`SyscallNumber::CALL_PEER_NODE`), writing its wire record to the
+/// `node_cap`-byte buffer at `node`. Returns the record's byte count, or a
+/// `TAIRIX_E_*` code reinterpreted into the result — `TAIRIX_E_NOT_FOUND` for a
+/// caller that is no driver loaded for a node.
+#[must_use]
+#[export_name = "tairix_sys_call_peer_node"]
+pub extern "C" fn sys_call_peer_node(
+    endpoint: u64,
+    ticket: u64,
+    node: *mut c_void,
+    node_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_call_recv`; the kernel validates the node `(ptr, len)`
+    // pair against the caller's address space before writing it.
+    unsafe {
+        raw_syscall(
+            NUM_CALL_PEER_NODE,
+            [endpoint, ticket, ptr_arg(node), node_cap as u64, 0, 0],
+        )
+    }
+}
+
 /// `waitset_create`: create a caller-owned wait-set that multiplexes the
 /// readiness of several event sources (`SyscallNumber::WAITSET_CREATE`).
 /// Returns the kernel-minted, opaque wait-set handle, or a `TAIRIX_E_*` code
@@ -3390,6 +3417,7 @@ mod tests {
         (NUM_SHM_CREATE_DMA, "shm_create_dma", 4),
         (NUM_SHM_GRANT_PEER, "shm_grant_peer", 3),
         (NUM_CALL_PEER_HOLDS, "call_peer_holds", 3),
+        (NUM_CALL_PEER_NODE, "call_peer_node", 4),
         (NUM_RESOURCE_GRANTS, "resource_grants", 2),
         (NUM_HW_TREE_READ, "hw_tree_read", 2),
         (NUM_HW_TREE_WAIT, "hw_tree_wait", 2),
@@ -4357,6 +4385,24 @@ mod tests {
         assert_eq!(&args[..2], &[0xD15_1001, 9]);
         assert_eq!(args[2], ptr as usize as u64);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn call_peer_node_marshals_the_node_buffer_and_its_capacity() {
+        let mut node = [0u8; tairix_abi::HwNode::WIRE_LEN];
+        let ptr = node.as_mut_ptr().cast::<c_void>();
+        let len = tairix_abi::HwNode::WIRE_LEN as u64;
+        let (number, args) = capture(len, || {
+            assert_eq!(
+                sys_call_peer_node(0xD15_1001, 9, ptr, tairix_abi::HwNode::WIRE_LEN),
+                len
+            );
+        });
+        assert_eq!(number, NUM_CALL_PEER_NODE);
+        assert_eq!(&args[..2], &[0xD15_1001, 9]);
+        assert_eq!(args[2], ptr as usize as u64);
+        assert_eq!(args[3], len);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

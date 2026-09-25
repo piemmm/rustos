@@ -69,7 +69,7 @@ impl TestSink {
     /// Used by tests that share one sink across multiple assertions and
     /// need to ignore the events emitted during set-up (e.g. the
     /// `TaskCapabilitiesDerived` records the per-task fixture builders
-    /// produce). — keep test assertions narrow.
+    /// produce), keeping test assertions narrow.
     pub fn clear(&self) {
         self.events.lock().clear();
     }

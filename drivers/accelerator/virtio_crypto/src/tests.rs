@@ -14,8 +14,8 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::{Cell, RefCell};
-use tairix_virtio::{ChainView, DmaHost, MockHost, MockTransport};
+use core::cell::RefCell;
+use tairix_virtio::{ChainView, MockHost, MockTransport, MockWait, MAX_COMPLETION_WAKES};
 
 /// Device-configuration window length: enough to hold `max_size` at offset
 /// 48.
@@ -44,6 +44,12 @@ struct DeviceLog {
     data: Vec<(u32, u32, u64, u32, u32, u32, u32)>,
     /// Status the device should answer the next data request with.
     data_status: u8,
+    /// Destroys still to refuse, keeping their sessions.
+    refuse_destroys: u32,
+    /// Complete requests without writing their replies.
+    unanswering: bool,
+    /// Answer jobs while reporting only the status written.
+    short_output: bool,
 }
 
 impl DeviceLog {
@@ -92,8 +98,16 @@ fn healthy_config() -> [u8; CONFIG_LEN] {
 /// The returned log is shared with the peer, so a test can read back exactly
 /// what the device decoded.
 fn build_device(config: [u8; CONFIG_LEN]) -> (MockTransport, Rc<RefCell<DeviceLog>>) {
+    build_device_with_queue_max(config, 8)
+}
+
+/// [`build_device`] whose queues hold at most `queue_max` descriptors.
+fn build_device_with_queue_max(
+    config: [u8; CONFIG_LEN],
+    queue_max: u16,
+) -> (MockTransport, Rc<RefCell<DeviceLog>>) {
     // Data queue 0 plus the control queue at index 1 (one data queue).
-    let mut t = MockTransport::new(2, 8, wire::VIRTIO_F_VERSION_1, CONFIG_LEN);
+    let mut t = MockTransport::new(2, queue_max, wire::VIRTIO_F_VERSION_1, CONFIG_LEN);
     t.set_config(0, &config);
     let log = Rc::new(RefCell::new(DeviceLog {
         next_id: 0x4200,
@@ -121,6 +135,10 @@ fn install_control_shim(t: &mut MockTransport, log: &Rc<RefCell<DeviceLog>>) {
             let opcode = read_u32(frame, 0);
             let mut log = control_log.borrow_mut();
             match opcode {
+                wire::CIPHER_CREATE_SESSION if log.unanswering => {
+                    log.control.push((opcode, 0));
+                    Ok(u32::try_from(wire::SESSION_INPUT_LEN).unwrap_or(0))
+                }
                 wire::CIPHER_CREATE_SESSION => {
                     let key = *chain.device_read.get(1).ok_or(VirtioError::DeviceFault)?;
                     let algo = read_u32(frame, wire::CTRL_CIPHER_PARA);
@@ -163,13 +181,18 @@ fn install_control_shim(t: &mut MockTransport, log: &Rc<RefCell<DeviceLog>>) {
                 }
                 wire::CIPHER_DESTROY_SESSION => {
                     let id = read_u64(frame, wire::CTRL_DESTROY_SESSION_ID);
-                    let known = log.session(id).is_some();
-                    log.sessions.retain(|(sid, _)| *sid != id);
                     log.control.push((opcode, id));
                     let reply = chain
                         .device_write
                         .first_mut()
                         .ok_or(VirtioError::DeviceFault)?;
+                    if log.refuse_destroys > 0 {
+                        log.refuse_destroys -= 1;
+                        reply[0] = wire::STATUS_ERR;
+                        return Ok(1);
+                    }
+                    let known = log.session(id).is_some();
+                    log.sessions.retain(|(sid, _)| *sid != id);
                     reply[0] = if known {
                         wire::STATUS_OK
                     } else {
@@ -207,6 +230,10 @@ fn install_data_shim(t: &mut MockTransport, log: &Rc<RefCell<DeviceLog>>) {
             let mut log = data_log.borrow_mut();
             log.data
                 .push((opcode, algo, id, iv_len, src_len, dst_len, op_type));
+            if log.unanswering {
+                chain.device_write[0].fill(0xEE);
+                return Ok(1);
+            }
             let planted = log.data_status;
             let session = log.session(id).cloned();
             let (Some(session), true) = (session, planted == wire::STATUS_OK) else {
@@ -239,129 +266,42 @@ fn install_data_shim(t: &mut MockTransport, log: &Rc<RefCell<DeviceLog>>) {
                 chain.device_write[0][index] = mix(*byte, key, iv[index % iv.len()], encrypt);
             }
             chain.device_write[1][0] = wire::STATUS_OK;
+            if log.short_output {
+                return Ok(1);
+            }
             Ok(u32::try_from(src.len()).unwrap_or(0) + 1)
         }),
     );
 }
 
-/// `VirtioHost` that drains the notified queue on each wake, so the driver's
-/// synchronous `kick → notify_wait → poll_used` cycle completes inside one
-/// method call without test scaffolding.
-struct AutoDrainHost {
-    inner: MockHost,
-    transport: core::cell::UnsafeCell<*mut MockTransport>,
-    /// Leading `notify_wait` calls that wake the driver **without** posting
-    /// the completion, modelling an advisory/early wake whose matching
-    /// completion is not yet in the used ring.
-    spurious_remaining: Cell<u32>,
+/// The mock device, shared by the driver under test and the host playing it.
+type Device = Rc<RefCell<MockTransport>>;
+
+type Crypto = Box<VirtioCrypto<'static, Device>>;
+
+/// Open a driver on `t`, whose waits `host` answers by playing the device.
+fn open_played_by(t: MockTransport, host: MockHost) -> (Crypto, Device, &'static MockHost) {
+    let host: &'static MockHost = Box::leak(Box::new(host));
+    let device = t.into_shared();
+    host.attach(&device);
+    let driver = Box::new(VirtioCrypto::open(Rc::clone(&device), host).expect("open"));
+    (driver, device, host)
 }
 
-impl AutoDrainHost {
-    fn new() -> Self {
-        Self {
-            inner: MockHost::new(),
-            transport: core::cell::UnsafeCell::new(core::ptr::null_mut()),
-            spurious_remaining: Cell::new(0),
-        }
-    }
-
-    fn with_spurious_wakes(n: u32) -> Self {
-        let host = Self::new();
-        host.spurious_remaining.set(n);
-        host
-    }
-
-    /// Plant the live transport's raw pointer so `notify_wait` can drain it.
-    fn install_transport(&self, t: *mut MockTransport) {
-        // SAFETY: tests are single-threaded with respect to a given
-        // `AutoDrainHost`; `auto_host` leaks a fresh instance per call, so no
-        // aliasing borrow of `self.transport` can exist when we write to it.
-        unsafe {
-            *self.transport.get() = t;
-        }
-    }
-
-    fn bytes_allocated(&self) -> usize {
-        self.inner.bytes_allocated()
-    }
+fn auto_host() -> &'static MockHost {
+    Box::leak(Box::new(MockHost::new()))
 }
 
-impl DmaHost for AutoDrainHost {
-    fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
-        self.inner.alloc_dma_zeroed(size)
-    }
-
-    fn device_quiesced(&self) {
-        self.inner.device_quiesced();
-    }
-}
-
-impl VirtioHost for AutoDrainHost {
-    fn notify_wait(&self, queue_index: u16, timeout_ns: u64) -> CompletionSignal {
-        let signal = self.inner.notify_wait(queue_index, timeout_ns);
-        let spurious = self.spurious_remaining.get();
-        if spurious > 0 {
-            self.spurious_remaining.set(spurious - 1);
-            return signal;
-        }
-        // SAFETY: the pointer was installed while no other borrow of the
-        // transport was live; the driver releases its `&mut transport` borrow
-        // between `kick` and `notify_wait`, so this is the unique live
-        // reference for the duration of `drain_queue`.
-        let t_ptr = unsafe { *self.transport.get() };
-        if !t_ptr.is_null() {
-            let t = unsafe { &mut *t_ptr };
-            let _ = t.drain_queue(queue_index);
-        }
-        signal
-    }
-}
-
-/// `VirtioHost` that never posts a completion: models a device whose
-/// interrupt is permanently lost, so every wait exhausts its budget.
-struct SilentHost {
-    inner: MockHost,
-}
-
-impl DmaHost for SilentHost {
-    fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
-        self.inner.alloc_dma_zeroed(size)
-    }
-
-    fn device_quiesced(&self) {
-        self.inner.device_quiesced();
-    }
-}
-
-impl VirtioHost for SilentHost {
-    fn notify_wait(&self, _queue_index: u16, _timeout_ns: u64) -> CompletionSignal {
-        CompletionSignal::TimedOut
-    }
-}
-
-fn auto_host() -> &'static AutoDrainHost {
-    Box::leak(Box::new(AutoDrainHost::new()))
-}
-
-/// Open the driver over `t` with a draining host, returning the boxed driver
-/// (so the transport it owns has a stable address) and the leaked host.
-fn open_with(
-    t: MockTransport,
-    host: &'static AutoDrainHost,
-) -> Box<VirtioCrypto<'static, MockTransport>> {
-    let mut driver = Box::new(VirtioCrypto::open(t, host).expect("open"));
-    host.install_transport(core::ptr::from_mut(driver.transport_mut()));
-    driver
-}
-
-fn open_healthy() -> (
-    Box<VirtioCrypto<'static, MockTransport>>,
-    Rc<RefCell<DeviceLog>>,
-    &'static AutoDrainHost,
-) {
+fn open_healthy() -> (Crypto, Rc<RefCell<DeviceLog>>, &'static MockHost, Device) {
     let (t, log) = build_device(healthy_config());
-    let host = auto_host();
-    (open_with(t, host), log, host)
+    let (driver, device, host) = open_played_by(t, MockHost::new());
+    (driver, log, host, device)
+}
+
+/// Let the wait `answered` waits from now time out without the device
+/// answering, abandoning that request to be answered later.
+fn go_silent_after(host: &MockHost, answered: usize) {
+    host.script_waits(core::iter::repeat_n(MockWait::Answer, answered).chain([MockWait::Silent]));
 }
 
 const KEY: [u8; 16] = [
@@ -413,10 +353,10 @@ fn bind_table_names_the_virtio_crypto_device_type_and_nothing_else() {
 
 #[test]
 fn open_negotiates_version_1_and_reports_what_the_device_offered() {
-    let (driver, _log, _host) = open_healthy();
-    assert!(driver.transport().status().contains(Status::DRIVER_OK));
+    let (driver, _log, _host, device) = open_healthy();
+    assert!(device.borrow().status().contains(Status::DRIVER_OK));
     assert_eq!(
-        driver.transport().negotiated_driver_features(),
+        device.borrow().negotiated_driver_features(),
         wire::VIRTIO_F_VERSION_1
     );
     let report = driver.device_report();
@@ -507,7 +447,7 @@ fn the_staged_ceiling_is_the_smaller_of_the_devices_and_the_drivers() {
 
 #[test]
 fn a_cipher_job_round_trips_through_the_device() {
-    let (mut driver, _log, _host) = open_healthy();
+    let (mut driver, _log, _host, _device) = open_healthy();
     let plain = [0x11u8; 32];
     let mut encrypted = [0u8; 32];
     driver
@@ -523,7 +463,7 @@ fn a_cipher_job_round_trips_through_the_device() {
 
 #[test]
 fn the_control_frames_carry_the_layout_the_device_decodes() {
-    let (mut driver, log, _host) = open_healthy();
+    let (mut driver, log, _host, _device) = open_healthy();
     let mut out = [0u8; 16];
     driver
         .cipher(cipher_job(CipherDirection::Encrypt, &[0u8; 16], &mut out))
@@ -541,7 +481,7 @@ fn the_control_frames_carry_the_layout_the_device_decodes() {
 
 #[test]
 fn the_data_frame_carries_the_session_the_algorithm_and_every_length() {
-    let (mut driver, log, _host) = open_healthy();
+    let (mut driver, log, _host, _device) = open_healthy();
     let plain = [0u8; 48];
     let mut out = [0u8; 48];
     driver
@@ -563,7 +503,7 @@ fn a_decrypt_job_binds_the_decrypt_direction_into_its_session() {
     // The peer refuses a data request whose direction is not the one its
     // session was created for, so a driver that hard-coded the session's `op`
     // could not complete this.
-    let (mut driver, log, _host) = open_healthy();
+    let (mut driver, log, _host, _device) = open_healthy();
     let mut out = [0u8; 16];
     driver
         .cipher(cipher_job(CipherDirection::Decrypt, &[0u8; 16], &mut out))
@@ -573,7 +513,7 @@ fn a_decrypt_job_binds_the_decrypt_direction_into_its_session() {
 
 #[test]
 fn the_session_is_destroyed_even_when_the_job_fails_and_the_jobs_error_wins() {
-    let (mut driver, log, _host) = open_healthy();
+    let (mut driver, log, _host, _device) = open_healthy();
     log.borrow_mut().data_status = wire::STATUS_ERR;
     let mut out = [0xAAu8; 16];
     assert_eq!(
@@ -590,7 +530,7 @@ fn the_session_is_destroyed_even_when_the_job_fails_and_the_jobs_error_wins() {
 
 #[test]
 fn a_refused_key_and_an_unsupported_request_are_request_level_refusals() {
-    let (mut driver, log, _host) = open_healthy();
+    let (mut driver, log, _host, _device) = open_healthy();
     let mut out = [0u8; 16];
     log.borrow_mut().data_status = wire::STATUS_KEY_REJECTED;
     assert_eq!(
@@ -635,7 +575,7 @@ fn status_decoding_fails_an_undefined_value_closed() {
 
 #[test]
 fn a_job_the_device_cannot_do_is_refused_before_any_of_it_is_submitted() {
-    let (mut driver, log, _host) = open_healthy();
+    let (mut driver, log, _host, _device) = open_healthy();
     let mut out = [0u8; 16];
     // A key length the algorithm does not accept.
     let job = CipherJob {
@@ -668,7 +608,7 @@ fn a_job_the_device_cannot_do_is_refused_before_any_of_it_is_submitted() {
 
 #[test]
 fn a_job_above_the_devices_own_ceiling_is_refused_rather_than_split() {
-    let (mut driver, log, _host) = open_healthy();
+    let (mut driver, log, _host, _device) = open_healthy();
     let ceiling = usize::try_from(driver.device_report().max_job_bytes).expect("fits");
     let plain = vec![0u8; ceiling + 16];
     let mut out = vec![0u8; ceiling + 16];
@@ -688,10 +628,7 @@ fn a_job_above_the_devices_own_ceiling_is_refused_rather_than_split() {
 #[test]
 fn a_silent_device_releases_the_caller_rather_than_parking_it_for_ever() {
     let (t, _log) = build_device(healthy_config());
-    let host: &'static SilentHost = Box::leak(Box::new(SilentHost {
-        inner: MockHost::new(),
-    }));
-    let mut driver = VirtioCrypto::open(t, host).expect("open");
+    let (mut driver, _device, _host) = open_played_by(t, MockHost::silent());
     let mut out = [0u8; 16];
     assert_eq!(
         driver.cipher(cipher_job(CipherDirection::Encrypt, &[0u8; 16], &mut out)),
@@ -702,11 +639,13 @@ fn a_silent_device_releases_the_caller_rather_than_parking_it_for_ever() {
 #[test]
 fn a_wake_storm_with_no_completion_fails_the_job_closed() {
     let (t, _log) = build_device(healthy_config());
-    let host: &'static AutoDrainHost = Box::leak(Box::new(AutoDrainHost::with_spurious_wakes(
-        MAX_COMPLETION_WAKES + 1,
-    )));
-    let mut driver = Box::new(VirtioCrypto::open(t, host).expect("open"));
-    host.install_transport(core::ptr::from_mut(driver.transport_mut()));
+    let host = MockHost::new();
+    let wakes = usize::try_from(MAX_COMPLETION_WAKES).unwrap_or(usize::MAX) + 1;
+    host.script_waits(core::iter::repeat_n(
+        MockWait::Spurious { after_ns: 0 },
+        wakes,
+    ));
+    let (mut driver, _device, _host) = open_played_by(t, host);
     let mut out = [0u8; 16];
     assert_eq!(
         driver.cipher(cipher_job(CipherDirection::Encrypt, &[0u8; 16], &mut out)),
@@ -716,7 +655,7 @@ fn a_wake_storm_with_no_completion_fails_the_job_closed() {
 
 #[test]
 fn the_job_path_reuses_its_staging_rather_than_re_granting_dma() {
-    let (mut driver, _log, host) = open_healthy();
+    let (mut driver, _log, host, _device) = open_healthy();
     let after_open = host.bytes_allocated();
     let mut out = [0u8; 32];
     for _ in 0..4 {
@@ -733,14 +672,14 @@ fn the_job_path_reuses_its_staging_rather_than_re_granting_dma() {
 
 #[test]
 fn the_device_interrupt_is_acknowledged_once_per_published_chain() {
-    let (mut driver, _log, _host) = open_healthy();
-    let before = driver.transport().ack_interrupts;
+    let (mut driver, _log, _host, device) = open_healthy();
+    let before = device.borrow().ack_interrupts;
     let mut out = [0u8; 16];
     driver
         .cipher(cipher_job(CipherDirection::Encrypt, &[0u8; 16], &mut out))
         .expect("encrypt");
     // Three chains: create session, run the job, destroy session.
-    assert_eq!(driver.transport().ack_interrupts, before + 3);
+    assert_eq!(device.borrow().ack_interrupts, before + 3);
 }
 
 #[test]
@@ -765,21 +704,267 @@ fn a_device_whose_reset_never_confirms_is_refused_before_it_is_given_memory() {
 }
 
 #[test]
-fn a_confirmed_close_releases_every_region() {
+fn a_dropped_device_that_confirms_its_reset_releases_every_region() {
     let (t, _log) = build_device(healthy_config());
     let host = MockHost::new();
-    VirtioCrypto::open(t, &host).expect("open").close();
+    drop(VirtioCrypto::open(t, &host).expect("open"));
     assert_eq!(host.slabs_outstanding(), 0);
 }
 
 #[test]
-fn a_close_whose_reset_never_confirms_releases_nothing() {
+fn a_dropped_device_whose_reset_never_confirms_releases_nothing() {
     let (t, _log) = build_device(healthy_config());
-    let host = MockHost::new();
-    let mut driver = VirtioCrypto::open(t, &host).expect("open");
+    let (driver, device, host) = open_played_by(t, MockHost::new());
     let held = host.slabs_outstanding();
     assert!(held > 0);
-    driver.transport_mut().refuse_resets_after(0);
-    driver.close();
+    device.borrow_mut().refuse_resets_after(0);
+    drop(driver);
     assert_eq!(host.slabs_outstanding(), held);
+}
+
+/// What a healthy device returns for `input`, run on a fresh one.
+fn healthy_output(input: &[u8]) -> Vec<u8> {
+    let (mut driver, _log, _host, _device) = open_healthy();
+    let mut out = vec![0u8; input.len()];
+    driver
+        .cipher(cipher_job(CipherDirection::Encrypt, input, &mut out))
+        .expect("encrypt");
+    out
+}
+
+#[test]
+fn a_late_jobs_output_is_never_handed_to_the_next_caller() {
+    let (mut driver, log, host, device) = open_healthy();
+    let first = [0x11u8; 16];
+    let second = [0x22u8; 16];
+    // The create answers; the job itself is answered only after its deadline.
+    go_silent_after(host, 1);
+    let mut out = [0u8; 16];
+    assert_eq!(
+        driver.cipher(cipher_job(CipherDirection::Encrypt, &first, &mut out)),
+        Err(DriverError::DeviceOffline)
+    );
+    assert_eq!(device.borrow_mut().drain_queue(DATA_QUEUE), Ok(1));
+
+    let mut out = [0u8; 16];
+    driver
+        .cipher(cipher_job(CipherDirection::Encrypt, &second, &mut out))
+        .expect("the device answers again");
+    assert_eq!(out.as_slice(), healthy_output(&second), "its own output");
+    assert!(
+        log.borrow().sessions.is_empty(),
+        "the late job's session was destroyed with it"
+    );
+}
+
+#[test]
+fn a_session_an_abandoned_create_made_is_destroyed_once_the_device_answers() {
+    let (mut driver, log, host, device) = open_healthy();
+    go_silent_after(host, 0);
+    let mut out = [0u8; 16];
+    assert_eq!(
+        driver.cipher(cipher_job(CipherDirection::Encrypt, &[0x33; 16], &mut out)),
+        Err(DriverError::DeviceOffline)
+    );
+    assert_eq!(device.borrow_mut().drain_queue(1), Ok(1));
+    assert_eq!(
+        log.borrow().sessions.len(),
+        1,
+        "the device made the session"
+    );
+
+    let mut out = [0u8; 16];
+    driver
+        .cipher(cipher_job(CipherDirection::Encrypt, &[0x44; 16], &mut out))
+        .expect("the device answers again");
+    assert!(
+        log.borrow().sessions.is_empty(),
+        "no key schedule outlives its job"
+    );
+}
+
+#[test]
+fn a_destroy_the_device_refuses_is_retried_before_the_next_job() {
+    // A refused destroy leaves the device holding the caller's key schedule.
+    let (mut driver, log, _host, _device) = open_healthy();
+    log.borrow_mut().refuse_destroys = 1;
+    let mut out = [0u8; 16];
+    assert_eq!(
+        driver.cipher(cipher_job(CipherDirection::Encrypt, &[0x21; 16], &mut out)),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(log.borrow().sessions.len(), 1);
+    driver
+        .cipher(cipher_job(CipherDirection::Encrypt, &[0x22; 16], &mut out))
+        .expect("the device answers again");
+    assert!(log.borrow().sessions.is_empty());
+}
+
+#[test]
+fn an_abandoned_destroy_the_device_then_refuses_is_retried_before_the_next_job() {
+    let (mut driver, log, host, device) = open_healthy();
+    // The create and the job are answered; the destroy's wait goes silent.
+    go_silent_after(host, 2);
+    let mut out = [0u8; 16];
+    assert_eq!(
+        driver.cipher(cipher_job(CipherDirection::Encrypt, &[0x31; 16], &mut out)),
+        Err(DriverError::DeviceOffline)
+    );
+    log.borrow_mut().refuse_destroys = 1;
+    assert_eq!(device.borrow_mut().drain_queue(1), Ok(1), "refused late");
+    assert_eq!(log.borrow().sessions.len(), 1);
+    driver
+        .cipher(cipher_job(CipherDirection::Encrypt, &[0x32; 16], &mut out))
+        .expect("the device answers again");
+    assert!(log.borrow().sessions.is_empty());
+}
+
+#[test]
+fn a_job_the_device_completed_without_answering_hands_back_nothing() {
+    // The status staging is reused, so without a fresh sentinel a job the
+    // device never answered reads as the last one's OK.
+    let (mut driver, log, _host, _device) = open_healthy();
+    let mut out = [0u8; 16];
+    driver
+        .cipher(cipher_job(CipherDirection::Encrypt, &[0x41; 16], &mut out))
+        .expect("answered");
+    log.borrow_mut().unanswering = true;
+    out.fill(0);
+    assert_eq!(
+        driver.cipher(cipher_job(CipherDirection::Encrypt, &[0x42; 16], &mut out)),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(out, [0u8; 16]);
+}
+
+#[test]
+fn a_create_the_device_completed_without_answering_runs_no_job() {
+    // Read stale, the session reply would name the last, destroyed session.
+    let (mut driver, log, _host, _device) = open_healthy();
+    let mut out = [0u8; 16];
+    driver
+        .cipher(cipher_job(CipherDirection::Encrypt, &[0x51; 16], &mut out))
+        .expect("answered");
+    log.borrow_mut().unanswering = true;
+    let jobs = log.borrow().data.len();
+    assert_eq!(
+        driver.cipher(cipher_job(CipherDirection::Encrypt, &[0x52; 16], &mut out)),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(log.borrow().data.len(), jobs, "no job was published");
+}
+
+#[test]
+fn a_ring_too_shallow_for_a_job_is_refused_before_it_is_programmed() {
+    // A device whose data queue holds four descriptors could run no job.
+    let (t, _log) = build_device_with_queue_max(healthy_config(), 4);
+    let device = t.into_shared();
+    assert_eq!(
+        VirtioCrypto::open(Rc::clone(&device), auto_host()).err(),
+        Some(DriverError::Unsupported)
+    );
+    assert_eq!(
+        device.borrow_mut().publish_raw_used(DATA_QUEUE, 0, 0),
+        Err(VirtioError::DeviceFault),
+        "the device was never given the ring"
+    );
+}
+
+#[test]
+fn a_control_queue_too_shallow_for_a_session_is_refused_at_open() {
+    let (mut t, _log) = build_device(healthy_config());
+    t.set_queue_max(1, 2);
+    let device = t.into_shared();
+    assert_eq!(
+        VirtioCrypto::open(Rc::clone(&device), auto_host()).err(),
+        Some(DriverError::Unsupported)
+    );
+    assert_eq!(
+        device.borrow_mut().publish_raw_used(1, 0, 0),
+        Err(VirtioError::DeviceFault),
+        "the device was never given the ring"
+    );
+}
+
+#[test]
+fn a_job_whose_completion_does_not_cover_its_output_hands_back_nothing() {
+    let (mut driver, log, _host, _device) = open_healthy();
+    log.borrow_mut().short_output = true;
+    let mut out = [0u8; 16];
+    assert_eq!(
+        driver.cipher(cipher_job(CipherDirection::Encrypt, &[0x5D; 16], &mut out)),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(out, [0u8; 16]);
+    assert!(
+        log.borrow().sessions.is_empty(),
+        "its session was destroyed"
+    );
+}
+
+#[test]
+fn a_key_the_device_held_is_scrubbed_when_the_driver_is_dropped() {
+    let (mut driver, _log, host, _device) = open_healthy();
+    go_silent_after(host, 0);
+    let mut out = [0u8; 16];
+    assert_eq!(
+        driver.cipher(cipher_job(CipherDirection::Encrypt, &[0x78; 16], &mut out)),
+        Err(DriverError::DeviceOffline)
+    );
+    let (phys, len) = driver
+        .key
+        .as_ref()
+        .map(|key| (key.phys(), key.len()))
+        .expect("put back");
+    drop(driver);
+    // SAFETY: the mock host leaks every slab's storage, so these bytes
+    // outlive the driver that freed them.
+    let staging = unsafe { core::slice::from_raw_parts(phys as *const u8, len) };
+    assert!(
+        staging.iter().all(|b| *b == 0),
+        "the confirmed reset took it back"
+    );
+}
+
+#[test]
+fn no_job_is_published_while_the_device_still_holds_an_abandoned_chain() {
+    let (mut driver, _log, host, device) = open_healthy();
+    go_silent_after(host, 1);
+    let mut out = [0u8; 16];
+    assert_eq!(
+        driver.cipher(cipher_job(CipherDirection::Encrypt, &[0x55; 16], &mut out)),
+        Err(DriverError::DeviceOffline)
+    );
+    assert_eq!(
+        driver.cipher(cipher_job(CipherDirection::Encrypt, &[0x66; 16], &mut out)),
+        Err(DriverError::DeviceOffline),
+        "the staging is the device's, so nothing is published over it"
+    );
+    assert_eq!(device.borrow_mut().drain_queue(1), Ok(0));
+    assert_eq!(
+        device.borrow_mut().drain_queue(DATA_QUEUE),
+        Ok(1),
+        "only the abandoned job was ever published"
+    );
+}
+
+#[test]
+fn a_key_the_device_held_is_scrubbed_when_it_comes_back() {
+    let (mut driver, _log, host, device) = open_healthy();
+    go_silent_after(host, 0);
+    let mut out = [0u8; 16];
+    assert_eq!(
+        driver.cipher(cipher_job(CipherDirection::Encrypt, &[0x77; 16], &mut out)),
+        Err(DriverError::DeviceOffline)
+    );
+    let key = driver.key.as_ref().expect("put back");
+    assert_eq!(
+        &key.as_bytes()[..KEY.len()],
+        KEY.as_slice(),
+        "left for the device, which may not have read it yet"
+    );
+    assert_eq!(device.borrow_mut().drain_queue(1), Ok(1));
+    driver.settle().expect("the chain came back");
+    let key = driver.key.as_ref().expect("the driver's again");
+    assert!(key.as_bytes().iter().all(|b| *b == 0));
 }

@@ -15,6 +15,25 @@ the standing task direction supersedes that language. Changing a `lib/abi`
 type today is allowed; it requires regenerating the C header
 (`cargo xtask c-header --write`), which the drift guard enforces.
 
+## Ledger
+
+| Item | What it is | Status |
+|---|---|---|
+| U1 | Kernel driver-unload mechanism and the `devmgr` unload reaction | done |
+| U2 | URB transport ABI and the `lib/usb` transport server/client | done |
+| U3a | Per-endpoint URB-transport grant mechanism | done |
+| U3a2 | Cross-process shared-memory primitive | done |
+| U3a3 | Wait-set multi-event wait primitive | done |
+| U3b | The xHCI HCD process | done |
+| U4 | `usb_kbd` as a pure HID class driver | done |
+| U5 | Event-driven hot-plug, re-enumeration, and a controller-fault recovery that keeps the devices that come back | done |
+| U6 | `usb_mouse` class driver and broken-device isolation | done |
+| U7 | Composite (multi-interface) devices | done |
+| U8 | EP0 max-packet discovery and exact-length descriptor reads | done |
+| U9 | Multi-tier hubs (a hub plugged into a hub) | done |
+| U10 | Each node gets a fresh shared buffer; a reused endpoint refuses the previous node's driver | done |
+| UM | Live metal acceptance of attach, detach, re-attach, cold boot unplugged, and a controller reset under a live keyboard | blocked: the operator's Pi 4 run (QEMU models no Pi USB) |
+
 ---
 
 ## 0. The problem this plan fixes
@@ -218,7 +237,7 @@ USB attach/detach is metal-only on the Pi 4 (QEMU cannot model the VL805,
 `plans/PI.md` §0.4), so the increments are ordered so that everything *except*
 the live controller behaviour is host- and CI-proven first.
 
-- **U1 — kernel driver-unload mechanism + devmgr unload reaction `[x]` (DONE).**
+- **U1 — kernel driver-unload mechanism + devmgr unload reaction.**
   `StoreRequest::Unload { handle }` (+ status-only reply) lives in
   `lib/abi/src/driver_store.rs`; the endpoint request cap is now
   `MAX_REQUEST_LEN`. The kernel teardown is the symmetric partner of
@@ -245,7 +264,7 @@ the live controller behaviour is host- and CI-proven first.
   `tests/integration/driver_unload_qemu_aarch64` `-M virt` vertical
   (autoload → `terminate_driver_process` → assert live-task count 1→0 + caps
   /aspace reclaimed + idempotent `NotFound`). Whole gate green.
-- **U2 — URB transport ABI + `lib/usb` transport server/client `[x]` (DONE).**
+- **U2 — URB transport ABI + `lib/usb` transport server/client.**
   The wire contract lives in `lib/abi/src/usb_urb.rs`: `UrbRequest` (endpoint,
   `UsbTransferType`, `UsbDirection`, shared-buffer handle, length, control
   SETUP; fixed `URB_REQUEST_LEN`) with fail-closed `decode` (truncation,
@@ -266,7 +285,7 @@ the live controller behaviour is host- and CI-proven first.
   buffer; and `serve_urb` fail-closed for a bad endpoint, oversize length,
   illegal direction, bulk, and a malformed frame, each proven not to reach the
   engine). Whole gate green.
-- **U3a — per-endpoint URB-transport grant mechanism `[x]` (DONE).** §1.3
+- **U3a — per-endpoint URB-transport grant mechanism.** §1.3
   requires the right to submit URBs for an interface to be "minted kernel-side
   from the matched node, never ambient" — a mechanism that did not exist. It
   now does, modelled on `msi_alloc`'s allocate-then-grant pattern and reusing
@@ -290,7 +309,7 @@ the live controller behaviour is host- and CI-proven first.
     both hold the class capability. Covered by host unit tests (ABI
     kind/`covers`/round-trip; kernel `call_create` grant-mint, `ipc_call`
     denied-without-grant, and round-trips-with-grant).
-- **U3a2 — cross-process shared-memory primitive `[x]` (DONE).** The URB data
+- **U3a2 — cross-process shared-memory primitive.** The URB data
   path needs a shared-memory buffer the class driver owns and the HCD maps
   (§1.3); TAIRiX had only per-process `mem_map`. The kernel now provides a
   generic, capability- and grant-scoped shared-memory primitive (Option B:
@@ -323,7 +342,7 @@ the live controller behaviour is host- and CI-proven first.
     trip; `LiveSpace::map_shared`/`unmap_shared`; sharedreg refcount + last-
     ref free + reclaim + fail-closed; shm handler grant-mint/id-write,
     forged/wrong-kind, no-facility).
-- **U3a3 — wait-set multi-event wait primitive `[x]` (DONE).** The HCD is a
+- **U3a3 — wait-set multi-event wait primitive.** The HCD is a
   single async event loop (§1.1) that must wake on *either* an incoming URB
   IPC call *or* its controller interrupt, for arbitrarily many interfaces.
   TAIRiX had no multi-source wait (`call_recv` parks on one endpoint,
@@ -360,10 +379,10 @@ the live controller behaviour is host- and CI-proven first.
     edge-consume + token-write, pending-endpoint readiness drained by recv).
     `lib/rt`/`lib/drvrt` wrappers + a QEMU vertical land with U3b (the first
     consumer); not added speculatively (§2.4).
-- **U3b — xHCI HCD process `[x]` (DONE, live path metal-only).**
+- **U3b — xHCI HCD process** (live path metal-only).
   `drivers/bus/usb/xhci` (`tairix-drv-bus-usb`) is now a `lib`+`Run`-binary
-  crate: it binds `usb,xhci` (`BIND_KEYS = compatible(XHCI_COMPATIBLE)`, the
-  role `lib/hid::KEYBOARD_BIND_KEYS` held), owns the controller, enumerates,
+  crate: it binds `usb,xhci` (`BIND_KEYS = compatible(XHCI_COMPATIBLE)`), owns
+  the controller, enumerates,
   emits one per-interface node, and serves the URB transport. The host-testable
   logic is in the `lib` target:
   - `bringup` (moved from the deleted `lib/hid::service`, returning the raw
@@ -399,7 +418,7 @@ the live controller behaviour is host- and CI-proven first.
   - `hw_emit_node` was evolved to **return the kernel-assigned node id** (the
     emitter cannot choose it but needs it to `hw_remove_node` on disconnect);
     `drvrt`/existing bus drivers treat `≥0` as success unchanged.
-- **U4 — `usb_kbd` as a pure HID class driver `[x]` (DONE).** Rewritten as a
+- **U4 — `usb_kbd` as a pure HID class driver.** Rewritten as a
   `lib`+`Run` crate binding the HID boot-keyboard **interface** key
   (`HwMatchKey::usb(0,0,0x03_01_01)`, in its own `lib` `BIND_KEYS`), holding no
   MMIO/DMA/IRQ — only `CAP_INPUT_INJECT`/`CAP_SHM`/`CAP_IPC_ENDPOINT`/
@@ -414,8 +433,8 @@ the live controller behaviour is host- and CI-proven first.
   `drivers/input/usb_hid` stub is deleted. Image builder ships both the
   `xhci` HCD bundle (`bus_usb/xhci`) and the retuned `usb_kbd` class-driver
   bundle.
-- **U5 — event-driven hot-plug + re-enumeration `[x]` (DONE host/CI; live
-  metal acceptance is the operator's).** Both staged refinements are built in
+- **U5 — event-driven hot-plug + re-enumeration** (live metal acceptance is
+  UM). Both staged refinements are built in
   `lib/usb`, and the HCD services them:
   - **Hub-downstream hot-plug is event-driven, not polled.** The `UsbDevice`
     engine, when it descends through a hub, configures and **arms the
@@ -445,8 +464,8 @@ the live controller behaviour is host- and CI-proven first.
   - **Re-attach is a fresh device, never reused state** (the operator's
     requirement): on connect the engine resets the downstream port and
     enumerates on a fresh slot; the HCD re-emits a **new** interface node
-    carrying the same endpoint+shm grants, so `devmgr` re-autoloads `usb_kbd`
-    onto the same transport and keystrokes resume to the same OS sink.
+    carrying the index's endpoint and a fresh shared buffer, so `devmgr`
+    re-autoloads `usb_kbd` onto it and keystrokes resume to the same OS sink.
     Re-attach zeroes the reused EP0/interrupt ring regions first (stale TRBs at
     the producer cycle would otherwise be consumed past the new enqueue
     pointer — a real-hardware correctness fix). A disconnect also aborts any
@@ -626,12 +645,14 @@ the live controller behaviour is host- and CI-proven first.
     split through the hub's transaction translator, and a device hammered with
     input *while it is still being addressed* — a keyboard typed on during
     boot, before USB bring-up — makes that split complete with a
-    `SplitTransactionError` (the on-metal `enum_stage=3 completion=36`). Such a
-    fault means the device never received the request, so it stays in Default
-    state; `attach_on_rebound_region` disables the slot and re-drives a fresh
-    Enable Slot + Address Device up to `ENUM_ATTEMPTS` (4) times, exactly as
-    production stacks re-initialise a port (Linux `hub_port_init`'s
-    `PORT_INIT_TRIES`). Before this, one transient split fault failed the
+    `SplitTransactionError` (the on-metal `enum_stage=3 completion=36`). A
+    fault on Address Device leaves the device in Default state, one on a
+    descriptor read leaves it holding the address it was just given; either
+    way enumeration disables the slot, resets the port — returning the device
+    to Default state, where a fresh slot's `SET_ADDRESS` reaches it — and
+    re-drives a fresh Enable Slot + Address Device up to `ENUM_ATTEMPTS` (4)
+    times, as Linux `hub_port_init` resets the port on each of its
+    `PORT_INIT_TRIES`. Before this, one transient split fault failed the
     attach; because the Pi 4's only connected root port is its onboard hub,
     that took the *whole* controller down (`bring_up` attached nothing →
     errored → the HCD task exited nonzero). The retry is scoped to the
@@ -740,7 +761,8 @@ the live controller behaviour is host- and CI-proven first.
     `detach_if_device_gone` confirm a *direct* device's removal on its
     root port's live `CCS`. The resting control cursor generalises with it
     (`rest_active_context`: lowest live hub, else a live device, else the
-    idle layout binding — never a released region). Devices fill a
+    no active control endpoint at all — never a released region). Devices
+    fill a
     growable table bounded only by the
     controller's reported slot count and genuine memory exhaustion — a
     keyboard and a storage stick plugged in together are both served, neither
@@ -832,10 +854,11 @@ the live controller behaviour is host- and CI-proven first.
     posts the Disable Slot, waits within budget, and **frees the local slot
     state regardless of whether the controller confirms** — retiring the
     command-ring slot either way so the ring stays consistent for the next
-    enumeration. A late
-    Disable Slot Command Completion for the freed slot is drained as a freed-slot
-    event by the event-ring consumers (`await_event_for`/`drain_events`)
-    rather than faulting the hub watch. The acted-on fault code is cleared on
+    enumeration. A Disable Slot completion arriving after the wait is settled
+    by the event-ring consumers (`UsbDevice::settle_awaited_disable`) rather
+    than faulting the hub watch: a confirmation clears the slot's DCBAA entry
+    and returns the region withheld behind it, a refusal leaves it withheld
+    until a controller reset. The acted-on fault code is cleared on
     teardown and on a fresh enumeration so a re-plugged device is never
     immediately re-detached; the HCD then re-arms the hub watch, and the hub's
     connect change re-enumerates a fresh keyboard. Host regressions:
@@ -932,9 +955,9 @@ the live controller behaviour is host- and CI-proven first.
     the decoder cannot name reaches a diagnostic as "undecodable", which is
     how the VL805's `Context State Error` read as a driver decode failure
     (`error=5 reject=3`) and, worse, fell outside the retry classification.
-    Enumeration now re-drives a fresh slot — settling `TRSTRCY` first, since
-    an immediate re-drive re-fails in the same microsecond — for **any**
-    pipe-bring-up fault that left the device untouched: a USB/split
+    Enumeration now re-drives a fresh slot — after a port reset, whose
+    `PORT_RESET_SETTLE_US` recovery interval also settles `TRSTRCY` — for
+    **any** pipe-bring-up fault the device did not answer: a USB/split
     transaction error (it could not answer) or a command the controller
     rejected on its own slot/port state
     (`CompletionCode::indicates_state_disagreement`). A device that *answers*
@@ -990,11 +1013,11 @@ the live controller behaviour is host- and CI-proven first.
       LUN), the display service, login's elevation broker — receives
       non-blocking, so a readiness peek whose call was cancelled can
       never park the loop and starve its other sources.
-    - Diagnostics: the `controller fault latched` warning (id 4127) now
-      carries live `USBSTS`/`USBCMD`, so the next metal capture names
-      which fault bit (HSE/HCE/HCHalted) actually latched — the
-      spontaneous mid-typing fault itself remains to be diagnosed from
-      that evidence.
+    - Diagnostics: the controller-reset warning (id 4127, `usb-hcd:
+      resetting the controller to recover it`) carries live
+      `USBSTS`/`USBCMD`, so a metal capture names which fault bit
+      (HSE/HCE/HCHalted) latched — the spontaneous mid-typing fault itself
+      remains to be diagnosed from that evidence.
     Regressions: kernel/ipc `cancel_posted_by_*` (three-state scrub,
     other-poster isolation, silent no-op), kernel/core
     `reclaim_scrubs_a_dead_posters_queued_call`,
@@ -1091,34 +1114,70 @@ the live controller behaviour is host- and CI-proven first.
     drain-count / foreign-event / disable-confirmed accessors that fed them)
     have been removed now that the chain is complete; the load-bearing tolerance
     behaviour they observed remains.
-  - **A controller that latches a fatal error / halts is reset and
-    re-enumerated, never left silent (the "unplug worked but the re-plug is
-    never seen" fix).** With boot typing fixed, the remaining failure was
-    purely unplug→replug: the metal capture showed the unplug retract the node
-    and complete its Disable Slot (`disable_confirmed=1`), then the end-of-wake
-    interrupter snapshot read `usbsts=0x0d`/`0x05` — `USBSTS.HSE` (Host System
-    Error) **and** `HCHalted` set, `erdp_ehb` stuck — whereas every keystroke
-    wake read `usbsts=0`. The controller *halts itself* during the
-    downstream-device hot-removal teardown, **after** the Disable Slot already
-    completed (so the controller was alive then — the halt is induced later in
-    the teardown, not by the unplug). A halted controller runs nothing and
-    raises no further interrupts, so the re-armed hub status-change watch never
-    saw the re-plug. Decisive corroboration: a cold boot with the keyboard
-    **unplugged** then plugged in works, because that path never runs the
-    teardown. Per the xHCI spec a Host System Error clears only with a Host
-    Controller Reset, so the fix detects the faulted controller
-    (`UsbDevice::controller_faulted` = `USBSTS & (HSE|HCHalted)`) at the end of
-    each controller-IRQ wake and recovers via `reset_and_reenumerate` — the
-    same full HC reset + fresh enumeration a cold boot performs — returning to
-    the proven await-connect state so the re-plug enumerates through the normal
-    attach path (`reset_reenumerate_and_publish`, the fault-recovery-only
-    reset; routine hot-plug never resets the controller) after both
-    disconnect exits (`recover_if_controller_faulted`). Host regression:
-    `controller_faulted_reports_hse_and_halt_and_recovery_clears_it` (healthy →
-    not faulted; latched HSE → faulted; HC reset clears it; Run/Stop clear →
-    HCHalted → faulted). The HCD main-loop wiring is a freestanding binary, so
-    coverage is at the lib/usb predicate+recovery level.
-    (Metal-only acceptance still required — QEMU models no Pi USB, §0.4.)
+  - **A controller that latches a fatal error or halts is reset, and keeps
+    the devices that come back.** The VL805 halts itself (`USBSTS.HSE` +
+    `HCHalted`) during a downstream hot-removal teardown, after that device's
+    Disable Slot completed, and a halted controller raises no further
+    interrupt, so its hub watch would never see the re-plug. A Host System
+    Error clears only with a Host Controller Reset, so the HCD checks
+    `UsbDevice::controller_faulted` (`USBSTS & (HSE|HCHalted)`) on each
+    interrupt and after each teardown, and recovers through
+    `UsbDevice::reset_and_reenumerate`, the full reset and fresh walk a cold
+    boot performs (routine hot-plug never resets the controller).
+    The reset does **not** remove the controller's children — the Linux USB
+    core's `usb_reset_and_verify_device` model:
+    - A held URB is answered once its device's fate is known: with the URB
+      protocol's reissuable `WouldBlock` where the device came back (the reset
+      discarded whatever transfer it had armed), which every class driver
+      treats as retry-later — `usb_msd` as `Busy`, the HID drivers as one fault
+      they ride out — and `NotFound` where its node was retracted. Never before
+      the reset: the resubmission it would prompt could arrive after a
+      replacing device's node is published and reach that device.
+    - After a successful reset each node is matched by identity to the index
+      now serving its device (`interfaces::Interfaces::reconcile` over
+      `UsbDevice::device_identity`): the device's root port and Route String
+      plus its vendor, product, `bcdDevice`, device class triple,
+      serial-number string, and the served interface's number and class
+      triple. A device that came back keeps its node, its id, its buffer and
+      its bound class driver even at another index; a vanished one is
+      retracted and a new one published, and no two nodes ever claim one
+      index. Node ids are never reissued, so keeping the node is the only way
+      a device survives the reset with its driver; `devmgr` holds nothing. The
+      serial is read, for a storage device only, in its first listed
+      language; one with none, or whose read is refused, faults, times out or
+      answers malformed, carries no serial and is still served. Non-storage
+      twins swapped between two positions compare equal; a storage interface
+      without a serial is never recognised across the reset
+      (`DeviceIdentity::recognises`), so its node is retracted and
+      republished.
+    - A reset that fails leaves the children published while the
+      controller's grace window runs (`plans/FIX-IO.md` IO4), serving nothing
+      through the controller: a report poll, held or new, waits for the next
+      attempt, and any other transfer is answered `WouldBlock` so its class
+      driver's own recovery paces the retry. The window's one-shot retries the
+      reset; if the window elapses first the subtree fails closed, every
+      interface node is retracted, so `devmgr` unloads their drivers, and the
+      HCD exits (85) with the reason logged; one whose wait-set fails does the
+      same (86).
+    Host regressions: `controller_faulted_reports_hse_and_halt_and_recovery_clears_it`,
+    `a_controller_reset_serves_an_unchanged_topology_under_the_same_identities`,
+    `a_device_found_on_another_port_after_a_reset_has_another_identity`, the
+    `interfaces` tests (`a_device_a_reset_moved_to_another_index_keeps_its_node_and_buffer`,
+    `devices_a_reset_reordered_keep_their_nodes`,
+    `a_moving_node_never_takes_an_index_another_node_serves`,
+    `a_device_replugged_where_one_left_is_published_on_a_region_no_node_carried`,
+    `a_node_is_published_only_once_its_endpoint_is_drained`,
+    `a_device_leaving_on_the_submit_path_recovers_the_controller_it_halted`,
+    `a_controller_that_misses_its_grace_window_retracts_every_node_and_is_never_reset_again`
+    and `stopping_retracts_every_node_and_answers_its_held_urb`), the
+    recovering `UrbService` tests
+    (`a_report_poll_during_recovery_waits_for_the_reset_without_touching_the_controller`,
+    `a_transfer_during_recovery_is_answered_reissuably_without_touching_the_controller`,
+    `a_failed_reset_answers_a_held_transfer_reissuably`),
+    and `devmgr`'s
+    `a_vanished_child_is_unloaded_at_once_even_while_its_owner_is_recovering`.
+    The sequencing is host-tested in `interfaces`; the freestanding serve loop
+    only drives it over the live engine.
   - **A re-plugged device reloads its class driver (the "unplug seen, re-plug
     never reloads" fix).** With the controller recovery above, the HCD
     correctly retracts the interface node on unplug and re-emits it on
@@ -1136,14 +1195,15 @@ the live controller behaviour is host- and CI-proven first.
     returns the unique spawned PID as the driver handle. Host regression: the
     store-server `a_load_spawns_the_matched_signed_driver_with_the_nodes_resources`
     test asserts the reported handle is the spawned PID, not the host counter.
-  - **Remaining (operator's):** live metal acceptance — attach → keystroke,
-    detach → `usb_kbd` unloaded (controller stays up), re-attach → autoloads
-    again, **and cold boot with the keyboard unplugged then plugged in** — is
-    inherently metal-only (QEMU models no Pi USB, §0.4). Update the `README.md`
-    matrix on metal sign-off.
+  - **Metal acceptance (UM):** attach → keystroke, detach → `usb_kbd`
+    unloaded (controller stays up), re-attach → autoloads again, cold boot
+    with the keyboard unplugged then plugged in, and a controller reset under
+    a live keyboard that keeps typing with its driver unreloaded — inherently
+    metal-only (QEMU models no Pi USB, §0.4). Update the `README.md` matrix on
+    metal sign-off.
 
-- **U6 — `usb_mouse` class driver + broken-device isolation `[x]` (DONE;
-  live path metal-only).** `drivers/input/usb_mouse` is the HID boot-mouse
+- **U6 — `usb_mouse` class driver + broken-device isolation** (live path
+  metal-only). `drivers/input/usb_mouse` is the HID boot-mouse
   sibling of `usb_kbd`: a `lib`+`Run` crate binding the boot-mouse interface
   key (`HwMatchKey::usb(0,0,0x03_01_02)`), same least-privilege caps
   (`CAP_INPUT_INJECT`/`CAP_SHM`/`CAP_IPC_ENDPOINT`/`CAP_LOG_EMIT`), pumping
@@ -1177,8 +1237,8 @@ the live controller behaviour is host- and CI-proven first.
   `a_failing_port_at_bring_up_never_costs_the_keyboard_its_service`,
   `a_failed_hot_plug_attach_drains_the_port_latches_so_the_watch_stays_quiet`.
 
-- **U7 — composite (multi-interface) devices `[x]` (DONE; live path
-  metal-only).** One physical USB device may carry several functions — the
+- **U7 — composite (multi-interface) devices** (live path metal-only). One
+  physical USB device may carry several functions — the
   motivating hardware is a wireless keyboard+mouse receiver whose single
   configuration holds a boot-keyboard interface *and* a boot-mouse
   interface. Before this, `InterfaceInfo` decoded only the first interface
@@ -1192,7 +1252,10 @@ the live controller behaviour is host- and CI-proven first.
   - `InterfaceInfo::decode_all` decodes **every** default-alternate
     interface (bounded by `MAX_INTERFACES`, alternate settings skipped, a
     malformed HID interface with no interrupt-IN endpoint dropped so a
-    well-formed sibling is still served); the control-data buffer
+    well-formed sibling is still served; an endpoint descriptor for endpoint
+    0, an endpoint named twice, and a second default setting of an interface
+    number already taken are skipped, the last with its endpoints); the
+    control-data buffer
     (`CTRL_DATA_LEN`, 512 B) holds a composite device's whole configuration
     in one read.
   - `finish_enumeration` plans one device-table entry per servable
@@ -1207,9 +1270,11 @@ the live controller behaviour is host- and CI-proven first.
     report/bulk paths are unchanged.
   - `detach_device` frees **every** entry sharing the vanished device's
     slot, so one physical unplug retracts all of its interfaces; the HCD
-    reconciles all published nodes against the live table
-    (`reconcile_interfaces`) after any hub event, fault detach, or
-    reset/re-enumeration instead of touching a single index.
+    reconciles all published nodes against the live table by identity
+    (`interfaces::Interfaces::reconcile`, each node matched to the index now
+    serving its device) after any hub
+    event, fault detach, or reset/re-enumeration instead of touching a single
+    index.
   - Host regressions (the mock gained a composite fixture whose 75-byte
     configuration exceeds the old 64-byte read plus an alternate-setting
     decoy, and a `composite_downstream_port` knob capturing the same slot's
@@ -1281,7 +1346,12 @@ the live controller behaviour is host- and CI-proven first.
     A field located before the descriptor's first Report ID item in a
     descriptor that *does* declare IDs is undemuxable (its offsets are a byte
     out and its report is indistinguishable from a sibling's), so the map is
-    refused and the caller falls back to boot protocol. Regressions:
+    refused and the caller falls back to boot protocol. Every field is read
+    only from its own report, a re-entered Report ID continues its offsets,
+    Pop restores the Report ID with the rest of the global state, and a map
+    locating a field the boot layout cannot read (a zero or over-32-bit axis,
+    multi-bit buttons or modifiers) is refused the same way (`plans/OPEN-DEFECTS.md`
+    D239). Regressions:
     `fields_located_before_the_first_report_id_refuse_the_map`,
     `a_descriptor_with_no_report_ids_still_maps_and_needs_no_demux`.
   - The interrupt-IN transfer lands in a `CAPTURE_LEN`-byte (64) buffer (a
@@ -1397,8 +1467,8 @@ the live controller behaviour is host- and CI-proven first.
   slower one, and a keyboard is untouched. Regression:
   `a_fast_mouses_poll_rate_is_capped`.
 
-- **U8 — EP0 max-packet discovery + exact-length descriptor reads `[x]`
-  (DONE; live path metal-only).** Enumeration assumed the speed's
+- **U8 — EP0 max-packet discovery + exact-length descriptor reads** (live
+  path metal-only). Enumeration assumed the speed's
   worst-case EP0 max packet (full speed → 64) for every EP0 transfer, but
   a full-speed device may legally use 8/16/32 — the real wireless
   receiver reports `bMaxPacketSize0` = 8, so its 18-byte device-descriptor
@@ -1429,8 +1499,8 @@ the live controller behaviour is host- and CI-proven first.
     `a_forged_ep0_max_packet_fails_closed_without_costing_the_keyboard`,
     `ep0_max_packet_validation_follows_the_speed_rules`.
 
-- **U9 — multi-tier hubs (a hub plugged into a hub) `[x]` (DONE; live path
-  metal-only).** The engine tracks every hub in a growable table
+- **U9 — multi-tier hubs (a hub plugged into a hub)** (live path
+  metal-only). The engine tracks every hub in a growable table
   (`lib/usb::device::HubState`, bounded only by the controller's slot
   count, `MAX_HUB_DEPTH` = 5 route-string tiers — the protocol-fixed
   Route String depth), not a single implicit tier:
@@ -1475,15 +1545,26 @@ the live controller behaviour is host- and CI-proven first.
     `unplugging_a_nested_hub_cascades_and_a_replug_rebuilds_the_tier`,
     `route_for_child_extends_one_nibble_per_tier_and_fails_closed`.
 
-U1–U9 are landed; the modular USB stack — bus driver → user-space HCD owning
-one controller and serving the URB transport → per-interface class drivers
-(keyboard, mouse, mass storage), with event-driven hub hot-plug on every
-tier, recursive multi-tier hub descent with cascade teardown, fresh
-re-enumeration, per-port failure isolation, composite (multi-interface)
-devices served one node per interface, and EP0 max-packet discovery for
-full-speed devices — is complete and host-/CI-proven. The
-live attach/detach/re-attach behaviour is metal-only and is the operator's
-acceptance step (QEMU models no Pi USB, §0.4).
+- **U10 — each node gets a fresh shared buffer; a reused endpoint refuses the
+  previous node's driver.** Every interface node the HCD publishes carries a
+  shared buffer created for it and carried by no other: `hw_remove_node`
+  revokes the node's grants, from its driver and anything it delegated them
+  to, and retires its regions (`plans/OPEN-DEFECTS.md` D230), and the HCD
+  unmaps its own copy, so the previous driver keeps only a buffer that
+  carries nothing of the new device. The device-table index's call endpoint
+  is reused: the previous driver's grant for it is revoked before the
+  removal returns, and the HCD answers the held URB and every queued one
+  `NotFound` before it publishes another node on it, so nothing the previous
+  driver posted, before or after the removal, reaches the new device.
+
+The modular USB stack — bus driver → user-space HCD owning one controller and
+serving the URB transport → per-interface class drivers (keyboard, mouse, mass
+storage), with event-driven hub hot-plug on every tier, recursive multi-tier
+hub descent with cascade teardown, fresh re-enumeration, controller-fault
+recovery that keeps the devices that come back, per-port failure isolation,
+composite (multi-interface) devices served one node per interface, and EP0
+max-packet discovery for full-speed devices — is host- and CI-proven; its live
+attach/detach/re-attach behaviour is metal-only (QEMU models no Pi USB, §0.4).
 
 ---
 

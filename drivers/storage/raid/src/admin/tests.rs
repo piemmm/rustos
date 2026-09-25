@@ -12,7 +12,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{handle_control, LiveArrays};
-use crate::compose::{Admission, MemberRegistry};
+use crate::compose::{Admission, MemberRegistry, ProbedDevice};
 use crate::runtime::ArrayRuntime;
 use crate::service::assemble_array;
 use crate::testkit::{
@@ -20,6 +20,7 @@ use crate::testkit::{
 };
 
 use tairix_abi::blkio::{decode_completion, BlkDeviceClass, BlkOp, BLK_COMPLETION_LEN};
+use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::raid::{MemberState, RaidLevel};
 use tairix_abi::raid_admin::{
     decode_create_reply, ArrayUuidBytes, MemberNodeList, RaidArrayRecord, RaidControlOp,
@@ -28,7 +29,7 @@ use tairix_abi::raid_admin::{
 };
 use tairix_abi::raid_ipc::MemberOffer;
 use tairix_abi::reply::{decode_page_reply, decode_status_reply};
-use tairix_abi::{CapabilityId, Errno};
+use tairix_abi::{CapabilityId, Errno, ProcId};
 use tairix_caps::CapabilitySet;
 
 /// The identity a create is told to mint, planted deterministically so a test
@@ -81,6 +82,24 @@ fn node_id_of(index: usize) -> u32 {
     u32::try_from(index).expect("a test registry index fits a node id") + 1
 }
 
+/// The agent process instance offering the device at registry index `index`.
+fn agent_of(index: usize) -> ProcId {
+    let mut raw = [0xA6; 16];
+    raw[..8].copy_from_slice(&(index as u64).to_le_bytes());
+    ProcId::from_raw(raw)
+}
+
+/// What a device of `blocks` logical blocks answered when it was connected to.
+fn probed(blocks: u64) -> ProbedDevice {
+    ProbedDevice {
+        class: BlkDeviceClass::Virtual,
+        geometry: BlockGeometry {
+            block_size: BLOCK_SIZE,
+            block_count: blocks,
+        },
+    }
+}
+
 /// Register a blank candidate device of `blocks` logical blocks, returning the
 /// node id it is offered under. The device's index in `disks` is its registry
 /// member index, which is what the connect seam is keyed by.
@@ -93,10 +112,15 @@ fn register_candidate(
     let node = node_id_of(index);
     let offer = MemberOffer {
         endpoint: 0x100 + index as u64,
-        window: 0x200 + index as u64,
+        window_grant: 0x200 + index as u64,
         node,
     };
-    match registry.admit_candidate(0x9000 + index as u64, offer, BlkDeviceClass::Virtual) {
+    match registry.admit_candidate(
+        0x9000 + index as u64,
+        agent_of(index),
+        offer,
+        probed(blocks),
+    ) {
         Admission::Registered { index: got } => {
             assert_eq!(got, index, "the index-check discipline");
         }
@@ -118,13 +142,14 @@ fn register_member(
     let node = node_id_of(index);
     let offer = MemberOffer {
         endpoint: 0x100 + index as u64,
-        window: 0x200 + index as u64,
+        window_grant: 0x200 + index as u64,
         node,
     };
     match registry.admit(
         0x9000 + index as u64,
+        agent_of(index),
         offer,
-        BlkDeviceClass::Virtual,
+        probed(DEVICE_BLOCKS),
         *superblock,
         NOW_NS,
     ) {
@@ -675,9 +700,9 @@ fn live_runtime(
         assembled.array,
         0x7001,
         0x7002,
-        42,
         assembled.resume,
         NOW_NS,
+        || Some(42),
     )
     .expect("the runtime is built from the array's width")
 }
@@ -1022,6 +1047,57 @@ fn remove_vacates_a_faulted_member_and_bumps_the_survivors_generation() {
         assert_eq!(
             stamped.generation, expected,
             "disk {index} is stamped at generation {expected}"
+        );
+    }
+}
+
+#[test]
+fn listing_members_opens_no_client_over_any_window() {
+    // A composed member's window is lent to the array holding its client, so a
+    // listing that connected a client of its own would put a second exclusive
+    // view on the same bytes, and would wait on every device it listed.
+    let members = [
+        superblock(RaidLevel::Mirror, UUID_A, 2, 0, 3),
+        superblock(RaidLevel::Mirror, UUID_A, 2, 1, 3),
+    ];
+    let mut registry = MemberRegistry::new();
+    let mut disks = Vec::new();
+    for member in &members {
+        register_member(&mut registry, &mut disks, member);
+    }
+    let mut arrays = TestArrays(vec![live_runtime(&members, &disks)]);
+    let mut out = [0u8; RAID_CONTROL_MAX_REPLY];
+    let mut connects = 0usize;
+
+    let frame = frame_of(&RaidControlOp::ListMembers {
+        offset: 0,
+        limit: 8,
+    });
+    let effects = handle_control(
+        &mut registry,
+        &mut arrays,
+        &read_caps(),
+        &frame,
+        NOW,
+        NOW_NS,
+        |index| {
+            connects += 1;
+            disks.get(index).cloned()
+        },
+        plant_minted,
+        no_remove(),
+        &mut out,
+    );
+    assert_eq!(connects, 0, "a listing connects to no device");
+    let (count, body) = decode_page_reply(&out[..effects.reply_len], RaidMemberRecord::WIRE_LEN, 8)
+        .expect("a page of members");
+    assert_eq!(count, 2);
+    for record in body.as_chunks::<{ RaidMemberRecord::WIRE_LEN }>().0 {
+        let record = RaidMemberRecord::from_bytes(record).expect("a member record");
+        assert_eq!(
+            (record.block_count(), record.block_size()),
+            (DEVICE_BLOCKS, BLOCK_SIZE),
+            "each member still reports the geometry its device answered with"
         );
     }
 }

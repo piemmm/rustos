@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{attach_transport_grants, UrbOutcome, UrbService};
+use super::{attach_transport_grants, Reach, UrbOutcome, UrbService};
 use tairix_abi::hwtree::{HwResourceKind, HW_NODE_ROOT};
 use tairix_abi::usb_urb::{
     decode_completion, UrbRequest, UsbDirection, UsbTransferType, URB_REQUEST_LEN,
@@ -150,7 +150,7 @@ fn an_interrupt_in_is_held_until_a_controller_event_completes_it() {
     let request = interrupt_urb(1, 8);
 
     // No report queued yet: the submit is held outstanding, not replied.
-    let outcome = service.on_submit(true, 0x11, &request, &mut shm, &mut engine);
+    let outcome = service.on_submit(Reach::Served, 0x11, &request, &mut shm, &mut engine);
     assert_eq!(outcome, UrbOutcome::Held);
     assert!(service.is_busy());
     assert_eq!(engine.interrupt_calls, 1);
@@ -196,7 +196,7 @@ fn a_bulk_in_is_held_until_a_controller_event_completes_it() {
     let mut service = UrbService::new();
     let request = bulk_in_urb(BULK_IN_ENDPOINT, 16);
 
-    let outcome = service.on_submit(true, 0x21, &request, &mut shm, &mut engine);
+    let outcome = service.on_submit(Reach::Served, 0x21, &request, &mut shm, &mut engine);
     assert_eq!(outcome, UrbOutcome::Held);
     assert!(service.is_busy());
 
@@ -214,6 +214,21 @@ fn a_bulk_in_is_held_until_a_controller_event_completes_it() {
     assert!(!service.is_busy());
 }
 
+/// Encode a `GET_DESCRIPTOR(device)` control-IN URB reading `length` bytes.
+fn control_in_urb(length: u8) -> Vec<u8> {
+    let urb = UrbRequest {
+        endpoint: 0,
+        transfer_type: UsbTransferType::Control,
+        direction: UsbDirection::In,
+        buffer: BUFFER_HANDLE,
+        length: u32::from(length),
+        setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, length, 0x00],
+    };
+    let mut buf = [0u8; URB_REQUEST_LEN];
+    let n = urb.encode(&mut buf).expect("encodes");
+    buf[..n].to_vec()
+}
+
 #[test]
 fn a_control_in_is_replied_synchronously() {
     let mut engine = MockEngine::new();
@@ -221,18 +236,13 @@ fn a_control_in_is_replied_synchronously() {
     let mut shm = vec![0u8; 64];
     let mut service = UrbService::new();
 
-    let urb = UrbRequest {
-        endpoint: 0,
-        transfer_type: UsbTransferType::Control,
-        direction: UsbDirection::In,
-        buffer: BUFFER_HANDLE,
-        length: 8,
-        setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x12, 0x00],
-    };
-    let mut buf = [0u8; URB_REQUEST_LEN];
-    let n = urb.encode(&mut buf).expect("encodes");
-
-    let outcome = service.on_submit(true, 0x22, &buf[..n], &mut shm, &mut engine);
+    let outcome = service.on_submit(
+        Reach::Served,
+        0x22,
+        &control_in_urb(8),
+        &mut shm,
+        &mut engine,
+    );
     assert_eq!(reply_result(&outcome), Ok(8));
     // A control transfer completes within the call — never left outstanding.
     assert!(!service.is_busy());
@@ -249,13 +259,13 @@ fn a_second_submit_while_one_is_outstanding_is_rejected_without_displacing_it() 
 
     // First submit is held (no report yet).
     assert_eq!(
-        service.on_submit(true, 0x11, &request, &mut shm, &mut engine),
+        service.on_submit(Reach::Served, 0x11, &request, &mut shm, &mut engine),
         UrbOutcome::Held
     );
     // A second concurrent submit is fail-closed `AlreadyExists` and does not
     // touch the engine or the in-flight URB.
     let before = engine.interrupt_calls;
-    let outcome = service.on_submit(true, 0x22, &request, &mut shm, &mut engine);
+    let outcome = service.on_submit(Reach::Served, 0x22, &request, &mut shm, &mut engine);
     assert_eq!(reply_result(&outcome), Err(Errno::AlreadyExists));
     assert_eq!(engine.interrupt_calls, before);
     assert!(service.is_busy());
@@ -277,7 +287,7 @@ fn aborting_an_outstanding_urb_replies_and_unblocks_a_replugged_driver() {
     let request = interrupt_urb(1, 8);
 
     assert_eq!(
-        service.on_submit(true, 0x11, &request, &mut shm, &mut engine),
+        service.on_submit(Reach::Served, 0x11, &request, &mut shm, &mut engine),
         UrbOutcome::Held
     );
 
@@ -295,7 +305,7 @@ fn aborting_an_outstanding_urb_replies_and_unblocks_a_replugged_driver() {
     assert!(!service.is_busy());
 
     assert_eq!(
-        service.on_submit(true, 0x22, &request, &mut shm, &mut engine),
+        service.on_submit(Reach::Served, 0x22, &request, &mut shm, &mut engine),
         UrbOutcome::Held
     );
 }
@@ -308,7 +318,7 @@ fn disconnect_abort_wins_over_a_stale_transfer_fault() {
     let request = interrupt_urb(1, 8);
 
     assert_eq!(
-        service.on_submit(true, 0x11, &request, &mut shm, &mut engine),
+        service.on_submit(Reach::Served, 0x11, &request, &mut shm, &mut engine),
         UrbOutcome::Held
     );
     engine.interrupt_fault = Some(DriverError::DeviceFault);
@@ -330,7 +340,7 @@ fn submit_after_interface_removal_is_rejected_without_touching_the_engine() {
     let mut service = UrbService::new();
     let request = interrupt_urb(1, 8);
 
-    let outcome = service.on_submit(false, 0x33, &request, &mut shm, &mut engine);
+    let outcome = service.on_submit(Reach::Retracted, 0x33, &request, &mut shm, &mut engine);
     match outcome {
         UrbOutcome::Reply(reply) => {
             assert_eq!(reply.ticket, 0x33);
@@ -364,7 +374,7 @@ fn an_illegal_urb_is_replied_fail_closed_without_reaching_the_engine() {
     let mut buf = [0u8; URB_REQUEST_LEN];
     let n = urb.encode(&mut buf).expect("encodes");
 
-    let outcome = service.on_submit(true, 0x33, &buf[..n], &mut shm, &mut engine);
+    let outcome = service.on_submit(Reach::Served, 0x33, &buf[..n], &mut shm, &mut engine);
     assert_eq!(reply_result(&outcome), Err(Errno::OutOfRange));
     assert!(!service.is_busy());
     assert_eq!(engine.control_calls, 0);
@@ -411,7 +421,13 @@ fn a_held_submit_runs_no_synchronous_transfer_the_shared_ring_could_lose() {
     let mut service = UrbService::new();
 
     // Nothing buffered: held, and only the non-blocking interrupt-IN probe ran.
-    let outcome = service.on_submit(true, 0x21, &interrupt_urb(1, 8), &mut shm, &mut engine);
+    let outcome = service.on_submit(
+        Reach::Served,
+        0x21,
+        &interrupt_urb(1, 8),
+        &mut shm,
+        &mut engine,
+    );
     assert_eq!(outcome, UrbOutcome::Held);
     assert_eq!(
         engine.control_calls, 0,
@@ -423,20 +439,137 @@ fn a_held_submit_runs_no_synchronous_transfer_the_shared_ring_could_lose() {
     let mut engine = MockEngine::new();
     engine.control_response = vec![0xAA; 4];
     let mut service = UrbService::new();
-    let urb = UrbRequest {
-        endpoint: 0,
-        transfer_type: UsbTransferType::Control,
-        direction: UsbDirection::In,
-        buffer: BUFFER_HANDLE,
-        length: 4,
-        setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x04, 0x00],
-    };
-    let mut buf = [0u8; URB_REQUEST_LEN];
-    let n = urb.encode(&mut buf).expect("encodes");
-    let outcome = service.on_submit(true, 0x22, &buf[..n], &mut shm, &mut engine);
+    let outcome = service.on_submit(
+        Reach::Served,
+        0x22,
+        &control_in_urb(4),
+        &mut shm,
+        &mut engine,
+    );
     assert!(matches!(outcome, UrbOutcome::Reply(_)));
     assert_eq!(
         engine.control_calls, 1,
         "a replied control URB did run a synchronous transfer"
     );
+}
+
+#[test]
+fn a_report_poll_during_recovery_waits_for_the_reset_without_touching_the_controller() {
+    // After a failed reset the device table is not trusted, so even a
+    // buffered report is not read. The poll is held through the next failed
+    // attempt too, and answered reissuably once an attempt brings its device
+    // back.
+    let mut engine = MockEngine::new();
+    engine.reports = vec![vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]];
+    let mut shm = vec![0u8; 8];
+    let mut service = UrbService::new();
+
+    let outcome = service.on_submit(
+        Reach::Recovering,
+        0x41,
+        &interrupt_urb(1, 8),
+        &mut shm,
+        &mut engine,
+    );
+    assert_eq!(outcome, UrbOutcome::Held);
+    assert!(service.is_busy());
+    assert_eq!(
+        engine.interrupt_calls, 0,
+        "nothing reaches the controller while it recovers"
+    );
+    assert_eq!(
+        reply_result(&service.on_submit(
+            Reach::Recovering,
+            0x42,
+            &interrupt_urb(1, 8),
+            &mut shm,
+            &mut engine,
+        )),
+        Err(Errno::AlreadyExists),
+        "the one held poll is never displaced"
+    );
+    assert_eq!(
+        service.reissue_held_transfer(),
+        UrbOutcome::Held,
+        "a failed attempt keeps the poll waiting rather than having it resubmitted"
+    );
+    assert!(service.is_busy());
+
+    match service.abort_outstanding(Errno::WouldBlock) {
+        UrbOutcome::Reply(reply) => {
+            assert_eq!(reply.ticket, 0x41);
+            assert_eq!(
+                decode_completion(&reply.bytes[..reply.len]),
+                Err(Errno::WouldBlock)
+            );
+        }
+        other => panic!("expected the held poll answered, got {other:?}"),
+    }
+    assert!(!service.is_busy());
+    assert_eq!(engine.interrupt_calls, 0);
+}
+
+#[test]
+fn a_transfer_during_recovery_is_answered_reissuably_without_touching_the_controller() {
+    let mut engine = MockEngine::new();
+    engine.control_response = vec![0xAA; 8];
+    engine.bulk_in_data = vec![vec![0xC3; 16]];
+    let mut shm = vec![0u8; 16];
+    let mut service = UrbService::new();
+
+    for (ticket, request) in [
+        (0x51, bulk_in_urb(BULK_IN_ENDPOINT, 16)),
+        (0x52, control_in_urb(8)),
+    ] {
+        let outcome = service.on_submit(Reach::Recovering, ticket, &request, &mut shm, &mut engine);
+        assert_eq!(reply_result(&outcome), Err(Errno::WouldBlock));
+        assert!(!service.is_busy(), "a reissuable answer holds nothing");
+    }
+    assert_eq!(engine.control_calls, 0);
+    assert_eq!(engine.bulk_in_armed, None, "no bulk TD was armed");
+}
+
+#[test]
+fn a_failed_reset_answers_a_held_transfer_reissuably() {
+    // A bulk TD armed before the controller faulted is gone with the reset,
+    // and nothing can run until an attempt succeeds, so its class driver is
+    // told to reissue rather than left blocked through the grace window.
+    let mut engine = MockEngine::new();
+    let mut shm = vec![0u8; 16];
+    let mut service = UrbService::new();
+    assert_eq!(
+        service.on_submit(
+            Reach::Served,
+            0x71,
+            &bulk_in_urb(BULK_IN_ENDPOINT, 16),
+            &mut shm,
+            &mut engine,
+        ),
+        UrbOutcome::Held
+    );
+
+    match service.reissue_held_transfer() {
+        UrbOutcome::Reply(reply) => {
+            assert_eq!(reply.ticket, 0x71);
+            assert_eq!(
+                decode_completion(&reply.bytes[..reply.len]),
+                Err(Errno::WouldBlock)
+            );
+        }
+        other => panic!("expected the held transfer answered, got {other:?}"),
+    }
+    assert!(!service.is_busy());
+    assert_eq!(service.reissue_held_transfer(), UrbOutcome::Idle);
+}
+
+#[test]
+fn a_malformed_urb_during_recovery_is_refused_fail_closed() {
+    let mut engine = MockEngine::new();
+    let mut shm = vec![0u8; 8];
+    let mut service = UrbService::new();
+
+    let truncated = &interrupt_urb(1, 8)[..URB_REQUEST_LEN - 1];
+    let outcome = service.on_submit(Reach::Recovering, 0x61, truncated, &mut shm, &mut engine);
+    assert_eq!(reply_result(&outcome), Err(Errno::LengthOutOfRange));
+    assert!(!service.is_busy());
 }

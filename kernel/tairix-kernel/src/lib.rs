@@ -61,8 +61,7 @@
 // `boot` module to resolve `alloc::sync::Arc`; on host builds the
 // declaration shows up as unused (`boot` is gated to the
 // `freestanding` build) but stripping it would break the bare-metal
-// build. — every `#[allow]` carries a justifying
-// comment.
+// build.
 #[allow(unused_extern_crates)]
 extern crate alloc;
 
@@ -264,7 +263,7 @@ pub mod unlock_service;
 // admits a discovered `kind = UserSpace` driver through the same signed
 // `drvhost::Host::load` gate, then **spawns** it into its own
 // hardware-isolated process, minting it one device-resource grant per
-// `HwResource` its matched hardware-tree node requested (drivers in user space; — only the resources the matched node
+// `HwResource` its matched hardware-tree node requested (drivers in user space; only the resources the matched node
 // requested). It implements `tairix_devmgr::DriverLoader`, so the device
 // manager's autoload walk drives it directly; the architecture-specific
 // process creation sits behind the `DriverProcessSpawn` seam, so the gate +

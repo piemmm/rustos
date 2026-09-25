@@ -51,7 +51,7 @@
 //! this crate so `cargo build -p tairix-test-syscall-dispatch-qemu`
 //! and `cargo xtask test --qemu` do the obvious thing; release builds
 //! that enable it are rejected by the `compile_error!` guard below
-//! (no hacks; — fail closed). `cargo deny check`
+//! (no hacks; fail closed). `cargo deny check`
 //! additionally forbids the production `tairix-kernel` crate from
 //! ever growing a `test-hooks` feature (see `deny.toml`).
 
@@ -160,7 +160,7 @@ mod kernel {
     /// Set once the synthesised-quartet entry point has been driven,
     /// so a stray duplicate `BootCompleted` (which the catalogue
     /// disallows but the audit pipeline cannot statically prove)
-    /// never re-enters the test logic. — fail closed.
+    /// never re-enters the test logic.
     static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
     // --- Audit observer Sinks ------------------------------------
@@ -469,8 +469,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // No audit observer, no dispatch, no QEMU exit affordance: the
     // run will time out under `tools/qemu::Runner`, which is the
     // correct fail-loud signal for "test-hooks feature was disabled
-    // for a QEMU enrolment that needs it". — no flaky
-    // tests; the timeout is deterministic.
+    // for a QEMU enrolment that needs it"; the timeout is deterministic.
     loop {
         // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on
         // x86_64. Looping defends against spurious

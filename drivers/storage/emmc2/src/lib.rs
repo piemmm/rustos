@@ -35,7 +35,7 @@
 //!
 //! # Public surface
 //!
-//! Per the only public *function* is [`register`].
+//! The only public *function* is [`register`].
 //! [`Emmc2`] is a public *type* the driver host instantiates through
 //! [`wiring::open_discovered`]; the host never reaches into it beyond the
 //! [`Block`] trait.
@@ -69,7 +69,7 @@ pub mod wiring;
 #[cfg(test)]
 mod tests;
 
-use command::{ResponseKind, SdCommand, BLOCK_SIZE, BLOCK_WORDS};
+use command::{CardCondition, ResponseKind, SdCommand, BLOCK_SIZE, BLOCK_WORDS};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 ///
@@ -198,6 +198,10 @@ pub trait SdhciHost {
     /// coherency operation. Out-of-range requests fail closed inside the
     /// slab and are never issued by the engine.
     fn sync_dma_range(&mut self, _offset: usize, _len: usize) {}
+
+    /// Never return the DMA staging region to its pool: the controller may
+    /// still be mastering it. A host with no region has nothing to withhold.
+    fn withhold_dma(&mut self) {}
 }
 
 /// A borrowed view of a host's device-shared DMA staging region.
@@ -324,6 +328,12 @@ impl<W: CompletionWait> SdhciHost for IrqSdhci<W> {
             slab.sync_range(offset, len);
         }
     }
+
+    fn withhold_dma(&mut self) {
+        if let Some(slab) = self.dma.as_mut() {
+            slab.withhold();
+        }
+    }
 }
 
 /// SD-clock frequency-select divisor used during card identification.
@@ -356,6 +366,11 @@ const DATA_TIMEOUT_VALUE: u32 = 0x0E;
 /// 16-bit block-count field bounds a single transfer (a format-fixed bound, not a scalable capacity); a caller
 /// asking for more is rejected fail-closed.
 const MAX_BLOCKS_PER_TRANSFER: usize = 0xFFFF;
+
+/// Rounds of `SEND_STATUS` and its remedy a card of unknown state is given to
+/// reach `tran`. An abort mid-write can leave it programming; a card still out
+/// of `tran` after three is faulty. A defence bound, not a capacity.
+const CARD_STATE_ROUNDS: usize = 3;
 
 /// Number of 512-byte blocks the ADMA2 DMA path stages per transfer chunk.
 ///
@@ -495,6 +510,12 @@ pub struct Emmc2<H: SdhciHost> {
     /// granted no DMA region (the engine then uses programmed I/O). Set
     /// once during [`Emmc2::init`] from the host's [`SdhciHost::dma_region`].
     dma_stage_blocks: usize,
+    /// A failed transfer's line reset never confirmed, so the controller may
+    /// still be mastering the staging region: no transfer may reuse it.
+    dma_wedged: bool,
+    /// A failed transfer's recovery could not prove the card back in `tran`,
+    /// so the next data command asks it first.
+    card_state_unknown: bool,
 }
 
 impl<H: SdhciHost> Emmc2<H> {
@@ -537,6 +558,8 @@ impl<H: SdhciHost> Emmc2<H> {
             rca: 0,
             poll_budget,
             dma_stage_blocks: 0,
+            dma_wedged: false,
+            card_state_unknown: false,
         };
         dev.init()?;
         Ok(dev)
@@ -583,9 +606,8 @@ impl<H: SdhciHost> Emmc2<H> {
     ///
     /// Each iteration reads the status once and, if neither `wanted` nor an
     /// error bit is set yet, parks via [`SdhciHost::await_irq`] until the
-    /// controller signals — never a busy-spin (: a
-    /// driver poll must not monopolise the CPU and starve interrupt-driven
-    /// work). `poll_budget` bounds the number of parks as a fail-closed
+    /// controller signals, never spinning, so a driver poll cannot monopolise
+    /// the CPU. `poll_budget` bounds the number of parks as a fail-closed
     /// backstop against a storm of spurious wake-ups; the metal completion
     /// itself arrives in one or two iterations. A wait that reports
     /// [`CompletionSignal::TimedOut`] fails closed at once: the controller
@@ -954,33 +976,45 @@ impl<H: SdhciHost> Emmc2<H> {
     /// Read `buf` (a whole number of blocks) from the card starting at
     /// `block_addr` over the programmed-I/O buffer data port.
     fn read_blocks_pio(&mut self, block_addr: u32, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.ensure_card_in_tran()?;
         let block_count = u32::try_from(buf.len() / BLOCK_SIZE as usize)
             .map_err(|_| DriverError::LengthOutOfRange)?;
         self.host
             .write32(regs::REG_BLKSIZECNT, (block_count << 16) | BLOCK_SIZE)?;
-        let (cmd, transfer_mode) = Self::read_command(block_count != 1, false);
-        self.issue(cmd, block_addr, transfer_mode)?;
-        for block in buf.chunks_mut(BLOCK_SIZE as usize) {
-            self.read_block_pio(block)?;
+        let multi = block_count != 1;
+        let (cmd, transfer_mode) = Self::read_command(multi, false);
+        let moved = self.issue(cmd, block_addr, transfer_mode).and_then(|_| {
+            for block in buf.chunks_mut(BLOCK_SIZE as usize) {
+                self.read_block_pio(block)?;
+            }
+            self.wait_interrupt(regs::INT_DATA_DONE)
+        });
+        if moved.is_err() {
+            self.recover_transfer(multi);
         }
-        self.wait_interrupt(regs::INT_DATA_DONE)?;
-        Ok(())
+        moved
     }
 
     /// Write `buf` (a whole number of blocks) to the card starting at
     /// `block_addr` over the programmed-I/O buffer data port.
     fn write_blocks_pio(&mut self, block_addr: u32, buf: &[u8]) -> Result<(), DriverError> {
+        self.ensure_card_in_tran()?;
         let block_count = u32::try_from(buf.len() / BLOCK_SIZE as usize)
             .map_err(|_| DriverError::LengthOutOfRange)?;
         self.host
             .write32(regs::REG_BLKSIZECNT, (block_count << 16) | BLOCK_SIZE)?;
-        let (cmd, transfer_mode) = Self::write_command(block_count != 1, false);
-        self.issue(cmd, block_addr, transfer_mode)?;
-        for block in buf.chunks(BLOCK_SIZE as usize) {
-            self.write_block_pio(block)?;
+        let multi = block_count != 1;
+        let (cmd, transfer_mode) = Self::write_command(multi, false);
+        let moved = self.issue(cmd, block_addr, transfer_mode).and_then(|_| {
+            for block in buf.chunks(BLOCK_SIZE as usize) {
+                self.write_block_pio(block)?;
+            }
+            self.wait_interrupt(regs::INT_DATA_DONE)
+        });
+        if moved.is_err() {
+            self.recover_transfer(multi);
         }
-        self.wait_interrupt(regs::INT_DATA_DONE)?;
-        Ok(())
+        moved
     }
 
     /// Stage the one-entry ADMA2 descriptor covering the first `chunk_bytes`
@@ -1033,8 +1067,99 @@ impl<H: SdhciHost> Emmc2<H> {
         } else {
             Self::read_command(multi, true)
         };
-        self.issue(cmd, lba, transfer_mode)?;
+        let moved = self
+            .issue(cmd, lba, transfer_mode)
+            .and_then(|_| self.wait_interrupt(regs::INT_DATA_DONE));
+        if moved.is_err() {
+            self.recover_transfer(multi);
+        }
+        moved
+    }
+
+    /// Recover from a failed data transfer, DMA or PIO, by the SDHCI
+    /// error-interrupt sequence: reset the command and data lines, then abort
+    /// a `multi`-block transfer with `CMD12` and wait for the transfer-complete
+    /// interrupt that ends its busy.
+    ///
+    /// Only that answered abort proves the card back in `tran`; anything less
+    /// leaves its state unknown for `ensure_card_in_tran` to settle. A line
+    /// reset that never confirms sends no abort and wedges DMA, since only the
+    /// data-line reset halts the DMA engine. A failed abort is not surfaced:
+    /// the transfer's own error stands.
+    fn recover_transfer(&mut self, multi: bool) {
+        self.card_state_unknown = true;
+        if self.reset_lines().is_err() {
+            if self.dma_stage_blocks != 0 {
+                self.dma_wedged = true;
+            }
+            return;
+        }
+        if multi
+            && self
+                .issue_awaiting_busy(command::STOP_TRANSMISSION, 0)
+                .is_ok()
+        {
+            self.card_state_unknown = false;
+        }
+    }
+
+    /// Issue the R1b `cmd` and park until the transfer-complete interrupt
+    /// reports the card's busy ended.
+    fn issue_awaiting_busy(&mut self, cmd: SdCommand, arg: u32) -> Result<(), DriverError> {
+        self.issue(cmd, arg, 0)?;
         self.wait_interrupt(regs::INT_DATA_DONE)
+    }
+
+    /// Before a data command, prove a card of unknown state back in `tran` with
+    /// `SEND_STATUS`, aborting a transfer still open and awaiting a programming
+    /// card's busy, then asking again, for at most [`CARD_STATE_ROUNDS`] rounds.
+    /// A card whose state is known is not asked.
+    ///
+    /// Any other answer, or a failed command, fails closed and keeps the state
+    /// unknown, so the next data command asks again.
+    fn ensure_card_in_tran(&mut self) -> Result<(), DriverError> {
+        if !self.card_state_unknown {
+            return Ok(());
+        }
+        // Whatever left the state unknown may have left a line error latched. No
+        // DMA has run since the recovery, so a reset failing here wedges no staging.
+        self.reset_lines()?;
+        for _ in 0..CARD_STATE_ROUNDS {
+            let status = self.issue(command::SEND_STATUS, self.rca, 0)?[0];
+            match command::card_condition(status) {
+                CardCondition::Ready => {
+                    self.card_state_unknown = false;
+                    return Ok(());
+                }
+                CardCondition::Transferring => {
+                    self.issue_awaiting_busy(command::STOP_TRANSMISSION, 0)?;
+                }
+                CardCondition::Busy => {
+                    self.issue_awaiting_busy(command::SEND_STATUS_BUSY, self.rca)?;
+                }
+                CardCondition::Unusable => return Err(DriverError::DeviceFault),
+            }
+        }
+        Err(DriverError::DeviceFault)
+    }
+
+    /// Reset the command and data lines; the data-line reset also halts the
+    /// DMA engine, so the staging is the engine's again once it confirms.
+    fn reset_lines(&mut self) -> Result<(), DriverError> {
+        let lines = regs::CONTROL1_SRST_CMD | regs::CONTROL1_SRST_DATA;
+        let control1 = self.host.read32(regs::REG_CONTROL1)?;
+        self.host.write32(regs::REG_CONTROL1, control1 | lines)?;
+        self.wait_clear(regs::REG_CONTROL1, lines)
+    }
+
+    /// Refuse a transfer while the controller may still be mastering the
+    /// staging an earlier one handed it.
+    fn staging_free(&self) -> Result<(), DriverError> {
+        if self.dma_wedged {
+            Err(DriverError::DeviceFault)
+        } else {
+            Ok(())
+        }
     }
 
     /// Read `buf` (a whole number of blocks) from the card starting at
@@ -1044,6 +1169,8 @@ impl<H: SdhciHost> Emmc2<H> {
     /// After each chunk's completion the engine orders its loads with
     /// [`dma_rmb`] and copies the device-written staging bytes into `buf`.
     fn read_blocks_dma(&mut self, block_addr: u32, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.staging_free()?;
+        self.ensure_card_in_tran()?;
         let stage_bytes = self.dma_stage_blocks * BLOCK_SIZE as usize;
         let mut lba = block_addr;
         let mut offset = 0usize;
@@ -1076,6 +1203,8 @@ impl<H: SdhciHost> Emmc2<H> {
     /// issuing the command, so the caller's buffer is never mutated (the
     /// `Block` write contract).
     fn write_blocks_dma(&mut self, block_addr: u32, buf: &[u8]) -> Result<(), DriverError> {
+        self.staging_free()?;
+        self.ensure_card_in_tran()?;
         let stage_bytes = self.dma_stage_blocks * BLOCK_SIZE as usize;
         let mut lba = block_addr;
         let mut offset = 0usize;
@@ -1097,6 +1226,17 @@ impl<H: SdhciHost> Emmc2<H> {
                 .ok_or(DriverError::LengthOutOfRange)?;
         }
         Ok(())
+    }
+}
+
+impl<H: SdhciHost> Drop for Emmc2<H> {
+    /// A controller whose line reset never confirmed may still be mastering
+    /// the staging region, which is then held for the kernel to quarantine
+    /// when the driver exits.
+    fn drop(&mut self) {
+        if self.dma_wedged {
+            self.host.withhold_dma();
+        }
     }
 }
 

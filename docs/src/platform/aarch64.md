@@ -462,8 +462,11 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   `ranges`-aware walk as the console and GIC (`fdt::scan_translated`,
   `AGENTS.md` §2.2) — on the Pi 4 tree, bus `0x7E00_B880` →
   CPU-physical `0xFE00_B880`.
-- **Bring-up (pre-MMU, by design).** `video::configure_from_fdt` runs
-  in the same pre-MMU phase as the console/GIC discovery: with the
+- **Bring-up (pre-MMU, by design).** `video::configure` runs in the same
+  pre-MMU phase as the console/GIC discovery, on the one firmware transport
+  the boot-time clock raise also uses (`firmware::with_transport`), so a
+  request the firmware leaves unanswered is still owed when the next is made
+  and its late reply is never taken for that one's. With the
   data caches still off, the CPU↔firmware property exchange over the
   shared `tairix-vcmailbox` protocol crate is coherent without cache
   maintenance, and the console state cell is written by the
@@ -1410,14 +1413,19 @@ The `VideoCore` firmware property mailbox is a **user-space service driver**
 (`drivers/bus/mailbox/vcmailbox`, `AGENTS.md` §4): the §18.6 bootstrap floor
 stays storage-only and the mailbox is reached, like every other device,
 through discovery and a capability-gated service. The discovered mailbox node
-above (the doorbell `reg` window plus its one-page `Dma` carve request) is what
-the service binds.
+above (the doorbell `reg` window, its inbox interrupt, and its one-page `Dma`
+carve request) is what the service binds.
 
 - **The service.** Autoloaded by `devmgr` when the mailbox node is discovered,
   it builds an `RtDriverHost` from its kernel-issued grants, maps the doorbell
   window (`sole_register_window` + `mmio_map`), carves the property buffer
-  (`dma_alloc`), and builds the BCM2711 transport (`lib/vcmailbox::MmioMailbox`)
-  over them. The kernel carves coherent DMA, so the program supplies no
+  (`dma_alloc`), and builds the BCM2711 transport (`lib/vcmailbox::DmaMailbox`)
+  over them; the transport owns the buffer and withholds it rather than freeing
+  it while the firmware owes a reply. It binds the granted inbox interrupt
+  (exiting if it cannot) before the transport turns that interrupt on, and each
+  wait for a reply parks on it until a four-second deadline of its own, rather
+  than polling the doorbell; the pre-MMU boot path, which has no scheduler,
+  keeps a bounded spin. The kernel carves coherent DMA, so the program supplies no
   architecture-specific cache shim and names no board address (`AGENTS.md`
   §2.20). It then `call_create`s a restricted-sender call endpoint and serves
   forever: `call_recv` → exchange → `call_reply`.
@@ -1448,7 +1456,8 @@ the service binds.
   `rxe` relocated for the production user-image bias and stamped with the
   kernel's `SYSCALL_TABLE_HASH`, and wraps it as a `kind = UserSpace`
   `DriverManifest` requesting `CAP_MMIO_MAP` + `CAP_MEM_DMA` +
-  `CAP_IPC_BIND_PRIVILEGED`, signed with the kernel's driver-signing seed — so
+  `CAP_IRQ_BIND` + `CAP_IPC_BIND_PRIVILEGED`, signed with the kernel's
+  driver-signing seed — so
   the booted kernel admits it through the §8 / §18.6 signed load gate. The
   autoload gate's delegatable superset (`unlock_service::autoload_caps`) carries
   `CAP_IPC_BIND_PRIVILEGED` precisely so a signed bus *service* driver like this

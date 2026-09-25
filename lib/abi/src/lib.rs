@@ -3,9 +3,8 @@
 //! This crate is the single source of truth for the binary interface between
 //! the kernel and user space. Every public item is `#[repr(C)]` (or
 //! `#[repr(transparent)]` over a `#[repr(C)]` type) with an explicit primitive
-//! representation, and the wire layout shipped under [`ABI_VERSION_V1`] is
-//! frozen for the lifetime of `abi-v1`: new behaviour ships in `abi-v2`
-//! instead of mutating these types in place.
+//! representation. [`ABI_VERSION_V1`] changes in place until the first
+//! release, when it freezes and new behaviour ships as `abi-v2`.
 //!
 //! The crate is `no_std`, has no transitive dependencies, and performs no
 //! allocation. Encoding and decoding helpers operate exclusively on borrowed

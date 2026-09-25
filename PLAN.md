@@ -359,8 +359,11 @@ a load, use, unload and reload QEMU vertical, and the Stage 4.D acceptance gate
   while its device may still master memory surrenders its DMA carves, and the
   DMA shared regions it still maps, to a quarantine held against its node, which
   frees them, scrubbed, only on a later driver's reset-confirmed `dma_quiesced`
-  or the node's retirement (`plans/OPEN-DEFECTS.md` D167; D225 and D226 are
-  where that does not yet hold).
+  or the node's retirement. A node has at most one live driver and its id is
+  never reissued, a live driver withholds what its device may still own, and a
+  node's removal revokes its authority from its driver and every delegate,
+  tearing down their windows, interrupt bindings and granted regions before it
+  returns (`plans/OPEN-DEFECTS.md` D167, D225–D227, D230).
 - **The floor is the storage path.** `driver_catalog::IN_KERNEL_DRIVERS` holds
   only virtio-blk, plus EMMC2 on aarch64. The signed driver store lives on a
   read-only `/System` volume mounted before the encrypted root is unlocked and
@@ -809,14 +812,9 @@ each is a line to fix in a gated change:
 - `docs/src/architecture/memory.md` has two §7o sections (demand-paged file
   mappings, and cold-page identification), so every `§7o` citation — Stage 5
   above, `plans/PI.md`, and five within the page — names either.
-- Found reviewing the DMA-quarantine change: `docs/src/lib/drvrt.md` (no
-  DMA-free syscall, exit frees a carve), `docs/src/architecture/kernel.md`
-  (what 4091's `bytes` counts, and that 4091 and 4092 always pair),
-  `docs/src/architecture/syscalls.md` (`dma_alloc`'s `PermissionDenied` and
-  `NotImplemented`, `port_write`'s return type, `port_bind` absent from the
-  table, gated syscalls missing from the capability matrix),
-  `lib/abi/src/syscall.rs` (the `DMA_ALLOC` and `DMA_QUIESCED` error lists),
-  and `plans/APPS.md` (`LiveSpace::drop` "drains" carves).
+- Found reviewing the DMA-quarantine change: `docs/src/architecture/syscalls.md`
+  (`port_write`'s return type, `port_bind` absent from the table, gated
+  syscalls missing from the capability matrix).
 
 **PLAN-SYNC.** Plans whose own status text disagrees with their body, their
 ledger or the tree. The ledger above records what the evidence supports; each
@@ -839,9 +837,6 @@ plan's own text is corrected when it is next touched, or sooner.
   (UAS in and out of scope), CODEVERIFY and WAFFLE (stages "planned" beside
   landed fixes), NEW-SWITCHBOARD (headings against its ledger), VIEW (the Files
   end-to-end).
-- A claim the DMA-quarantine review disproved: PI (its D167 check asks only for
-  a `DMA_QUARANTINE_RELEASED` record, which every bring-up emits; recovery is
-  the record's non-zero `bytes`).
 
 ## Charter Amendments
 

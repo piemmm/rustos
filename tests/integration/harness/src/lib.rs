@@ -309,8 +309,8 @@ pub fn dump_aarch64_virt_dtb_with_ram(
 ///
 /// A blob too short for the 40-byte header, with the wrong magic, or
 /// whose header offsets escape the buffer is returned unchanged — trimming
-/// is an optimisation, never a parser (: callers still
-/// validate the result through `tairix_fdt::Fdt::new`).
+/// is an optimisation, never a parser, so callers still validate the result
+/// through `tairix_fdt::Fdt::new`.
 #[must_use]
 pub fn trim_fdt_to_extent(bytes: &[u8]) -> Vec<u8> {
     const FDT_MAGIC: u32 = 0xd00d_feed;

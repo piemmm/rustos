@@ -481,12 +481,12 @@ pub struct BspBringUp {
     pub installed_memory_bytes: u64,
     /// The MADT-discovered IO-APIC routing, every pin programmed masked.
     pub irq_routing: IrqRouting,
-    /// The discovered hardware tree published to the authoritative
-    /// [`crate::hwtree_store::HW_TREE`] and leaked to `'static`: the ACPI
-    /// platform inventory plus the enumerated virtio-PCI block/network
-    /// nodes. The production [`try_boot`] resolves the bootstrap root block
-    /// binding from it; a QEMU chassis that composes its own boot ignores it.
-    pub tree: &'static [tairix_abi::HwNode],
+    /// The discovered hardware tree: the ACPI platform inventory plus the
+    /// enumerated virtio-PCI block/network nodes. The production [`try_boot`]
+    /// hands it to the boot record, which moves it into
+    /// [`crate::hwtree_store::HW_TREE`]; a QEMU chassis that composes its own
+    /// boot ignores it.
+    pub tree: Vec<tairix_abi::HwNode>,
 }
 
 /// Bring the BSP and its board up: per-CPU tables, the dedicated `#PF`
@@ -757,11 +757,11 @@ pub fn bring_up_bsp(
     //      binds to the GSI.
     let irq_routing = discover_and_program_io_apics(&madt, bsp_lapic_id)?;
 
-    // Publish the ACPI-discovered platform inventory (root, enabled CPUs,
-    // and the I/O APICs) plus the enumerated virtio-PCI devices to the
-    // authoritative `HW_TREE`, so the `hw_tree_read` / `hw_tree_wait`
-    // syscalls expose the real x86_64 hardware to user space — the sibling
-    // of the riscv64/aarch64 device-tree seed.
+    // Discover the ACPI platform inventory (root, enabled CPUs, and the I/O
+    // APICs) plus the enumerated virtio-PCI devices, which `try_boot`'s boot
+    // record publishes to the authoritative `HW_TREE`, so the `hw_tree_read`
+    // / `hw_tree_wait` syscalls expose the real x86_64 hardware to user space
+    // — the sibling of the riscv64/aarch64 device-tree seed.
     //
     // Ordered **after** `discover_and_program_io_apics` deliberately: an
     // interrupt-driven virtio-PCI function (a NIC, a keyboard) is a
@@ -824,19 +824,9 @@ fn try_boot(
     // entry, IO-APIC routing.
     let board = bring_up_bsp(boot_info, log_sink)?;
 
-    // Resolve + audit which discovered node carries the bootstrap root block
-    // device, and which floor block driver binds it, through the same shared
-    // `lib/devmatch` policy the user-space `devmgr` uses, then stash the
-    // binding for the init seam where the in-kernel root-unlock kthread reads
-    // it once (`plans/ARCHSUPPORT.md` A2, the riscv64/aarch64 buffered-tree
-    // analogue). Unlike those ports there is no firmware device tree to carry
-    // — the x86_64 bring-up re-resolves the transport from PCI configuration
-    // space — so the stashed DTB pointer is `0`. A `None` binding (no /
-    // ambiguous disk) leaves the unlock a no-op and `login` fails closed; the
-    // tree is still stashed (re-seeded, identically) so an input driver can
-    // still autoload once the store is reachable.
-    let binding = crate::root_storage::resolve_root_block_driver(board.tree, log_sink);
-    crate::unlock_service::record_boot(binding, 0, board.tree);
+    // No device tree to stash: the root bring-up re-resolves its transport
+    // from PCI configuration space.
+    crate::unlock_service::record_boot(0, board.tree, log_sink);
 
     let arch = X86_64Arch::new(&ARCH_STORAGE, 0, board.bsp_lapic_id, &board.cpu_to_lapic)
         .map_err(|_| BootError::ArchInit)?;
@@ -962,11 +952,11 @@ fn try_boot(
 }
 
 /// Discover the platform hardware tree from the firmware ACPI tables and
-/// the PCI bus, and publish it to the authoritative
-/// [`crate::hwtree_store::HW_TREE`] the `hw_tree_read` / `hw_tree_wait`
-/// syscalls read, so user space observes the same inventory the kernel
-/// discovered (Design D) — the x86_64 sibling of the riscv64/aarch64
-/// device-tree seed.
+/// the PCI bus: the boot seed [`crate::unlock_service::record_boot`]
+/// publishes to the authoritative [`crate::hwtree_store::HW_TREE`] the
+/// `hw_tree_read` / `hw_tree_wait` syscalls read, so user space observes the
+/// same inventory the kernel discovered (Design D) — the x86_64 sibling of
+/// the riscv64/aarch64 device-tree seed.
 ///
 /// Two discovery sources feed **one** shared
 /// [`crate::boot_hwtree::CollectingHwNodeSink`] (so no arch carries its own
@@ -996,9 +986,8 @@ fn try_boot(
 /// Fail closed at every step: a malformed ACPI table, an ECAM window
 /// outside the identity map, or an enumeration error each leave the
 /// affected devices undiscovered and seed whatever *was* collected rather
-/// than failing the boot. The buffered tree is leaked to `'static` (a
-/// one-shot boot publish, never a mutable global) so the inventory readers
-/// can borrow it for the kernel's lifetime.
+/// than failing the boot. The collected tree is returned by value for the
+/// boot record to move into the live inventory.
 ///
 /// # Safety
 ///
@@ -1010,7 +999,7 @@ unsafe fn seed_hardware_tree(
     madt_bytes: &[u8],
     rsdp: &acpi::Rsdp,
     log: &'static (dyn Sink + Sync),
-) -> &'static [tairix_abi::HwNode] {
+) -> Vec<tairix_abi::HwNode> {
     use tairix_arch_api::PlatformDiscovery;
     use tairix_arch_x86_64::platform::AcpiDiscovery;
 
@@ -1020,13 +1009,7 @@ unsafe fn seed_hardware_tree(
     // SAFETY: forwarded — the caller pins the firmware tables (and the MCFG
     // the ECAM branch reads) into the identity-mapped window.
     unsafe { seed_virtio_pci(rsdp, &mut sink, log) };
-    // Leak the buffered tree to `'static` (a one-shot boot publish, never a
-    // mutable global) so the `hw_tree_read` / `hw_tree_wait` syscalls and the
-    // root-storage bind resolution can borrow the same nodes for the kernel's
-    // lifetime — the sibling of the riscv64/aarch64 seed.
-    let tree: &'static [tairix_abi::HwNode] = sink.leak();
-    crate::hwtree_store::HW_TREE.seed(tree);
-    tree
+    sink.into_vec()
 }
 
 /// Enumerate the virtio-PCI bus and emit every virtio-net and virtio-input
@@ -1543,8 +1526,8 @@ fn discover_and_program_io_apics(
     // `tests/integration/irq_qemu_x86_64` QEMU integration test) can
     // reach [`IoApicController::program_pin`] and
     // [`IoApicController::read_pin_low`] without re-borrowing the
-    // `pub(crate)` `KernelState`. — one-shot publish;
-    // the slot accepts the same pointer the `IrqRouting` carries.
+    // `pub(crate)` `KernelState`. It is published once, with the same pointer
+    // the `IrqRouting` carries.
     crate::x86_64::ioapic_controller::publish_typed(controller_static);
 
     // Step 4. For every pin: allocate the next vector from the
@@ -1685,7 +1668,6 @@ fn verify_bsp_present(madt: &acpi::Madt<'_>, bsp_lapic_id: u8) -> Result<(), Boo
 // module already pins this at compile time; we re-coerce here at the
 // call-site to catch a regression at the `set_dispatch_callback`
 // install rather than only in the dispatch module's own tests.
-// — encode the contract in the type system.
 const _DISPATCH_CALLBACK_INSTALLABLE: syscall_entry::SyscallDispatchFn = production_dispatch;
 
 // SAFETY-INVARIANT: a 16-KiB per-CPU stack is sufficient to hold a

@@ -117,11 +117,20 @@ pub const AUDIOD_BOUND: EventId = EventId(13_018);
 /// unavailable).
 pub const AUDIOD_BIND_FAILED: EventId = EventId(13_019);
 
+/// A matched node left the hardware tree before its driver was admitted, so
+/// nothing was loaded for it. A hot-removal racing the load, not a refusal:
+/// recorded at `Info`, carrying the `errno`.
+pub const NODE_LOAD_RACED_REMOVAL: EventId = EventId(13_020);
+/// A matched node's load was refused because another live driver already
+/// holds the node. The node is driven, just not by an instance this service
+/// loaded: recorded at `Info`, carrying the `errno`.
+pub const NODE_ALREADY_DRIVEN: EventId = EventId(13_021);
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [EventId; 19] = [
+    const ALL: [EventId; 21] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
@@ -141,6 +150,8 @@ mod tests {
         NETWORK_IFCONFIG_REJECTED,
         AUDIOD_BOUND,
         AUDIOD_BIND_FAILED,
+        NODE_LOAD_RACED_REMOVAL,
+        NODE_ALREADY_DRIVEN,
     ];
 
     #[test]

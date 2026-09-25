@@ -42,6 +42,7 @@
 //! | 4100 | Info | `FS_NODE_MUTATED` | audit | A capability- and permission-checked filesystem mutation succeeded (`fs_mkdir`/`fs_unlink`/`fs_rename`/`fs_set_mode`/`fs_set_owner`). The `op`, `uid`, and `path` fields name the operation, the caller's kernel-attested uid, and the target; `to` carries a rename's destination, `mode` a chmod's new mode (octal), and `owner`/`group` a chown's new ids. Paths are bounded to the log field limit. |
 //! | 4091 | Warn | `DMA_QUARANTINED` | audit | A driver ended holding DMA memory its device may still master; it passed to its node's quarantine, not the allocator. The `node`, `generation` and `bytes` fields name the node, the dead driver's admission generation, and what it held. |
 //! | 4092 | Info | `DMA_QUARANTINE_RELEASED` | audit | Quarantined DMA memory returned to the allocator, scrubbed. `cause` is `reset` (a later driver for the `node` declared its device reset; recorded even when nothing was freed) or `removed` (a surprise removal retired the node; recorded only when something was freed); `bytes` is what was freed. |
+//! | 4093 | Info | `HW_NODE_GRANTS_REVOKED` | audit | A removed hardware-tree `node`'s authority was revoked from every task holding it: `grants` revoked across `holders` tasks, whose bindings of its interrupt lines, windows onto its registers and mappings of its shared regions were torn down. `killed` counts holders whose access could not be torn down and which were killed instead; the record is Warn when it is non-zero. |
 //! | 4101 | Warn | `FS_MUTATION_DENIED` | audit | A filesystem mutation was refused by the secured VFS; nothing changed (fail closed). Carries the same `op`/`uid`/`path`(/`to`/`mode`/`owner`/`group`) fields as `FS_NODE_MUTATED` plus the refusal's `errno`. |
 //! | 4130 | Warn | `VOLUME_DEGRADED`   | audit | A served volume's backing block device reported itself unhealthy while still serving I/O. Emitted once on the edge into `Degraded`; the `dev` field names the block-service endpoint. |
 //! | 4131 | Warn | `VOLUME_RECOVERING` | audit | A served volume's backing block device stalled/reset and entered its bounded recovery grace window. Emitted once on the edge into `Recovering`; `dev` names the block-service endpoint. |
@@ -139,7 +140,7 @@ pub enum AuditEvent {
     ///
     /// Emitted by [`crate::spawn::spawn_and_enter`] before any state is
     /// touched: the capability check fails closed and no address space is
-    /// built (no ambient authority; — capability
+    /// built (no ambient authority; capability
     /// checks before state touches).
     ProcessSpawnDenied,
     /// A spawn was authorised but building the process image failed.
@@ -274,8 +275,7 @@ pub enum AuditEvent {
     /// `kind` field (`key` / `pointer`) attributing which input class
     /// proved itself live. It carries **no** event content, count, or
     /// timing — a per-event record would leak typed secrets and is
-    /// forbidden (no input-content/timing noise on the log;
-    /// — secret hygiene).
+    /// forbidden: no input content or timing reaches the log.
     InputDelivered,
     /// A `CAP_SEAT_ADMIN` `seat_switch` retargeted a seat's foreground
     /// text console (`plans/DISPLAY.md` D3).
@@ -507,6 +507,13 @@ pub enum AuditEvent {
     /// its device is gone (recorded only when it freed something); `bytes` is
     /// what was freed.
     DmaQuarantineReleased,
+    /// A removed hardware-tree node's authority was revoked from every task
+    /// holding it, and their standing access torn down.
+    ///
+    /// `node` is the node named in the removal; `grants`, `holders` and
+    /// `killed` count the grants revoked, the tasks that held them, and the
+    /// holders killed because their access could not be torn down.
+    HwNodeGrantsRevoked,
     /// A capability- and permission-checked filesystem mutation succeeded.
     ///
     /// Emitted by the `fs_mkdir` / `fs_unlink` / `fs_rename` / `fs_set_mode`
@@ -710,6 +717,7 @@ impl AuditEvent {
             Self::IrqLineQuarantined => 4090,
             Self::DmaQuarantined => 4091,
             Self::DmaQuarantineReleased => 4092,
+            Self::HwNodeGrantsRevoked => 4093,
             Self::FsNodeMutated => 4100,
             Self::FsMutationDenied => 4101,
             Self::SystemConfigApplied => 4110,
@@ -783,6 +791,7 @@ impl AuditEvent {
             Self::IrqLineQuarantined => "irq line quarantined (runaway interrupt)",
             Self::DmaQuarantined => "dead driver's dma memory quarantined",
             Self::DmaQuarantineReleased => "quarantined dma memory released",
+            Self::HwNodeGrantsRevoked => "removed node's grants revoked",
             Self::FsNodeMutated => "filesystem node mutated",
             Self::FsMutationDenied => "filesystem mutation denied",
             Self::SystemConfigApplied => "system configuration applied",
@@ -876,6 +885,7 @@ mod tests {
         AuditEvent::IrqLineQuarantined,
         AuditEvent::DmaQuarantined,
         AuditEvent::DmaQuarantineReleased,
+        AuditEvent::HwNodeGrantsRevoked,
         AuditEvent::FsNodeMutated,
         AuditEvent::FsMutationDenied,
         AuditEvent::SystemConfigApplied,
@@ -897,7 +907,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 64, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 65, "a new event belongs in `ALL`");
     }
 
     #[test]
