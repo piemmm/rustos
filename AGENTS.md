@@ -722,6 +722,7 @@ tairix/
 │           ├── figure/  #     Rigs, sockets, pose clips, motion layers, designer.
 │           ├── net/     #     The realm wire protocol and session handshake.
 │           ├── rules/   #     The authoritative simulation and the game rules.
+│           ├── talk/    #     NPC conversation: understanding, rule base, speech.
 │           └── world/   #     The seed-pure procedural world generator.
 │
 ├── docs/                # Long-form documentation (mdBook).
@@ -1610,7 +1611,7 @@ You are not exempt from any rule above. In addition:
     | Exploit-mitigation hardening: stack canaries, shadow stack, hardware memory tagging (MTE/CET), the per-arch protection-fault fix-up | `plans/FIX-PROTECTION.md` |
     | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
     | The desktop companion (`cinder.app`) and the desktop-layer authority every companion-shaped app needs: `CAP_DESKTOP_LAYER`, the layer surface's containment controls, the terrain and pointer feeds, the elevated camera | `plans/CINDER.md` |
-    | The WinterSun RPG (`userland/games/wintersun`): the procedural world, the authoritative fixed-tick simulation, magic and combat, the realm server's gateway/zone/store split, interest management, the self-balancing economy, chat, the console and admin surfaces | `plans/WINTERSUN.md` |
+    | The WinterSun RPG (`userland/games/wintersun`): the procedural world, its settlements and the people in them, the authoritative fixed-tick simulation, magic and combat, NPC conversation, the realm server's gateway/zone/store split, interest management, the self-balancing economy, chat, the console and admin surfaces | `plans/WINTERSUN.md` |
     | Parametric outline primitives in `lib/raster` (the one piece `cinder` and the game share), and the game-side figure engine above them: rigs, the skinned meshes a part is drawn as, equipment sockets, pose-parameter clips and blending, procedural motion layers, the shipped motion set, and the `artsheet` harness that gates art quality | `plans/FIGURE.md` |
     | Durable structured storage: the `lib/recdb` B+tree record store, its write-ahead log and commit barrier, recovery, snapshot transactions, secondary indexes, and per-page encryption at rest | `plans/RECDB.md` |
     | The `vim` app | `plans/VIM.md` |
