@@ -88,12 +88,12 @@ exactly, at every heading, with no approximation to get the sign of.
 | `rig` | `Rig` and its validation, `Posture`, `Part`/`Fitted`, and the `Placement` a figure is skinned, projected and depth-sorted into — by each surface's mean, or by a point a layered surface shares with the one it lies over. |
 | `humanoid` | The one skeleton every species stands on: 18 joints, 21 body surfaces plus up to 12 of features, every socket, proportioned in percentages of `STANDING_HEIGHT`; the builder that turns an `Identity` into a rig, the drive table binding the pose parameters to it, and `MOST_REACH`, how far the largest figure a record describes reaches. |
 | `identity` | `Identity`: the nineteen-byte record a character is — species, build settings, feature forms, palette swatches — its checks, its one-spelling encoding, and its total, fail-closed decoder. |
-| `species` | `Species` and what each may be: the interval every build setting spans, the forms each feature may take, and the swatch tables each palette slot draws from. |
+| `species` | `Species` and what each may be: the interval every build setting spans, the forms each feature may take and how often it carries one it may go without, and the swatch tables each palette slot draws from. |
 | `tint` | `Tint`, the role a surface's colour plays, and `Tints`, what each role resolves to for one figure. |
-| `design` | `Designer`: a record edited live and kept canonical — the player's choices projected onto the species chosen, an edit a species cannot carry refused by its field — and settled into at most one write per interaction; `Change`, what a record's change leaves a drawn figure owing. |
+| `design` | `Designer`: a record edited live and kept canonical — the player's choices projected onto the species chosen, an edit a species cannot carry refused by its field — settled into at most one write per interaction, with one write out at a time and its answer landing only where the player is not editing; `Change`, what a record's change leaves a drawn figure owing. |
 | `preview` | `Preview`: the record being designed playing the shipped motions on the grid's stage, caught up by exactly what each change costs, and viewed in the harness's cell framing or at the one scale every figure shares. |
 | `plausible` | `figure`: a random record drawn from per-field distributions with the correlations a person would choose, from an injected generator, integer-only. |
-| `motion` | The shipped motion set — idle, walk, run — whose leg curves are a stated foot path solved through the same two-bone geometry the planting layer uses; `Set` holds it and `Clips` is its clip table for a machine to borrow. |
+| `motion` | The shipped motion set — idle, walk, run — whose leg curves are a stated foot path solved through the planting layer's own two-bone solve, every key checked against it, and whose run sinks into each stance and rises across each flight; `Set` holds it and `Clips` is its clip table for a machine to borrow. |
 | `paint` | The one paint order (shadow, then strips far-first) and what drawing a figure costs. |
 | `quality` | The measurements the art is gated on — joint-limit use, motion continuity, loop closure, foot skate, grounding — each with its bound beside it. |
 | `reference` | The reference grid the cross-target digest folds and the art harness draws — each species' reference figure, its least and most, and two plausible figures, in which poses, facing which way — and the one stage every figure stands on: ground, light, breath, and the framing that holds a whole figure in a cell. |
@@ -228,13 +228,18 @@ holds.
 
 Every palette is readable because the one tone every figure wears whatever it
 chose — the trousers — sits in the narrow luminance band that clears both
-desktop themes on its own; the art harness checks that tone before any cell.
+desktop themes on its own; the art harness checks that tone before any cell,
+and holds every dye on every species' palest and darkest build to the bounds
+the grid's own cells meet.
 
 ## A designer that cannot freeze its window
 
 `Designer::edit` changes the record in memory and nothing else, and
 `Designer::settle` answers the record to write only once the interaction that
-made the edits has finished and only if it changed anything. What a repaint
+made the edits has finished and only if the store does not hold it already.
+One write is out at a time; `Designer::landed` and `Designer::refused` take its
+answer only where the player is not editing, and hand out a settle made
+meanwhile. What a repaint
 owes is `Change::between` the record drawn and the one live — nothing, a
 re-tint, or a rebuild — so a palette drag never re-rigs and a burst of edits
 costs one catch-up. `Preview::show` performs exactly that catch-up and leaves

@@ -425,7 +425,10 @@ fn a_required_form_is_given() {
         .edit(Edit::Species(Species::Dragonkin))
         .expect("any species");
     let features = designer.live().spec().features;
-    assert_eq!(features.horns, Species::Dragonkin.horns()[0]);
+    assert_eq!(
+        features.horns,
+        Species::Dragonkin.horns().forms().first().copied()
+    );
     assert_eq!(features.tail, Some(TailForm::Scaled));
 }
 
@@ -505,15 +508,155 @@ fn arbitrary(rng: &mut NonCryptoRng) -> Spec {
     spec
 }
 
-/// Opening again on what a store holds is the whole of undoing a refused
-/// write.
+/// A drag written, and a second drag begun before the store answers.
+fn one_write_out_and_a_drag_in_hand() -> (Designer, Identity) {
+    let mut designer = open(Species::Human);
+    designer.edit(Edit::Girth(Setting(200))).expect("in range");
+    let written = designer.settle().expect("a changed record is written");
+    designer.edit(Edit::Height(Setting(10))).expect("in range");
+    (designer, written)
+}
+
+/// The D179 defect, in the designer: an answer to one drag landing during
+/// the next must not put the field under the pointer back.
 #[test]
-fn opening_again_on_the_stored_record_undoes_what_was_refused() {
-    let stored = reference::identity(Species::Human).expect("a real record");
-    let mut designer = Designer::open(stored);
-    designer.edit(Edit::Girth(Setting::HIGH)).expect("in range");
-    assert!(designer.settle().is_some());
-    let mut designer = Designer::open(stored);
-    assert_eq!(designer.live(), stored);
-    assert_eq!(designer.settle(), None);
+fn an_answer_landing_mid_drag_leaves_the_drag_alone() {
+    let (mut designer, written) = one_write_out_and_a_drag_in_hand();
+    assert_eq!(designer.landed(written), None, "nothing settled meanwhile");
+    let live = designer.live().spec();
+    assert_eq!(live.build.height, Setting(10), "the drag in hand was lost");
+    assert_eq!(live.build.girth, Setting(200));
+    let next = designer
+        .settle()
+        .expect("the drag in hand is its own write");
+    assert_eq!(next.spec().build.height, Setting(10));
+}
+
+/// A refusal takes back what it refused and nothing the player is holding.
+#[test]
+fn a_refusal_landing_mid_drag_reverts_only_what_was_refused() {
+    let stored = open(Species::Human).live();
+    let (mut designer, _) = one_write_out_and_a_drag_in_hand();
+    assert_eq!(designer.refused(), None, "nothing settled meanwhile");
+    let live = designer.live().spec();
+    assert_eq!(
+        live.build.girth,
+        stored.spec().build.girth,
+        "the refusal stuck"
+    );
+    assert_eq!(live.build.height, Setting(10), "the drag in hand was lost");
+}
+
+/// One write is out at a time: an interaction settling while one is out is
+/// owed, and the answer hands it out — the store's record where the player
+/// was not editing, the player's where they were.
+#[test]
+fn a_settle_while_a_write_is_out_is_owed_until_the_answer_lands() {
+    for landing in [true, false] {
+        let (mut designer, written) = one_write_out_and_a_drag_in_hand();
+        assert_eq!(designer.settle(), None, "a second write went out");
+        assert_eq!(designer.settle(), None, "owed twice is still one write");
+        let owed = if landing {
+            designer.landed(written)
+        } else {
+            designer.refused()
+        };
+        let owed = owed.expect("the settled drag is handed out").spec();
+        assert_eq!(owed.build.height, Setting(10));
+        let girth = if landing {
+            Setting(200)
+        } else {
+            open(Species::Human).live().spec().build.girth
+        };
+        assert_eq!(owed.build.girth, girth, "landing {landing}");
+        assert_eq!(designer.settle(), None, "the owed write is already out");
+    }
+}
+
+/// Where the store holds a record other than the one written, it wins every
+/// field the player is not editing, and the player keeps the rest.
+#[test]
+fn a_store_answering_another_record_wins_where_the_player_is_not_editing() {
+    let (mut designer, written) = one_write_out_and_a_drag_in_hand();
+    let mut answer = written.spec();
+    answer.build.girth = Setting(90);
+    answer.build.height = Setting(250);
+    let answer = Identity::new(answer).expect("a real record");
+    assert_eq!(designer.landed(answer), None);
+    let live = designer.live().spec();
+    assert_eq!(live.build.girth, Setting(90), "the store's record lost");
+    assert_eq!(live.build.height, Setting(10), "the drag in hand was lost");
+}
+
+/// An answer with no write out is nobody's, and changes nothing.
+#[test]
+fn an_answer_to_no_write_changes_nothing() {
+    let mut designer = open(Species::Elf);
+    designer.edit(Edit::Limbs(Setting(3))).expect("in range");
+    let before = designer;
+    let other = reference::identity(Species::Dwarf).expect("a real record");
+    assert_eq!(designer.landed(other), None);
+    assert_eq!(designer.refused(), None);
+    assert_eq!(designer, before);
+}
+
+/// An edit to a field the record holds at zero can only ask for that zero,
+/// and must not overwrite the choice beneath it: the markings a beastkin wore
+/// come back after a human's, and the hair a figure had comes back after a
+/// bald one's.
+#[test]
+fn an_edit_to_a_field_held_at_zero_keeps_the_choice_beneath() {
+    let mut designer = open(Species::Beastkin);
+    designer
+        .edit(Edit::Markings(2))
+        .expect("a beastkin's markings");
+    let marked = designer.live();
+    designer
+        .edit(Edit::Species(Species::Human))
+        .expect("any species");
+    let human = designer;
+    designer.edit(Edit::Markings(0)).expect("the zero it holds");
+    assert_eq!(designer, human, "an edit of nothing changed the designer");
+    designer
+        .edit(Edit::Species(Species::Beastkin))
+        .expect("any species");
+    assert_eq!(designer.live(), marked, "the markings beneath were lost");
+
+    let mut designer = open(Species::Human);
+    let haired = designer.live();
+    designer.edit(Edit::Hair(None)).expect("anyone may be bald");
+    let shorn = designer;
+    designer
+        .edit(Edit::HairColour(0))
+        .expect("the zero it holds");
+    designer
+        .edit(Edit::Volume(Setting::LOW))
+        .expect("the zero it holds");
+    assert_eq!(designer, shorn, "an edit of nothing changed the designer");
+    designer
+        .edit(Edit::Hair(haired.spec().features.hair))
+        .expect("anyone may have hair");
+    assert_eq!(designer.live(), haired, "the hair beneath was lost");
+}
+
+/// Every field reads back as the edit that sets it, and that edit writes
+/// that field and no other.
+#[test]
+fn every_field_reads_back_as_the_edit_that_sets_it() {
+    let specs: Vec<Spec> = FIGURES.iter().map(|figure| figure.spec).collect();
+    for field in Field::ALL {
+        for (from, onto) in specs.iter().zip(specs.iter().rev()) {
+            let edit = Edit::of(field, *from);
+            assert_eq!(edit.field(), field);
+            let written = edit.written(*onto);
+            for other in Field::ALL {
+                let expected = if other == field { *from } else { *onto };
+                assert_eq!(
+                    Edit::of(other, written),
+                    Edit::of(other, expected),
+                    "writing {field:?} moved {other:?}"
+                );
+            }
+        }
+    }
 }

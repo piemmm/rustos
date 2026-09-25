@@ -341,6 +341,12 @@ do not skate" is a bound rather than an opinion — on the walk the tests
 author by solving the leg, the fitted stride recovers the authored one and
 the planted foot moves under a hundredth of a stride over the ground.
 
+Where the foot is down is read over the ground, at the height the clip holds
+the body, not through the body frame. A stance that sinks the body while the
+leg folds into it keeps the foot on the floor but raises it through the body,
+and a window read there holds only the ends of the step: on the shipped run it
+straddled the swing and fitted a stride twelve per cent short.
+
 ### Each foot on its own ground, not on the ground's average
 
 The world has real slopes, so a figure standing across a gradient has one
@@ -383,9 +389,22 @@ on the ground; negative is standing into the legs; positive is off the ground
 altogether. A displacement past a whole leg either way is a move the
 simulation authorised rather than a cycle's own rise and fall, and is
 refused. The idle and the walk keep a foot down at every phase and so hold
-one height throughout; the run adds the parabola its body follows across each
-flight window, meeting the stance height at both ends so the height never
-steps at the moment a foot takes over.
+one height throughout. The run's body sinks from each strike to midstance and
+rises again to toe-off — the stance leg folding into the landing and
+straightening out of it — then follows a parabola across the flight, meeting
+the stance height at both ends so the height never steps where a foot takes
+over. The dip is as deep as the flight rises, so the bob is centred on the
+height the body lands at and spans a twentieth of the figure. Its ends are
+flat rather than at the flight's slope: that join would have the leg
+shortening at the landing's full speed as it strikes, and keys a thirty-second
+of a cycle apart cannot follow it without the planted foot sinking past the
+grounding bound — even a fifth of the shipped rise fails it on the
+longest-legged build a record describes.
+
+The run's height is keyed at its leg keys' own phases. Between two keys both
+are interpolated linearly, so the body and a planted foot move along one line
+and the foot stays on the floor; keyed any finer, the height follows its true
+curve while the legs facet, and the difference sinks the foot.
 
 Nothing in the solve makes a clip's stated height agree with its own leg
 keys — a clip claiming to stand upright while folding its legs would put its
@@ -395,12 +414,17 @@ exactly, since below it the foot sinks in and above it the figure never lands.
 The two are one quantity's two signs, so `quality::grounding` answers both
 with one number, and it needs no notion of which foot is "down" — a contact
 band widens near a foot's lowest point, where its height is flat, and would
-report a foot planted well into its own toe-off.
+report a foot planted well into its own toe-off. What it measures on the
+shipped set is the sag between keys: a leg's angles are interpolated
+linearly, so the foot they put down arcs slightly below the line its path
+holds it to, deepest halfway between keys. Six-place rounding adds under a
+hundred-thousandth of a unit to that.
 
-The shipped run's stance legs carry no push-off of their own, so its body
-holds one height while a foot is down and rises only across the flight. A
-mid-stance dip from leg compression would need its leg keys re-solved, and is
-its own item (FG8) rather than faked.
+Every shipped leg key is its foot path solved: a test states each clip's path
+whole — strike distance, stance fraction, swing clearance, and how much of the
+leg's turn the ankle levels the foot by — puts it through the planting layer's
+own two-bone solve, and holds every key of every table to the six places it is
+written to.
 
 How much height difference the legs can absorb is the rig's own statement —
 the span between a straight leg and a fully folded one, which for the shipped
@@ -505,10 +529,10 @@ judges current rather than as-of-last-regeneration.
 | Measured | Where its bound lives | Shipped worst |
 |---|---|---|
 | Joint-limit use, verified through `Posture::set` | `figure::quality` | 0.79 of a joint's travel |
-| Foot skate, as a fraction of the fitted stride | `figure::quality` | 0.009 |
-| Motion continuity, per unit of a parameter's range | `figure::quality` | 0.041 |
+| Foot skate, as a fraction of the fitted stride | `figure::quality` | 0.0027, the walk's |
+| Motion continuity, per unit of a parameter's or the root height's range | `figure::quality` | 0.041 |
 | Loop closure | `figure::quality` | exact |
-| Grounding: the cycle's lowest foot against the floor | `figure::quality` | 0.057 of a figure's units, on the long-legged elf |
+| Grounding: the cycle's lowest foot against the floor | `figure::quality` | 0.067 of a figure's units, the long-legged elf's run |
 | Coverage ratio, tonal regions, contrast against both themes | the harness | 0.061–0.155, ≥ 3 regions, ≥ 2.20 |
 | Outline points and fill area per cell | `figure::paint` + the harness | ≤ 1,096 points, ≤ 0.20 overdraw |
 
@@ -520,8 +544,12 @@ allowances, 1.02 of the reach above the ground point and 0.20 below it, between
 margins of a fiftieth of the side; every build corner of every species stays
 within them in every shipped motion at every sixteenth of a turn, and every
 cell of the grid inside its square. The worst cell for separable masses is the
-least beastkin — pale cloth on pale fur — at the floor, which resolves into
-exactly the three the bound asks for.
+least beastkin — pale cloth on pale fur, seen from behind — at the floor,
+which resolves into exactly the three the bound asks for: head, trunk and
+legs. It wears the one dye of the sixteen that does. A palette is the
+player's to choose, so the harness also draws every dye on every species'
+palest and darkest build and holds each cell to the same bounds, without
+ledger rows, since the grid already carries the worst of them.
 
 The pose-side measurements live in the crate rather than the harness, so
 `cargo test` runs them on every Tier-1 target and a later figure preset is
@@ -642,11 +670,18 @@ rather than against each edit is what makes a burst of edits between two
 frames cost one catch-up.
 
 **The durable write happens once, where the interaction settles.**
-`Designer::settle` answers the record to store when the interaction changed it,
-and nothing otherwise: a drag of any length is at most one write, and one that
-ends where it began is none. The store is the surface's to reach, off the
-frame loop; a refused write is undone by opening the designer again on what
-the store holds.
+`Designer::settle` answers the record to store when the store does not hold it
+already, and nothing otherwise: a drag of any length is at most one write, and
+one that ends where it began is none. The store is the surface's to reach, off
+the frame loop.
+
+**An answer lands on what the player is not doing.** One write is out at a
+time, and its answer can arrive during the next drag. `Designer::landed` takes
+the store's record, and `Designer::refused` the one it kept, in every field
+the player has not edited since the write went out; the drag in hand stays
+theirs, so an answer never snaps a slider back under the pointer. A settle
+made while a write is out is owed, and whichever answer arrives hands it out
+— one write for however many settles it covers.
 
 **The record is always one.** The designer keeps what the player chose, field
 by field, and the record those choices come to for the species chosen. An edit
@@ -656,8 +691,10 @@ reshapes: a swatch past the new species' table is clamped to its last, a form
 the species lacks becomes its first, a form it must carry is given — a
 dragonkin always has horns and the scaled tail — an eye colour it does not
 admit becomes the admitted one nearest in colour, and a bald figure's hair
-colour and volume are zeroed. The choices survive beneath the record, so going
-to an elf and back, or bald and back, gives back exactly the figure you left.
+colour and volume are zeroed. The choices survive beneath the record — an edit
+to a field the record holds at zero can only ask for that zero, and leaves the
+choice beneath alone — so going to an elf and back, or bald and back, gives
+back exactly the figure you left.
 This is not a repair of a record: a record arriving from anywhere else is still
 decoded and refused, never adjusted.
 
@@ -693,9 +730,10 @@ held to every bound an authored figure is.
 
 ## What comes next
 
-A run's mid-stance dip is FG8. Its body now holds the height its clip states
-while a foot is down and follows a parabola across each flight, which is what
-a body with nothing holding it up does; what it does not yet do is compress at
-midstance and extend at toe-off, because its leg keys carry no push-off to
-compress. Adding one means re-solving those keys through the foot path, and
-moves the stride and the skate with them.
+The engine's own items are done; what uses it next is `WinterSun`'s — figures
+on screen with the preset set (WS6) and the designer's surfaces (WS17). Two
+decisions are recorded rather than taken (`plans/FIGURE.md`): the sheets draw
+eight phases, so no picture shows a figure mid-flight or at the bottom of a
+run's stance; and the run's stance meets its flight flat, since joining at
+the flight's slope needs leg keys finer than a thirty-second of a cycle, and a
+measurement grid finer still to see between them.

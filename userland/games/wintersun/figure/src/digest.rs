@@ -45,12 +45,12 @@ use crate::clip::Clip;
 use crate::error::FigureError;
 use crate::frame::project;
 use crate::gait::Gait;
-use crate::humanoid::{self, Bone};
+use crate::humanoid;
 use crate::mesh::Hoop;
 use crate::motion::{self, Kind};
 use crate::plant::{Legs, Planted};
 use crate::pose::Param;
-use crate::preview::{Frame, Preview};
+use crate::preview::{Frame, Preview, FADE};
 use crate::quality;
 use crate::reference::{self, Reference, SIDES};
 use crate::rig::{Frames, Placement, Resolved, Strip};
@@ -68,7 +68,7 @@ use crate::species::Species;
 /// change that moves it changes every figure anybody will ever see, and the
 /// new value is written down deliberately rather than pasted out of a
 /// failure.
-pub const REFERENCE_DIGEST: u64 = 0x43A3_E2C9_EDF4_79A4;
+pub const REFERENCE_DIGEST: u64 = 0x5E81_1CB6_1D68_80FB;
 
 /// The stream the reference grid is folded into.
 pub const REFERENCE_SEED: u64 = 0x5749_4E54_4552_4647;
@@ -119,12 +119,21 @@ const PREVIEW_SCRIPT: [(Kind, u32); 4] = [
     (Kind::Walk, 5),
     (Kind::Run, 5),
     (Kind::Idle, 4),
-    (Kind::Run, 3),
+    (Kind::Run, 4),
 ];
 
 /// The preview probe's frame length, in seconds: no fraction of a fade or of
 /// any clip's cycle, so no frame lands on a boundary by luck.
 const PREVIEW_FRAME: f64 = 0.071;
+
+const _: () = {
+    let mut index = 0;
+    while index < PREVIEW_SCRIPT.len() {
+        let held = PREVIEW_SCRIPT[index].1 as f64 * PREVIEW_FRAME;
+        assert!(held > FADE, "a preview probe clip ends inside its fade");
+        index += 1;
+    }
+};
 
 /// Draw the reference grid and return its digest.
 ///
@@ -146,11 +155,12 @@ pub fn reference() -> Result<u64, FigureError> {
         hasher.write(&identity.encode());
         let figure = Reference::new(&identity)?;
         let rigging = humanoid::rigging(figure.rig())?;
+        let legs = figure.legs();
 
         for kind in entry.kinds() {
             let clip = figure.clip(*kind)?;
-            fold_quality(&mut hasher, &rigging, clip, *kind, figure.legs())?;
-            fold_gait(&mut hasher, &rigging, clip, *kind)?;
+            fold_quality(&mut hasher, &rigging, clip, *kind, &legs)?;
+            fold_gait(&mut hasher, &rigging, clip, *kind, &legs)?;
         }
 
         for cell in entry.cells() {
@@ -175,7 +185,7 @@ pub fn reference() -> Result<u64, FigureError> {
         }
 
         for kind in entry.kinds() {
-            fold_slopes(&mut hasher, &rigging, figure.legs(), figure.clip(*kind)?)?;
+            fold_slopes(&mut hasher, &rigging, legs, figure.clip(*kind)?)?;
         }
     }
     fold_shadow(&mut hasher)?;
@@ -229,11 +239,12 @@ fn fold_gait(
     rigging: &Rigging<'_>,
     clip: Clip<'_>,
     kind: Kind,
+    legs: &Legs,
 ) -> Result<(), FigureError> {
     if kind.stride().is_none() {
         return Ok(());
     }
-    let mut gait = Gait::fitted(rigging, clip, Bone::Ankle(Side::Left).joint())?;
+    let mut gait = Gait::fitted(rigging, clip, legs, Side::Left)?;
     fold_real(hasher, gait.stride());
     for onward in GAIT_STEPS {
         let stepped = gait.travel(onward)?;
@@ -251,21 +262,18 @@ fn fold_quality(
     rigging: &Rigging<'_>,
     clip: Clip<'_>,
     kind: Kind,
-    legs: Legs,
+    legs: &Legs,
 ) -> Result<(), FigureError> {
     hasher.write(kind.name().as_bytes());
     fold_real(hasher, clip.seconds());
     fold_real(hasher, quality::limits(rigging, clip)?);
     fold_real(hasher, quality::continuity(clip));
     fold_real(hasher, quality::closure(clip));
-    fold_real(hasher, quality::grounding(rigging, clip, &legs)?);
+    fold_real(hasher, quality::grounding(rigging, clip, legs)?);
     fold_root(hasher, clip);
     if let Some(authored) = kind.stride() {
         fold_real(hasher, authored);
-        fold_real(
-            hasher,
-            quality::skate(rigging, clip, Bone::Ankle(Side::Left).joint())?,
-        );
+        fold_real(hasher, quality::skate(rigging, clip, legs, Side::Left)?);
     }
     Ok(())
 }

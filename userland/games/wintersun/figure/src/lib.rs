@@ -70,7 +70,8 @@
 //! it goes; what a repaint owes is [`Change::between`] the record drawn and
 //! the one now live, so a palette edit costs a re-tint and a burst of edits
 //! costs one rebuild; and the durable write is answered once, where the
-//! interaction settles. The [`Preview`] it is watched in plays the shipped
+//! interaction settles, its answer landing only on the fields the player is
+//! not editing. The [`Preview`] it is watched in plays the shipped
 //! motions on the art grid's own stage, and [`plausible::figure`] draws a
 //! random figure that looks chosen rather than rolled.
 //!

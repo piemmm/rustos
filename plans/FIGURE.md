@@ -12,7 +12,7 @@ general and the rest is a game's:
 | Half | Home | Why there |
 |---|---|---|
 | The parametric **outline primitives** — a superellipse, a taper, a wedge, a scalloped panel, a bevelled panel, a splat — and their tracer | `lib/raster::shape` | Two independent consumers (`cinder` and the game) and no game semantics: they are 2D vector primitives feeding the scan converter `lib/raster` already owns, sitting beside `fill_round_rect`. |
-| **Everything with character semantics** — rigs, joint limits, equipment sockets, draw order, the body frame, pose parameters, clips, blending, the transition machine, motion layers, character parameter spaces, presets, the art harness | `userland/games/wintersun/figure` | A rig is game content, not OS infrastructure. `lib/*` is the OS's shared-library namespace and a figure engine has no business in it. |
+| **Everything with character semantics** — rigs, joint limits, equipment sockets, draw order, the body frame, pose parameters, clips, blending, the transition machine, motion layers, character parameter spaces, the designer, the art harness's measurements | `userland/games/wintersun/figure` | A rig is game content, not OS infrastructure. `lib/*` is the OS's shared-library namespace and a figure engine has no business in it. |
 
 That line is the whole organisational decision, and it is drawn at "does this
 carry meaning about a *creature*?". A taper is geometry; a *limb* is anatomy.
@@ -47,8 +47,8 @@ controls), `lib/raster` and `lib/util::mathf` rustdoc.
 | FG4 | Procedural layers over a clip: gait phase from distance travelled, look-at, recoil, cloth and hair sway, breathing, per-foot terrain planting, the clip-authored root height, root motion and the figure's root placement, contact shadow | done |
 | FG5 | `cargo xtask artsheet`: the shipped motion set, the painter, the contact-sheet renderer, the committed ledger, and the automated quality checks | done |
 | FG6 | The parameter space: species and build parameters, the palette model, validated bounds, and the compact serialised form a character record stores | done |
-| FG7 | The designer engine: the parameter model, live preview, presets, and randomised-but-plausible generation | done |
-| FG8 | The run's mid-stance dip: a foot path that compresses at midstance and extends at toe-off, the run's leg keys re-solved through it, and its root height dipping to match | planned |
+| FG7 | The designer engine: the parameter model, live preview, picking a preset, and randomised-but-plausible generation | done |
+| FG8 | The run's mid-stance dip: a foot path that compresses at midstance and extends at toe-off, the run's leg keys re-solved through it, and its root height dipping to match | done |
 
 Items are built in ledger order; each is complete — tests, docs, green gate —
 before the next begins.
@@ -388,14 +388,17 @@ floor exactly — below it the foot sinks in, above it the figure never lands.
 One quantity's two signs, so `quality::grounding` answers both with one
 number, and it needs no notion of which foot is "down": a contact band widens
 near a foot's lowest point, where its height is flat, and reports a foot
-planted well into its own toe-off. The run's is the worst: 0.052 units on the
-reference human, which is the gap between the crouch depth a foot path was
-authored with and the fold its six-place keys actually produce — so the bound
-is that rounding rather than a judgement about art — and it scales with the
-leg, to 0.057 on the long-legged elf.
+planted well into its own toe-off. What it measures on the shipped set is the
+sag between keys: a leg's angles are interpolated linearly, so the foot they
+put down arcs slightly below the line its path holds it to, deepest halfway
+between keys — the bound is that key spacing's sag rather than a judgement
+about art, and six-place rounding adds under a hundred-thousandth of a unit
+to it. The run's is the worst: 0.061 units on the reference human, scaling
+with the leg to 0.067 on the long-legged elf and 0.073 on the tallest,
+longest-legged build a record describes.
 
-The run's body holds its stated height while a foot is down and follows a
-parabola across each flight. Compressing at midstance as well is FG8 (§8).
+The run's body sinks into each stance and rises out of it, and follows a
+parabola across each flight (§8).
 
 Every layer is a pure function of (pose, state, time) and is host-tested
 against its stated property, not against a screenshot.
@@ -451,20 +454,29 @@ widened to admit a change.
   clip pinned at a limit reads as a rig fighting itself and leaves the overlay
   layers nowhere to go. Shipped worst: 0.79.
 - **Foot slide.** Consumed from `Gait::fitted`/`Gait::slide` and divided by the
-  stride, so the bound is dimensionless. Shipped worst: 0.009 of a stride,
-  about one pixel over a whole cycle at the largest drawn size.
-- **Motion continuity.** The largest second difference of any parameter across
-  a cycle, per unit of that parameter's range, taken cyclically for a clip that
-  joins. It separates a pop from a keyed curve's own faceting rather than
-  measuring how finely the curve was keyed. Shipped worst: 0.041.
+  stride, so the bound is dimensionless. The contact window is read over the
+  ground, at the height the clip holds the body. Shipped worst: 0.0027 of a
+  stride, the walk's, about a sixth of a pixel over a whole cycle at the
+  largest drawn size.
+- **Motion continuity.** The largest second difference of any parameter, or of
+  the root height, across a cycle, per unit of the range it is authored in,
+  taken cyclically for a clip that joins. It separates a pop from a keyed
+  curve's own faceting rather than measuring how finely the curve was keyed.
+  Shipped worst: 0.041.
 - **Loop closure.** How far a looping clip's last pose sits from its first. The
   shipped tables are authored to join exactly, so the bound is rounding.
 - **Grounding.** Over a cycle, how far the lowest point either foot reaches
   sits from the floor — penetration and hover being one quantity's two signs.
-  Worst: 0.057 units, the elf's run.
+  Worst: 0.067 units, the elf's run.
 - **Silhouette readability**, three measured numbers per cell: the
   alpha-weighted **coverage ratio** inside a band; the count of **connected
   tonal regions**; and the **contrast ratio** against both themes' desktops.
+  A palette is the player's to choose, so beyond the grid the harness draws
+  every dye on each species' palest and darkest build at the floor and holds
+  each cell to the same bounds, bounds only, with no ledger rows. The worst
+  cell anywhere is the grid's own least beastkin, pale cloth on pale fur seen
+  from behind, in the one dye of the sixteen that resolves into exactly the
+  three regions required.
 - **Budget.** Outline points per figure and fill area per cell, so a rig
   cannot quietly become the frame's cost centre.
 
@@ -475,14 +487,18 @@ The grid's eight phases are eighths, and the run's flight windows run from
 samples land on their *boundaries*, where the root arc meets the stance
 height and contributes nothing. The sheets therefore do not show a figure
 mid-flight, and this is why the inverted flight dip (§3) survived FG5's gate:
-the harness never rendered a phase at which it was visible.
+the harness never rendered a phase at which it was visible. Within a stance
+the eighths fall a third and two thirds of the way through, where the run's
+body is three quarters of its dip down; midstance, where it is lowest, falls
+between them.
 
 The curve is gated regardless — the digest folds it on its own sixteenths,
-which cross both windows at their middle, and the crate's own tests hold the
-arc's rise, its ends and its sign. What is still missing is a *picture* a
-reviewer can look at. Closing that means sixteen phases rather than eight,
-which doubles the grid, the ledger and the four determinism verticals' work;
-it is recorded here as a deliberate gap rather than taken silently.
+which cross both flight windows and both stances at their middle, and the
+crate's own tests hold the dip's depth, the arc's rise, their ends and their
+signs. What is still missing is a *picture* of either extreme a reviewer can
+look at. Closing that means sixteen phases rather than eight, which doubles
+the grid, the ledger and the four determinism verticals' work; it is recorded
+here as a deliberate gap rather than taken silently.
 
 ### The honest limit
 
@@ -514,10 +530,13 @@ read it.
   the harness to sheet "every clip" and every walk in the tree was a test
   fixture. Idle, walk and run are the honest minimum that exercises every check.
   Their leg curves are not authored by eye: each states a **foot path** — strike
-  distance, crouch depth, swing clearance, stance fraction — solved through the
-  same two-bone geometry the planting layer uses, and a test measures the stride
-  back out of the keys and checks it against the number the path was authored to
-  give.
+  distance, stance fraction, swing clearance, and how much of the leg's turn the
+  ankle levels the foot by, with the foot on the floor wherever the clip holds
+  the body while it is down — put through the planting layer's own two-bone
+  solve (`plant::solve`). A test states each path whole and holds every key of
+  every shipped leg table to it, to the six places the tables are written to,
+  and another measures the stride back out of the keys against the number the
+  path was authored to give.
 - **The figure gained a fourth cross-target digest.** `figure::digest` folds the
   complete placed-strip stream, the planting roots and misses, the gait's own
   phases and the quality numbers, over raw `f64::to_bits` with no quantisation.
@@ -605,21 +624,27 @@ What the finished part guarantees:
   The digest folds all of it, each record's bytes included.
 
 **FG7.** The designer engine is the parameter model, the preview it is
-watched in, presets and plausible generation; the surfaces — sliders, windows,
-the character library — are the game's (`plans/WINTERSUN.md` WS17). What the
-finished part guarantees:
+watched in, picking a preset, and plausible generation; the surfaces —
+sliders, windows, the character library — and the preset set are the game's
+(`plans/WINTERSUN.md` WS17, WS6). What the finished part guarantees:
 
 - **An edit costs what it feeds, and nothing is written until it settles.**
   `design::Designer::edit` changes the record in memory and nothing else. What
   a repaint owes is `design::Change::between` the record last drawn and the one
-  now live — `Nothing`, `Tints` (species or palette changed; `Rig::retint`, no
+  now live — `Nothing`, `Tints` (only the palette changed; `Rig::retint`, no
   point moves) or `Rig` (species, build or features changed; a rebuild) — so
   any burst of edits between two paints costs one catch-up, and the preview
   catching up by that diff is what makes it so. `Designer::settle` answers the
-  record to write only when the interaction changed it: a drag of any length is
-  at most one write. Persisting it is the surface's, through `lib/util`'s
-  `JobDesk`; a refused write is undone by opening the designer again on what
-  the store holds.
+  record to write only when the store does not hold it already: a drag of any
+  length is at most one write. Persisting it is the surface's, through
+  `lib/util`'s `JobDesk`.
+- **An answer lands on what the player is not doing.** One write is out at a
+  time, and its answer can arrive during the next drag. `Designer::landed`
+  takes the store's record, and `Designer::refused` the one it kept, in every
+  field not edited since the write went out; the drag in hand stays the
+  player's. A settle made while a write is out is owed, and the answer hands
+  it out — one write for however many settles it covers. An answer with no
+  write out changes nothing.
 - **The record is always one.** The designer holds the player's choices field
   by field and the canonical record they come to for the species chosen. An
   edit the species cannot carry is refused with the field `Identity::new`
@@ -628,8 +653,10 @@ finished part guarantees:
   species lacks becomes its first, a form it must carry is given (a dragonkin
   always has horns and the scaled tail), an eye colour it does not admit
   becomes the admitted one nearest in colour, and a bald figure's hair colour
-  and volume are zeroed. The choices survive beneath, so a round trip through
-  any species, or through going bald, gives back exactly the figure it left.
+  and volume are zeroed. The choices survive beneath — an edit to a field the
+  record holds at zero (`Spec::fixed`) can only ask for that zero and leaves
+  the choice beneath alone — so a round trip through any species, or through
+  going bald, gives back exactly the figure it left.
   This projects the player's own choices; a record from anywhere else is still
   decoded and refused, never repaired.
 - **The preview plays, on the grid's own stage.** `preview::Preview` plays the
@@ -651,7 +678,9 @@ finished part guarantees:
   bell about each setting's middle, with a heavy build leaning broad-shouldered
   and a tall one long-limbed and small-headed; hair and markings lean toward
   the lightness of the covering, the tunic away from it; optional forms are
-  carried as often as the species is described as carrying them. It is
+  carried as often as the species' own `species::Forms` states, one number
+  that also says whether it may go without and whether it carries one at
+  all, so no species' odds can contradict its forms. It is
   integer-only and takes an injected `RandU64`: the predictable
   `NonCryptoRng` is the tier to use, because a figure a player could have built
   by hand protects nothing by being unpredictable, and a seed that names a
@@ -747,7 +776,10 @@ finished part guarantees:
   which is what makes the fitting earn its answer. A clip whose foot never
   lifts has no stride and is refused rather than given an invented one, and
   a walk authored from mid-stance measures the same as one from the head of
-  the cycle.
+  the cycle. A stance that sinks the body while its leg folds into it is
+  fitted over the ground: its window spans the stance, so a stride a tenth
+  off slides by a tenth of the ground the stance covers, where a window read
+  through the body frame holds only the step's ends.
 - Planting: on flat ground the solve is an **identity** — every parameter
   unchanged, at *any* authored root height, and the figure left at exactly the
   height its clip asked for — so a figure on the level is drawn precisely as
@@ -770,11 +802,18 @@ finished part guarantees:
   clip, since the loop mode is the clip's to know, and the same curve is
   admitted on a clip that plays once and holds. A clip authoring no height
   reads as standing straight. The shipped idle and walk hold one height at
-  every phase; the run's arc clears its stance height by exactly the rise it
+  every phase. The run sinks from each strike to midstance by exactly the dip
+  it authored and rises again to toe-off, never turning back between, both
+  steps alike; its arc clears the toe-off height by exactly the rise it
   authored, meets that height at both ends of both flight windows, and never
-  dips below it anywhere in the cycle. Every shipped height is inside a leg's
-  own travel, and the rig's leg is the length the curves were authored
-  against.
+  dips below it across either. Every shipped height is inside a leg's own
+  travel, and the rig's leg is the length the curves were authored against.
+- Foot paths: every key of every shipped leg table — the idle's, the walk's
+  and the run's hip, knee and ankle — is its clip's stated foot path put
+  through `plant::solve`, to the six places it is written to. The solve
+  itself puts a chain's end where it was aimed, across the reach from nearly
+  straight to folded near the knee's limit, ahead, behind, above, below and a
+  little to either side.
 - Grounding: the shipped set's lowest foot sits on the floor to within the
   bound, and the measurement catches both of its failure directions — a crouch
   with no root height hovers and is rejected, and a root driven past the fold
@@ -812,8 +851,11 @@ finished part guarantees:
   shoulders together, and leaves an already-extreme pose inside its ranges.
 - `artsheet` verify mode fails on any drift *and* on any breached bound, and
   is part of `ci`'s static-gate group; every §4 check runs over every cell of
-  the grid, at every drawn size. Its PNG encoder is proven by round-tripping
+  the grid, at every drawn size, and over every dye on each species' palest
+  and darkest build at the floor. Its PNG encoder is proven by round-tripping
   what it writes through `lib/image`'s own decoder rather than by eye.
+- Continuity sees the root height: a body that steps by a fifth of a leg reads
+  as the pop it is, and one that holds still reads as nothing.
 - The figure digest is asserted by the host suite and by one vertical per
   Tier-1 target (`tests/integration/figure_determinism_*`), so a backend that
   lowered the same arithmetic differently would fail rather than diverge
@@ -844,10 +886,19 @@ finished part guarantees:
   from every grid record either shows exactly the value it set or is refused by
   the field `Identity::new` names and changes nothing; a round trip through any
   species gives back the figure; a required form is given, a swatch clamped and
-  given back, an eye colour replaced by the nearest admitted one; and the
+  given back, an eye colour replaced by the nearest admitted one; an edit of
+  the zero a field is held at leaves the choice beneath it; and the
   projection turns any choices at all into a record and a record into itself.
-  The fuzz harness (`tests/fuzz_design`) holds the same over any edit sequence
-  from any corpus record.
+  An answer or a refusal landing during the next drag leaves the drag in hand
+  and puts every other field where the store's record has it; a store
+  answering another record wins where the player is not editing; a settle
+  made meanwhile is owed and handed out by the answer, and an answer with no
+  write out changes nothing. Every field reads back as the edit that sets it,
+  and that edit writes it and no other. The fuzz harness (`tests/fuzz_design`)
+  holds all of it over any edit sequence from any corpus record: the field an
+  edit sets and every field it cannot reshape, the record each write carries,
+  answers landing mid-drag, and round trips through every species and through
+  going bald with every field held at zero written on the way.
 - Preview: unmoved and framed as a cell, it is the harness's first idle cell
   strip for strip at every heading and side; in the shared frame height and
   species read, in the measured one they do not, and the largest figure fits;
@@ -858,8 +909,10 @@ finished part guarantees:
   likeliest at its middle and seldom at an end; girth leans taper, height
   leans limbs and head, and height and girth do not move together; hair and
   markings follow the covering's lightness and the tunic leans away from it;
-  optional forms are carried at their stated odds. All from fixed seeds, so
-  every statistic is one number.
+  optional forms are carried at their stated odds, and each species' odds are
+  what its forms admit — never for none to carry, always where it cannot go
+  without, a real chance only where both are admitted. All from fixed seeds,
+  so every statistic is one number.
 - Framing: every cell of the grid lies inside its square at every side, and
   every build corner stays within the allowances, to within a hundredth.
 - `miri`: the figure crate forbids `unsafe` outright and the harness carries
@@ -870,17 +923,46 @@ finished part guarantees:
 
 ## 8. FG8 — the run's mid-stance dip
 
-The shipped run's body holds its stated height while a foot is down and
-follows a parabola across each flight, which is what a body with nothing
-holding it up does. What it does not do is compress at midstance and extend at
-toe-off: the run's stance legs carry no push-off to compress, so its whole
-vertical oscillation is the flight arc.
+What the finished part guarantees:
 
-The work: state the dip in the run's foot path, re-solve its hip, knee and
-ankle keys through it with the same two-bone geometry the planting layer
-uses — checking the tables against the path with a test rather than trusting
-an offline solve — and key the root height to dip with it. Re-solving the
-keys moves the stride and the skate, so the item ends with the digest
-re-pinned and all four determinism legs run. `quality::grounding`'s shipped
-worst is the run's, and it is authored crouch depth against six-place key
-rounding — a rounding bound, never widened to admit art (§6).
+- **The run's legs take the landing and give it back.** Its body sinks from
+  each strike to midstance by `motion::RUN_STANCE_DIP` and rises again to
+  toe-off, then follows the flight's parabola. The dip is as deep as the
+  flight rises, so the bob is centred on the height the body lands at and
+  spans a twentieth of the figure. Its shape is `swell`, a polynomial flat at
+  both ends, so the root keys are exact at compile time.
+- **The stance meets the flight flat — a recorded decision.** Joined at the
+  flight's own slope, the leg would be shortening at the landing's full speed
+  as it strikes, and between keys a thirty-second of a cycle apart the
+  planted foot sags past the grounding bound: measured, even a fifth of the
+  shipped rise fails on the longest-legged build a record describes. Taking
+  that join needs leg keys finer than a thirty-second and a measurement grid
+  finer still to see between them. The flat join keeps the velocity break at
+  each strike and toe-off the flight already had, and adds none.
+- **The height is keyed where the legs are.** `RUN_LIFT` is generated at
+  `RUN_HIP_LEFT`'s own phases, so between two keys the body and a planted
+  foot are interpolated along one line and the foot stays on the floor; keyed
+  finer, the height would follow its curve while the legs faceted, and the
+  difference sinks the foot.
+- **Every leg key is its path solved.** The two-bone solve is one free
+  function, `plant::solve`, that the planter and the authoring check both
+  call. A test states every shipped path whole — the idle's, the walk's and
+  the run's — and holds every key of every leg table to it. Only the run's
+  eleven interior stance keys moved; strike, toe-off and the swing are as
+  they were.
+- **The gait reads the stance over the ground.** A contact window taken in the
+  body frame sees a planted foot the stance dip raises through the body, and
+  held only the step's ends — on the shipped run it straddled the swing and
+  fitted a stride of 84 against the authored 96. `Gait::fitted` and
+  `Gait::slide` take the foot at the clip's own height through
+  `Legs::standing`, the one definition the planter and grounding read too.
+  The walk measures exactly as before; the run's window no longer admits
+  swing samples, and its skate is 0.0002.
+- **Continuity sees the root height**, so a body that pops is caught like a
+  joint that does.
+- **Grounding's residue is the key spacing's sag**, not rounding: unrounded
+  keys ground within a hundred-thousandth of a unit of the six-place ones.
+  The run's is 0.061 on the reference human, 0.067 on the elf and 0.073 on
+  the tallest, longest-legged build; `MAX_GROUNDING` is unchanged (§6).
+- **The digest is re-pinned** and asserted on the host and on all four Tier-1
+  targets.

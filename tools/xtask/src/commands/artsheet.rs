@@ -36,7 +36,7 @@ use tairix_raster::surface::Surface;
 use tairix_raster::Color;
 use tairix_theme::Theme;
 use tairix_wintersun_figure::digest as figure_digest;
-use tairix_wintersun_figure::humanoid::{self, Bone};
+use tairix_wintersun_figure::humanoid;
 use tairix_wintersun_figure::mesh::{self, LEVELS};
 use tairix_wintersun_figure::motion::Kind;
 use tairix_wintersun_figure::paint::{self, Brush, MAX_FIGURE_POINTS};
@@ -47,7 +47,7 @@ use tairix_wintersun_figure::reference::{
 use tairix_wintersun_figure::rig::{Placement, Rig};
 use tairix_wintersun_figure::rigging::Rigging;
 use tairix_wintersun_figure::socket::Side;
-use tairix_wintersun_figure::species::TROUSERS;
+use tairix_wintersun_figure::species::{DYES, TROUSERS};
 use tairix_wintersun_figure::tint::Tint;
 
 mod png;
@@ -79,7 +79,10 @@ const COVERAGE: (f64, f64) = (0.05, 0.30);
 /// Three is the requirement rather than the measurement: at the smallest
 /// size a figure is drawn, the head, the trunk and the legs must each still
 /// be a mass of their own. The grid's worst cell — its least beastkin, pale
-/// cloth on pale fur, at the floor — meets it exactly.
+/// cloth on pale fur, seen from behind at the floor — meets it exactly, in
+/// the one dye of the sixteen that does. Every other dye on every species'
+/// palest and darkest build resolves into more, and
+/// [`every_dye_stays_readable`] holds each of them to the bound.
 const MIN_REGIONS: u32 = 3;
 
 /// The fewest pixels a run must hold to count as a region.
@@ -255,7 +258,50 @@ fn measure() -> Result<String, String> {
             }
         }
     }
+    every_dye_stays_readable(&mut placement, &mut brush)?;
     Ok(ledger)
+}
+
+/// Every dye a record can ask for, on each species' palest and darkest
+/// build, held at the readability floor to the bounds the grid's own cells
+/// are.
+///
+/// A palette is the player's choice, so what the grid proves of the cloth
+/// its figures wear has to hold of every cloth they could. Bounds only: the
+/// grid already carries the worst of it, and a row per dye would bury the
+/// ledger's diff.
+fn every_dye_stays_readable(placement: &mut Placement, brush: &mut Brush) -> Result<(), String> {
+    let floor = SIDES[0];
+    for entry in reference::FIGURES
+        .iter()
+        .filter(|entry| matches!(entry.sampling, Sampling::Walk))
+    {
+        for index in 0..DYES.len() {
+            let dye = u8::try_from(index).map_err(|_| "artsheet: a dye past a byte".to_owned())?;
+            if dye == entry.spec.palette.accent {
+                continue;
+            }
+            let mut spec = entry.spec;
+            spec.palette.accent = dye;
+            let dyed = Figure { spec, ..*entry };
+            let figure = build(&dyed)?;
+            let tones = declared(figure.rig());
+            let shaded = shades(&tones);
+            for cell in dyed.cells() {
+                cell_row(
+                    &dyed,
+                    &figure,
+                    (&tones, &shaded),
+                    cell,
+                    floor,
+                    placement,
+                    brush,
+                )
+                .map_err(|e| format!("{e}, wearing dye {dye}"))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The one colour every figure wears whatever its palette clears both
@@ -322,7 +368,8 @@ fn motion_row(
     bound(&name, "limits", used, used <= quality::MAX_LIMIT_USE)?;
     bound(&name, "continuity", bend, bend <= quality::MAX_CONTINUITY)?;
     bound(&name, "closure", gap, gap <= quality::MAX_CLOSURE)?;
-    let sunk = quality::grounding(rigging, clip, &figure.legs()).map_err(refused)?;
+    let legs = figure.legs();
+    let sunk = quality::grounding(rigging, clip, &legs).map_err(refused)?;
     bound(&name, "grounding", sunk, sunk <= quality::MAX_GROUNDING)?;
     let _ = write!(
         ledger,
@@ -331,8 +378,7 @@ fn motion_row(
         clip.seconds(),
     );
     if let Some(authored) = kind.stride() {
-        let ankle = Bone::Ankle(Side::Left).joint();
-        let slide = quality::skate(rigging, clip, ankle).map_err(refused)?;
+        let slide = quality::skate(rigging, clip, &legs, Side::Left).map_err(refused)?;
         bound(&name, "skate", slide, slide <= quality::MAX_SKATE)?;
         let _ = write!(ledger, " stride {authored:.6} skate {slide:.6}");
     }

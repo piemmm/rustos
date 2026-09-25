@@ -2,7 +2,7 @@
 
 use tairix_util::mathf;
 
-use super::{Leg, Legs};
+use super::{chain, solve, span, Leg, Legs};
 use crate::error::FigureError;
 use crate::frame::Body;
 use crate::humanoid::{self, Bone, DRIVES};
@@ -127,6 +127,67 @@ fn an_unreal_root_height_is_refused() {
     }
 }
 
+/// The two-bone solve is the one thing both the planter and the shipped
+/// clips' authoring check trust, so it is held directly: a point the chain
+/// reaches ahead of the hip, behind it, above or below it, and a little to
+/// either side as a foot under a hip is, from nearly straight to folded near
+/// the knee's limit, is where the angles it answers put the chain's end.
+#[test]
+fn the_two_bone_solve_puts_the_chain_where_it_was_aimed() {
+    let (thigh, shank, folded) = (23.0, 24.0, 2.4);
+    let shortest = span(thigh, shank, folded);
+    for step in 1..24 {
+        let distance = shortest + (thigh + shank - shortest) * f64::from(step) / 24.0;
+        for turn in 0..16 {
+            let heading = f64::from(turn) * core::f64::consts::TAU / 16.0;
+            for lean in [-0.1, 0.0, 0.08] {
+                let toward = Body::new(
+                    distance * mathf::cos(heading) * mathf::cos(lean),
+                    distance * mathf::sin(lean),
+                    distance * mathf::sin(heading) * mathf::cos(lean),
+                );
+                let reached = chain(thigh, shank, solve(thigh, shank, folded, toward));
+                let error = reached.plus(toward.scaled(-1.0)).length();
+                assert!(
+                    error < SLACK,
+                    "aimed at {toward:?}, reached {reached:?}, {error} away"
+                );
+            }
+        }
+    }
+}
+
+/// The height the clip holds the body at raises both ankles by that much of
+/// a leg, and a height past a whole leg is refused rather than drawn.
+#[test]
+fn standing_raises_both_feet_by_the_height_the_clip_holds_the_body_at() {
+    let rig = human();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+    let frames = resolved(&rigging, &striding());
+    let rest = legs.standing(&frames, 0.0).expect("both feet");
+    for lift in [-1.0, -0.13, 0.4, 1.0] {
+        let raised = legs.standing(&frames, lift).expect("both feet");
+        for side in [0, 1] {
+            // The plan position is untouched, bit for bit.
+            assert_eq!(raised[side].forward.to_bits(), rest[side].forward.to_bits());
+            assert_eq!(raised[side].side.to_bits(), rest[side].side.to_bits());
+            assert!(
+                mathf::fabs(raised[side].up - rest[side].up - lift * legs.straight()) < SLACK,
+                "lift {lift} raised foot {side} by {}",
+                raised[side].up - rest[side].up
+            );
+        }
+    }
+    for lift in [f64::NAN, -1.01, 1.5] {
+        assert_eq!(
+            legs.standing(&frames, lift).map(|_| ()),
+            Err(FigureError::LiftOutsideRange),
+            "lift {lift} was admitted"
+        );
+    }
+}
+
 /// The measurements come from the rig rather than from constants beside it,
 /// so a taller or wider figure needs no second set of numbers.
 #[test]
@@ -210,7 +271,7 @@ fn the_height_a_clip_states_lands_its_planted_foot() {
 
     for pose in [Pose::REST, striding()] {
         let frames = resolved(&rigging, &pose);
-        let standing = legs.standing(&frames).expect("both feet");
+        let standing = legs.standing(&frames, 0.0).expect("both feet");
         let fold = mathf::fmin(standing[0].up, standing[1].up) - legs.sole();
         let planted = legs
             .plant(
@@ -251,7 +312,7 @@ fn a_tucked_pose_rises_with_its_clip_rather_than_sinking_by_its_fold() {
         .with(Param::KneeBend(Side::Right), 0.45)
         .expect("a real pose");
     let frames = resolved(&rigging, &flight);
-    let standing = legs.standing(&frames).expect("both feet");
+    let standing = legs.standing(&frames, 0.0).expect("both feet");
     let tuck = mathf::fmin(standing[0].up, standing[1].up) - legs.sole();
     assert!(tuck > 1.0, "the fixture must tuck both feet up at all");
 
@@ -293,7 +354,7 @@ fn a_foot_the_clip_lifted_keeps_its_clearance() {
         .with(Param::KneeBend(Side::Right), 0.55)
         .expect("a real pose");
     let frames = resolved(&rigging, &pose);
-    let before = legs.standing(&frames).expect("both feet");
+    let before = legs.standing(&frames, 0.0).expect("both feet");
     let clearance = before[Side::Right as usize].up - before[Side::Left as usize].up;
     assert!(clearance > 1.0, "the fixture must lift a foot at all");
 
@@ -324,7 +385,7 @@ fn each_foot_lands_on_its_own_terrain_height() {
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     let pose = Pose::REST;
     let frames = resolved(&rigging, &pose);
-    let sole = legs.standing(&frames).expect("both feet")[0].up;
+    let sole = legs.standing(&frames, 0.0).expect("both feet")[0].up;
 
     for ground in [
         [2.0, -2.0],
@@ -521,7 +582,7 @@ fn a_foot_a_rig_cannot_aim_reports_its_miss_rather_than_a_landing() {
     );
     // And the miss must be the honest one: resolving the pose puts the foot
     // exactly where the report says it is.
-    let sole = legs.standing(&frames).expect("both feet")[0].up;
+    let sole = legs.standing(&frames, 0.0).expect("both feet")[0].up;
     let landed = ankle_heights(&kneeling, &planted.pose(), planted.root());
     for side in [Side::Left, Side::Right] {
         let wanted = 12.0 + sole;

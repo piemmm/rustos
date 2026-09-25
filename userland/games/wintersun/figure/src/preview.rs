@@ -59,22 +59,38 @@ const fn state(kind: Kind) -> StateId {
 }
 
 /// Each kind's state plays its own clip.
-const STATES: [ClipId; Kind::ALL.len()] = [
-    ClipId::new(slot(Kind::Idle)),
-    ClipId::new(slot(Kind::Walk)),
-    ClipId::new(slot(Kind::Run)),
-];
+const STATES: [ClipId; Kind::ALL.len()] = {
+    let mut states = [ClipId::new(0); Kind::ALL.len()];
+    let mut index = 0;
+    while index < Kind::ALL.len() {
+        states[index] = ClipId::new(slot(Kind::ALL[index]));
+        index += 1;
+    }
+    states
+};
+
+/// How many ordered pairs of two different kinds there are.
+const PAIRS: usize = Kind::ALL.len() * (Kind::ALL.len() - 1);
 
 /// Every clip may give way to every other, ascending as a machine holds its
 /// edges.
-const EDGES: [Edge; 6] = [
-    Edge::new(state(Kind::Idle), state(Kind::Walk), FADE),
-    Edge::new(state(Kind::Idle), state(Kind::Run), FADE),
-    Edge::new(state(Kind::Walk), state(Kind::Idle), FADE),
-    Edge::new(state(Kind::Walk), state(Kind::Run), FADE),
-    Edge::new(state(Kind::Run), state(Kind::Idle), FADE),
-    Edge::new(state(Kind::Run), state(Kind::Walk), FADE),
-];
+const EDGES: [Edge; PAIRS] = {
+    let mut edges = [Edge::new(state(Kind::Idle), state(Kind::Idle), FADE); PAIRS];
+    let mut at = 0;
+    let mut from = 0;
+    while from < Kind::ALL.len() {
+        let mut to = 0;
+        while to < Kind::ALL.len() {
+            if from != to {
+                edges[at] = Edge::new(state(Kind::ALL[from]), state(Kind::ALL[to]), FADE);
+                at += 1;
+            }
+            to += 1;
+        }
+        from += 1;
+    }
+    edges
+};
 
 /// How a view frames the figure in its square.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

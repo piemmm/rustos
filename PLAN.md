@@ -196,7 +196,7 @@ plan's ledger. A `blocked` row names its blocker.
 | Id | Item | Status |
 |---|---|---|
 | WINTERSUN | The WinterSun RPG (`plans/WINTERSUN.md`) | in progress |
-| FIGURE | Figure rigs, meshes and motion (`plans/FIGURE.md`) | in progress |
+| FIGURE | Figure rigs, meshes and motion (`plans/FIGURE.md`) | done |
 
 ### Engineering
 

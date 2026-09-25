@@ -8,14 +8,15 @@
 //!
 //! # How the leg curves were arrived at
 //!
-//! Not by eye. Each locomotion clip states a **foot path** — how far in
-//! front of the hip the foot strikes, how deep the figure stands, how high
-//! the swing foot clears, and what fraction of the cycle the foot is down
-//! for — and the hip, knee and ankle keys below are that path solved through
-//! the same two-bone geometry the planting layer uses. What the path implies
-//! is therefore what the rig does, and the crate's own tests measure the
-//! stride back out of the clip and check it against the number the path was
-//! authored to give.
+//! Not by eye. Each clip states a **foot path** — how far in front of the
+//! hip the foot strikes, what fraction of the cycle it is down for, how high
+//! the swing foot clears, and how much of the leg's turn the ankle levels the
+//! foot by — and while the foot is down the path is the floor, wherever the
+//! clip holds the body. The hip, knee and ankle keys below are that path put
+//! through the planting layer's own two-bone solve and rounded to six
+//! places. The crate's tests solve every key again from the path and hold
+//! the tables to it, and measure the stride back out of each clip against
+//! the number its path was authored to give.
 //!
 //! The pelvis sits at a fixed height, so a foot cannot travel fore and aft
 //! along level ground with a straight leg: every locomotion path is authored
@@ -25,11 +26,14 @@
 //!
 //! Each clip therefore states the height it holds the body at, because the
 //! articulation cannot be asked: both legs tucked is a run's flight phase
-//! and a deep crouch at once. The height is its crouch wherever a foot is
-//! down, and the run adds the arc its body follows over the moment it has
-//! neither. `quality::grounding` measures the two halves against each other,
-//! so a depth here that its keys do not produce is a failure rather than a
-//! figure quietly sunk into the floor.
+//! and a deep crouch at once. The idle and the walk hold their crouch
+//! throughout. The run sinks into each stance and rises out of it — the leg
+//! taking the landing and giving it back — then follows a parabola across the
+//! flight. Its height is keyed where its legs are, so between two keys the
+//! body and a planted foot are interpolated along one line and the foot stays
+//! on the floor. `quality::grounding` measures the two halves against each
+//! other, so a depth here that its keys do not produce is a failure rather
+//! than a figure quietly sunk into the floor.
 //!
 //! The ankle levels the foot against the ground by a fixed fraction of the
 //! leg's own turn rather than all of it, because a heel lifts at toe-off and
@@ -60,6 +64,9 @@ use crate::socket::Side;
 pub const MAX_CURVES: usize = Param::COUNT;
 
 /// Which shipped motion.
+///
+/// Declared in the order [`Self::ALL`] lists them, which is the order every
+/// table of motions is held in.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Kind {
     /// Standing: a slow weight shift and a glance, so a waiting figure does
@@ -79,11 +86,7 @@ impl Kind {
     /// Its position in [`Self::ALL`].
     #[must_use]
     pub const fn index(self) -> usize {
-        match self {
-            Self::Idle => 0,
-            Self::Walk => 1,
-            Self::Run => 2,
-        }
+        self as usize
     }
 
     /// Its stable name, for a ledger row or a diagnostic.
@@ -195,12 +198,9 @@ impl Set {
     ///
     /// As [`Motion::new`].
     pub fn new() -> Result<Self, FigureError> {
+        let [first, second, third] = Kind::ALL.map(Motion::new);
         Ok(Self {
-            motions: [
-                Motion::new(Kind::Idle)?,
-                Motion::new(Kind::Walk)?,
-                Motion::new(Kind::Run)?,
-            ],
+            motions: [first?, second?, third?],
         })
     }
 
@@ -219,11 +219,8 @@ impl Set {
     ///
     /// As [`Motion::clip`].
     pub fn clips(&self) -> Result<Clips<'_>, FigureError> {
-        Ok(Clips([
-            self.clip(Kind::Idle)?,
-            self.clip(Kind::Walk)?,
-            self.clip(Kind::Run)?,
-        ]))
+        let [first, second, third] = self.motions.each_ref().map(Motion::clip);
+        Ok(Clips([first?, second?, third?]))
     }
 }
 
@@ -303,12 +300,13 @@ const RUN_HALF_STEP: f64 = 18.0;
 /// what makes it a run rather than a fast walk.
 const RUN_STANCE: f64 = 0.375;
 
-/// How deep each path stands into its own legs, in figure-local units.
+/// How deep each path stands into its own legs as a foot strikes, in
+/// figure-local units.
 ///
-/// The depth its leg keys were solved with, and therefore the height the
-/// body sits at while a foot is down: the root sinks by exactly this so the
-/// planted foot reaches the floor. `quality::grounding` measures the two
-/// against each other rather than either being trusted.
+/// The idle and the walk hold it throughout, and the run sinks further from
+/// it into each stance: the root sinks by exactly this so the planted foot
+/// reaches the floor. `quality::grounding` measures the two against each
+/// other rather than either being trusted.
 const IDLE_CROUCH: f64 = 1.2;
 const WALK_CROUCH: f64 = 3.5;
 const RUN_CROUCH: f64 = 6.0;
@@ -317,12 +315,23 @@ const RUN_CROUCH: f64 = 6.0;
 ///
 /// A run has a moment with neither foot down, and where the body is then is
 /// not in its articulation — both legs tucked reads identically to a deep
-/// crouch. The leg keys carry no push-off of their own to imply it, so the
-/// rise is stated here: a fortieth of the figure's height, which is a pixel
-/// or two of lift at the largest size the desktop draws one. Enough to read
-/// as a bound rather than a glide, and far inside the stride the feet are
-/// pacing.
+/// crouch — so the rise is stated here: a fortieth of the figure's height,
+/// two or three pixels of lift at the largest size the desktop draws one.
+/// Enough to read as a bound rather than a glide, and far inside the stride
+/// the feet are pacing.
 const RUN_FLIGHT_RISE: f64 = 2.5;
+
+/// How far the running body sinks from a strike to midstance, rising again
+/// to toe-off: the stance leg folding into the landing and straightening out
+/// of it into the flight.
+///
+/// As deep as the flight rises, so the body's bob is centred on the height it
+/// lands at and spans a twentieth of the figure, five pixels at the largest
+/// size. Its ends are flat rather than at the flight's own slope: that join
+/// would have the leg shortening at the landing's full speed as it strikes,
+/// which keys a thirty-second of a cycle apart cannot follow without the
+/// planted foot sinking past the grounding bound.
+const RUN_STANCE_DIP: f64 = RUN_FLIGHT_RISE;
 
 /// The leg a root height is measured against: straight, hip to ankle.
 ///
@@ -346,6 +355,42 @@ const fn flight(t: f64) -> f64 {
     rooted(-RUN_CROUCH + RUN_FLIGHT_RISE * (1.0 - t * t))
 }
 
+/// The run's root height `u` of the way through a stance, strike to toe-off.
+const fn stance(u: f64) -> f64 {
+    rooted(-RUN_CROUCH - RUN_STANCE_DIP * swell(u))
+}
+
+/// A swell across `0..=1`: none at either end, where it is flat, and all of
+/// it at the middle.
+///
+/// A polynomial, so a height keyed from it is exact at compile time.
+const fn swell(u: f64) -> f64 {
+    let arch = 4.0 * u * (1.0 - u);
+    arch * arch
+}
+
+/// The run's root height at `phase`: each half of the cycle is one step, a
+/// stance and then a flight.
+const fn run_root(phase: f64) -> f64 {
+    let step = if phase < 0.5 { phase } else { phase - 0.5 };
+    if step < RUN_STANCE {
+        stance(step / RUN_STANCE)
+    } else {
+        flight(2.0 * (step - RUN_STANCE) / (0.5 - RUN_STANCE) - 1.0)
+    }
+}
+
+/// [`run_root`] keyed at the phases `legs` are keyed at.
+const fn keyed_like<const N: usize>(legs: &[Key; N]) -> [Key; N] {
+    let mut keys = *legs;
+    let mut index = 0;
+    while index < N {
+        keys[index] = Key::new(legs[index].phase, run_root(legs[index].phase));
+        index += 1;
+    }
+    keys
+}
+
 /// The idle and walk hold one height throughout: both keep a foot down for
 /// every phase of the cycle, so the body never leaves it.
 const IDLE_LIFT: [Key; 2] = [
@@ -358,30 +403,11 @@ const WALK_LIFT: [Key; 2] = [
     Key::new(1.0, rooted(-WALK_CROUCH)),
 ];
 
-/// The run's two flight arcs, one per step, keyed on the cycle's own grid.
-const RUN_LIFT: [Key; 19] = [
-    Key::new(0.000_000, flight(1.0)),
-    Key::new(0.375_000, flight(-1.0)),
-    Key::new(0.390_625, flight(-0.75)),
-    Key::new(0.406_250, flight(-0.50)),
-    Key::new(0.421_875, flight(-0.25)),
-    Key::new(0.437_500, flight(0.00)),
-    Key::new(0.453_125, flight(0.25)),
-    Key::new(0.468_750, flight(0.50)),
-    Key::new(0.484_375, flight(0.75)),
-    Key::new(0.500_000, flight(1.0)),
-    Key::new(0.875_000, flight(-1.0)),
-    Key::new(0.890_625, flight(-0.75)),
-    Key::new(0.906_250, flight(-0.50)),
-    Key::new(0.921_875, flight(-0.25)),
-    Key::new(0.937_500, flight(0.00)),
-    Key::new(0.953_125, flight(0.25)),
-    Key::new(0.968_750, flight(0.50)),
-    Key::new(0.984_375, flight(0.75)),
-    Key::new(1.000_000, flight(1.0)),
-];
+/// The run's height, keyed where its legs are.
+const RUN_LIFT: [Key; RUN_HIP_LEFT.len()] = keyed_like(&RUN_HIP_LEFT);
 
-/// The authored leg cycles, left side, solved from the foot paths above.
+/// The authored leg cycles, left side, solved from each clip's foot path —
+/// stated whole, and every key solved again from it, by this module's tests.
 const WALK_HIP_LEFT: [Key; 33] = [
     Key::new(0.000_000, 0.276_264),
     Key::new(0.031_250, 0.279_460),
@@ -492,17 +518,17 @@ const WALK_ANKLE_LEFT: [Key; 33] = [
 
 const RUN_HIP_LEFT: [Key; 33] = [
     Key::new(0.000_000, 0.364_662),
-    Key::new(0.031_250, 0.369_350),
-    Key::new(0.062_500, 0.362_333),
-    Key::new(0.093_750, 0.346_751),
-    Key::new(0.125_000, 0.324_155),
-    Key::new(0.156_250, 0.295_498),
-    Key::new(0.187_500, 0.261_441),
-    Key::new(0.218_750, 0.222_458),
-    Key::new(0.250_000, 0.178_845),
-    Key::new(0.281_250, 0.130_666),
-    Key::new(0.312_500, 0.077_603),
-    Key::new(0.343_750, 0.018_622),
+    Key::new(0.031_250, 0.376_626),
+    Key::new(0.062_500, 0.383_561),
+    Key::new(0.093_750, 0.381_932),
+    Key::new(0.125_000, 0.369_915),
+    Key::new(0.156_250, 0.346_831),
+    Key::new(0.187_500, 0.312_966),
+    Key::new(0.218_750, 0.269_341),
+    Key::new(0.250_000, 0.217_360),
+    Key::new(0.281_250, 0.158_422),
+    Key::new(0.312_500, 0.093_668),
+    Key::new(0.343_750, 0.024_052),
     Key::new(0.375_000, -0.163_425),
     Key::new(0.406_250, -0.340_846),
     Key::new(0.437_500, -0.354_357),
@@ -528,17 +554,17 @@ const RUN_HIP_LEFT: [Key; 33] = [
 
 const RUN_KNEE_LEFT: [Key; 33] = [
     Key::new(0.000_000, 0.257_372),
-    Key::new(0.031_250, 0.316_239),
-    Key::new(0.062_500, 0.358_478),
-    Key::new(0.093_750, 0.388_915),
-    Key::new(0.125_000, 0.409_674),
-    Key::new(0.156_250, 0.421_802),
-    Key::new(0.187_500, 0.425_795),
-    Key::new(0.218_750, 0.421_802),
-    Key::new(0.250_000, 0.409_674),
-    Key::new(0.281_250, 0.388_915),
-    Key::new(0.312_500, 0.358_478),
-    Key::new(0.343_750, 0.316_239),
+    Key::new(0.031_250, 0.326_571),
+    Key::new(0.062_500, 0.388_763),
+    Key::new(0.093_750, 0.439_956),
+    Key::new(0.125_000, 0.477_943),
+    Key::new(0.156_250, 0.501_306),
+    Key::new(0.187_500, 0.509_191),
+    Key::new(0.218_750, 0.501_306),
+    Key::new(0.250_000, 0.477_943),
+    Key::new(0.281_250, 0.439_956),
+    Key::new(0.312_500, 0.388_763),
+    Key::new(0.343_750, 0.326_571),
     Key::new(0.375_000, 0.257_372),
     Key::new(0.406_250, 0.210_371),
     Key::new(0.437_500, 0.226_273),
@@ -564,17 +590,17 @@ const RUN_KNEE_LEFT: [Key; 33] = [
 
 const RUN_ANKLE_LEFT: [Key; 33] = [
     Key::new(0.000_000, 0.079_737),
-    Key::new(0.031_250, -0.014_481),
-    Key::new(0.062_500, -0.096_915),
-    Key::new(0.093_750, -0.171_353),
-    Key::new(0.125_000, -0.239_219),
-    Key::new(0.156_250, -0.300_948),
-    Key::new(0.187_500, -0.356_448),
-    Key::new(0.218_750, -0.405_292),
-    Key::new(0.250_000, -0.446_805),
-    Key::new(0.281_250, -0.480_045),
-    Key::new(0.312_500, -0.503_673),
-    Key::new(0.343_750, -0.515_521),
+    Key::new(0.031_250, -0.021_799),
+    Key::new(0.062_500, -0.118_505),
+    Key::new(0.093_750, -0.208_592),
+    Key::new(0.125_000, -0.290_882),
+    Key::new(0.156_250, -0.363_909),
+    Key::new(0.187_500, -0.425_805),
+    Key::new(0.218_750, -0.474_610),
+    Key::new(0.250_000, -0.508_817),
+    Key::new(0.281_250, -0.527_893),
+    Key::new(0.312_500, -0.532_639),
+    Key::new(0.343_750, -0.525_477),
     Key::new(0.375_000, -0.511_248),
     Key::new(0.406_250, -0.506_713),
     Key::new(0.437_500, -0.539_764),

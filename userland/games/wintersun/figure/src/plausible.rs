@@ -38,7 +38,7 @@ use crate::identity::{
     Build, EyeShape, FaceShape, Features, Field, HairStyle, Identity, IdentityError, Palette,
     Setting, Spec,
 };
-use crate::species::{Species, DYES, HAIR};
+use crate::species::{Forms, Species, CERTAIN, DYES, HAIR};
 
 /// Draw a plausible figure of `species` from `rng`.
 ///
@@ -121,25 +121,12 @@ fn setting(drawn: i32) -> Setting {
 /// going bald, so all but a few do.
 const HAIRED: u8 = 14;
 
-/// How often, in sixteenths, a species carries horns and a tail.
-///
-/// Beastkin are described as often tailed and never as horned. Every other
-/// species always or never carries each, which its admitted forms say too.
-const fn carried(species: Species) -> (u8, u8) {
-    match species {
-        Species::Human | Species::Elf | Species::Dwarf => (0, 0),
-        Species::Beastkin => (3, 12),
-        Species::Dragonkin => (16, 16),
-    }
-}
-
 fn features<R: RandU64 + ?Sized>(species: Species, rng: &mut R) -> Result<Features, IdentityError> {
-    let (horned, tailed) = carried(species);
     let face = uniform(rng, FaceShape::ALL).ok_or(IdentityError::Unknown(Field::Face))?;
     let eyes = uniform(rng, EyeShape::ALL).ok_or(IdentityError::Unknown(Field::Eyes))?;
     let ears = uniform(rng, species.ears()).ok_or(IdentityError::NotOfSpecies(Field::Ears))?;
-    let horns = optional(rng, species.horns(), horned, Field::Horns)?;
-    let tail = optional(rng, species.tails(), tailed, Field::Tail)?;
+    let horns = optional(rng, species.horns(), Field::Horns)?;
+    let tail = optional(rng, species.tails(), Field::Tail)?;
     let hair = if chance(rng, HAIRED) {
         Some(uniform(rng, HairStyle::ALL).ok_or(IdentityError::Unknown(Field::Hair))?)
     } else {
@@ -226,37 +213,35 @@ fn weighted<R: RandU64 + ?Sized>(rng: &mut R, table: &[Color], weigh: impl Fn(u8
     0
 }
 
-/// One of `admitted`: a form with `odds` sixteenths' likelihood where it
-/// holds both a form and none, and otherwise whichever it holds.
+/// One of `carried`'s forms as often as the species carries one, and none
+/// otherwise.
 ///
-/// An empty list admits nothing, and is refused as `field`.
-fn optional<R: RandU64 + ?Sized, T: Copy>(
+/// A species admitting neither a form nor going without is refused as
+/// `field`.
+fn optional<R: RandU64 + ?Sized, T: Copy + PartialEq>(
     rng: &mut R,
-    admitted: &[Option<T>],
-    odds: u8,
+    carried: Forms<T>,
     field: Field,
 ) -> Result<Option<T>, IdentityError> {
     let refused = IdentityError::NotOfSpecies(field);
-    let forms = admitted.iter().flatten().count();
-    let bare = admitted.iter().any(Option::is_none);
-    if forms == 0 {
+    let forms = carried.forms();
+    let bare = carried.admits(None);
+    if forms.is_empty() {
         return if bare { Ok(None) } else { Err(refused) };
     }
-    if bare && !chance(rng, odds) {
+    if bare && !chance(rng, carried.often()) {
         return Ok(None);
     }
-    admitted
-        .iter()
-        .flatten()
-        .nth(below(rng, forms))
+    forms
+        .get(below(rng, forms.len()))
         .copied()
         .map(Some)
         .ok_or(refused)
 }
 
-/// Whether a draw lands inside `sixteenths` of sixteen.
+/// Whether a draw lands inside `sixteenths` of [`CERTAIN`].
 fn chance<R: RandU64 + ?Sized>(rng: &mut R, sixteenths: u8) -> bool {
-    rng.next_below(16) < u64::from(sixteenths)
+    rng.next_below(u64::from(CERTAIN)) < u64::from(sixteenths)
 }
 
 /// One of `items`, each as likely as the next; `None` for none.

@@ -214,6 +214,34 @@ pub struct Spec {
     pub palette: Palette,
 }
 
+impl Spec {
+    /// Whether the record leaves `field` nothing to choose, so a record holds
+    /// zero there: a bald figure's hair colour and volume, and the markings
+    /// of a species with none.
+    #[must_use]
+    pub fn fixed(&self, field: Field) -> bool {
+        match field {
+            Field::Volume | Field::HairColour => self.features.hair.is_none(),
+            Field::MarkingsColour => self.species.markings().is_empty(),
+            Field::Species
+            | Field::Height
+            | Field::Girth
+            | Field::Taper
+            | Field::Limbs
+            | Field::Head
+            | Field::Face
+            | Field::Eyes
+            | Field::Ears
+            | Field::Horns
+            | Field::Tail
+            | Field::Hair
+            | Field::SkinColour
+            | Field::EyeColour
+            | Field::AccentColour => false,
+        }
+    }
+}
+
 /// A checked record: a figure that can be drawn.
 ///
 /// Its one constructor refuses anything else, so a figure built from an
@@ -223,11 +251,24 @@ pub struct Identity {
     spec: Spec,
 }
 
-/// A record field, named in a refusal.
+/// One field of a record, as a refusal names it or an edit sets it.
+///
+/// Declared in the order a record spells its fields, which is the order
+/// [`Self::ALL`] lists them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Field {
     /// The species.
     Species,
+    /// Standing height.
+    Height,
+    /// How heavy the body and limbs are.
+    Girth,
+    /// Shoulders against hips.
+    Taper,
+    /// Limb length against the trunk.
+    Limbs,
+    /// Head size against the body.
+    Head,
     /// The face shape.
     Face,
     /// The eye shape.
@@ -254,6 +295,36 @@ pub enum Field {
     AccentColour,
 }
 
+impl Field {
+    /// Every field, in the order a record spells them.
+    pub const ALL: [Self; 18] = [
+        Self::Species,
+        Self::Height,
+        Self::Girth,
+        Self::Taper,
+        Self::Limbs,
+        Self::Head,
+        Self::Face,
+        Self::Eyes,
+        Self::Ears,
+        Self::Horns,
+        Self::Tail,
+        Self::Hair,
+        Self::Volume,
+        Self::SkinColour,
+        Self::HairColour,
+        Self::EyeColour,
+        Self::MarkingsColour,
+        Self::AccentColour,
+    ];
+
+    /// Its position in [`Self::ALL`].
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// Why a record was refused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum IdentityError {
@@ -278,6 +349,11 @@ impl fmt::Display for Field {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Species => "species",
+            Self::Height => "height",
+            Self::Girth => "girth",
+            Self::Taper => "taper",
+            Self::Limbs => "limb length",
+            Self::Head => "head size",
             Self::Face => "face shape",
             Self::Eyes => "eye shape",
             Self::Ears => "ear form",
@@ -347,10 +423,10 @@ impl Identity {
         if !species.ears().contains(&features.ears) {
             return Err(IdentityError::NotOfSpecies(Field::Ears));
         }
-        if !species.horns().contains(&features.horns) {
+        if !species.horns().admits(features.horns) {
             return Err(IdentityError::NotOfSpecies(Field::Horns));
         }
-        if !species.tails().contains(&features.tail) {
+        if !species.tails().admits(features.tail) {
             return Err(IdentityError::NotOfSpecies(Field::Tail));
         }
 
@@ -369,22 +445,18 @@ impl Identity {
         if usize::from(palette.accent) >= DYES.len() {
             return Err(IdentityError::Unknown(Field::AccentColour));
         }
-        let markings = species.markings();
-        if markings.is_empty() {
+        if spec.fixed(Field::MarkingsColour) {
             if palette.markings != 0 {
                 return Err(IdentityError::NonCanonical(Field::MarkingsColour));
             }
-        } else if usize::from(palette.markings) >= markings.len() {
+        } else if usize::from(palette.markings) >= species.markings().len() {
             return Err(IdentityError::Unknown(Field::MarkingsColour));
         }
-
-        if features.hair.is_none() {
-            if features.volume != Setting::LOW {
-                return Err(IdentityError::NonCanonical(Field::Volume));
-            }
-            if palette.hair != 0 {
-                return Err(IdentityError::NonCanonical(Field::HairColour));
-            }
+        if spec.fixed(Field::Volume) && features.volume != Setting::LOW {
+            return Err(IdentityError::NonCanonical(Field::Volume));
+        }
+        if spec.fixed(Field::HairColour) && palette.hair != 0 {
+            return Err(IdentityError::NonCanonical(Field::HairColour));
         }
 
         Ok(Self { spec })

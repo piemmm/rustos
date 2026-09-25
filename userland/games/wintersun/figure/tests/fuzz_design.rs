@@ -6,11 +6,15 @@
 //!
 //! * from any admitted record, any sequence of edits — admissible or not —
 //!   leaves the designer holding a record the decoder admits and reads back;
-//! * an edit that is taken shows exactly the value it set and changes no
-//!   other field, unless it reshapes the record (a species, going bald), and
-//!   an edit that is refused changes nothing;
-//! * an interaction settles into at most one write, and only when it
-//!   changed the record;
+//! * an edit that is taken shows exactly the value it set and moves no field
+//!   it does not reshape (a species its forms and swatches, going bald the
+//!   hair's colour and volume), and an edit that is refused changes nothing;
+//! * an interaction settles into at most one write, of the record shown, and
+//!   only when the store does not hold it already;
+//! * an answer or a refusal landing during the next drag leaves the fields
+//!   that drag set as they are, and puts every other field where the store's
+//!   record has it; a settle made meanwhile is owed, and the answer hands it
+//!   out;
 //! * a round trip through another species gives back the record it left;
 //! * a plausible figure drawn from any seed is a record that builds.
 //!
@@ -23,7 +27,7 @@ use tairix_rng::NonCryptoRng;
 use tairix_wintersun_figure::design::{Designer, Edit};
 use tairix_wintersun_figure::humanoid;
 use tairix_wintersun_figure::identity::{
-    EarForm, EyeShape, FaceShape, HairStyle, HornForm, Identity, Setting, Spec, TailForm,
+    EarForm, EyeShape, FaceShape, Field, HairStyle, HornForm, Identity, Setting, TailForm,
 };
 use tairix_wintersun_figure::plausible;
 use tairix_wintersun_figure::species::Species;
@@ -75,40 +79,57 @@ fn edit(rng: &mut Prng) -> Edit {
     }
 }
 
-/// `spec` with `edit`'s field set, or `None` for an edit that reshapes the
-/// record's other fields as well: the oracle a taken edit is held to.
-fn written(edit: Edit, spec: Spec) -> Option<Spec> {
-    let mut spec = spec;
-    match edit {
-        Edit::Species(_) | Edit::Hair(_) => return None,
-        Edit::Height(setting) => spec.build.height = setting,
-        Edit::Girth(setting) => spec.build.girth = setting,
-        Edit::Taper(setting) => spec.build.taper = setting,
-        Edit::Limbs(setting) => spec.build.limbs = setting,
-        Edit::Head(setting) => spec.build.head = setting,
-        Edit::Face(face) => spec.features.face = face,
-        Edit::EyeShape(eyes) => spec.features.eyes = eyes,
-        Edit::Ears(ears) => spec.features.ears = ears,
-        Edit::Horns(horns) => spec.features.horns = horns,
-        Edit::Tail(tail) => spec.features.tail = tail,
-        Edit::Volume(volume) => spec.features.volume = volume,
-        Edit::Skin(swatch) => spec.palette.skin = swatch,
-        Edit::HairColour(swatch) => spec.palette.hair = swatch,
-        Edit::EyeColour(swatch) => spec.palette.eyes = swatch,
-        Edit::Markings(swatch) => spec.palette.markings = swatch,
-        Edit::Accent(swatch) => spec.palette.accent = swatch,
+/// A build setting, which no record refuses and nothing re-derives: the
+/// drag an answer lands in the middle of.
+fn build(rng: &mut Prng) -> Edit {
+    let setting = Setting(rng.next_u8());
+    match rng.below(5) {
+        0 => Edit::Height(setting),
+        1 => Edit::Girth(setting),
+        2 => Edit::Taper(setting),
+        3 => Edit::Limbs(setting),
+        _ => Edit::Head(setting),
     }
-    Some(spec)
+}
+
+/// Whether `edit` re-derives `field` around itself.
+fn reshaped(edit: Edit, field: Field) -> bool {
+    match edit {
+        Edit::Species(_) => matches!(
+            field,
+            Field::Ears
+                | Field::Horns
+                | Field::Tail
+                | Field::SkinColour
+                | Field::EyeColour
+                | Field::MarkingsColour
+        ),
+        Edit::Hair(_) => matches!(field, Field::Volume | Field::HairColour),
+        _ => false,
+    }
 }
 
 /// Make `edit` and hold the designer to every invariant above.
 fn exercise(designer: &mut Designer, edit: Edit) {
     let before = *designer;
+    let was = before.live().spec();
     if designer.edit(edit).is_ok() {
         let live = designer.live();
         assert_eq!(Identity::decode(&live.encode()), Ok(live));
-        if let Some(expected) = written(edit, before.live().spec()) {
-            assert_eq!(live.spec(), expected, "{edit:?} did not show as set");
+        let now = live.spec();
+        assert_eq!(
+            Edit::of(edit.field(), now),
+            edit,
+            "{edit:?} did not show as set"
+        );
+        for field in Field::ALL {
+            if field != edit.field() && !reshaped(edit, field) {
+                assert_eq!(
+                    Edit::of(field, now),
+                    Edit::of(field, was),
+                    "{edit:?} moved {field:?}"
+                );
+            }
         }
     } else {
         assert!(
@@ -119,16 +140,105 @@ fn exercise(designer: &mut Designer, edit: Edit) {
     }
 }
 
-/// Every species' round trip from where the designer stands gives back the
-/// record it left.
+/// Settle, drag the build while the write is out, and answer it, holding the
+/// answer to the invariants above; `stored` is the record the store holds.
+fn settle_and_answer(designer: &mut Designer, stored: &mut Identity, rng: &mut Prng) {
+    let changed = designer.live() != *stored;
+    let Some(written) = designer.settle() else {
+        assert!(!changed, "a changed record settled into no write");
+        return;
+    };
+    assert!(changed, "a record the store holds was written again");
+    assert_eq!(
+        written,
+        designer.live(),
+        "the record written is not the one shown"
+    );
+
+    let mut dragged = Vec::new();
+    for _ in 0..rng.below(4) {
+        let edit = build(rng);
+        designer
+            .edit(edit)
+            .expect("a build setting is never refused");
+        if !dragged.contains(&edit.field()) {
+            dragged.push(edit.field());
+        }
+    }
+    let owed = rng.below(2) == 0;
+    if owed {
+        assert_eq!(
+            designer.settle(),
+            None,
+            "a second write went out while one was"
+        );
+    }
+
+    let held = designer.live().spec();
+    let answer = if rng.below(2) == 0 {
+        *stored = written;
+        designer.landed(written)
+    } else {
+        designer.refused()
+    };
+    let now = designer.live();
+    for field in Field::ALL {
+        let expected = if dragged.contains(&field) {
+            Edit::of(field, held)
+        } else {
+            Edit::of(field, stored.spec())
+        };
+        assert_eq!(
+            Edit::of(field, now.spec()),
+            expected,
+            "the answer moved {field:?}"
+        );
+    }
+    let wanted = (owed && now != *stored).then_some(now);
+    assert_eq!(
+        answer, wanted,
+        "the owed write was not what the answer handed out"
+    );
+    if let Some(owed) = answer {
+        assert_eq!(designer.landed(owed), None, "an owed write owed another");
+        *stored = owed;
+    }
+}
+
+/// Write every field the record holds at zero with the zero it holds, which
+/// must leave the choices beneath it alone.
+fn rewrite_what_is_fixed(probe: &mut Designer) {
+    for field in [Field::Volume, Field::HairColour, Field::MarkingsColour] {
+        let spec = probe.live().spec();
+        if spec.fixed(field) {
+            probe
+                .edit(Edit::of(field, spec))
+                .expect("the zero a record holds is admitted");
+        }
+    }
+}
+
+/// Every round trip from where the designer stands — through each species,
+/// and through going bald — gives back the record it left, even with every
+/// field the far end holds at zero written on the way.
 fn round_trips(designer: &Designer) {
-    let home = designer.live().species();
+    let home = designer.live().spec();
     for other in Species::ALL {
         let mut probe = *designer;
         probe.edit(Edit::Species(other)).expect("any species");
-        probe.edit(Edit::Species(home)).expect("any species");
+        rewrite_what_is_fixed(&mut probe);
+        probe
+            .edit(Edit::Species(home.species))
+            .expect("any species");
         assert_eq!(probe.live(), designer.live(), "a trip through {other:?}");
     }
+    let mut probe = *designer;
+    probe.edit(Edit::Hair(None)).expect("anyone may be bald");
+    rewrite_what_is_fixed(&mut probe);
+    probe
+        .edit(Edit::Hair(home.features.hair))
+        .expect("anyone may have hair");
+    assert_eq!(probe.live(), designer.live(), "a trip through going bald");
 }
 
 #[test]
@@ -142,19 +252,23 @@ fn any_edits_keep_a_record_and_settle_into_at_most_one_write() {
 
     let mut iteration: u64 = 0;
     loop {
-        let mut designer = Designer::open(*rng.pick(&records));
-        let mut settled = designer.live();
+        let mut stored = *rng.pick(&records);
+        let mut designer = Designer::open(stored);
         for _ in 0..EDITS {
             exercise(&mut designer, edit(&mut rng));
             if rng.below(6) == 0 {
-                let changed = designer.live() != settled;
-                let write = designer.settle();
-                assert_eq!(write.is_some(), changed);
-                assert_eq!(designer.settle(), None, "one interaction wrote twice");
-                settled = designer.live();
+                settle_and_answer(&mut designer, &mut stored, &mut rng);
             }
         }
         round_trips(&designer);
+
+        let untouched = designer;
+        assert_eq!(designer.landed(stored), None, "an answer with no write out");
+        assert_eq!(designer.refused(), None, "a refusal with no write out");
+        assert_eq!(
+            designer, untouched,
+            "an answer to nothing changed the designer"
+        );
 
         let species = *rng.pick(&Species::ALL);
         let drawn = plausible::figure(species, &mut NonCryptoRng::seed_from_u64(rng.next_u64()))

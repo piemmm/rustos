@@ -40,7 +40,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS3 | `wintersun/rules`: the fixed-tick authoritative step, space and collision, stats, damage, status effects | done |
 | WS4 | `wintersun/art`: material synthesis, the splat field, the decal and particle vocabulary, the WinterSun palette | done |
 | WS5 | The client shell: window, the three size states, input, frame pacing, camera, terrain draw | done |
-| WS6 | Figures on screen: presets, clips, the animation state machine, the locomotion join | planned |
+| WS6 | Figures on screen: presets, clips, the animation state machine, the locomotion join, and the art harness measuring every shipped preset | planned |
 | WS7 | `Code/wintersun-store`: the schemas and the realm's single writer | planned |
 | WS8 | `Code/wintersund` + `Code/wintersun-zone`: the gateway, zone shards, interest management, back-pressure, the thousand-player floor | planned |
 | WS9 | Combat: melee, ranged ballistics, traps, the archetypes | planned |
@@ -218,7 +218,7 @@ userland/games/wintersun/
 ├── app/      # the client `Run` + the three realm server binaries → WinterSun.app
 ├── ctl/      # wintersunctl — the admin command bundle
 ├── art/      # material synthesis, the splat field, decals, particles, palette
-├── figure/   # rigs, sockets, pose clips, blending, motion layers, presets
+├── figure/   # rigs, sockets, pose clips, blending, motion layers, the designer
 ├── net/      # the realm wire protocol and session handshake
 ├── rules/    # the authoritative simulation and the game rules
 └── world/    # the seed-pure procedural world generator
@@ -665,8 +665,9 @@ here, and it moves when the art does.
 
 It is measured **once, at build time**, by the FG5 contact-sheet harness, which
 renders the figure grid — authored and generated figures alike — at every drawn
-size, and compiled in as the ladder's floor. The presets are bundle content
-(WS6), and the harness renders every one of them too once WS6 ships them. Nothing measures readability on a frame: that would put the
+size, and compiled in as the ladder's floor. The presets are bundle content,
+and measuring every one of them is part of WS6, the item that ships them.
+Nothing measures readability on a frame: that would put the
 most expensive check in the project on the hot path to decide whether the
 frame is too expensive.
 

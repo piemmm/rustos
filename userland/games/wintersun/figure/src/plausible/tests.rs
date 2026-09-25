@@ -143,14 +143,14 @@ fn everything_a_species_admits_is_drawn() {
         for ears in species.ears() {
             assert!(seen(&|s| s.features.ears == *ears), "{species:?} {ears:?}");
         }
-        for horns in species.horns() {
+        for horns in species.horns().admitted() {
             assert!(
-                seen(&|s| s.features.horns == *horns),
+                seen(&|s| s.features.horns == horns),
                 "{species:?} {horns:?}"
             );
         }
-        for tail in species.tails() {
-            assert!(seen(&|s| s.features.tail == *tail), "{species:?} {tail:?}");
+        for tail in species.tails().admitted() {
+            assert!(seen(&|s| s.features.tail == tail), "{species:?} {tail:?}");
         }
         for hair in HairStyle::ALL
             .iter()

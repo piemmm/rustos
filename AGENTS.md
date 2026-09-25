@@ -719,7 +719,7 @@ tairix/
 │           ├── app/     #     Client `Run` + the three realm server binaries.
 │           ├── art/     #     Material synthesis, decals, particles, palette.
 │           ├── ctl/     #     `wintersunctl`, the admin command bundle.
-│           ├── figure/  #     Rigs, sockets, pose clips, motion layers, presets.
+│           ├── figure/  #     Rigs, sockets, pose clips, motion layers, designer.
 │           ├── net/     #     The realm wire protocol and session handshake.
 │           ├── rules/   #     The authoritative simulation and the game rules.
 │           └── world/   #     The seed-pure procedural world generator.

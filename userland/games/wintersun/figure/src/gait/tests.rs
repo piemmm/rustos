@@ -3,10 +3,11 @@
 use tairix_util::mathf;
 
 use super::Gait;
-use crate::clip::{Clip, Curve, Event, Key, Loop};
+use crate::clip::{Clip, Curve, Event, Key, Lift, Loop};
 use crate::error::FigureError;
-use crate::humanoid::{Bone, DRIVES};
-use crate::joint::JointId;
+use crate::frame::Body;
+use crate::humanoid::{self, DRIVES, SHANK_LENGTH, THIGH_LENGTH};
+use crate::plant::{solve, Legs};
 use crate::pose::Param;
 use crate::rigging::Rigging;
 use crate::socket::Side;
@@ -65,8 +66,6 @@ fn curves() -> [Curve<'static>; 2] {
 fn walk<'a>(curves: &'a [Curve<'a>]) -> Clip<'a> {
     Clip::new(1.0, Loop::Wrap, curves, &STEP).expect("a real walk")
 }
-
-const ANKLE: JointId = Bone::Ankle(Side::Left).joint();
 
 #[test]
 fn an_unreal_stride_is_refused() {
@@ -169,17 +168,20 @@ fn the_phase_stays_inside_the_cycle_over_a_long_walk() {
 fn a_fitted_stride_recovers_the_walk_it_was_authored_with() {
     let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     let curves = curves();
     let walk = walk(&curves);
 
-    let gait = Gait::fitted(&rigging, walk, ANKLE).expect("a fitted gait");
+    let gait = Gait::fitted(&rigging, walk, &legs, Side::Left).expect("a fitted gait");
     assert!(
         mathf::fabs(gait.stride() - STRIDE) < 0.05 * STRIDE,
         "fitted stride {} should recover {STRIDE}",
         gait.stride()
     );
 
-    let slide = gait.slide(&rigging, walk, ANKLE).expect("a measured slide");
+    let slide = gait
+        .slide(&rigging, walk, &legs, Side::Left)
+        .expect("a measured slide");
     assert!(
         slide < 0.01 * STRIDE,
         "a planted foot slid {slide} over a stride of {STRIDE}"
@@ -193,17 +195,18 @@ fn a_fitted_stride_recovers_the_walk_it_was_authored_with() {
 fn a_stride_that_is_not_the_clips_own_makes_the_foot_skate() {
     let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     let curves = curves();
     let walk = walk(&curves);
 
-    let fitted = Gait::fitted(&rigging, walk, ANKLE).expect("a fitted gait");
+    let fitted = Gait::fitted(&rigging, walk, &legs, Side::Left).expect("a fitted gait");
     let honest = fitted
-        .slide(&rigging, walk, ANKLE)
+        .slide(&rigging, walk, &legs, Side::Left)
         .expect("a measured slide");
     for wrong in [0.5, 1.5, 2.0] {
         let guess = Gait::new(fitted.stride() * wrong).expect("a real gait");
         let skate = guess
-            .slide(&rigging, walk, ANKLE)
+            .slide(&rigging, walk, &legs, Side::Left)
             .expect("a measured slide");
         assert!(
             skate > honest * 10.0,
@@ -218,23 +221,13 @@ fn a_stride_that_is_not_the_clips_own_makes_the_foot_skate() {
 fn a_clip_whose_foot_never_lifts_has_no_stride() {
     let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     let flat = [Key::new(0.0, 0.2), Key::new(1.0, 0.2)];
     let curves = [Curve::new(Param::HipSwing(Side::Left), &flat).expect("a real curve")];
     let standing = Clip::new(1.0, Loop::Wrap, &curves, &STEP).expect("a real clip");
     assert_eq!(
-        Gait::fitted(&rigging, standing, ANKLE).map(|_| ()),
+        Gait::fitted(&rigging, standing, &legs, Side::Left).map(|_| ()),
         Err(FigureError::StrideUnreal)
-    );
-}
-
-#[test]
-fn fitting_against_a_joint_the_rig_lacks_is_refused() {
-    let rig = human();
-    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
-    let curves = curves();
-    assert_eq!(
-        Gait::fitted(&rigging, walk(&curves), JointId::new(30)).map(|_| ()),
-        Err(FigureError::NoSuchJoint)
     );
 }
 
@@ -244,8 +237,9 @@ fn fitting_against_a_joint_the_rig_lacks_is_refused() {
 fn a_walk_authored_from_mid_stance_measures_the_same_stride() {
     let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     let curves = curves();
-    let upright = Gait::fitted(&rigging, walk(&curves), ANKLE).expect("a fitted gait");
+    let upright = Gait::fitted(&rigging, walk(&curves), &legs, Side::Left).expect("a fitted gait");
 
     // The same cycle read from a quarter of the way in: the stance now runs
     // across the join rather than sitting at the head of the clip. The keys
@@ -267,12 +261,92 @@ fn a_walk_authored_from_mid_stance_measures_the_same_stride() {
         Curve::new(Param::HipSwing(Side::Left), &hip).expect("a real hip curve"),
         Curve::new(Param::KneeBend(Side::Left), &knee).expect("a real knee curve"),
     ];
-    let rotated =
-        Gait::fitted(&rigging, walk(&shifted), ANKLE).expect("a fitted gait across the join");
+    let rotated = Gait::fitted(&rigging, walk(&shifted), &legs, Side::Left)
+        .expect("a fitted gait across the join");
     assert!(
         mathf::fabs(rotated.stride() - upright.stride()) < 0.1 * upright.stride(),
         "mid-stance {} against head-of-cycle {}",
         rotated.stride(),
         upright.stride()
+    );
+}
+
+/// A stance that sinks the body while its leg folds into it keeps the foot on
+/// the floor but raises it through the body, so where the foot is down is
+/// read over the ground: through the body frame the step shows only at its
+/// ends, and the stride fitted there is nobody's.
+#[test]
+fn a_stance_that_sinks_the_body_is_fitted_over_the_ground() {
+    const KEYS: usize = 17;
+    const CROUCH: f64 = 2.0;
+    const DIP: f64 = 4.0;
+    let rig = human();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+    let folded = rigging
+        .angle_for(Param::KneeBend(Side::Left), 1.0)
+        .expect("the humanoid has knees");
+    let leg = THIGH_LENGTH + SHANK_LENGTH;
+
+    // The fixture's own step, eight units in front to eight behind and then
+    // twelve over, with the body sinking by `DIP` at midstance and the leg
+    // solved to keep the foot on the floor meanwhile.
+    let mut hip = [Key::new(0.0, 0.0); KEYS];
+    let mut knee = hip;
+    let mut lift = hip;
+    for index in 0..KEYS {
+        let phase = f64::from(u8::try_from(index).expect("a small count")) / 16.0;
+        let (forward, raised, sunk) = if phase < 0.5 {
+            let u = 2.0 * phase;
+            let arch = 4.0 * u * (1.0 - u);
+            (8.0 * (1.0 - 2.0 * u), 0.0, DIP * arch * arch)
+        } else {
+            let arch = mathf::sin(core::f64::consts::PI * (2.0 * phase - 1.0));
+            let forward = -8.0 * mathf::cos(core::f64::consts::PI * (2.0 * phase - 1.0));
+            (forward, 12.0 * arch * arch, 0.0)
+        };
+        let foot = Body::new(forward, 0.0, CROUCH + sunk + raised - leg);
+        let solved = solve(THIGH_LENGTH, SHANK_LENGTH, folded, foot);
+        let value = |param, angle| {
+            rigging
+                .value_for(param, angle)
+                .expect("the solve turns each joint the way it travels")
+        };
+        hip[index] = Key::new(phase, value(Param::HipSwing(Side::Left), solved.pitch));
+        knee[index] = Key::new(phase, value(Param::KneeBend(Side::Left), solved.fold));
+        lift[index] = Key::new(phase, -(CROUCH + sunk) / leg);
+    }
+    let curves = [
+        Curve::new(Param::HipSwing(Side::Left), &hip).expect("a real hip curve"),
+        Curve::new(Param::KneeBend(Side::Left), &knee).expect("a real knee curve"),
+    ];
+    let sinking = walk(&curves)
+        .lifting(Lift::new(&lift).expect("a real lift"))
+        .expect("a closing lift");
+
+    let gait = Gait::fitted(&rigging, sinking, &legs, Side::Left).expect("a fitted gait");
+    assert!(
+        mathf::fabs(gait.stride() - STRIDE) < 0.05 * STRIDE,
+        "fitted stride {} should recover {STRIDE}",
+        gait.stride()
+    );
+    let slide = gait
+        .slide(&rigging, sinking, &legs, Side::Left)
+        .expect("a measured slide");
+    assert!(
+        slide < 0.01 * STRIDE,
+        "a planted foot slid {slide} over a stride of {STRIDE}"
+    );
+    // The window is the stance: a stride a tenth off carries the body past
+    // the planted foot by a tenth of the ground the stance covers, where a
+    // window read through the body frame holds only the ends of the step.
+    let stance = 0.5;
+    let off = Gait::new(gait.stride() * 1.1)
+        .expect("a real gait")
+        .slide(&rigging, sinking, &legs, Side::Left)
+        .expect("a measured slide");
+    assert!(
+        off > 0.1 * gait.stride() * 0.8 * stance,
+        "a stride a tenth off slid only {off}: the window missed most of the stance"
     );
 }

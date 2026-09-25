@@ -29,7 +29,7 @@ pub enum Species {
     Elf,
     /// Short, broad, and large-headed.
     Dwarf,
-    /// Furred, with an animal's ears and often its tail.
+    /// Furred, with an animal's ears, often its tail, and sometimes horns.
     Beastkin,
     /// Scaled, horned and tailed.
     Dragonkin,
@@ -100,6 +100,91 @@ pub struct Ranges {
 /// What a hair style's volume setting spans, for every species: the factor on
 /// the hair's own girth.
 pub const VOLUME: Bounds = Bounds::new(0.90, 1.25);
+
+/// Odds of sixteen in sixteen, the unit a species' odds of carrying a form
+/// are stated in.
+pub const CERTAIN: u8 = 16;
+
+/// The forms a species may carry of a feature it can go without, and how
+/// often, in sixteenths, it carries one.
+///
+/// The one number says both whether it may go without — under [`CERTAIN`] —
+/// and whether it carries one at all — over none — so no species can state
+/// odds its own forms contradict.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Forms<T: 'static> {
+    forms: &'static [T],
+    often: u8,
+}
+
+impl<T: Copy + PartialEq> Forms<T> {
+    /// None, ever.
+    const NEVER: Self = Self {
+        forms: &[],
+        often: 0,
+    };
+
+    /// One of `forms`, always.
+    const fn always(forms: &'static [T]) -> Self {
+        Self {
+            forms,
+            often: CERTAIN,
+        }
+    }
+
+    /// One of `forms`, `often` sixteenths of the time.
+    const fn sometimes(forms: &'static [T], often: u8) -> Self {
+        Self { forms, often }
+    }
+
+    /// Whether the odds and the forms agree: forms to carry exactly where
+    /// there is a chance of carrying one, and no chance past certain.
+    const fn consistent(self) -> bool {
+        self.often <= CERTAIN && (self.often == 0) == self.forms.is_empty()
+    }
+
+    /// The forms it carries, when it carries one.
+    #[must_use]
+    pub const fn forms(self) -> &'static [T] {
+        self.forms
+    }
+
+    /// How often, in sixteenths, a figure of the species carries one.
+    #[must_use]
+    pub const fn often(self) -> u8 {
+        self.often
+    }
+
+    /// Whether a figure of the species may have `form`: one of its forms, or
+    /// none where it may go without.
+    #[must_use]
+    pub fn admits(self, form: Option<T>) -> bool {
+        match form {
+            None => self.often < CERTAIN,
+            Some(form) => self.often > 0 && self.forms.contains(&form),
+        }
+    }
+
+    /// Every choice it admits, going without first where it may.
+    pub fn admitted(self) -> impl Iterator<Item = Option<T>> + Clone {
+        (self.often < CERTAIN)
+            .then_some(None)
+            .into_iter()
+            .chain(self.forms.iter().map(|form| Some(*form)))
+    }
+}
+
+const _: () = {
+    let mut index = 0;
+    while index < Species::ALL.len() {
+        let species = Species::ALL[index];
+        assert!(
+            species.horns().consistent() && species.tails().consistent(),
+            "a species' odds of carrying a form contradict its forms"
+        );
+        index += 1;
+    }
+};
 
 impl Species {
     /// Every species, in the order [`Self::byte`] numbers them.
@@ -201,28 +286,28 @@ impl Species {
         }
     }
 
-    /// The horns it may have, `None` among them where it may have none.
+    /// The horns it may have, and how often it has them.
     #[must_use]
-    pub const fn horns(self) -> &'static [Option<HornForm>] {
+    pub const fn horns(self) -> Forms<HornForm> {
         match self {
-            Self::Human | Self::Elf | Self::Dwarf => &[None],
-            Self::Beastkin => &[None, Some(HornForm::Nubs), Some(HornForm::Curled)],
-            Self::Dragonkin => &[
-                Some(HornForm::Nubs),
-                Some(HornForm::Swept),
-                Some(HornForm::Curled),
-                Some(HornForm::Spire),
-            ],
+            Self::Human | Self::Elf | Self::Dwarf => Forms::NEVER,
+            Self::Beastkin => Forms::sometimes(&[HornForm::Nubs, HornForm::Curled], 3),
+            Self::Dragonkin => Forms::always(&[
+                HornForm::Nubs,
+                HornForm::Swept,
+                HornForm::Curled,
+                HornForm::Spire,
+            ]),
         }
     }
 
-    /// The tails it may have, `None` among them where it may have none.
+    /// The tails it may have, and how often it has one.
     #[must_use]
-    pub const fn tails(self) -> &'static [Option<TailForm>] {
+    pub const fn tails(self) -> Forms<TailForm> {
         match self {
-            Self::Human | Self::Elf | Self::Dwarf => &[None],
-            Self::Beastkin => &[None, Some(TailForm::Brush), Some(TailForm::Slender)],
-            Self::Dragonkin => &[Some(TailForm::Scaled)],
+            Self::Human | Self::Elf | Self::Dwarf => Forms::NEVER,
+            Self::Beastkin => Forms::sometimes(&[TailForm::Brush, TailForm::Slender], 12),
+            Self::Dragonkin => Forms::always(&[TailForm::Scaled]),
         }
     }
 

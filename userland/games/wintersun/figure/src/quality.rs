@@ -16,7 +16,7 @@
 
 use tairix_util::mathf;
 
-use crate::clip::{Clip, Loop};
+use crate::clip::{Clip, Lift, Loop};
 use crate::error::FigureError;
 use crate::gait::{Gait, SAMPLES};
 use crate::joint::{JointId, Limit};
@@ -24,6 +24,7 @@ use crate::plant::Legs;
 use crate::pose::Range;
 use crate::rig::{Frames, Posture, Resolved};
 use crate::rigging::Rigging;
+use crate::socket::Side;
 
 /// The most of any joint's own travel a shipped clip may turn through.
 ///
@@ -33,8 +34,9 @@ use crate::rigging::Rigging;
 /// walk's ankle at a little under four fifths.
 pub const MAX_LIMIT_USE: f64 = 0.90;
 
-/// The largest second difference any parameter may show across a cycle, per
-/// unit of that parameter's own range.
+/// The largest second difference any parameter, or the height the body is
+/// held at, may show across a cycle, per unit of the range it is authored
+/// in.
 ///
 /// A pop is a discontinuity, and a discontinuity of any size at all shows up
 /// here as a second difference of that size; a keyed curve sampled on this
@@ -63,7 +65,7 @@ pub const MAX_CLOSURE: f64 = 1e-9;
 /// has to earn rather than a measurement with headroom added: at the largest
 /// size the desktop draws a figure it is about one pixel over a whole cycle,
 /// so it is the point below which a slide stops being visible at all. The
-/// shipped set's worst is the run's, a shade under it at 0.0091.
+/// shipped set's worst is the walk's, at 0.0027.
 pub const MAX_SKATE: f64 = 0.01;
 
 /// How far a clip's stated root height may leave its planted foot from the
@@ -76,12 +78,15 @@ pub const MAX_SKATE: f64 = 0.01;
 /// is that disagreement, measured over every sample the foot is actually
 /// down for.
 ///
-/// The residue is the gap between the crouch depth a foot path was authored
-/// with and the fold its keys, rounded to six places, actually produce — so
-/// the bound is that rounding rather than a judgement about art. It scales
-/// with the leg: the run's is 0.052 on the hundred-unit reference human and
-/// 0.057 on the long-legged elf, well inside a pixel at every size the
-/// desktop draws one.
+/// The residue is the sag between two keys: a leg's angles are interpolated
+/// linearly, and the foot they put down follows a slight arc below the line
+/// the path holds it to, deepest halfway between keys — so the bound is the
+/// key spacing's own sag rather than a judgement about art, and six-place
+/// rounding adds under a hundred-thousandth of a unit to it. It scales with
+/// the leg and with how fast the leg folds: the run's is 0.061 on the
+/// hundred-unit reference human, 0.067 on the long-legged elf and 0.073 on
+/// the tallest, longest-legged elf a record can describe, all well inside a
+/// pixel at every size the desktop draws one.
 pub const MAX_GROUNDING: f64 = 0.08;
 
 /// The worst fraction of a joint's own travel any pose of `clip` uses.
@@ -108,8 +113,8 @@ pub fn limits(rigging: &Rigging<'_>, clip: Clip<'_>) -> Result<f64, FigureError>
     Ok(worst)
 }
 
-/// The largest second difference of any parameter across `clip`, per unit of
-/// that parameter's range.
+/// The largest second difference of any parameter across `clip`, or of the
+/// height it holds the body at, per unit of the range each is authored in.
 ///
 /// Cyclic for a clip that joins, so a velocity break at the loop's own seam
 /// is measured like any other; open-ended otherwise, where there is no seam
@@ -117,22 +122,37 @@ pub fn limits(rigging: &Rigging<'_>, clip: Clip<'_>) -> Result<f64, FigureError>
 #[must_use]
 pub fn continuity(clip: Clip<'_>) -> f64 {
     let joined = clip.repeat() == Loop::Wrap;
-    let mut worst = 0.0;
+    let mut worst = bend(|phase| clip.root_at(phase), Lift::RANGE, joined);
     for curve in clip.curves() {
-        let mut values = [0.0; SAMPLES];
-        for (index, slot) in values.iter_mut().enumerate() {
-            *slot = curve.sample(grid(index), clip.repeat());
+        let sampled = bend(
+            |phase| curve.sample(phase, clip.repeat()),
+            curve.param().range(),
+            joined,
+        );
+        worst = mathf::fmax(worst, sampled);
+    }
+    worst
+}
+
+/// The largest second difference `value` shows across the grid, per unit of
+/// `range`.
+fn bend(value: impl Fn(f64) -> f64, range: Range, joined: bool) -> f64 {
+    let mut values = [0.0; SAMPLES];
+    for (index, slot) in values.iter_mut().enumerate() {
+        *slot = value(grid(index));
+    }
+    let span = span(range);
+    let mut worst = 0.0;
+    for index in 0..SAMPLES {
+        if !joined && (index == 0 || index + 1 == SAMPLES) {
+            continue;
         }
-        let span = span(curve.param().range());
-        for index in 0..SAMPLES {
-            if !joined && (index == 0 || index + 1 == SAMPLES) {
-                continue;
-            }
-            let before = values[(index + SAMPLES - 1) % SAMPLES];
-            let after = values[(index + 1) % SAMPLES];
-            let bend = after - 2.0 * values[index] + before;
-            worst = mathf::fmax(worst, mathf::fabs(bend) / span);
-        }
+        let before = values[(index + SAMPLES - 1) % SAMPLES];
+        let after = values[(index + 1) % SAMPLES];
+        worst = mathf::fmax(
+            worst,
+            mathf::fabs(after - 2.0 * values[index] + before) / span,
+        );
     }
     worst
 }
@@ -149,8 +169,8 @@ pub fn closure(clip: Clip<'_>) -> f64 {
     worst
 }
 
-/// How far `clip`'s planted foot travels over the ground in one cycle, as a
-/// fraction of the stride it was fitted to.
+/// How far `clip`'s planted `side` foot of `legs` travels over the ground in
+/// one cycle, as a fraction of the stride it was fitted to.
 ///
 /// The gait already measures both halves of this; dividing them is what
 /// turns a length in figure-local units into the dimensionless number a
@@ -160,9 +180,14 @@ pub fn closure(clip: Clip<'_>) -> f64 {
 ///
 /// As [`Gait::fitted`] — in particular a clip whose foot never leaves the
 /// ground has no gait to measure and is refused rather than given one.
-pub fn skate(rigging: &Rigging<'_>, clip: Clip<'_>, ankle: JointId) -> Result<f64, FigureError> {
-    let gait = Gait::fitted(rigging, clip, ankle)?;
-    Ok(gait.slide(rigging, clip, ankle)? / gait.stride())
+pub fn skate(
+    rigging: &Rigging<'_>,
+    clip: Clip<'_>,
+    legs: &Legs,
+    side: Side,
+) -> Result<f64, FigureError> {
+    let gait = Gait::fitted(rigging, clip, legs, side)?;
+    Ok(gait.slide(rigging, clip, legs, side)? / gait.stride())
 }
 
 /// How far the lowest point of `clip`'s own cycle sits from the floor, in
@@ -191,10 +216,8 @@ pub fn grounding(rigging: &Rigging<'_>, clip: Clip<'_>, legs: &Legs) -> Result<f
         let phase = grid(index);
         let pose = clip.sample(phase)?;
         rigging.posture(&pose)?.resolve(Resolved::REST, &mut frames);
-        let standing = legs.standing(&frames)?;
-        let sunk =
-            clip.root_at(phase) * legs.straight() + mathf::fmin(standing[0].up, standing[1].up);
-        deepest = mathf::fmin(deepest, sunk);
+        let standing = legs.standing(&frames, clip.root_at(phase))?;
+        deepest = mathf::fmin(deepest, mathf::fmin(standing[0].up, standing[1].up));
     }
     Ok(mathf::fabs(deepest - legs.sole()))
 }

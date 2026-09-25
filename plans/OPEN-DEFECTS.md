@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 94 open, 172 closed, 266 total.
+**closed**, and a partial fix stays **open**. 90 open, 176 closed, 266 total.
 
-### Open (94)
+### Open (90)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -99,10 +99,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D216 | desktop controls allocate per pointer event and per paint | noticed merging the desktop idle work; not absorbed. `FlagSet::flag_rects` builds two `Vec`s on every pointer event and hit test; `PermsSection::new` makes about twenty allocations on every paint, press and key; and `backdrop_ground` flattens a full-screen surface each time the screensaver starts, including for the blank and slideshow savers that discard it |
 | D217 | Settings waits on the desktop from its event loop | noticed merging the desktop idle work; not absorbed. It calls `notify_sources` and `lock_screen` synchronously over the window channel; the session answers from memory, but the interactive loop still waits on another service |
 | D218 | `lib/input`'s click tests define one interval twice | noticed merging the desktop idle work; not absorbed. `click.rs`'s tests declare `INTERVAL` and an equal `INTERVAL_NS` separately |
-| D219 | the figure-design fuzz harness never checks what an edit did | noticed merging the WinterSun designer; not absorbed. An accepted `Species` or `Hair` edit is checked only for a decode round trip, and the settle check only that a write happened, so an edit that did nothing passes; it should assert the edited field, the untouched ones, and the record written |
-| D220 | the figure designer adopts refusals and overwrites choices it should keep | noticed merging the WinterSun designer; not absorbed. `settle()` marks a record settled when its write is submitted, so a refusal arriving during the next drag throws that drag away (the D179 pattern); an edit to a field the current record forces to zero overwrites the remembered choice; and `Designer::settle` is not `#[must_use]` |
-| D221 | the figure crate keeps per-species data and motion order in several places | noticed merging the WinterSun designer; not absorbed. `plausible::carried` holds per-species odds outside `species.rs` (four of five rows unread); the motion-kind order is written in `motion::Set::new`, `Set::clips` and `preview::STATES`, and the six transition edges by hand; and the art gate's worst cell now meets `MIN_REGIONS` with no margin |
-| D222 | the WinterSun figure plans and comments contradict the code | noticed merging the WinterSun designer; not absorbed. `plans/FIGURE.md` owes `Tints` on a species change where the code rebuilds the rig; `plausible.rs` says beastkin are never horned against odds of 3 in 16; `digest.rs` claims every clip outlasts its fade while the last does not; `AGENTS.md`, `plans/FIGURE.md` and `plans/WINTERSUN.md` still home presets in the figure crate; and `plans/WINTERSUN.md` promises an `artsheet` render of bundle presets no deliverable carries |
 | D223 | the kernel's shared-region and call registries are global statics | noticed merging the DMA engine; not absorbed. `sharedreg::REGIONS` and `callreg` keep their state in global `SpinLock` statics the syscall and teardown paths reach directly; the owned-registry shape `PeerWatch` took, injected where it is used, is the fix |
 | D224 | the tree has two secure-wipe primitives: the `zeroize` crate (a direct dependency of 12 crates) and the first-party `tairix_util::secret` (`wipe`, `Wiped`; used by nine crates, among them `kernel/core`, `lib/rt`, and `netstack`) | noticed while moving `lib/sandbox`'s session queue onto `lib/collections`' `ByteQueue`, which wipes through `zeroize` where the queue it replaced wiped through `lib/util`. Both are volatile stores behind a fence, so neither is weaker; the defect is that one job has two implementations, and their stated reasons contradict each other — `lib/log` and `lib/rng` chose `zeroize` for "no hand-rolled wiping", while `lib/util` is exactly a hand-rolled wipe. Needs a decision on which is canonical before a sweep: `zeroize` stays in the graph either way, because `lib/crypto`'s audited cipher crates depend on it, and the charter otherwise prefers the first-party one. Then every consumer moves to the one, and the other is deleted. **Re-check trigger:** the next crate that needs to wipe a secret |
 | D228 | a grab does not hand the seat back as it found it | a key pressed before a menu chain, the lock or the screensaver takes the keys is released into the grab, so the application that saw the press keeps it held; and the lock and the screensaver move only the cursor, never the shell's tracked pointer (nor the window manager's), so a press after either ends with no motion first is hit-tested where the pointer was when the grab began — a press carries no position. Needs the grab-entry and grab-exit contract decided first: what the focused surface is told when the seat is taken mid-press, and when the shell adopts the pointer the lock tracked (the lock may not route motion while engaged, and it fades out). The seat's modifier state already crosses a grab: every keyboard drain goes through `DesktopShell::poll_key`. Noticed fixing `plans/NEW-MENUS.md` D34 |
@@ -148,7 +144,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (172)
+### Closed (176)
 
 | ID | Subject |
 |---|---|
@@ -297,6 +293,10 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D197 | the idle lock could be held off: idle deadlines were served only on a wake that timed out, so a client keeping the loop busy postponed them indefinitely, and a key repeat the session made up counted as input, so a stuck key did too; both are closed in the serve loop (`is_due` pinned by `is_due_says_what_due_would_take_without_taking_it`; the loop wiring itself has no host test) |
 | D198 | the idle lock came up over the screensaver, because the restack keeping the saver on top ran only on a non-idle wake; the idle path now restacks too (loop wiring, no host test) |
 | D199 | a USB keyboard that went away left its held keys down, so the session repeated one for ever; the driver releases every key it last reported held before it exits (`tairix_hid::release_held`), pinned by `a_keyboard_leaving_releases_every_key_it_last_reported_held` and `a_release_delivers_what_was_latched_before_it` |
+| D219 | the figure-design fuzz harness never checked what an edit did |
+| D220 | the figure designer adopted refusals over the drag in hand and overwrote choices it should keep |
+| D221 | the figure crate kept per-species odds and the motion order in several places |
+| D222 | the WinterSun figure plans and comments contradicted the code |
 | D225 | the DMA quarantine rested on premises the kernel did not enforce |
 | D227 | request drivers took any completion as the current request's once a chain was abandoned, and reused staging the device still held |
 | D230 | a removed node's grants outlived it: its driver, and whatever that driver delegated to, kept the device's windows and interrupt lines, and a republished transport reached the old driver |
@@ -9601,3 +9601,70 @@ one enumeration plain equality still names the same device. Regression tests:
 `a_device_is_recognised_by_every_fact_and_storage_by_its_serial_too`,
 `a_storage_device_without_a_serial_number_is_replaced_across_a_reset` and
 `a_storage_device_without_a_serial_number_keeps_its_node_across_a_hot_plug`.
+
+## D219 — the figure-design fuzz harness never checked what an edit did — FIXED
+
+`tests/fuzz_design` held an accepted `Species` or `Hair` edit only to a decode
+round trip and a settle only to a write having happened, so an edit that did
+nothing, or a write of the wrong record, passed. Its oracle now reads every
+field through `design::Edit::of`: an accepted edit shows exactly the value it
+set and moves no field it cannot reshape (a species its forms and swatches,
+going bald the hair's colour and volume); the record a settle writes is the
+one shown, and only when the store does not hold it; an answer or refusal
+landing during a drag leaves the dragged fields and puts every other where
+the store's record has it, handing out the owed write; and the round trips run
+through every species and through going bald with every field the far end
+holds at zero written on the way. Mutating the designer's forced-zero rule
+fails it.
+
+## D220 — the figure designer adopted refusals over the drag in hand and overwrote choices it should keep — FIXED
+
+`Designer::settle` marked a record settled when its write went out, and a
+refusal was undone by opening the designer again on the stored record, so an
+answer arriving during the next drag threw that drag away — the D179 pattern.
+The designer now keeps the choices behind the stored record and behind the
+write in flight, and the fields edited since it went out: one write is out at
+a time, `landed` and `refused` take the store's record only where the player
+is not editing, and a settle made meanwhile is owed and handed out by the
+answer. An edit to a field the record holds at zero (`identity::Spec::fixed`,
+now the one statement of that rule for the decoder and the designer) can only
+ask for the zero and leaves the choice beneath alone, where it used to
+overwrite a beastkin's markings with a human's zero. `settle`, `landed` and
+`refused` are `#[must_use]`. Regression tests:
+`an_answer_landing_mid_drag_leaves_the_drag_alone`,
+`a_refusal_landing_mid_drag_reverts_only_what_was_refused`,
+`a_settle_while_a_write_is_out_is_owed_until_the_answer_lands`,
+`a_store_answering_another_record_wins_where_the_player_is_not_editing`,
+`an_answer_to_no_write_changes_nothing`,
+`an_edit_to_a_field_held_at_zero_keeps_the_choice_beneath` and
+`every_field_reads_back_as_the_edit_that_sets_it`.
+
+## D221 — the figure crate kept per-species odds and the motion order in several places — FIXED
+
+A species' odds of carrying horns or a tail lived in `plausible::carried`,
+four of its five rows unread. `species::Forms` now states each optional
+feature once, its forms and how often in sixteenths the species carries one —
+the one number also deciding whether it may go without and whether it carries
+one at all, held consistent at compile time — and the decoder, the designer
+and the plausible draw all read it, the draw bit-identical. The motion order
+is `motion::Kind::ALL` alone: `Kind::index` is the declaration order, `Set` and
+`Clips` are built by mapping it, and the preview's states and edges are
+generated from it. The art gate's worst cell meeting `MIN_REGIONS` exactly was
+measured against every dye on every species' palest and darkest build: none
+falls below three regions, and the grid's own least beastkin wears the one
+dye of the sixteen that meets it exactly. The harness now holds every such
+dye to the grid's bounds (`every_dye_stays_readable`), so the claim is gated
+rather than argued; painting one dye the palest fur's colour fails it.
+Regression tests: `every_table_of_motions_is_held_in_the_order_kind_lists`,
+`how_often_a_species_carries_a_form_is_what_its_forms_admit`.
+
+## D222 — the WinterSun figure plans and comments contradicted the code — FIXED
+
+`plans/FIGURE.md` now owes `Tints` for a palette change only, as the code
+does; the beastkin's "never horned" comment went with the odds it sat beside
+(D221), the species now described as sometimes horned; the digest's preview
+probe holds its last clip for four frames, so every clip in it outlasts its
+fade as its comment says, and a compile-time assertion holds that; `AGENTS.md`,
+`plans/FIGURE.md` and `plans/WINTERSUN.md` no longer home presets in the figure
+crate; and measuring every shipped preset is now a WS6 deliverable rather than
+a promise no item carried.

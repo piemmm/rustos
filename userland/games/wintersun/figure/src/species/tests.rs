@@ -3,8 +3,8 @@
 use tairix_raster::Color;
 
 use super::{
-    Bounds, Species, DYES, EYES, FUR, FUR_MARKINGS, HAIR, HORN, LEATHER, SCALE, SKIN, TROUSERS,
-    VOLUME,
+    Bounds, Forms, Species, CERTAIN, DYES, EYES, FUR, FUR_MARKINGS, HAIR, HORN, LEATHER, SCALE,
+    SKIN, TROUSERS, VOLUME,
 };
 use crate::identity::Setting;
 
@@ -99,8 +99,8 @@ fn every_species_admits_at_least_one_of_every_feature_and_none_twice() {
     }
     for species in Species::ALL {
         distinct(species.ears());
-        distinct(species.horns());
-        distinct(species.tails());
+        distinct(&species.horns().admitted().collect::<alloc::vec::Vec<_>>());
+        distinct(&species.tails().admitted().collect::<alloc::vec::Vec<_>>());
         distinct(species.eyes());
         assert!(species
             .eyes()
@@ -144,10 +144,45 @@ fn every_swatch_table_holds_distinct_colours() {
 #[test]
 fn only_a_species_with_markings_has_swatches_for_them() {
     for species in Species::ALL {
-        let marked = species.horns().iter().any(Option::is_some)
-            || species.tails().iter().any(Option::is_some);
+        let marked = !species.horns().forms().is_empty() || !species.tails().forms().is_empty();
         assert_eq!(!species.markings().is_empty(), marked, "{species:?}");
     }
+}
+
+/// How often a species carries a form is one number, and it is the one its
+/// forms admit: never for a species with none to carry, always for one that
+/// cannot go without, and a real chance only where both are admitted.
+#[test]
+fn how_often_a_species_carries_a_form_is_what_its_forms_admit() {
+    fn held<T: Copy + PartialEq + core::fmt::Debug>(species: Species, forms: Forms<T>) {
+        let carries = forms.admitted().any(|form| form.is_some());
+        let goes_without = forms.admits(None);
+        match forms.often() {
+            0 => assert!(
+                !carries && goes_without,
+                "{species:?} never carries {forms:?}"
+            ),
+            CERTAIN => assert!(
+                carries && !goes_without,
+                "{species:?} always carries {forms:?}"
+            ),
+            _ => assert!(
+                carries && goes_without,
+                "{species:?} sometimes carries {forms:?}"
+            ),
+        }
+        for form in forms.forms() {
+            assert_eq!(forms.admits(Some(*form)), forms.often() > 0);
+        }
+    }
+    for species in Species::ALL {
+        held(species, species.horns());
+        held(species, species.tails());
+    }
+    // The one species the odds are a choice for: a beastkin is often tailed
+    // and sometimes horned.
+    assert_eq!(Species::Beastkin.tails().often(), 12);
+    assert_eq!(Species::Beastkin.horns().often(), 3);
 }
 
 /// Both ends of every interval are exactly its documented ends. The

@@ -16,7 +16,7 @@
 use tairix_util::mathf;
 
 use crate::error::FigureError;
-use crate::pose::{Mask, Param, Pose};
+use crate::pose::{Mask, Param, Pose, Range};
 
 /// How the segment starting at a key reaches the next one.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -321,6 +321,9 @@ pub struct Lift<'a> {
 }
 
 impl<'a> Lift<'a> {
+    /// The interval a root height is authored in: a whole leg either way.
+    pub const RANGE: Range = Range::Signed;
+
     /// A root-height curve through `keys`.
     ///
     /// # Errors
@@ -329,8 +332,8 @@ impl<'a> Lift<'a> {
     /// [`FigureError::KeysNotAscending`] for keys that do not strictly
     /// ascend by phase, [`FigureError::PhaseOutsideClip`] for a phase
     /// outside `0..=1`, [`FigureError::LiftOutsideRange`] for a value
-    /// outside `-1..=1`, and [`FigureError::LiftNotSpanning`] where the
-    /// curve does not reach both ends of the cycle.
+    /// outside [`Self::RANGE`], and [`FigureError::LiftNotSpanning`] where
+    /// the curve does not reach both ends of the cycle.
     #[allow(
         clippy::float_cmp,
         reason = "the ends are the contract: a curve stopping short of either \
@@ -348,7 +351,7 @@ impl<'a> Lift<'a> {
             if index > 0 && key.phase <= keys[index - 1].phase {
                 return Err(FigureError::KeysNotAscending);
             }
-            if !key.value.is_finite() || !(-1.0..=1.0).contains(&key.value) {
+            if !Self::RANGE.holds(key.value) {
                 return Err(FigureError::LiftOutsideRange);
             }
         }
@@ -361,7 +364,7 @@ impl<'a> Lift<'a> {
     /// The root height at `phase`, as a fraction of a straight leg.
     #[must_use]
     pub fn at(self, phase: f64, repeat: Loop) -> f64 {
-        mathf::clamp(walk(self.keys, phase, repeat), -1.0, 1.0)
+        Self::RANGE.clamp(walk(self.keys, phase, repeat))
     }
 
     /// Whether the curve ends where it began.

@@ -52,6 +52,7 @@
 
 use tairix_util::mathf;
 
+use crate::clip::Lift;
 use crate::error::FigureError;
 use crate::frame::{Basis, Body, Rotation};
 use crate::joint::JointId;
@@ -89,6 +90,7 @@ pub struct Legs {
     sides: [Leg; 2],
     thigh: [f64; 2],
     shank: [f64; 2],
+    folded: [f64; 2],
     hip: [Body; 2],
     sole: f64,
     reach: f64,
@@ -179,14 +181,14 @@ impl Legs {
         // A leg spans from straight to fully folded; the difference is how
         // much height a foot can pick up or give away without the root
         // moving, and so is the reach the tilt is a fallback for.
+        let mut folded = [0.0; 2];
         let mut reach = f64::MAX;
         for index in 0..2 {
-            let (thigh, shank) = (thigh[index], shank[index]);
-            let folded = rigging
+            folded[index] = rigging
                 .angle_for(legs[index].bend, 1.0)
                 .ok_or(FigureError::NoSuchJoint)?;
-            let shortest = span(thigh, shank, folded);
-            reach = mathf::fmin(reach, thigh + shank - shortest);
+            let (thigh, shank) = (thigh[index], shank[index]);
+            reach = mathf::fmin(reach, thigh + shank - span(thigh, shank, folded[index]));
         }
         // A straight leg from the hip is what puts the sole on the ground, so
         // the height it rests at is the rig's own statement of where its feet
@@ -198,6 +200,7 @@ impl Legs {
             sides: legs,
             thigh,
             shank,
+            folded,
             hip,
             sole,
             reach,
@@ -237,20 +240,30 @@ impl Legs {
         self.straight
     }
 
-    /// Where each ankle sits in the figure's frame, for the resolve in
-    /// `frames`.
+    /// Where each ankle stands in the figure's frame, for the resolve at
+    /// rest in `frames` with the body held at `lift`, a fraction of
+    /// [`Self::straight`] ([`Clip::root_at`][root]).
     ///
-    /// What a caller samples the terrain under: the foot's plan position is
-    /// the animation's, so the ground that matters is the ground beneath
-    /// where the clip actually put the foot.
+    /// Its plan position is what a caller samples the terrain under, and its
+    /// height is over the figure's own ground point, so a foot on level
+    /// ground stands at [`Self::sole`].
     ///
     /// # Errors
     ///
-    /// [`FigureError::NoSuchJoint`] if the resolve did not cover an ankle.
-    pub fn standing(&self, frames: &Frames) -> Result<[Body; 2], FigureError> {
+    /// [`FigureError::LiftOutsideRange`] for a root beyond a straight leg
+    /// either way, and [`FigureError::NoSuchJoint`] if the resolve did not
+    /// cover an ankle.
+    ///
+    /// [root]: crate::clip::Clip::root_at
+    pub fn standing(&self, frames: &Frames, lift: f64) -> Result<[Body; 2], FigureError> {
+        if !Lift::RANGE.holds(lift) {
+            return Err(FigureError::LiftOutsideRange);
+        }
+        let raised = lift * self.straight;
         let mut at = [Body::ORIGIN; 2];
         for (slot, leg) in at.iter_mut().zip(self.sides) {
-            *slot = frames.get(leg.ankle).ok_or(FigureError::NoSuchJoint)?.at;
+            let rest = frames.get(leg.ankle).ok_or(FigureError::NoSuchJoint)?.at;
+            *slot = Body::new(rest.forward, rest.side, rest.up + raised);
         }
         Ok(at)
     }
@@ -288,17 +301,13 @@ impl Legs {
         if !ground[0].is_finite() || !ground[1].is_finite() {
             return Err(FigureError::GroundUnreal);
         }
-        if !lift.is_finite() || !(-1.0..=1.0).contains(&lift) {
-            return Err(FigureError::LiftOutsideRange);
-        }
-        let standing = self.standing(frames)?;
+        let standing = self.standing(frames, lift)?;
 
-        let height = lift * self.straight;
         // The lowest ground sets how far the hips come down, because the leg
         // reaching it is the one that cannot stretch; the authored height is
         // where the body sits above that. Level ground leaves the figure at
         // the height the clip asked for and nowhere else.
-        let drop = height + mathf::fmin(0.0, mathf::fmin(ground[0], ground[1]));
+        let drop = lift * self.straight + mathf::fmin(0.0, mathf::fmin(ground[0], ground[1]));
         // What the legs cannot absorb, the figure leans into. Positive roll
         // raises the left foot, which is the one to raise when it is higher.
         let difference = ground[0] - ground[1];
@@ -325,16 +334,14 @@ impl Legs {
             // Where the clip put this foot, raised by the terrain under it:
             // a planted foot lands on its own hill and a swing foot clears
             // whatever it is about to come down on.
-            let target = Body::new(
-                standing[index].forward,
-                standing[index].side,
-                height + standing[index].up + ground[index],
-            );
-            let solved = self.aim(
-                rigging,
-                index,
+            let at = standing[index];
+            let target = Body::new(at.forward, at.side, at.up + ground[index]);
+            let solved = solve(
+                self.thigh[index],
+                self.shank[index],
+                self.folded[index],
                 parent.unapply(target.plus(hip.scaled(-1.0))),
-            )?;
+            );
 
             write(rigging, &mut out, leg.swing, solved.pitch)?;
             write(rigging, &mut out, leg.splay, solved.roll)?;
@@ -379,55 +386,6 @@ impl Legs {
         Ok(root.basis.compose(carried))
     }
 
-    /// The hip and knee angles that put the ankle along `toward`, which is
-    /// stated in the hip's parent frame.
-    fn aim(
-        &self,
-        rigging: &Rigging<'_>,
-        index: usize,
-        toward: Body,
-    ) -> Result<Solved, FigureError> {
-        let (thigh, shank) = (self.thigh[index], self.shank[index]);
-        let folded = rigging
-            .angle_for(self.sides[index].bend, 1.0)
-            .ok_or(FigureError::NoSuchJoint)?;
-        let longest = thigh + shank;
-        let shortest = span(thigh, shank, folded);
-        let asked = toward.length();
-        let distance = mathf::clamp(asked, shortest, longest);
-        if distance <= 0.0 || asked <= 0.0 {
-            return Ok(Solved::REST);
-        }
-        let aim = toward.scaled(1.0 / asked);
-
-        // The triangle the hip, knee and ankle make: its knee angle folds the
-        // leg to the right length, and its hip angle is how far the thigh
-        // sits off the line to the foot.
-        let fold = mathf::acos(
-            (distance * distance - thigh * thigh - shank * shank) / (2.0 * thigh * shank),
-        );
-        let off = mathf::acos(
-            (distance * distance + thigh * thigh - shank * shank) / (2.0 * distance * thigh),
-        );
-
-        // A leg hangs down its own frame and folds backward, so the chain's
-        // end lies `off` behind the thigh. Inverting that composition for the
-        // pitch and roll that land it on `aim` is one arcsine and one
-        // arctangent rather than a matrix solve.
-        let (behind, along) = (mathf::sin(off), mathf::cos(off));
-        let roll = mathf::asin(mathf::clamp(
-            if along == 0.0 { 0.0 } else { aim.side / along },
-            -1.0,
-            1.0,
-        ));
-        let across = along * mathf::cos(roll);
-        let pitch = mathf::atan2(
-            behind * aim.up - across * aim.forward,
-            -(behind * aim.forward + across * aim.up),
-        );
-        Ok(Solved { pitch, roll, fold })
-    }
-
     /// How far the leg above the ankle was already turned by the animation.
     fn animated_leg_pitch(rigging: &Rigging<'_>, leg: Leg, pose: &Pose) -> f64 {
         let swing = rigging
@@ -442,10 +400,13 @@ impl Legs {
 
 /// A leg's solved angles.
 #[derive(Copy, Clone, Debug, PartialEq)]
-struct Solved {
-    pitch: f64,
-    roll: f64,
-    fold: f64,
+pub(crate) struct Solved {
+    /// The hip's fore-and-aft swing.
+    pub(crate) pitch: f64,
+    /// The hip's sideways splay.
+    pub(crate) roll: f64,
+    /// The knee's fold.
+    pub(crate) fold: f64,
 }
 
 impl Solved {
@@ -454,6 +415,50 @@ impl Solved {
         roll: 0.0,
         fold: 0.0,
     };
+}
+
+/// The hip and knee angles that put the end of a two-bone chain along
+/// `toward`, which is stated in the hip's parent frame.
+///
+/// `folded` is the knee's whole fold, so a target nearer than the chain can
+/// fold to, or further than it reaches, is aimed at along the same line. The
+/// one solve both the planting layer and the shipped clips' authoring check
+/// run, so what a clip's keys were solved through is what plants its feet.
+pub(crate) fn solve(thigh: f64, shank: f64, folded: f64, toward: Body) -> Solved {
+    let longest = thigh + shank;
+    let shortest = span(thigh, shank, folded);
+    let asked = toward.length();
+    let distance = mathf::clamp(asked, shortest, longest);
+    if distance <= 0.0 || asked <= 0.0 {
+        return Solved::REST;
+    }
+    let aim = toward.scaled(1.0 / asked);
+
+    // The triangle the hip, knee and ankle make: its knee angle folds the leg
+    // to the right length, and its hip angle is how far the thigh sits off
+    // the line to the foot.
+    let fold =
+        mathf::acos((distance * distance - thigh * thigh - shank * shank) / (2.0 * thigh * shank));
+    let off = mathf::acos(
+        (distance * distance + thigh * thigh - shank * shank) / (2.0 * distance * thigh),
+    );
+
+    // A leg hangs down its own frame and folds backward, so the chain's end
+    // lies `off` behind the thigh. Inverting that composition for the pitch
+    // and roll that land it on `aim` is one arcsine and one arctangent rather
+    // than a matrix solve.
+    let (behind, along) = (mathf::sin(off), mathf::cos(off));
+    let roll = mathf::asin(mathf::clamp(
+        if along == 0.0 { 0.0 } else { aim.side / along },
+        -1.0,
+        1.0,
+    ));
+    let across = along * mathf::cos(roll);
+    let pitch = mathf::atan2(
+        behind * aim.up - across * aim.forward,
+        -(behind * aim.forward + across * aim.up),
+    );
+    Solved { pitch, roll, fold }
 }
 
 /// How far apart a two-bone chain's ends are when it is folded by `fold`.

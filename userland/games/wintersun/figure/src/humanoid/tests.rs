@@ -679,8 +679,8 @@ fn admissible(species: Species) -> Vec<(Features, u8)> {
     for face in FaceShape::ALL {
         for eyes in EyeShape::ALL {
             for ears in species.ears() {
-                for horns in species.horns() {
-                    for tail in species.tails() {
+                for horns in species.horns().admitted() {
+                    for tail in species.tails().admitted() {
                         for hair in HairStyle::ALL
                             .iter()
                             .map(|style| Some(*style))
@@ -691,8 +691,8 @@ fn admissible(species: Species) -> Vec<(Features, u8)> {
                                     face: *face,
                                     eyes: *eyes,
                                     ears: *ears,
-                                    horns: *horns,
-                                    tail: *tail,
+                                    horns,
+                                    tail,
                                     hair,
                                     volume: Setting::LOW,
                                 },

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-figure-determinism-qemu-x86-64"
-description = "QEMU integration test: WinterSun's world generator produces the digest tairix_wintersun_figure::digest::REFERENCE_DIGEST on x86_64. The whole seed-pure pipeline — plates, relief, depression-filled drainage, stream-power erosion, climate advection, Whittaker blending, jittered-grid scatter, settlement placement and least-cost road routing — runs in the guest and its output is folded into one number, which must equal the constant every other Tier-1 target asserts."
+description = "QEMU integration test: WinterSun's figure engine produces the digest tairix_wintersun_figure::digest::REFERENCE_DIGEST on x86_64. Every figure of the reference grid — its carried rings, projected strips, planting roots and misses, gait phases and quality numbers, and a designer's preview through every change of clip — runs in the guest and is folded into one number, which must equal the constant every other Tier-1 target asserts. Its siblings are figure_determinism_qemu_{aarch64,riscv64} and figure_determinism_wasm32."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

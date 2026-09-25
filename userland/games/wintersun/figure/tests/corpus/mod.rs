@@ -59,14 +59,14 @@ pub fn records() -> Vec<Vec<u8>> {
             spec.features.ears = *ears;
             specs.push(spec);
         }
-        for horns in species.horns() {
+        for horns in species.horns().admitted() {
             let mut spec = base;
-            spec.features.horns = *horns;
+            spec.features.horns = horns;
             specs.push(spec);
         }
-        for tail in species.tails() {
+        for tail in species.tails().admitted() {
             let mut spec = base;
-            spec.features.tail = *tail;
+            spec.features.tail = tail;
             specs.push(spec);
         }
     }

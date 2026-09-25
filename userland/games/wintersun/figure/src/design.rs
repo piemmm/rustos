@@ -16,6 +16,17 @@
 //!   interaction changed it, so a drag of any length is at most one write and
 //!   a drag that ends where it began is none.
 //!
+//! # A write lands on what the player is doing now
+//!
+//! One write is outstanding at a time, and its answer arrives while the
+//! player may already be dragging something else. [`Designer::landed`] and
+//! [`Designer::refused`] therefore touch only the fields the player has not
+//! edited since that write was handed out: the store's record where it took
+//! the write, and the one it kept where it refused it. The drag in hand is
+//! the player's either way. An interaction that settles while a write is out
+//! is owed, and both answers hand it out — one write for however many
+//! settles it covers.
+//!
 //! # A record that is always one
 //!
 //! The designer holds what the player chose, field by field, and the record
@@ -26,8 +37,10 @@
 //! new species' table is clamped, a form it does not carry becomes its first,
 //! a form it must carry is given, an eye colour it does not admit becomes the
 //! nearest it does, and a bald figure's hair colour and volume are zeroed.
-//! The choices survive beneath the record, so a round trip through another
-//! species, or through going bald, gives back exactly the figure it left.
+//! The choices survive beneath the record — including through an edit to a
+//! field the record holds at zero, which can only ask for the zero it holds —
+//! so a round trip through another species, or through going bald, gives
+//! back exactly the figure it left.
 //!
 //! This is not a repair of a record. What it projects is the player's own
 //! choices; a record arriving from anywhere else is checked by
@@ -36,8 +49,8 @@
 use tairix_raster::Color;
 
 use crate::identity::{
-    EarForm, EyeShape, FaceShape, HairStyle, HornForm, Identity, IdentityError, Setting, Spec,
-    TailForm,
+    EarForm, EyeShape, FaceShape, Field, HairStyle, HornForm, Identity, IdentityError, Setting,
+    Spec, TailForm,
 };
 use crate::species::{Species, DYES, EYES, HAIR};
 
@@ -87,6 +100,56 @@ impl Edit {
     /// are re-derived around it rather than it being checked against them.
     const fn reshapes(self) -> bool {
         matches!(self, Self::Species(_) | Self::Hair(_))
+    }
+
+    /// The field it sets.
+    #[must_use]
+    pub const fn field(self) -> Field {
+        match self {
+            Self::Species(_) => Field::Species,
+            Self::Height(_) => Field::Height,
+            Self::Girth(_) => Field::Girth,
+            Self::Taper(_) => Field::Taper,
+            Self::Limbs(_) => Field::Limbs,
+            Self::Head(_) => Field::Head,
+            Self::Face(_) => Field::Face,
+            Self::EyeShape(_) => Field::Eyes,
+            Self::Ears(_) => Field::Ears,
+            Self::Horns(_) => Field::Horns,
+            Self::Tail(_) => Field::Tail,
+            Self::Hair(_) => Field::Hair,
+            Self::Volume(_) => Field::Volume,
+            Self::Skin(_) => Field::SkinColour,
+            Self::HairColour(_) => Field::HairColour,
+            Self::EyeColour(_) => Field::EyeColour,
+            Self::Markings(_) => Field::MarkingsColour,
+            Self::Accent(_) => Field::AccentColour,
+        }
+    }
+
+    /// The edit that sets `field` to what `spec` holds there.
+    #[must_use]
+    pub const fn of(field: Field, spec: Spec) -> Self {
+        match field {
+            Field::Species => Self::Species(spec.species),
+            Field::Height => Self::Height(spec.build.height),
+            Field::Girth => Self::Girth(spec.build.girth),
+            Field::Taper => Self::Taper(spec.build.taper),
+            Field::Limbs => Self::Limbs(spec.build.limbs),
+            Field::Head => Self::Head(spec.build.head),
+            Field::Face => Self::Face(spec.features.face),
+            Field::Eyes => Self::EyeShape(spec.features.eyes),
+            Field::Ears => Self::Ears(spec.features.ears),
+            Field::Horns => Self::Horns(spec.features.horns),
+            Field::Tail => Self::Tail(spec.features.tail),
+            Field::Hair => Self::Hair(spec.features.hair),
+            Field::Volume => Self::Volume(spec.features.volume),
+            Field::SkinColour => Self::Skin(spec.palette.skin),
+            Field::HairColour => Self::HairColour(spec.palette.hair),
+            Field::EyeColour => Self::EyeColour(spec.palette.eyes),
+            Field::MarkingsColour => Self::Markings(spec.palette.markings),
+            Field::AccentColour => Self::Accent(spec.palette.accent),
+        }
     }
 
     /// `spec` with this field set.
@@ -145,36 +208,70 @@ impl Change {
     }
 }
 
+/// A set of a record's fields.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Fields(u32);
+
+const _: () = assert!(Field::ALL.len() <= u32::BITS as usize);
+
+impl Fields {
+    const NONE: Self = Self(0);
+    const ALL: Self = Self(u32::MAX >> (u32::BITS as usize - Field::ALL.len()));
+
+    const fn with(self, field: Field) -> Self {
+        Self(self.0 | 1 << field.index())
+    }
+
+    const fn holds(self, field: Field) -> bool {
+        self.0 & 1 << field.index() != 0
+    }
+}
+
+/// Choices, and the record they come to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Chosen {
+    spec: Spec,
+    record: Identity,
+}
+
 /// A record being designed.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Designer {
     /// What the player chose, field by field, whether or not the species
-    /// chosen carries it.
-    chosen: Spec,
-    /// The record those choices come to, which is what a preview draws.
-    live: Identity,
-    /// The record the last settled interaction left.
-    settled: Identity,
+    /// chosen carries it, and the record that comes to — which is what a
+    /// preview draws.
+    live: Chosen,
+    /// The choices behind the record the store holds.
+    stored: Chosen,
+    /// The choices behind the write handed out and not yet answered.
+    written: Option<Chosen>,
+    /// The fields edited since that write was handed out.
+    touched: Fields,
+    /// Whether an interaction settled while a write was out.
+    owed: bool,
 }
 
 impl Designer {
-    /// Open `record` for editing, as it is stored.
-    ///
-    /// Opening again on what a store holds is how a refused write is undone:
-    /// the choices that produced the refused record go with it.
+    /// Open `record` for editing, as the store holds it.
     #[must_use]
     pub const fn open(record: Identity) -> Self {
+        let chosen = Chosen {
+            spec: record.spec(),
+            record,
+        };
         Self {
-            chosen: record.spec(),
-            live: record,
-            settled: record,
+            live: chosen,
+            stored: chosen,
+            written: None,
+            touched: Fields::NONE,
+            owed: false,
         }
     }
 
     /// The record as it stands.
     #[must_use]
     pub const fn live(&self) -> Identity {
-        self.live
+        self.live.record
     }
 
     /// Make `edit` to the live record.
@@ -186,33 +283,102 @@ impl Designer {
     /// its table, or a value a bald or unmarked figure must leave at zero. A
     /// refused edit changes nothing.
     pub fn edit(&mut self, edit: Edit) -> Result<(), IdentityError> {
+        let field = edit.field();
         if !edit.reshapes() {
-            Identity::new(edit.written(self.live.spec()))?;
+            let set = edit.written(self.live.record.spec());
+            Identity::new(set)?;
+            if set.fixed(field) {
+                return Ok(());
+            }
         }
-        let chosen = edit.written(self.chosen);
-        self.live = Identity::new(canonical(chosen))?;
-        self.chosen = chosen;
+        let spec = edit.written(self.live.spec);
+        self.live = Chosen {
+            spec,
+            record: Identity::new(canonical(spec))?,
+        };
+        self.touched = self.touched.with(field);
         Ok(())
     }
 
     /// Replace the whole record with `record`: a preset picked, or a
     /// plausible figure drawn.
     pub fn apply(&mut self, record: Identity) {
-        self.chosen = record.spec();
-        self.live = record;
+        self.live = Chosen {
+            spec: record.spec(),
+            record,
+        };
+        self.touched = Fields::ALL;
     }
 
     /// The interaction making the edits has finished: the record to write,
-    /// if it changed since the last interaction settled.
+    /// if the store does not hold it already.
     ///
     /// A drag settles once however many samples it took; a key step or a
-    /// pick, being a whole interaction, settles at once.
+    /// pick, being a whole interaction, settles at once. While an earlier
+    /// write is unanswered this answers nothing and owes the write instead.
+    #[must_use = "a record handed out is written, or the interaction is lost"]
     pub fn settle(&mut self) -> Option<Identity> {
-        if self.live == self.settled {
+        if self.written.is_some() {
+            self.owed = true;
             return None;
         }
-        self.settled = self.live;
-        Some(self.live)
+        if self.live.record == self.stored.record {
+            return None;
+        }
+        self.written = Some(self.live);
+        self.touched = Fields::NONE;
+        Some(self.live.record)
+    }
+
+    /// The write handed out landed, and the store now holds `stored`.
+    ///
+    /// Every field the player has not edited since takes the store's record;
+    /// a store that took the write exactly keeps the choices behind it too.
+    /// Answers the write owed, if an interaction settled meanwhile. With no
+    /// write out, an answer changes nothing.
+    #[must_use = "an owed record is written, or the interaction is lost"]
+    pub fn landed(&mut self, stored: Identity) -> Option<Identity> {
+        let written = self.written.take()?;
+        self.stored = if stored == written.record {
+            written
+        } else {
+            Chosen {
+                spec: stored.spec(),
+                record: stored,
+            }
+        };
+        self.answered()
+    }
+
+    /// The write handed out was refused, and the store holds what it held.
+    ///
+    /// Every field the player has not edited since goes back to it. Answers
+    /// the write owed, if an interaction settled meanwhile. With no write
+    /// out, a refusal changes nothing.
+    #[must_use = "an owed record is written, or the interaction is lost"]
+    pub fn refused(&mut self) -> Option<Identity> {
+        self.written.take()?;
+        self.answered()
+    }
+
+    /// Take what the store holds wherever the player is not editing, and hand
+    /// out the write the answer was holding up.
+    fn answered(&mut self) -> Option<Identity> {
+        let mut spec = self.live.spec;
+        for field in Field::ALL {
+            if !self.touched.holds(field) {
+                spec = Edit::of(field, self.stored.spec).written(spec);
+            }
+        }
+        // The projection of any choices is a record, so this never falls
+        // back; were it to, the store's own record is the one to show.
+        self.live =
+            Identity::new(canonical(spec)).map_or(self.stored, |record| Chosen { spec, record });
+        if core::mem::take(&mut self.owed) {
+            self.settle()
+        } else {
+            None
+        }
     }
 }
 
@@ -221,27 +387,29 @@ impl Designer {
 fn canonical(chosen: Spec) -> Spec {
     let species = chosen.species;
     let mut spec = chosen;
-    spec.features.ears = carried(chosen.features.ears, species.ears());
-    spec.features.horns = carried(chosen.features.horns, species.horns());
-    spec.features.tail = carried(chosen.features.tail, species.tails());
+    spec.features.ears = carried(chosen.features.ears, species.ears().iter().copied());
+    spec.features.horns = carried(chosen.features.horns, species.horns().admitted());
+    spec.features.tail = carried(chosen.features.tail, species.tails().admitted());
     spec.palette.skin = within(chosen.palette.skin, species.covering().len());
     spec.palette.hair = within(chosen.palette.hair, HAIR.len());
     spec.palette.eyes = nearest_eye(chosen.palette.eyes, species.eyes());
     spec.palette.markings = within(chosen.palette.markings, species.markings().len());
     spec.palette.accent = within(chosen.palette.accent, DYES.len());
-    if chosen.features.hair.is_none() {
+    if spec.fixed(Field::Volume) {
         spec.features.volume = Setting::LOW;
+    }
+    if spec.fixed(Field::HairColour) {
         spec.palette.hair = 0;
     }
     spec
 }
 
 /// `form` where `admitted` holds it, and the first it holds otherwise.
-fn carried<T: Copy + PartialEq>(form: T, admitted: &[T]) -> T {
-    if admitted.contains(&form) {
+fn carried<T: Copy + PartialEq>(form: T, mut admitted: impl Iterator<Item = T> + Clone) -> T {
+    if admitted.clone().any(|one| one == form) {
         form
     } else {
-        admitted.first().copied().unwrap_or(form)
+        admitted.next().unwrap_or(form)
     }
 }
 

@@ -15,14 +15,20 @@
 //! body over it, which is exactly how far the body must travel forward for
 //! the foot to stay still. [`Gait::slide`] then reports what is left, so
 //! "the feet do not skate" is a measured number rather than an opinion.
+//!
+//! Where the foot is on the ground is read over the ground, at the height the
+//! clip holds the body: a stance that sinks the body while the leg folds into
+//! it keeps the foot on the floor but raises it through the body frame, and a
+//! contact window taken there would see only the ends of the step.
 
 use tairix_util::mathf;
 
 use crate::clip::Clip;
 use crate::error::FigureError;
-use crate::joint::JointId;
+use crate::plant::Legs;
 use crate::rig::{Frames, Resolved};
 use crate::rigging::Rigging;
+use crate::socket::Side;
 
 /// How finely a cycle is sampled when a stride is measured.
 ///
@@ -57,7 +63,8 @@ fn real(count: usize) -> f64 {
     count as f64
 }
 
-/// A foot's path through the body frame over one cycle.
+/// A foot's path over one cycle: through the body across the ground, and
+/// over the ground in height.
 struct Trace {
     forward: [f64; SAMPLES],
     side: [f64; SAMPLES],
@@ -66,8 +73,13 @@ struct Trace {
 }
 
 impl Trace {
-    /// Where `ankle` sits at each of [`SAMPLES`] phases of `clip`.
-    fn of(rigging: &Rigging<'_>, clip: Clip<'_>, ankle: JointId) -> Result<Self, FigureError> {
+    /// Where `foot` of `legs` stands at each of [`SAMPLES`] phases of `clip`.
+    fn of(
+        rigging: &Rigging<'_>,
+        clip: Clip<'_>,
+        legs: &Legs,
+        foot: Side,
+    ) -> Result<Self, FigureError> {
         let mut trace = Self {
             forward: [0.0; SAMPLES],
             side: [0.0; SAMPLES],
@@ -80,7 +92,7 @@ impl Trace {
             let phase = real(index) / real(SAMPLES);
             let pose = clip.sample(phase)?;
             rigging.posture(&pose)?.resolve(Resolved::REST, &mut frames);
-            let at = frames.get(ankle).ok_or(FigureError::NoSuchJoint)?.at;
+            let at = legs.standing(&frames, clip.root_at(phase))?[foot as usize];
             trace.forward[index] = at.forward;
             trace.side[index] = at.side;
             trace.up[index] = at.up;
@@ -194,7 +206,8 @@ impl Gait {
         Ok(Self { stride, phase: 0.0 })
     }
 
-    /// The gait whose stride leaves `clip`'s planted foot standing still.
+    /// The gait whose stride leaves `clip`'s planted `side` foot of `legs`
+    /// standing still.
     ///
     /// Measured rather than authored: the foot's backward travel through the
     /// body while it is on the ground, over the fraction of the cycle it is
@@ -202,7 +215,7 @@ impl Gait {
     ///
     /// # Errors
     ///
-    /// [`FigureError::NoSuchJoint`] if the rig has no such joint,
+    /// [`FigureError::NoSuchJoint`] if the resolve does not cover the leg,
     /// [`FigureError::SamplesTooFew`] for a contact window too short to
     /// measure a span over, and [`FigureError::StrideUnreal`] for a clip
     /// whose foot never leaves the ground or never travels backward through
@@ -210,9 +223,10 @@ impl Gait {
     pub fn fitted(
         rigging: &Rigging<'_>,
         clip: Clip<'_>,
-        ankle: JointId,
+        legs: &Legs,
+        side: Side,
     ) -> Result<Self, FigureError> {
-        let trace = Trace::of(rigging, clip, ankle)?;
+        let trace = Trace::of(rigging, clip, legs, side)?;
         let (start, length) = trace.contact()?;
         Self::new(trace.backward_rate(start, length))
     }
@@ -231,9 +245,10 @@ impl Gait {
         self,
         rigging: &Rigging<'_>,
         clip: Clip<'_>,
-        ankle: JointId,
+        legs: &Legs,
+        side: Side,
     ) -> Result<f64, FigureError> {
-        let trace = Trace::of(rigging, clip, ankle)?;
+        let trace = Trace::of(rigging, clip, legs, side)?;
         let (start, length) = trace.contact()?;
         let (mut least, mut most) = (f64::MAX, f64::MIN);
         let (mut narrowest, mut widest) = (f64::MAX, f64::MIN);

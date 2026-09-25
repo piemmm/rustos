@@ -6,8 +6,9 @@ use super::{
     closure, continuity, grounding, limits, skate, MAX_CLOSURE, MAX_CONTINUITY, MAX_GROUNDING,
     MAX_LIMIT_USE, MAX_SKATE,
 };
-use crate::clip::{Clip, Curve, Easing, Key, Loop};
-use crate::humanoid::{self, Bone, DRIVES};
+use crate::clip::{Clip, Curve, Easing, Key, Lift, Loop};
+use crate::gait::Gait;
+use crate::humanoid::{self, DRIVES};
 use crate::motion::{Kind, Motion};
 use crate::plant::Legs;
 use crate::pose::Param;
@@ -22,7 +23,7 @@ use crate::testing::{corners, human};
 fn every_shipped_motion_clears_every_bound() {
     let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
-    let ankle = Bone::Ankle(Side::Left).joint();
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
 
     for kind in Kind::ALL {
         let motion = Motion::new(kind).expect("a shipped motion");
@@ -39,11 +40,10 @@ fn every_shipped_motion_clears_every_bound() {
         assert!(gap <= MAX_CLOSURE, "{name} closes {gap} short");
 
         if kind.stride().is_some() {
-            let slide = skate(&rigging, clip, ankle).expect("a fitted gait");
+            let slide = skate(&rigging, clip, &legs, Side::Left).expect("a fitted gait");
             assert!(slide <= MAX_SKATE, "{name} skates {slide} of its stride");
         }
 
-        let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
         let sunk = grounding(&rigging, clip, &legs).expect("it resolves");
         assert!(sunk <= MAX_GROUNDING, "{name} grounds {sunk} off the floor");
     }
@@ -123,6 +123,37 @@ fn a_step_in_a_curve_reads_as_the_pop_it_is() {
     );
 }
 
+/// The body's height is authored like any curve and can pop like one: a
+/// root height that steps is caught at the size it is, and one that holds
+/// still reads as nothing at all.
+#[test]
+fn a_step_in_the_root_height_reads_as_the_pop_it_is() {
+    const HELD: [Key; 2] = [Key::new(0.0, -0.1), Key::new(1.0, -0.1)];
+    const STEPPED: [Key; 4] = [
+        Key::new(0.0, -0.1),
+        Key::new(0.5, -0.1).eased(Easing::Hold),
+        Key::new(0.5625, 0.1),
+        Key::new(1.0, -0.1),
+    ];
+    let clip = Clip::new(1.0, Loop::Wrap, &[], &[]).expect("a real clip");
+    let held = clip
+        .lifting(Lift::new(&HELD).expect("a real lift"))
+        .expect("a closing lift");
+    assert!(
+        continuity(held) < 1e-12,
+        "a still body bent {}",
+        continuity(held)
+    );
+    let stepped = clip
+        .lifting(Lift::new(&STEPPED).expect("a real lift"))
+        .expect("a closing lift");
+    let bend = continuity(stepped);
+    assert!(
+        bend > MAX_CONTINUITY,
+        "a fifth of a leg's jump in the body measured only {bend}"
+    );
+}
+
 /// A cycle whose ends do not meet hitches once a lap, and the closure
 /// measurement is what sees it.
 #[test]
@@ -144,23 +175,21 @@ fn a_cycle_that_does_not_join_is_reported() {
 fn a_foot_out_of_step_with_the_body_skates() {
     let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
-    let ankle = Bone::Ankle(Side::Left).joint();
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     let motion = Motion::new(Kind::Walk).expect("the shipped walk");
     let clip = motion.clip().expect("its clip");
-    let honest = skate(&rigging, clip, ankle).expect("a fitted gait");
+    let honest = skate(&rigging, clip, &legs, Side::Left).expect("a fitted gait");
 
-    let gait = crate::gait::Gait::new(clip_stride(&rigging, clip, ankle) * 0.6).expect("a gait");
-    let forced = gait.slide(&rigging, clip, ankle).expect("a slide") / gait.stride();
+    let fitted = Gait::fitted(&rigging, clip, &legs, Side::Left).expect("a fitted gait");
+    let gait = Gait::new(fitted.stride() * 0.6).expect("a gait");
+    let forced = gait
+        .slide(&rigging, clip, &legs, Side::Left)
+        .expect("a slide")
+        / gait.stride();
     assert!(
         forced > honest * 10.0,
         "a stride four tenths short skated {forced} against {honest}"
     );
-}
-
-fn clip_stride(rigging: &Rigging<'_>, clip: Clip<'_>, ankle: crate::joint::JointId) -> f64 {
-    crate::gait::Gait::fitted(rigging, clip, ankle)
-        .expect("a fitted gait")
-        .stride()
 }
 
 /// A clip names no length and no joint, so it plays on every build: at every
@@ -169,7 +198,6 @@ fn clip_stride(rigging: &Rigging<'_>, clip: Clip<'_>, ankle: crate::joint::Joint
 /// reference figure.
 #[test]
 fn every_shipped_motion_clears_its_bounds_on_every_build() {
-    let ankle = Bone::Ankle(Side::Left).joint();
     let motions = Kind::ALL.map(|kind| Motion::new(kind).expect("a shipped motion"));
     for species in Species::ALL {
         for identity in corners(species) {
@@ -186,7 +214,7 @@ fn every_shipped_motion_clears_its_bounds_on_every_build() {
                     identity.spec().build
                 );
                 if motion.kind().stride().is_some() {
-                    let slide = skate(&rigging, clip, ankle).expect("measurable");
+                    let slide = skate(&rigging, clip, &legs, Side::Left).expect("measurable");
                     assert!(
                         slide <= MAX_SKATE,
                         "{species:?} {} skates {slide} at {:?}",
