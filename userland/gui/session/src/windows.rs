@@ -1321,14 +1321,18 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             grant: doc.grant,
         });
         let mut reach = DeskReach { desk, host: self };
-        Ok(
-            match resolve_launch(&mut reach, running, one_instance, target) {
-                Launch::Reused { .. } => HandOverOutcome::Reached,
-                // Nothing took it, so the caller launches the bundle itself — and
-                // with a document that is the only thing that still shows it.
-                Launch::Spawn => HandOverOutcome::NotRunning,
-            },
-        )
+        match resolve_launch(&mut reach, running, one_instance, target) {
+            Launch::Reused { .. } => Ok(HandOverOutcome::Reached),
+            // Nothing took it, so the caller launches the bundle itself — and
+            // with a document that is the only thing that still shows it. The
+            // grant it sent was for the session to hand on, so it is consumed.
+            Launch::Spawn => {
+                if let Some(document) = document {
+                    self.relay.decline(document.grant);
+                }
+                Ok(HandOverOutcome::NotRunning)
+            }
+        }
     }
 
     fn app_bar_declared(&mut self, owner: ProcId, bar: &AppBar) -> Result<(), Errno> {
@@ -1540,6 +1544,8 @@ mod tests {
         fn relay(&mut self, _grant: u64, _app: ProcId) -> Result<u64, Errno> {
             Err(Errno::NotSupported)
         }
+
+        fn decline(&mut self, _grant: u64) {}
     }
 
     /// An icon-bar seam that records what the bridge relayed: these tests
@@ -1614,6 +1620,7 @@ mod tests {
     #[derive(Default)]
     struct WiredRelay {
         relayed: alloc::vec::Vec<(u64, ProcId)>,
+        declined: alloc::vec::Vec<u64>,
         mints: Option<u64>,
     }
 
@@ -1621,6 +1628,10 @@ mod tests {
         fn relay(&mut self, grant: u64, app: ProcId) -> Result<u64, Errno> {
             self.relayed.push((grant, app));
             self.mints.ok_or(Errno::NotSupported)
+        }
+
+        fn decline(&mut self, grant: u64) {
+            self.declined.push(grant);
         }
     }
 
@@ -1678,6 +1689,12 @@ mod tests {
         );
         assert!(relay.relayed.is_empty(), "nothing was delegated");
         assert!(desk.handed.is_empty());
+        assert_eq!(
+            relay.declined,
+            [31],
+            "the grant sent to the session was left pending in its table"
+        );
+        relay.declined.clear();
 
         // With one resident, the document is relayed to *it* and queued under
         // the handle the relay minted — never the one the caller sent, which
@@ -1689,6 +1706,10 @@ mod tests {
             Ok(HandOverOutcome::Reached)
         );
         assert_eq!(relay.relayed, [(31, resident)]);
+        assert!(
+            relay.declined.is_empty(),
+            "a relayed grant is the instance's"
+        );
         assert_eq!(
             desk.handed,
             [(

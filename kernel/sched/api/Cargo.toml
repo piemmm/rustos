@@ -52,3 +52,8 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # shared spinlock.
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+# The set of ids held against the draw, and the unkeyed hasher it is built over:
+# every member is a kernel-drawn id, and a hold is taken on every admission, so
+# its insert must fail as a value rather than abort the kernel.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }

@@ -165,7 +165,9 @@ driver's present path, so "I can write pixels" no longer implies "I own
 the screen":
 
 - The `lib/abi` seat handle is `tairix_abi::seat::SeatLease` — seat id,
-  owning task, and the mint-time generation `display_acquire` returned.
+  owning process, and the mint-time generation `display_acquire` returned.
+  A lease is the acquiring thread's process's: any of its threads presents
+  and drains through it, and the process teardown releases it.
   The generation is what makes a stale pre-revoke handle refusable even
   after its owner reacquires the seat: `tairix_seat::SeatState::verify`
   (the one definition of the check) accepts exactly the live
@@ -513,7 +515,7 @@ still reaches its log sink.
 The seat inventory is exposed through the System Information API — never
 a `/proc`-style file. The `SEAT_LIST` query (`sysinfo-v1` id 12, gated on
 `CAP_SYSINFO_HW` and audited, like the hardware tree) returns one
-`SeatRecord` per seat: seat id, the owning task (with an explicit
+`SeatRecord` per seat: seat id, the owning process (with an explicit
 owned/unowned flag — an unowned record carries no owner), the monotonic
 lease generation, and the foreground console. The kernel serves the
 underlying `IntrospectDomain::Seats` snapshot directly from its seat

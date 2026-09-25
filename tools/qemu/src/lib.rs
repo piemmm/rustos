@@ -2641,6 +2641,7 @@ fn drain_stream(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .len();
+    let mut progress = vec![MarkerProgress::default(); markers.len()];
     loop {
         match r.read(&mut buf) {
             Ok(0) => return Ok(()),
@@ -2652,11 +2653,12 @@ fn drain_stream(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 guard.push_str(&chunk);
-                for (marker, needed, seen) in markers {
-                    if !seen.load(Ordering::Acquire)
-                        && guard.matches(marker.as_str()).count() >= *needed as usize
-                    {
-                        seen.store(true, Ordering::Release);
+                for ((marker, needed, seen), progress) in markers.iter().zip(&mut progress) {
+                    if !seen.load(Ordering::Acquire) {
+                        progress.advance(&guard, marker);
+                        if progress.found >= *needed as usize {
+                            seen.store(true, Ordering::Release);
+                        }
                     }
                 }
                 if let Some(watch) = fatal {
@@ -2668,6 +2670,40 @@ fn drain_stream(
                 }
             }
         }
+    }
+}
+
+/// How far one readiness marker's count has read the captured log.
+///
+/// The count is the log's own left-to-right, non-overlapping one, taken a pass
+/// at a time: each pass resumes past the last match, and no earlier than a
+/// match could still begin that reaches text the last pass had not read. Every
+/// byte is therefore examined a bounded number of times however long the log
+/// grows, where re-counting the whole log per read made a marker that never
+/// arrives quadratic in the transcript's length.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MarkerProgress {
+    found: usize,
+    resume: usize,
+}
+
+impl MarkerProgress {
+    /// Count the occurrences of `marker` in `log` the last pass could not see.
+    fn advance(&mut self, log: &str, marker: &str) {
+        // Every position matches an empty marker, so it is already present.
+        if marker.is_empty() {
+            self.found = usize::MAX;
+            return;
+        }
+        while let Some(at) = log[self.resume..].find(marker) {
+            self.found += 1;
+            self.resume += at + marker.len();
+        }
+        let mut earliest = log.len().saturating_sub(marker.len() - 1);
+        while !log.is_char_boundary(earliest) {
+            earliest -= 1;
+        }
+        self.resume = self.resume.max(earliest);
     }
 }
 
@@ -4065,6 +4101,47 @@ mod tests {
         let second: &[u8] = b"more\nsc=irq_bind task=8\n";
         drain_stream(Some(second), &captured, &markers, None).expect("drain second marker");
         assert!(seen.load(Ordering::Acquire));
+    }
+
+    /// However the log arrives, a marker's count is the whole log's
+    /// left-to-right, non-overlapping one — a match split across reads, one
+    /// ending where the next begins, and a log holding multi-byte text.
+    #[test]
+    fn a_marker_counted_a_read_at_a_time_matches_the_whole_logs_count() {
+        let cases: [(&str, &str); 5] = [
+            ("boot\nsc=irq_bind\nsc=irq_bind\n", "sc=irq_bind"),
+            ("aaaaaaa", "aa"),
+            ("abababab", "abab"),
+            ("\u{fffd}ready\u{fffd}\u{fffd}ready", "ready"),
+            ("no marker here at all", "absent"),
+        ];
+        for (text, marker) in cases {
+            for split in 1..=text.len() {
+                let mut log = String::new();
+                let mut progress = MarkerProgress::default();
+                for piece in text.as_bytes().chunks(split) {
+                    log.push_str(&String::from_utf8_lossy(piece));
+                    progress.advance(&log, marker);
+                }
+                assert_eq!(
+                    progress.found,
+                    log.matches(marker).count(),
+                    "{marker:?} in {log:?} read {split} bytes at a time"
+                );
+            }
+        }
+    }
+
+    /// A pass leaves the next one no earlier than a match could still begin,
+    /// so a marker that never arrives costs each read only its own bytes.
+    #[test]
+    fn a_pass_that_finds_nothing_resumes_at_the_logs_end() {
+        let marker = "never printed";
+        let log = "x".repeat(100_000);
+        let mut progress = MarkerProgress::default();
+        progress.advance(&log, marker);
+        assert_eq!(progress.found, 0);
+        assert_eq!(progress.resume, log.len() - (marker.len() - 1));
     }
 
     /// Serial output as the guest's pipe delivers it: in arbitrary pieces.

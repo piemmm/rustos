@@ -6330,8 +6330,8 @@ fn the_sources_that_notified_are_answered_to_settings_alone() {
         .serve_notify(&mut comp, &chat, raise(1, NotifySeverity::Info), &policy)
         .is_ok());
 
-    let settings =
-        tairix_abi::AppIdentity::new(crate::SETTINGS_BUNDLE_ID, publisher).expect("identity");
+    let settings = tairix_abi::AppIdentity::new(tairix_taskbar::system::SETTINGS_BUNDLE, publisher)
+        .expect("identity");
     let answered: Vec<&str> = shell
         .notify_sources(Some(&settings))
         .expect("Settings is answered")
@@ -6357,8 +6357,8 @@ fn a_lock_is_asked_for_by_settings_alone_and_only_where_it_can_open() {
     let (mut shell, mut comp) = headless_desktop();
     let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
     let own = tairix_abi::AppIdentity::new("os.tairix.desktop", publisher).expect("identity");
-    let settings =
-        tairix_abi::AppIdentity::new(crate::SETTINGS_BUNDLE_ID, publisher).expect("identity");
+    let settings = tairix_abi::AppIdentity::new(tairix_taskbar::system::SETTINGS_BUNDLE, publisher)
+        .expect("identity");
     let files = tairix_abi::AppIdentity::new("os.tairix.files", publisher).expect("identity");
     shell.set_own_app(Some(own));
 
@@ -7044,6 +7044,8 @@ impl DocumentRelay for RecordingRelay {
         self.relayed.push((grant, app));
         self.mints.ok_or(Errno::NotSupported)
     }
+
+    fn decline(&mut self, _grant: u64) {}
 }
 
 /// A reach that counts what it was asked and refuses everything: the

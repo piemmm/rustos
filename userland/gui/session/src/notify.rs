@@ -10,9 +10,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::notify_ipc::NOTIFY_SOURCES_MAX;
 use tairix_abi::{AppIdentity, BundleId, Errno, Origin};
+use tairix_taskbar::system::SETTINGS_BUNDLE;
 use tairix_taskbar::Producer;
-
-use crate::config::SETTINGS_BUNDLE_ID;
 
 /// The producer the kernel attests in `origin`.
 ///
@@ -35,7 +34,7 @@ pub fn producer_of(origin: &Origin) -> Result<Producer, Errno> {
 pub fn is_settings_surface(caller: Option<&AppIdentity>, own: Option<&AppIdentity>) -> bool {
     match (caller, own) {
         (Some(caller), Some(own)) => {
-            caller.bundle_id() == SETTINGS_BUNDLE_ID && caller.publisher() == own.publisher()
+            caller.bundle_id() == SETTINGS_BUNDLE && caller.publisher() == own.publisher()
         }
         _ => false,
     }
@@ -84,7 +83,7 @@ mod tests {
     use tairix_abi::{AppIdentity, BundleId, Errno, Origin, ProcId, PublisherId};
 
     use super::{is_settings_surface, producer_of, NotifySources};
-    use crate::config::SETTINGS_BUNDLE_ID;
+    use tairix_taskbar::system::SETTINGS_BUNDLE;
 
     fn app(id: &str, key: u8) -> AppIdentity {
         AppIdentity::new(id, PublisherId::from_raw([key; 32])).expect("a well-formed identity")
@@ -119,9 +118,9 @@ mod tests {
     #[test]
     fn only_the_settings_bundle_under_the_desktops_own_publisher_is_the_surface() {
         let own = app("os.tairix.desktop", 1);
-        let settings = app(SETTINGS_BUNDLE_ID, 1);
+        let settings = app(SETTINGS_BUNDLE, 1);
         assert!(is_settings_surface(Some(&settings), Some(&own)));
-        let impostor = app(SETTINGS_BUNDLE_ID, 2);
+        let impostor = app(SETTINGS_BUNDLE, 2);
         assert!(!is_settings_surface(Some(&impostor), Some(&own)));
         assert!(!is_settings_surface(
             Some(&app("os.tairix.files", 1)),
@@ -159,6 +158,6 @@ mod tests {
             .find_map(|line| line.strip_prefix("id = \""))
             .and_then(|rest| rest.strip_suffix('"'))
             .expect("the manifest declares an id");
-        assert_eq!(declared, SETTINGS_BUNDLE_ID);
+        assert_eq!(declared, SETTINGS_BUNDLE);
     }
 }

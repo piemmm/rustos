@@ -2475,9 +2475,11 @@ pub extern "C" fn sys_shm_grant_peer(region: u64, endpoint: u64, ticket: u64) ->
 
 /// `call_peer_holds`: whether the task whose call `ticket` on `endpoint` the
 /// caller is serving holds a grant covering the wire-encoded resource record
-/// at `resource` (`SyscallNumber::CALL_PEER_HOLDS`). Returns `0` when it does,
-/// else a negative `TAIRIX_E_*` — `TAIRIX_E_PERMISSION_DENIED` when it holds
-/// none.
+/// at `resource` (`SyscallNumber::CALL_PEER_HOLDS`), asked by the DMA
+/// controller serving `endpoint` about a request line naming it or an MMIO
+/// window. Returns `0` when it does, else a negative `TAIRIX_E_*` —
+/// `TAIRIX_E_PERMISSION_DENIED` when it holds none, `TAIRIX_E_OUT_OF_RANGE`
+/// for any other record.
 #[must_use]
 #[export_name = "tairix_sys_call_peer_holds"]
 pub extern "C" fn sys_call_peer_holds(endpoint: u64, ticket: u64, resource: *mut c_void) -> i32 {
@@ -3300,9 +3302,10 @@ pub extern "C" fn sys_resource_open(
 /// once its task is gone and so may name a later holder by the time the
 /// grant is minted. The kernel validates the pair against the caller's
 /// address space, refuses an instance no live process holds
-/// (`TAIRIX_E_NOT_FOUND`) and a short buffer
-/// (`TAIRIX_E_BUFFER_TOO_SMALL`), and records the instance so only that
-/// process can redeem.
+/// (`TAIRIX_E_NOT_FOUND`), a short buffer (`TAIRIX_E_BUFFER_TOO_SMALL`), and
+/// a fresh delegation past the caller's pending bound to that recipient
+/// (`TAIRIX_E_LIMIT_EXCEEDED`), and records the instance so only that process
+/// can redeem.
 ///
 /// The caller's identity and effective capability set are captured with the
 /// descriptor's path. The caller forwards the handle in-band; it resolves

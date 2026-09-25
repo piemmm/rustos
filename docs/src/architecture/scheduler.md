@@ -1198,22 +1198,28 @@ These hold at every API boundary:
    policy already holds is redrawn past under the same write lock the
    registration takes, so a *live* id is never issued twice, and a bounded
    run of rejected candidates fails closed rather than registering a
-   duplicate. A dead task's id may be drawn again: state keyed by a task id
-   is dropped before the id is released, so a stale reference produces
+   duplicate. A dead task's id may be drawn again once the kernel has dropped
+   the state it keys by that id, so a stale reference produces
    `SchedError::NoSuchTask`, and where a stale reference must be told apart
    from a fresh occupant of the same number the 128-bit `ProcId`
    process-instance identity is what distinguishes them.
 
-   An identity may nevertheless outlive its task, and the draw respects it.
-   A process *is* its leader thread's task, so reaping the leader of a group
-   whose siblings still run would return a live process's number to the draw.
-   `reserve_task_id` holds such a number and `release_task_id` returns it, and
-   `choose_task_id` composes the held set with the policy's own liveness
-   predicate — so the hold is part of the one id rule every policy already
-   calls rather than an addition to the `SchedulerPolicy` contract. The
-   per-thread retire rule owns both halves — it takes the hold when a leader
-   goes with siblings alive and returns the number when the group's member
-   count reaches zero — so every teardown path inherits it.
+   That state outlives the task in the policy's table, and the draw respects
+   it. A kill removes a parked victim before the kernel tears down its
+   capability record, address space, grants, and endpoints, and a process
+   *is* its leader thread's task, so the leader's number keys the process for
+   as long as any of its threads runs. `reserve_task_id` holds a number and
+   `release_task_id` returns it, and `choose_task_id` composes the held set
+   with the policy's own liveness predicate — so the hold is part of the one
+   id rule every policy already calls rather than an addition to the
+   `SchedulerPolicy` contract. `kernel/core` takes the hold when it admits a
+   user process or thread, and returns it as the last step of the teardown:
+   a non-leader's by the per-thread retire rule, the leader's — the
+   process's — by the process teardown, once every record keyed by the
+   number is gone. The driver-store unload's immediate teardown, which
+   leaves part of a process standing (`plans/OPEN-DEFECTS.md` D271), never
+   returns it. The held set grows fallibly, so an admission it cannot hold
+   is refused as `SchedError::OutOfMemory` rather than aborting.
 
 7. **A reserved identity is admitted, never drawn.** `spawn_parked_as` is
    the birth form the boot path uses to admit PID 1 at `INIT_TASK_ID`; the

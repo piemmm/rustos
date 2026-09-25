@@ -1988,10 +1988,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // the node takes a successor only once nothing of this one holds on.
         self.aspaces.write().withdraw(sec_id);
 
-        // Drop the capability record last, so a concurrent `cap_query` racing
-        // this teardown never observes a task whose caps vanished while the
-        // scheduler still believed it lived — the same ordering the `exit`
-        // syscall keeps.
+        // The number the admission held is never returned: this teardown
+        // omits part of the process teardown (`plans/OPEN-DEFECTS.md` D271),
+        // so a successor drawing it would inherit what is left keyed by it.
         let _ = crate::peerwatch::remove_record(Some(self.peer_watch), self.caps, sec_id);
 
         let mut handle_buf = [0u8; 16];
@@ -3431,6 +3430,47 @@ mod tests {
             0,
             "no thread of the group is left aliased onto a reclaimed record"
         );
+    }
+
+    /// The unload's own teardown leaves part of the process standing, so the
+    /// number its admission held stays out of the draw rather than hand a
+    /// successor what is left keyed by it (`plans/OPEN-DEFECTS.md` D271).
+    #[test]
+    fn an_unloaded_drivers_number_stays_out_of_the_draw() {
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+        let ctx = KernelInitSpawner::new(
+            state.frame_allocator,
+            audit_sink,
+            &state.scheduler,
+            &state.caps,
+            &state.peer_watch,
+            &state.aspaces,
+            state.arch.as_ref(),
+            process_wait,
+            &state.irq,
+            &crate::devres::NULL_SHARED_MEM_FACILITY,
+        );
+        let handle = 0x05ee_d271u64;
+        let sec = SecProcessId(handle);
+        state.caps.write().insert(TaskCapabilities::derive(
+            sec,
+            UserId(0),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            audit_sink,
+        ));
+        tairix_kernel_sched_api::reserve_task_id(handle).expect("the admission's hold");
+
+        assert_eq!(ctx.terminate_driver_process(handle), Ok(()));
+        assert!(state.caps.read().caps_of_process(sec).is_none());
+        assert_eq!(
+            tairix_kernel_sched_api::choose_task_id(Some(handle), |_| false),
+            Err(tairix_kernel_sched_api::SchedError::TaskIdInUse)
+        );
+        tairix_kernel_sched_api::release_task_id(handle);
     }
 
     #[test]

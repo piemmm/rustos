@@ -85,9 +85,10 @@ through the grant's window. The region binds its creator's node quarantine:
 the creator's own unmap is its word that the device is done, and a creator
 that ends still mapping it orphans it, so its frames join the quarantine when
 the last mapping goes. `shm_grant_peer` mints a region to the caller an
-endpoint's server is serving, and `call_peer_holds` answers whether that caller
-holds a grant covering a quoted record; both answer only about a caller being
-served, and every delegated mint refuses a recipient that has ended.
+endpoint's server is serving, and `call_peer_holds` answers the controller
+whether that caller holds one of its request lines or a register window; both
+answer only about a caller being served, by process instance, and every
+delegated mint refuses a recipient that has ended.
 
 **Why the two capabilities sit in SND4 rather than beside the ABI.** A
 capability is added with the subsystem that enforces it, never ahead of it: it
@@ -1030,8 +1031,9 @@ enforcement point in this change:
 - `shm_grant_peer` — mint a mapping of a region for the in-service caller of an
   endpoint the grantor owns; `shm_grant` reaches only an endpoint's server.
 - `call_peer_holds` — whether the in-service caller holds a grant covering a
-  given resource: `call_peer_seat`'s shape, generalised from seats to grants,
-  answering only about a caller the server is actively serving.
+  request line naming the controller's endpoint, or a register window:
+  `call_peer_seat`'s shape, asked only by the duty holder and only about a
+  caller it is actively serving.
 
 **Scope.** SND5's driver is `drivers/dma/bcm2835`, the legacy engine
 (`brcm,bcm2835-dma`), named for the binding it serves: every default-tree

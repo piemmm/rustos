@@ -1284,8 +1284,8 @@ What it guarantees:
 - **Who may see who notified.** The session remembers at most
   `NOTIFY_SOURCES_MAX` sources seen since it started and answers them through
   the `QueryNotifySources` window request to its own Settings application
-  alone (`is_settings_surface`: the attested `SETTINGS_BUNDLE_ID` under the
-  session's own publisher). The reply is the shared name-list codec the cursor
+  alone (`is_settings_surface`: the attested
+  `tairix_taskbar::system::SETTINGS_BUNDLE` under the session's own publisher). The reply is the shared name-list codec the cursor
   sets already used, now one definition for both.
 - **The intake is bounded and keyed on the instance.** The notification area
   holds at most `NOTIFICATIONS_MAX` notices in all and

@@ -3198,8 +3198,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ],
         ret: AbiType::Errno,
         // Gated like `call_peer_seat` by the endpoint's receive capability
-        // against its owner, in the handler. Not audited: a query whose
-        // decision is the server's to record.
+        // against its owner, and by the DMA controller duty naming the
+        // endpoint, in the handler. Not audited: a query whose decision is
+        // the server's to record.
         required_capability: None,
         audit: false,
     },
@@ -3243,7 +3244,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // `U64` carries the record-bytes-written-or-`-errno` convention, like
         // `call_peer_origin`.
         ret: AbiType::U64,
-        // Gated like `call_peer_holds` by the endpoint's receive capability
+        // Gated like `call_peer_seat` by the endpoint's receive capability
         // against its owner, in the handler. Not audited: a read whose
         // decision is the server's to record.
         required_capability: None,

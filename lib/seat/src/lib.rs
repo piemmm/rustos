@@ -61,12 +61,14 @@
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct SeatId(pub u64);
 
-/// The kernel-attested identity of the task a seat records as its owner.
+/// The kernel-attested identity of the process a seat records as its owner.
 ///
-/// This is the seat model's view of the kernel's task id: the caller of an
+/// This is the seat model's view of the kernel's process id: the caller of an
 /// ownership-changing operation is identified by the kernel's per-CPU
-/// current-task slot, never by a value the caller supplies. The kernel
-/// converts its own task-id type into this newtype at the boundary.
+/// current-task slot, never by a value the caller supplies, and names the
+/// process that thread belongs to — a lease is per-process authority, which
+/// the process teardown releases. The kernel converts its own id type into
+/// this newtype at the boundary.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct SeatOwner(pub u64);
 

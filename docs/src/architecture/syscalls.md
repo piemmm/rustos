@@ -978,18 +978,23 @@ refusal. It is the display service's per-present gate: the check is fresh
 at call time (a revocation between two frames refuses the very next
 present), and it discloses seat facts only about a task the server is
 actively servicing — seat ownership is never enumerable (`SEAT_LIST`
-stays behind `CAP_SYSINFO_HW`). Wrapper `tairix_rt::call_peer_seat`; C
-stub `tairix_sys_call_peer_seat`. Not audited per call — it is the per-frame
-hot path, exactly like the kernel-side present gate.
+stays behind `CAP_SYSINFO_HW`). The caller is resolved by its process
+instance, never its reusable pid, so a poster that has ended — or left its
+pid to a successor holding the seat — is `NotFound`. Wrapper
+`tairix_rt::call_peer_seat`; C stub `tairix_sys_call_peer_seat`. Not audited
+per call — it is the per-frame hot path, exactly like the kernel-side present
+gate.
 
 `shm_grant` (no. 82) is the endpoint-directed delegation of a shared
 memory region (`plans/DISPLAY.md` D7a): the region's owner (holding
 `CAP_SHM` and its own per-region grant) mints the **live serving task**
 of a call endpoint an unforgeable handle for the region, which the owner
 forwards in-band and the recipient presents to `shm_map`. The recipient
-is resolved from the endpoint at grant time — never a caller-supplied
-(recyclable) PID — and the handle resolves only for the recipient task,
-so the number is useless to a bystander. Every mint is audited, exactly
+is the process instance that bound the endpoint — never a caller-supplied
+or recyclable PID — resolved at grant time, so a server that has ended
+receives nothing, nor does a successor admitted under its number; the
+handle resolves only for the recipient task, so the number is useless to a
+bystander. Every mint is audited, exactly
 as `shm_create`. This is how the desktop session hands its composed frame
 buffer to the display service with zero frame bytes crossing the IPC. The
 donor must be allowed to post to the endpoint (its send capabilities, and the
@@ -1015,8 +1020,9 @@ spawn, so no such composing service could exist. It widens nothing: the
 caller's own grant is checked **before** any endpoint state is read, so a
 grant the caller does not hold and an unknown recipient endpoint are the
 same `NotFound` with nothing minted, and the reply is no existence oracle.
-As with `shm_grant`, the recipient is resolved from the endpoint at grant
-time — never a caller-supplied (recyclable) PID — the donor must be allowed
+As with `shm_grant`, the recipient is the instance that bound the endpoint,
+resolved at grant time — never a caller-supplied or recyclable PID — the
+donor must be allowed
 to post to it (`PermissionDenied` otherwise), the handle resolves only for
 the recipient task, and every mint is audited. Wrapper
 `tairix_rt::call_grant`; C stub `tairix_sys_call_grant`.
@@ -1068,21 +1074,27 @@ the ticket as `call_peer_origin` names it, rather than to an endpoint's server.
 The caller must hold a `Shared` grant for the region — checked before any
 endpoint state is read, so an unheld and an unknown region are the same
 `NotFound` — and must own the endpoint and hold its receive capability. The
-recipient is the task the kernel recorded as posting the call, and one that
-has ended receives nothing. A DMA-engine driver uses it to return the buffer it
+recipient is the process instance the kernel recorded as posting the call, and
+one that has ended receives nothing, nor does a successor admitted under its
+pid. A DMA-engine driver uses it to return the buffer it
 carved for a client inside its `Prepare` reply. Audited as `shm_grant`.
 Wrapper `tairix_rt::shm_grant_peer`; C stub `tairix_sys_shm_grant_peer`.
 
 `call_peer_holds(endpoint, ticket, resource)` is the grant twin of
-`call_peer_seat`: it answers `0` when one of the served caller's grants covers
-the quoted wire-encoded `HwResource`, and `PermissionDenied` when none does,
-under the same gate — the caller owns the endpoint and holds its receive
-capability — so a server learns grants only of a task it is actively serving,
-and never which grant covered. A record that does not decode is refused with
-its own decode error. A DMA-engine driver uses it to confirm a client holds the
-register window it asks a channel to feed, so a client can aim a channel only
-at a FIFO it could map itself. Not audited: the decision it feeds is the
-server's to record. Wrapper `tairix_rt::call_peer_holds`; C stub
+`call_peer_seat`, for a DMA controller: it answers `0` when one of the served
+caller's grants covers the quoted wire-encoded `HwResource`, and
+`PermissionDenied` when none does. Only the controller serving its own
+endpoint asks — the caller owns the endpoint, holds its receive capability,
+and holds the `DmaController` duty naming it — and only about what it
+programs a channel from: a `DmaRequest` line naming that endpoint, or an
+`Mmio` register window. Any other record is `OutOfRange`, so no server can
+probe the authority of whoever calls it; a record that does not decode is
+refused with its own decode error. The caller is resolved by its process
+instance, so a poster that has ended is `NotFound`. A server learns grants
+only of a task it is actively serving, and never which grant covered. The
+controller confirms a client's request line, and the register window it asks
+a channel to feed, so a client can aim a channel only at a FIFO it could map
+itself. Not audited: the decision it feeds is the server's to record. Wrapper `tairix_rt::call_peer_holds`; C stub
 `tairix_sys_call_peer_holds`.
 
 `call_peer_node(endpoint, ticket, node, node_cap)` (no. 131) is the node twin
@@ -1150,16 +1162,21 @@ installing a delegated descriptor whose every operation is re-authorised
 through the secured VFS under the **grantor's** captured identity, so a
 permission change against the grantor revokes the delegation's reach
 too. `File::from_delegation` is the owned redemption, so the descriptor is
-closed on every path out. An exited
-recipient's unredeemed grants are reclaimed with its records. Minting is
-idempotent for the same reason the resource grants are: re-granting a
+closed on every path out. An unredeemed delegation is reclaimed when
+either end exits: with the recipient's records, and with its grantor's.
+Minting is idempotent for the same reason the resource grants are: re-granting a
 delegation that is **still pending** returns the pending handle rather than
 appending a duplicate, so a grantor cannot grow a recipient's kernel-side
 table by repeating one call — a pending delegation conveys exactly one
 right, and these descriptors carry no position (every read names its own
 offset), so a second identical entry conveys nothing the first does not.
 Once redeemed the entry is consumed, so a later grant of the same file
-legitimately mints afresh. Wrappers
+legitimately mints afresh. Distinct delegations are bounded too: a grantor may
+have at most 64 pending to one recipient, and a fresh one past that is refused
+with `LimitExceeded` while the earlier ones stay redeemable. The bound is
+charged to the grantor, so one that leaves its delegations unredeemed cannot
+exhaust a recipient's table for any other, and an honest hand-over, redeemed as
+it arrives, never nears it. Wrappers
 `tairix_rt::fd_grant` / `tairix_rt::fd_redeem`; C stubs
 `tairix_sys_fd_grant` / `tairix_sys_fd_redeem`.
 
@@ -1181,6 +1198,11 @@ lap and no source can hold it. Registration order still decides within a
 lap, the cursor moves only when a token actually reached the caller (a
 wait that failed to report costs the member nothing), and a member removed
 in the meantime simply falls back to registration order.
+
+A wait-set is its creator's **process's**, as are the endpoints, ports, and
+seat leases it may watch: any thread of the process may add to it or wait on
+it, and the process teardown releases it. A park still names the waiting
+thread.
 
 The wait-set (`waitset_ctl`, no. 44) additionally accepts a `SeatInput`
 member (`plans/DISPLAY.md` D7a): `id` names a seat whose **live lease the
@@ -2150,8 +2172,8 @@ re-validates arguments — the dispatcher does that first.
 | `dma_free`      | the symmetric free for `dma_alloc`: resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), then releases the buffer based at `cpu_va` from the caller's own address space through the same `DmaAllocFacility` (`free`), zeroing every backing byte (zero-on-free, `AGENTS.md` §4) before its frames return to the allocator, and drops the buffer's own pages from the caller's address-space snapshot (the allocator reports the extent it released, so the drop costs the buffer, not the whole space). Only `cpu_va` is taken from the caller; the buffer's extent is the allocator's authoritative record. A long-running driver reclaims each transfer's bounce buffers through this rather than leaking DMA frames until it exits (`plans/PI.md` P10) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `cpu_va` not the base of a live carve in the caller's DMA window (covers a stale, double, or cross-task free) → `OutOfRange`. No DMA facility wired → `NotImplemented`. Otherwise `Ok(0)`. |
 | `dma_quiesced`  | reads the caller's own load record (hardware-tree node and admission generation, kernel-attested; no argument crosses the trap) and has the installed `DmaQuarantineFacility` (`with_dma_quarantine`; default `NULL_DMA_QUARANTINE`) free, scrubbed, every block the node's quarantine holds from an earlier generation, auditing `DMA_QUARANTINE_RELEASED` with `cause=reset` (D167) | No load record → `NotFound`. No quarantine wired → `NotImplemented`. Otherwise `Ok(bytes freed)`. |
 | `shm_create_dma` | demands `CAP_SHM` in the handler, resolves `handle` against the caller (owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`) and `len` against it, requires the caller's load record, then has `sharedreg::create_dma` bind the node's quarantine and the installed `SharedMemFacility` carve one block below the grant's `addr_limit` (`alloc_dma_region`, `FrameAllocator::alloc_order_under`) and map it `DmaCoherent`; translates the block through `devres::translate_device_addr`, publishes the mapping, copies the id and device address out, and mints the caller the region's `Shared` grant | No `CAP_SHM`, or no load record → `PermissionDenied`. Unknown / non-owned handle → `NotFound`. Non-DMA grant, over-the-grant-maximum `len`, a limit no RAM lies below, or a block the window cannot name → `OutOfRange`. `len == 0`, or past the largest contiguous block → `LengthOutOfRange`. No quarantine or no DMA-capable facility wired → `NotImplemented`. No free block below the limit → `OutOfMemory`. Faulting out pointer → `BadAddress` (the region released). Otherwise `Ok(base)`. |
-| `shm_grant_peer` | checks the caller's own `Shared` grant for the region, resolves the endpoint and gates the caller against its `recv_caps` and owner, resolves the ticket to the kernel-recorded poster (`CallEndpoint::peer_origin`), and mints the poster the region grant only while it lives (`AddressSpaceRegistry::delegate_grant`, which carries the covering grant's origin) | Unheld region, unknown endpoint or ticket, or an ended recipient → `NotFound`. Not the endpoint's server, or a retired region → `PermissionDenied`. Otherwise `Ok(handle)`. |
-| `call_peer_holds` | resolves the endpoint and gates the caller against its `recv_caps` and owner, resolves the ticket to the kernel-recorded poster, copies the `HwResource` record in and decodes it canonically, then tests the poster's grants (`AddressSpaceRegistry::grant_covers`) | Unknown endpoint or ticket → `NotFound`. Not the endpoint's server, or no covering grant → `PermissionDenied`. Faulting pointer → `BadAddress`. Undecodable record → its decode error. Otherwise `Ok(0)`. |
+| `shm_grant_peer` | checks the caller's own `Shared` grant for the region, resolves the endpoint and gates the caller against its `recv_caps` and owner, resolves the ticket to the kernel-recorded poster (`CallEndpoint::peer_origin`), then, under the capability table's read lock, the poster's instance to its live process (`CapTable::process_of_instance`), and mints that process the region grant (`AddressSpaceRegistry::delegate_grant`, which carries the covering grant's origin) | Unheld region, unknown endpoint or ticket, or an ended recipient → `NotFound`. Not the endpoint's server, or a retired region → `PermissionDenied`. Otherwise `Ok(handle)`. |
+| `call_peer_holds` | resolves the endpoint and gates the caller against its `recv_caps` and owner, then its `DmaController` duty for the endpoint (`AddressSpaceRegistry::holds_dma_controller_duty`), resolves the ticket to the kernel-recorded poster, copies the `HwResource` record in and decodes it canonically, admits only a `DmaRequest` line naming the endpoint or an `Mmio` window, then tests the grants of the poster's live process, confirming its instance after the read | Unknown endpoint or ticket, or a poster no longer live → `NotFound`. Not the endpoint's server, no duty for it, or no covering grant → `PermissionDenied`. Any other record → `OutOfRange`. Faulting pointer → `BadAddress`. Undecodable record → its decode error. Otherwise `Ok(0)`. |
 | `call_peer_node` | resolves the endpoint and gates the caller against its `recv_caps` and owner, checks the buffer holds a whole node, resolves the ticket to the kernel-recorded poster, then the poster's instance to its live process (`CapTable::process_of_instance`), that process's loaded node (`AddressSpaceRegistry::loaded_node`), and the instance again, and finds the node in the live tree | Not the endpoint's server → `PermissionDenied`. Buffer short of one record → `BufferTooSmall`. Unknown endpoint or ticket, a poster no longer live or loaded for no node, or a node gone from the tree → `NotFound`. Faulting pointer → `BadAddress`. Otherwise the record's length. |
 
 `spawn` also carries the **parser-sandbox mode**

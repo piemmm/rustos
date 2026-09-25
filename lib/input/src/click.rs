@@ -128,7 +128,11 @@ mod tests {
 
     /// The interval every case pairs under unless it names its own.
     const INTERVAL: Duration64 = Duration64::from_millis(500);
-    const INTERVAL_NS: u64 = 500_000_000;
+
+    /// [`INTERVAL`] in the nanoseconds a press is stamped with.
+    fn interval_ns() -> u64 {
+        INTERVAL.saturating_total_nanos()
+    }
 
     /// The primary button, which every pre-existing case below presses.
     const LEFT: PointerButton = PointerButton::Primary;
@@ -148,7 +152,7 @@ mod tests {
             ClickKind::Single
         );
         assert_eq!(
-            tracker.register(1_000 + INTERVAL_NS / 2, 3, LEFT, INTERVAL),
+            tracker.register(1_000 + interval_ns() / 2, 3, LEFT, INTERVAL),
             ClickKind::Double
         );
     }
@@ -158,7 +162,7 @@ mod tests {
         let mut tracker = DoubleClickTracker::new();
         assert_eq!(tracker.register(0, 0, LEFT, INTERVAL), ClickKind::Single);
         assert_eq!(
-            tracker.register(INTERVAL_NS, 0, LEFT, INTERVAL),
+            tracker.register(interval_ns(), 0, LEFT, INTERVAL),
             ClickKind::Double
         );
     }
@@ -168,7 +172,7 @@ mod tests {
         let mut tracker = DoubleClickTracker::new();
         assert_eq!(tracker.register(0, 3, LEFT, INTERVAL), ClickKind::Single);
         assert_eq!(
-            tracker.register(INTERVAL_NS + 1, 3, LEFT, INTERVAL),
+            tracker.register(interval_ns() + 1, 3, LEFT, INTERVAL),
             ClickKind::Single
         );
     }

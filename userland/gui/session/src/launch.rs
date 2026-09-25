@@ -144,6 +144,11 @@ pub trait DocumentRelay {
     /// Whatever the kernel refused. Nothing is delegated on a refusal, so a
     /// caller reads it as "the instance did not get it".
     fn relay(&mut self, grant: u64, app: ProcId) -> Result<u64, Errno>;
+
+    /// Redeem `grant` and close it unread: a hand-over nothing took leaves no
+    /// delegation pending in this process's table for its asker's life. A
+    /// grant already consumed makes this a no-op.
+    fn decline(&mut self, grant: u64);
 }
 
 /// The bundle *directory* an entry-point `Run` path names.

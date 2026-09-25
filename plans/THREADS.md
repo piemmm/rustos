@@ -27,11 +27,13 @@ modules; the reference documentation is `docs/src/architecture/threads.md`.
    from the ABI's pid range (`tairix_abi::PID_MAX`), so a dead thread's id may
    be drawn again; where a stale reference must be told apart from a fresh
    occupant of the same number, the process-instance `ProcId` in decision 2 is
-   what distinguishes them. A *leader* that exits while its siblings live is
-   the case where the identity outlives its task: `threads::retire` holds the
-   number against the id draw and returns it when the group's last thread
-   lands, so the group keeps using it as its `ProcessId` for as long as it
-   lives and no admission can be issued it (`plans/OPEN-DEFECTS.md` D91).
+   what distinguishes them. The kernel's own records keyed by an id outlive
+   the task in the scheduler — a kill removes a parked victim before tearing
+   it down, and a *leader* that exits while its siblings live leaves its
+   number naming the process — so every user thread's id is held against the
+   draw from its admission to the end of its teardown: a non-leader's is
+   returned by `threads::retire`, the leader's by the process teardown once
+   the group's last record is gone (`plans/OPEN-DEFECTS.md` D91, D269).
 2. **One capability record per process, with a thread alias map.** `CapTable`
    holds `threads: BTreeMap<TaskId, ProcessId>`; `caps_for` resolves through it.
    Credentials, `proc_id`, attested name, and I/O counters are therefore

@@ -22,8 +22,8 @@
 //! apply it at the next safe point. See `docs/src/architecture/scheduler.md`
 //! for the full invariants.
 
-use alloc::collections::BTreeSet;
-
+use tairix_collections::HashSet;
+use tairix_hash::BuildFastHash;
 use tairix_rng::{FastRng, RandU64, StreamKey};
 use tairix_sync::SpinLock;
 
@@ -40,11 +40,10 @@ use crate::error::{SchedError, SchedResult};
 ///
 /// A *live* id is never handed out twice — admission refuses a candidate the
 /// policy already holds — but an id whose task has exited may be drawn again,
-/// as on any system that bounds its pid space. Nothing relies on it not
-/// happening: state keyed by a task id is dropped when its task dies, and
-/// where a stale reference must be told apart from a fresh occupant of the
-/// same number, the 128-bit `ProcId` process-instance identity is what
-/// distinguishes them.
+/// as on any system that bounds its pid space, once the kernel has dropped the
+/// state it keyed by that id ([`reserve_task_id`]). Where a stale reference
+/// must be told apart from a fresh occupant of the same number, the 128-bit
+/// `ProcId` process-instance identity is what distinguishes them.
 pub type TaskId = u64;
 
 /// The reserved "no task" id: never drawn, never admitted.
@@ -133,9 +132,8 @@ pub fn choose_task_id(
     requested: Option<TaskId>,
     is_live: impl Fn(TaskId) -> bool,
 ) -> SchedResult<TaskId> {
-    // An id is unavailable if the policy holds a live task under it *or* it is
-    // held against the draw ([`reserve_task_id`]) because an identity outlived
-    // the task that carried it.
+    // An id is unavailable if the policy holds a live task under it *or* the
+    // kernel still holds state keyed by it ([`reserve_task_id`]).
     let taken = |id: TaskId| is_live(id) || task_id_reserved(id);
     if requested.is_some() {
         // A reserved id needs no draw, so the shared generator is left
@@ -145,35 +143,41 @@ pub fn choose_task_id(
     draw_id(&mut TASK_IDS.lock(), taken)
 }
 
-/// Ids withheld from the draw because an identity outlived the task that
-/// carried it.
+/// Ids withheld from the draw while the kernel holds state keyed by them.
 ///
-/// Empty in the common case — a process whose leader thread exits before its
-/// siblings is the only producer — and bounded by the number of live
-/// processes, since every entry is released by that process's teardown.
-static RESERVED_TASK_IDS: SpinLock<BTreeSet<TaskId>> = SpinLock::new(BTreeSet::new());
+/// Bounded by the live user threads, since every entry is released by its
+/// holder's teardown.
+static RESERVED_TASK_IDS: SpinLock<HashSet<TaskId, BuildFastHash>> =
+    SpinLock::new(HashSet::with_hasher(BuildFastHash::new()));
 
 /// Hold `id` against the draw until [`release_task_id`] returns it.
 ///
-/// A process *is* its leader thread's task, so the two share a number. When
-/// the leader exits first the scheduler reaps its task and the number becomes
-/// drawable, while the process itself is still alive under a surviving sibling
-/// thread — a later admission could then be issued the live process's id and
-/// overwrite its capability record. This is the zombie leader: the task is
-/// reaped normally and only the *number* is withheld.
+/// A policy stops holding an id the moment it removes the task, and a kill
+/// removes a parked victim before the kernel has torn down what it keyed by
+/// that id — its capability record, address space, grants, and endpoints.
+/// Drawn in that window, the id would admit a newcomer whose records the
+/// victim's teardown then deletes. The kernel therefore takes this hold when
+/// it admits a user task and returns it only once that teardown is done. A
+/// process is its leader thread's task, so the leader's hold is the process's
+/// and outlives the leader task itself for as long as the group does.
 ///
-/// Idempotent, so a repeated retire cannot corrupt the set.
+/// Idempotent.
 ///
 /// # Errors
 ///
-/// [`SchedError::NoTaskIdAvailable`] if `id` is [`NO_TASK`], which names no
-/// task and is never drawn anyway.
+/// * [`SchedError::NoTaskIdAvailable`] if `id` is [`NO_TASK`], which names no
+///   task and is never drawn anyway.
+/// * [`SchedError::OutOfMemory`] if the held set cannot grow; `id` is then
+///   not held, and the caller refuses the admission.
 pub fn reserve_task_id(id: TaskId) -> SchedResult<()> {
     if id == NO_TASK {
         return Err(SchedError::NoTaskIdAvailable);
     }
-    RESERVED_TASK_IDS.lock().insert(id);
-    Ok(())
+    RESERVED_TASK_IDS
+        .lock()
+        .try_insert(id)
+        .map(|_| ())
+        .map_err(|_| SchedError::OutOfMemory)
 }
 
 /// Return an id [`reserve_task_id`] withheld. Idempotent: releasing an id that
@@ -237,8 +241,8 @@ fn draw_id<const N: usize>(
 #[cfg(test)]
 mod id_tests {
     use super::{
-        choose_reserved, choose_task_id, draw_id, seed_task_ids, FIRST_DRAWN_TASK_ID, INIT_TASK_ID,
-        NO_TASK,
+        choose_reserved, choose_task_id, draw_id, release_task_id, reserve_task_id, seed_task_ids,
+        task_id_reserved, FIRST_DRAWN_TASK_ID, INIT_TASK_ID, NO_TASK,
     };
     use crate::error::SchedError;
     use alloc::collections::BTreeSet;
@@ -331,6 +335,25 @@ mod id_tests {
             choose_reserved(Some(NO_TASK), |_| false),
             Err(SchedError::NoTaskIdAvailable)
         );
+    }
+
+    /// A held id is refused to every admission, however the policy's own
+    /// table reads, until its release; holding one twice is one hold.
+    #[test]
+    fn a_held_id_is_refused_until_it_is_released() {
+        const HELD: u64 = 0x00ee_5f1d_0001;
+        release_task_id(HELD);
+        assert_eq!(reserve_task_id(HELD), Ok(()));
+        assert_eq!(reserve_task_id(HELD), Ok(()));
+        assert!(task_id_reserved(HELD));
+        assert_eq!(
+            choose_task_id(Some(HELD), |_| false),
+            Err(SchedError::TaskIdInUse)
+        );
+        release_task_id(HELD);
+        assert!(!task_id_reserved(HELD));
+        assert_eq!(choose_task_id(Some(HELD), |_| false), Ok(HELD));
+        assert_eq!(reserve_task_id(NO_TASK), Err(SchedError::NoTaskIdAvailable));
     }
 
     /// The process-wide path: whatever another test has drawn from the shared

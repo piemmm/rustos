@@ -2619,13 +2619,6 @@ impl Form {
         )))
     }
 
-    /// Choose the value at `index` for group `group`'s row `row`, through
-    /// the same adoption path a committed choice list takes.
-    ///
-    /// A test seam over the *routing* only: what it exercises is the
-    /// working copy, the dirty set and the ceiling restatement, none of
-    /// which a choice list's own keyboard mechanics (which `lib/controls`
-    /// tests) has any part in.
     /// Activate the button in row `row` of group `group`, as a press on it
     /// would.
     #[cfg(test)]
@@ -2639,6 +2632,13 @@ impl Form {
         )))
     }
 
+    /// Choose the value at `index` for group `group`'s row `row`, through
+    /// the same adoption path a committed choice list takes.
+    ///
+    /// A test seam over the *routing* only: what it exercises is the
+    /// working copy, the dirty set and the ceiling restatement, none of
+    /// which a choice list's own keyboard mechanics (which `lib/controls`
+    /// tests) has any part in.
     #[cfg(test)]
     pub(crate) fn choose_for_test(
         &mut self,

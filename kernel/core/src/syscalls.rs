@@ -191,6 +191,31 @@ fn child_selector(id: u64) -> Option<i64> {
     }
 }
 
+/// `endpoint`, for the process serving it: `NotFound` when unbound, and
+/// `PermissionDenied`, before anything about it is read, for a caller that
+/// does not own it or lacks its receive capabilities.
+fn served_endpoint(
+    caller: &CallerContext<'_>,
+    endpoint: u64,
+) -> Result<alloc::sync::Arc<CallEndpoint>, Errno> {
+    let ep = crate::callreg::lookup(EndpointId(endpoint)).ok_or(Errno::NotFound)?;
+    if !ep
+        .required_recv_caps()
+        .is_subset_of(caller.caps.effective())
+        || ep.owner() != caller.caps.process().0
+    {
+        return Err(Errno::PermissionDenied);
+    }
+    Ok(ep)
+}
+
+/// Whom a seat lease `caller` takes or presents names: its process. A lease is
+/// per-process authority the process teardown releases, and a thread's own id
+/// returns to the draw when that thread alone ends.
+fn seat_owner(caller: &CallerContext<'_>) -> SeatOwner {
+    SeatOwner(caller.process().0)
+}
+
 /// A no-op diagnostic [`Sink`] — the fail-closed default for the
 /// `log_emit` handler's `log_sink` until the boot path installs the real
 /// arch diagnostic sink.
@@ -1020,6 +1045,81 @@ where
             && ep
                 .required_send_caps()
                 .is_subset_of(caller.caps.effective())
+    }
+
+    /// `op`'s answer about the process that `instance` is, or `NotFound` once
+    /// that instance no longer holds a number.
+    ///
+    /// Per-process state is keyed by a number a successor can be admitted
+    /// under. `op` runs under the capability table's read lock, which the
+    /// instance's teardown takes as a writer before its number can return to
+    /// the draw, so it reaches the instance's own state and never a
+    /// successor's. `op` must not take the table again; it may take a registry
+    /// after it, the order every holder of both keeps.
+    fn for_instance<T>(
+        &self,
+        instance: ProcId,
+        op: impl FnOnce(ProcessId) -> Result<T, Errno>,
+    ) -> Result<T, Errno> {
+        let caps = self.caps.read();
+        let process = caps.process_of_instance(instance).ok_or(Errno::NotFound)?;
+        op(process)
+    }
+
+    /// Delegate `wanted`, which `from` holds a grant covering, to the process
+    /// instance `instance`, returning its handle; `NotFound` once that
+    /// instance has ended or `from` no longer holds the grant. The recipient is
+    /// named by instance because its number can pass to a successor.
+    fn delegate_to_instance(
+        &self,
+        from: ProcessId,
+        instance: ProcId,
+        wanted: HwResource,
+    ) -> SyscallResult {
+        self.for_instance(instance, |to| {
+            self.aspaces
+                .write()
+                .delegate_grant(from, to, wanted)
+                .ok_or(Errno::NotFound)
+        })
+    }
+
+    /// The addressing constraint and custody a DMA carve of `len` bytes under
+    /// the caller's grant `handle` is made with.
+    ///
+    /// `NotFound` for a handle that names no grant of the caller's (a forged
+    /// or another driver's resolves to nothing), `OutOfRange` for a grant
+    /// naming no DMA constraint or a length past its declared extent,
+    /// `LengthOutOfRange` for a zero length, and `PermissionDenied` for a
+    /// caller that is no driver loaded for a node: the device may outlive the
+    /// carver, so the carve needs the custody of the node it drives.
+    fn dma_carve_terms(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        len: usize,
+    ) -> Result<(crate::devres::DmaConstraint, DmaCustodian), Errno> {
+        let (resource, driver) = {
+            let aspaces = self.aspaces.read();
+            (
+                aspaces.grant(caller.process(), handle),
+                aspaces.loaded_driver(caller.process()),
+            )
+        };
+        let constraint = dma_constraint(&resource.ok_or(Errno::NotFound)?)?;
+        if len == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if constraint.max_len != 0 && (len as u64) > constraint.max_len {
+            return Err(Errno::OutOfRange);
+        }
+        let driver = driver.ok_or(Errno::PermissionDenied)?;
+        let custodian = DmaCustodian {
+            node: driver.node,
+            generation: driver.generation,
+            custody: self.dma_quarantine,
+        };
+        Ok((constraint, custodian))
     }
 
     /// Undo what `caller` just mapped under a grant revoked while it was
@@ -3254,9 +3354,8 @@ where
     /// Order matters for the *security* observer: the IRQ bindings are
     /// released first (the kernel unmasks no lines on exit,
     /// `docs/src/security/irq.md`), and the capability record is dropped
-    /// before the address-space entry so a concurrent `cap_query` racing
-    /// the teardown cannot observe a task whose caps have vanished but
-    /// whose memory registry survives.
+    /// before the address-space entry, so while the process's memory is
+    /// released no request can name the process by pid or by instance.
     ///
     /// Withdrawing the address-space registry entry drops the task's
     /// standard streams, resource limits, working directory, device
@@ -3363,7 +3462,7 @@ where
         let sched_task = caller.task_id.0;
         match m.kind {
             WaitSourceKind::Endpoint => crate::callreg::lookup(EndpointId(m.id))
-                .is_some_and(|ep| ep.owner() == sched_task && ep.has_pending()),
+                .is_some_and(|ep| ep.owner() == caller.process().0 && ep.has_pending()),
             // A reply to a request *this caller posted* has arrived (or its
             // per-request deadline has elapsed — a timeout the reap surfaces).
             // Matched on the caller's security task id, the same claimant the
@@ -3399,16 +3498,14 @@ where
             // A queued keyboard/pointer record for the live owner, or the
             // loss of the lease itself (revoked, released, seat destroyed)
             // — the woken owner drains and observes the typed refusal.
-            WaitSourceKind::SeatInput => {
-                self.seat_registry.input_ready(m.id, SeatOwner(sched_task))
-            }
+            WaitSourceKind::SeatInput => self.seat_registry.input_ready(m.id, seat_owner(caller)),
             // A delivered message waiting in the owner's mailbox — the
             // woken owner's `ipc_recv` performs the dequeue.
             WaitSourceKind::Port => self
                 .ipc
                 .read()
                 .lookup(EndpointId(m.id))
-                .is_some_and(|port| port.owner() == sched_task && port.has_pending()),
+                .is_some_and(|port| port.owner() == caller.process().0 && port.has_pending()),
             // Buffered bytes (or end-of-stream) on the caller's own pipe
             // read end — the woken owner's read performs the drain,
             // re-resolved against the open table so a descriptor closed or
@@ -6587,19 +6684,17 @@ where
 
     fn display_acquire(&self, caller: &CallerContext<'_>, seat: u64) -> SyscallResult {
         // The dispatcher already checked `CAP_DISPLAY`. The kernel-attested
-        // caller is recorded as the named seat's owner: key edges injected
-        // for that seat now follow the new surface owner (`plans/PI.md`
-        // P11), an unknown seat id fails closed (`NotFound`), and a seat
-        // held by another task refuses the claim (`SeatBusy`) rather than
-        // displacing the holder — ownership is exclusive even between two
+        // caller's process is recorded as the named seat's owner: key edges
+        // injected for that seat now follow the new surface owner
+        // (`plans/PI.md` P11), an unknown seat id fails closed (`NotFound`),
+        // and a seat held by another process refuses the claim (`SeatBusy`)
+        // rather than displacing the holder — ownership is exclusive even between two
         // principals that both hold the capability (`plans/DISPLAY.md` D2).
         // The minted lease's generation (>= 1) is returned so the client
         // holds the handle its present right is later derived from
         // (`plans/DISPLAY.md` D4); a stale pre-revoke handle can then never
         // be mistaken for the live grant.
-        let lease = self
-            .seat_registry
-            .acquire(seat, SeatOwner(caller.task_id.0))?;
+        let lease = self.seat_registry.acquire(seat, seat_owner(caller))?;
         Ok(lease.generation)
     }
 
@@ -6617,8 +6712,7 @@ where
         // release is never a global "flip it back" switch
         // (`plans/DISPLAY.md` D2). `next` decides only what the screen shows
         // in the gap that follows, never who may release.
-        self.seat_registry
-            .release(seat, SeatOwner(caller.task_id.0), next)?;
+        self.seat_registry.release(seat, seat_owner(caller), next)?;
         Ok(0)
     }
 
@@ -6702,23 +6796,22 @@ where
         // Drain one record into a stack buffer first. `read_key` resolves
         // the named seat (an unknown id fails closed `NotFound`) and
         // owner-gates the drain against that seat's live lease — only the
-        // task that acquired the seat may take records off its desktop
+        // process that acquired the seat may take records off its desktop
         // channel (`plans/DISPLAY.md` D2) — then returns `0` when the
         // channel is momentarily empty (a valid short read the caller
         // loops on) or one whole record's `WIRE_LEN`. The buffer is wiped
         // on every exit (a key edge may carry a typed character).
         let mut record_bytes = [0u8; KeyInput::WIRE_LEN];
-        let read =
-            match self
-                .seat_registry
-                .read_key(seat, SeatOwner(caller.task_id.0), &mut record_bytes)
-            {
-                Ok(read) => read,
-                Err(err) => {
-                    record_bytes.zeroize();
-                    return Err(err);
-                }
-            };
+        let read = match self
+            .seat_registry
+            .read_key(seat, seat_owner(caller), &mut record_bytes)
+        {
+            Ok(read) => read,
+            Err(err) => {
+                record_bytes.zeroize();
+                return Err(err);
+            }
+        };
         if read == 0 {
             record_bytes.zeroize();
             return Ok(0);
@@ -6805,17 +6898,15 @@ where
         // Drain one record into a stack buffer first. `read_pointer`
         // resolves the named seat (an unknown id fails closed `NotFound`)
         // and owner-gates the drain against that seat's live lease — only
-        // the task that acquired the seat may take records off its pointer
+        // the process that acquired the seat may take records off its pointer
         // channel — then returns `0` when the channel is momentarily empty
         // (a valid short read the caller loops on) or one whole record's
         // `WIRE_LEN`. A pointer record carries no typed content, so no
         // zeroisation is needed on the staging buffer.
         let mut record_bytes = [0u8; PointerInput::WIRE_LEN];
-        let read = self.seat_registry.read_pointer(
-            seat,
-            SeatOwner(caller.task_id.0),
-            &mut record_bytes,
-        )?;
+        let read = self
+            .seat_registry
+            .read_pointer(seat, seat_owner(caller), &mut record_bytes)?;
         if read == 0 {
             return Ok(0);
         }
@@ -7034,46 +7125,8 @@ where
         len: usize,
         device_out: u64,
     ) -> SyscallResult {
-        // step 2 (capability) was enforced by the dispatcher: the
-        // `dma_alloc` spec carries `CAP_MEM_DMA`. Step 3 (validate every
-        // input) is here. Resolve `handle` to a granted resource **for the
-        // calling task** (`caller.task_id` is kernel-trusted), so a forged or
-        // another driver's handle resolves to nothing and is refused
-        // (— a driver reaches only the resources its
-        // matched node requested), exactly as `mmio_map`.
-        let (resource, driver) = {
-            let aspaces = self.aspaces.read();
-            (
-                aspaces.grant(caller.process(), handle),
-                aspaces.loaded_driver(caller.process()),
-            )
-        };
-        let Some(resource) = resource else {
-            return Err(Errno::NotFound);
-        };
-        // The grant must name a DMA constraint; reject any other kind before
-        // carving (fail closed).
-        let constraint = dma_constraint(&resource)?;
-        // A zero-length buffer names nothing; reject it before any carve.
-        if len == 0 {
-            return Err(Errno::LengthOutOfRange);
-        }
-        // The buffer must fit the grant's declared maximum extent, when one
-        // is declared (`max_len == 0` means no declared maximum). Reject an
-        // over-large request before carving.
-        if constraint.max_len != 0 && (len as u64) > constraint.max_len {
-            return Err(Errno::OutOfRange);
-        }
-        // The device may outlive the caller, so a carve needs custody for the
-        // node the caller drives: only a driver loaded for one may carve.
-        let Some(driver) = driver else {
-            return Err(Errno::PermissionDenied);
-        };
-        let custodian = DmaCustodian {
-            node: driver.node,
-            generation: driver.generation,
-            custody: self.dma_quarantine,
-        };
+        // The dispatcher enforced `CAP_MEM_DMA`.
+        let (constraint, custodian) = self.dma_carve_terms(caller, handle, len)?;
         // Mechanism: the installed producer carves a physically-contiguous,
         // zeroed, coherent block bounded by the grant's `addr_limit` into the
         // caller's own live address space. The default `NULL_DMA_ALLOC_FACILITY`
@@ -8330,9 +8383,7 @@ where
         // re-acquires on foreground wake. Every kernel-owned topic refuses
         // outright inside `notice::publish`.
         if matches!(topic, NoticeTopic::Desktop)
-            && !self
-                .seat_registry
-                .holds_live_lease(SeatOwner(caller.task_id.0))
+            && !self.seat_registry.holds_live_lease(seat_owner(caller))
         {
             return Err(Errno::PermissionDenied);
         }
@@ -8736,9 +8787,7 @@ where
             && !caller
                 .caps
                 .has(tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED)
-            && self
-                .seat_registry
-                .holds_live_lease(SeatOwner(caller.task_id.0));
+            && self.seat_registry.holds_live_lease(seat_owner(caller));
         let endpoint = if seat_attested {
             CallEndpoint::create_seat_attested(
                 EndpointId(endpoint_id),
@@ -8801,21 +8850,7 @@ where
         ticket_out: u64,
         flags: CallRecvFlags,
     ) -> SyscallResult {
-        // resolve the endpoint, then gate the *server* against the
-        // endpoint's required receive capability and confirm it is the owning
-        // task — both before any state is touched. A foreign or
-        // insufficiently-capable task is denied (no
-        // ambient authority); an unknown endpoint fails closed.
-        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
-            return Err(Errno::NotFound);
-        };
-        if !ep
-            .required_recv_caps()
-            .is_subset_of(caller.caps.effective())
-            || ep.owner() != caller.caps.process().0
-        {
-            return Err(Errno::PermissionDenied);
-        }
+        let ep = served_endpoint(caller, endpoint)?;
 
         // Block until a request fits and is dequeued, parking off the run
         // queue between polls (no busy yield). Register on
@@ -8903,17 +8938,7 @@ where
         reply: u64,
         reply_len: usize,
     ) -> SyscallResult {
-        // resolve + gate before touching state, exactly as `call_recv`.
-        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
-            return Err(Errno::NotFound);
-        };
-        if !ep
-            .required_recv_caps()
-            .is_subset_of(caller.caps.effective())
-            || ep.owner() != caller.caps.process().0
-        {
-            return Err(Errno::PermissionDenied);
-        }
+        let ep = served_endpoint(caller, endpoint)?;
 
         // Bound the reply copy before allocating: refuse a reply larger than
         // the endpoint advertises (the same `MessageTooLarge` `reply` would
@@ -8941,21 +8966,7 @@ where
         origin: u64,
         origin_cap: usize,
     ) -> SyscallResult {
-        // Resolve + gate before touching state, exactly as `call_recv` /
-        // `call_reply`: the reader must hold the endpoint's required receive
-        // capability and be the owning task. A foreign or insufficiently
-        // capable task is denied (no ambient authority); an unknown endpoint
-        // fails closed.
-        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
-            return Err(Errno::NotFound);
-        };
-        if !ep
-            .required_recv_caps()
-            .is_subset_of(caller.caps.effective())
-            || ep.owner() != caller.caps.process().0
-        {
-            return Err(Errno::PermissionDenied);
-        }
+        let ep = served_endpoint(caller, endpoint)?;
 
         // The reader's buffer must hold a whole origin; a short buffer fails
         // closed rather than truncating the record.
@@ -8969,9 +8980,7 @@ where
         // caller's identity only while it is actively servicing that caller's
         // call. The origin was snapshotted from the caller's own task state at
         // post time, so it cannot be forged on the wire.
-        let Some(peer) = ep.peer_origin(CallTicket(ticket)) else {
-            return Err(Errno::NotFound);
-        };
+        let peer = ep.peer_origin(CallTicket(ticket)).ok_or(Errno::NotFound)?;
         let bytes = peer.to_le_bytes();
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(origin), &bytes)
@@ -8989,34 +8998,23 @@ where
         ticket: u64,
         seat: u64,
     ) -> SyscallResult {
-        // Resolve + gate before touching state, exactly as
-        // `call_peer_origin`: the reader must hold the endpoint's required
-        // receive capability and be the owning task (no ambient authority);
-        // an unknown endpoint fails closed.
-        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
-            return Err(Errno::NotFound);
-        };
-        if !ep
-            .required_recv_caps()
-            .is_subset_of(caller.caps.effective())
-            || ep.owner() != caller.caps.process().0
-        {
-            return Err(Errno::PermissionDenied);
-        }
+        let ep = served_endpoint(caller, endpoint)?;
         // The kernel-attested identity snapshotted for this in-service
         // ticket: a server learns seat facts only about a caller it is
         // actively servicing (between `call_recv` and `call_reply`), so
         // seat ownership is never enumerable through this path.
-        let Some(peer) = ep.peer_origin(CallTicket(ticket)) else {
-            return Err(Errno::NotFound);
-        };
+        let peer = ep.peer_origin(CallTicket(ticket)).ok_or(Errno::NotFound)?;
         // Read the seat's *live* lease for the peer — fresh at check time,
         // exactly like the kernel-side present gate — and answer with its
         // generation. Every refusal is typed and fail-closed: `SeatNotOwner`
         // (unowned or another task holds it), `SeatRevoked` (the peer's
-        // unacknowledged eviction), `NotFound` (no such seat).
-        let lease = self.seat_registry.live_lease(seat, SeatOwner(peer.pid()))?;
-        Ok(lease.generation)
+        // unacknowledged eviction), `NotFound` (no such seat, or a poster that
+        // has ended).
+        self.for_instance(peer.proc_id(), |process| {
+            self.seat_registry
+                .live_lease(seat, SeatOwner(process.0))
+                .map(|lease| lease.generation)
+        })
     }
 
     fn call_peer_holds(
@@ -9026,30 +9024,36 @@ where
         ticket: u64,
         resource: u64,
     ) -> SyscallResult {
-        // Gated as `call_peer_seat`: only the endpoint's server, holding its
-        // receive capability, learns anything, and only about the caller it
-        // is serving.
-        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
-            return Err(Errno::NotFound);
-        };
-        if !ep
-            .required_recv_caps()
-            .is_subset_of(caller.caps.effective())
-            || ep.owner() != caller.caps.process().0
+        let ep = served_endpoint(caller, endpoint)?;
+        // Only a DMA controller serving its own endpoint asks, and only about
+        // what it programs a channel from: one of its own request lines, or a
+        // register window. Anything wider would let any server probe the
+        // authority of whoever calls it.
+        if !self
+            .aspaces
+            .read()
+            .holds_dma_controller_duty(caller.process(), endpoint)
         {
             return Err(Errno::PermissionDenied);
         }
-        let Some(peer) = ep.peer_origin(CallTicket(ticket)) else {
-            return Err(Errno::NotFound);
-        };
+        let peer = ep.peer_origin(CallTicket(ticket)).ok_or(Errno::NotFound)?;
         let mut record = [0u8; HwResource::WIRE_LEN];
         self.copy_in_user(caller, resource, &mut record)?;
         let resource = HwResource::from_bytes(&record)?;
-        if self
-            .aspaces
-            .read()
-            .grant_covers(ProcessId(peer.pid()), &resource)
-        {
+        let asked_about = match resource.kind() {
+            Some(HwResourceKind::DmaRequest) => resource
+                .dma_request_line()
+                .is_ok_and(|line| line.endpoint() == endpoint),
+            Some(HwResourceKind::Mmio) => true,
+            _ => false,
+        };
+        if !asked_about {
+            return Err(Errno::OutOfRange);
+        }
+        let held = self.for_instance(peer.proc_id(), |process| {
+            Ok(self.aspaces.read().grant_covers(process, &resource))
+        })?;
+        if held {
             Ok(0)
         } else {
             Err(Errno::PermissionDenied)
@@ -9064,39 +9068,17 @@ where
         node: u64,
         node_cap: usize,
     ) -> SyscallResult {
-        // Gated as `call_peer_holds`: only the endpoint's server, holding its
-        // receive capability, learns anything, and only about the caller it
-        // is serving.
-        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
-            return Err(Errno::NotFound);
-        };
-        if !ep
-            .required_recv_caps()
-            .is_subset_of(caller.caps.effective())
-            || ep.owner() != caller.caps.process().0
-        {
-            return Err(Errno::PermissionDenied);
-        }
+        let ep = served_endpoint(caller, endpoint)?;
         if node_cap < tairix_abi::HwNode::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let Some(peer) = ep.peer_origin(CallTicket(ticket)) else {
-            return Err(Errno::NotFound);
-        };
-        // By instance, never by the reusable pid, so a poster that has exited
-        // names nothing. The instance is read again once the node is known: a
-        // pid never returns to an instance it has left, so a match proves the
-        // node was the poster's and not a successor's on its number.
-        let instance = peer.proc_id();
-        let Some(process) = self.caps.read().process_of_instance(instance) else {
-            return Err(Errno::NotFound);
-        };
-        let Some(node_id) = self.aspaces.read().loaded_node(process) else {
-            return Err(Errno::NotFound);
-        };
-        if self.caps.read().instance_of(process) != instance {
-            return Err(Errno::NotFound);
-        }
+        let peer = ep.peer_origin(CallTicket(ticket)).ok_or(Errno::NotFound)?;
+        let node_id = self.for_instance(peer.proc_id(), |process| {
+            self.aspaces
+                .read()
+                .loaded_node(process)
+                .ok_or(Errno::NotFound)
+        })?;
         let Some(record) = self.hw_tree.node(node_id)? else {
             return Err(Errno::NotFound);
         };
@@ -9713,10 +9695,7 @@ where
         if crate::sharedreg::is_retired(region) {
             return Err(Errno::PermissionDenied);
         }
-        // Resolve the recipient as the live serving task of `endpoint` at
-        // grant time — never a caller-supplied (recyclable) PID, so the
-        // grant cannot land on a reused task id. An unknown endpoint fails
-        // closed before any state changes.
+        // An unknown endpoint fails closed before any state changes.
         let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
             return Err(Errno::NotFound);
         };
@@ -9731,10 +9710,7 @@ where
         // task itself, so the number is useless to a bystander. A server that
         // ended since the lookup, or a caller whose grant was revoked since
         // the check above, delegates nothing.
-        self.aspaces
-            .write()
-            .delegate_grant(caller.process(), ProcessId(ep.owner()), wanted)
-            .ok_or(Errno::NotFound)
+        self.delegate_to_instance(caller.process(), ep.owner_instance(), wanted)
     }
 
     fn shm_create_dma(
@@ -9750,33 +9726,7 @@ where
         if !caller.caps.has(tairix_abi::CapabilityId::SHM) {
             return Err(Errno::PermissionDenied);
         }
-        let (resource, driver) = {
-            let aspaces = self.aspaces.read();
-            (
-                aspaces.grant(caller.process(), handle),
-                aspaces.loaded_driver(caller.process()),
-            )
-        };
-        let Some(resource) = resource else {
-            return Err(Errno::NotFound);
-        };
-        let constraint = dma_constraint(&resource)?;
-        if len == 0 {
-            return Err(Errno::LengthOutOfRange);
-        }
-        if constraint.max_len != 0 && (len as u64) > constraint.max_len {
-            return Err(Errno::OutOfRange);
-        }
-        // The device may outlive the caller, so the region needs custody for
-        // the node the caller drives: only a driver loaded for one may carve.
-        let Some(driver) = driver else {
-            return Err(Errno::PermissionDenied);
-        };
-        let custodian = DmaCustodian {
-            node: driver.node,
-            generation: driver.generation,
-            custody: self.dma_quarantine,
-        };
+        let (constraint, custodian) = self.dma_carve_terms(caller, handle, len)?;
         let pages = (len as u64).div_ceil(PAGE_SIZE as u64);
         let made = crate::sharedreg::create_dma(
             self.shared_mem_facility,
@@ -9845,25 +9795,11 @@ where
         if crate::sharedreg::is_retired(region) {
             return Err(Errno::PermissionDenied);
         }
-        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
-            return Err(Errno::NotFound);
-        };
-        if !ep
-            .required_recv_caps()
-            .is_subset_of(caller.caps.effective())
-            || ep.owner() != caller.caps.process().0
-        {
-            return Err(Errno::PermissionDenied);
-        }
-        // The recipient is the task the kernel recorded as posting the call
-        // being served, and only while it is being served.
-        let Some(peer) = ep.peer_origin(CallTicket(ticket)) else {
-            return Err(Errno::NotFound);
-        };
-        self.aspaces
-            .write()
-            .delegate_grant(caller.process(), ProcessId(peer.pid()), wanted)
-            .ok_or(Errno::NotFound)
+        let ep = served_endpoint(caller, endpoint)?;
+        // The recipient is the instance the kernel recorded as posting the
+        // call being served, and only while it is being served.
+        let peer = ep.peer_origin(CallTicket(ticket)).ok_or(Errno::NotFound)?;
+        self.delegate_to_instance(caller.process(), peer.proc_id(), wanted)
     }
 
     fn call_grant(
@@ -9894,10 +9830,7 @@ where
         if !self.aspaces.read().grant_covers(caller.process(), &wanted) {
             return Err(Errno::NotFound);
         }
-        // Resolve the recipient as the live serving task of `recipient` at
-        // grant time — never a caller-supplied (recyclable) PID, so the grant
-        // cannot land on a reused task id. An unknown endpoint fails closed
-        // before any state changes.
+        // An unknown endpoint fails closed before any state changes.
         let Some(ep) = crate::callreg::lookup(EndpointId(recipient)) else {
             return Err(Errno::NotFound);
         };
@@ -9911,10 +9844,7 @@ where
         // idempotent, so repeating the delegation cannot grow the recipient's
         // grant table, and a server that ended since the lookup, or a caller
         // whose grant was revoked since the check above, delegates nothing.
-        self.aspaces
-            .write()
-            .delegate_grant(caller.process(), ProcessId(ep.owner()), wanted)
-            .ok_or(Errno::NotFound)
+        self.delegate_to_instance(caller.process(), ep.owner_instance(), wanted)
     }
 
     fn shm_unmap(&self, caller: &CallerContext<'_>, base: u64, _len: usize) -> SyscallResult {
@@ -9940,9 +9870,10 @@ where
         // No capability (the dispatcher gates none): a wait-set observes only
         // resources the caller already holds, each owner-checked when it is
         // added. Mint a fresh handle and record an empty set owned by the
-        // kernel-trusted `caller.task_id` (never a caller-supplied value), so
-        // only this task can later add to, wait on, or have the set observed.
-        Ok(crate::waitset::create(caller.task_id.0))
+        // kernel-trusted caller's process (never a caller-supplied value),
+        // which releases it at teardown, so only its threads can later add
+        // to, wait on, or have the set observed.
+        Ok(crate::waitset::create(caller.process().0))
     }
 
     // One dispatch owner-checks the resource each wait-set member names
@@ -9978,7 +9909,7 @@ where
                 match kind {
                     WaitSourceKind::Endpoint => {
                         let owned = crate::callreg::lookup(EndpointId(id))
-                            .is_some_and(|ep| ep.owner() == caller.task_id.0);
+                            .is_some_and(|ep| ep.owner() == caller.process().0);
                         if !owned {
                             return Err(Errno::NotFound);
                         }
@@ -10027,15 +9958,15 @@ where
                     }
                     WaitSourceKind::SeatInput => {
                         // A wait-set may observe a seat's input only for the
-                        // task holding its live lease (`display_acquire`
-                        // bound the caller). Every refusal — unknown seat,
+                        // process holding its live lease (`display_acquire`
+                        // bound the caller's). Every refusal — unknown seat,
                         // another owner, a revoked lease — collapses to the
                         // same `NotFound` the other kinds use: `waitset_ctl`
                         // carries no capability gate, so a typed seat error
                         // here would be an existence/ownership oracle.
                         if self
                             .seat_registry
-                            .live_lease(id, SeatOwner(caller.task_id.0))
+                            .live_lease(id, seat_owner(caller))
                             .is_err()
                         {
                             return Err(Errno::NotFound);
@@ -10052,7 +9983,7 @@ where
                             .ipc
                             .read()
                             .lookup(EndpointId(id))
-                            .is_some_and(|port| port.owner() == caller.task_id.0);
+                            .is_some_and(|port| port.owner() == caller.process().0);
                         if !owned {
                             return Err(Errno::NotFound);
                         }
@@ -10192,7 +10123,7 @@ where
                 // duplicate add do we register the file-change watch, so a
                 // rejected add never leaks a watch registration.
                 crate::waitset::add(
-                    caller.task_id.0,
+                    caller.process().0,
                     set,
                     crate::waitset::Member {
                         kind,
@@ -10210,7 +10141,7 @@ where
                     // reported.
                     let baseline = crate::fswatch::watch_add(member_file);
                     let _ = crate::waitset::advance_observed(
-                        caller.task_id.0,
+                        caller.process().0,
                         set,
                         WaitSourceKind::File,
                         id,
@@ -10225,7 +10156,7 @@ where
                     // start-up and is then told only about moves.
                     let baseline = NoticeTopic::from_u64(id).map_or(0, crate::notice::generation);
                     let _ = crate::waitset::advance_observed(
-                        caller.task_id.0,
+                        caller.process().0,
                         set,
                         WaitSourceKind::SystemNotice,
                         id,
@@ -10236,7 +10167,7 @@ where
             }
             // Removing a member only edits the caller's own set; the registry
             // owner-checks the set and fails closed if the member is absent.
-            WaitSetOp::Del => crate::waitset::remove(caller.task_id.0, set, kind, id).map(|()| 0),
+            WaitSetOp::Del => crate::waitset::remove(caller.process().0, set, kind, id).map(|()| 0),
         }
     }
 
@@ -10258,7 +10189,7 @@ where
         // the member the previous wait reported, which is what makes the
         // first-ready scan below a fair round robin rather than a fixed
         // priority by registration order.
-        let members = crate::waitset::members(caller.task_id.0, set)?;
+        let members = crate::waitset::members(caller.process().0, set)?;
 
         let cpu = SchedulerArch::current_cpu(self.arch);
         let sched_task = caller.task_id.0;
@@ -10595,7 +10526,7 @@ where
             {
                 let generation = crate::fswatch::current_generation(m.file);
                 let _ = crate::waitset::advance_observed(
-                    caller.task_id.0,
+                    caller.process().0,
                     set,
                     WaitSourceKind::File,
                     id,
@@ -10614,7 +10545,7 @@ where
             if let Ok(topic) = NoticeTopic::from_u64(id) {
                 let generation = crate::notice::generation(topic);
                 let _ = crate::waitset::advance_observed(
-                    caller.task_id.0,
+                    caller.process().0,
                     set,
                     WaitSourceKind::SystemNotice,
                     id,
@@ -10626,7 +10557,7 @@ where
         // wait scans the rest of the set first. Recorded only once the token
         // has actually reached the caller: a wait that failed to report
         // reported nothing, and must not cost the member its turn.
-        let _ = crate::waitset::note_reported(caller.task_id.0, set, kind, id);
+        let _ = crate::waitset::note_reported(caller.process().0, set, kind, id);
         Ok(0)
     }
 
@@ -10912,7 +10843,7 @@ where
         if !registry.contains(recipient) {
             return Err(Errno::NotFound);
         }
-        Ok(registry.mint_fd_delegation(recipient, instance, file, access))
+        registry.mint_fd_delegation(recipient, instance, caller.process(), file, access)
     }
 
     fn fd_redeem(&self, caller: &CallerContext<'_>, handle: u64) -> SyscallResult {
@@ -11669,9 +11600,9 @@ where
 /// loading child that failed before entering user mode provably never
 /// acquired.
 ///
-/// The three registry mutations take separate write locks: the scheduler
-/// holds the id until this reclaim has run, so a task being reclaimed is
-/// never concurrently admitted under the same id and there is no cross-lock
+/// The registry mutations take separate write locks. The process's number is
+/// returned to the id draw only after the last of them, so no admission can be
+/// issued it while any record keyed by it survives, and there is no cross-lock
 /// invariant to hold.
 fn reclaim_process_bookkeeping(
     caps: &RwLock<CapTable>,
@@ -11719,6 +11650,7 @@ fn reclaim_process_bookkeeping(
     // and any frozen space snapshot all go together, so no stale entry
     // outlives the process.
     aspaces.write().withdraw(process);
+    tairix_kernel_sched_api::release_task_id(process.leader_task().0);
 }
 
 /// The kernel-attested identity a freshly spawned child is admitted under:
@@ -12738,6 +12670,13 @@ where
                     _ => AdmitError::SchedulerFull,
                 })?;
         let sec_id = ProcessId::leader(SecTaskId(task_id));
+        // Held from here until the process teardown's last step, since a kill
+        // removes the task before that teardown withdraws what it keys by the
+        // number.
+        if tairix_kernel_sched_api::reserve_task_id(task_id).is_err() {
+            let _ = self.sched.exit(task_id);
+            return Err(AdmitError::OutOfMemory);
+        }
 
         // A node has at most one live driver. Claimed before any other state
         // of the child exists, so a refusal leaves only the parked task.
@@ -12745,6 +12684,7 @@ where
             let claimed = self.aspaces.write().admit_driver(sec_id, node.id);
             if let Err(err) = claimed {
                 let _ = self.sched.exit(task_id);
+                tairix_kernel_sched_api::release_task_id(task_id);
                 return Err(if err == Errno::Busy {
                     AdmitError::NodeBusy
                 } else {
@@ -14009,6 +13949,30 @@ mod tests {
         sink: &(dyn Sink + Sync),
     ) -> TaskCapabilities {
         make_owned_caps_record(task, 1000, items, sink)
+    }
+
+    /// `task`'s record as its admission leaves it: carrying an instance of its
+    /// own, and installed in `table`, where a mint or query that names a
+    /// process by instance finds it.
+    fn admitted_record(
+        table: &RwLock<CapTable>,
+        task: u64,
+        items: &[CapabilityId],
+        sink: &(dyn Sink + Sync),
+    ) -> TaskCapabilities {
+        let mut raw = [0xAD; PROC_ID_LEN];
+        raw[..8].copy_from_slice(&task.to_le_bytes());
+        let record = make_caps_record(task, items, sink).with_proc_id(ProcId::from_raw(raw));
+        table.write().insert(record.clone());
+        record
+    }
+
+    /// Replace `task`'s record with a successor's: another instance admitted
+    /// under the same number once the first has ended.
+    fn admit_successor(table: &RwLock<CapTable>, task: u64, sink: &(dyn Sink + Sync)) {
+        let record =
+            make_caps_record(task, &[], sink).with_proc_id(ProcId::from_raw([0x5C; PROC_ID_LEN]));
+        table.write().insert(record);
     }
 
     /// A capability record for `task` owned by `uid` — the kernel-attested
@@ -20208,6 +20172,59 @@ mod tests {
         );
     }
 
+    /// A kill removes a parked victim's task before tearing the process down,
+    /// so the scheduler stops holding its number while every record keyed by
+    /// it still stands. The admission's own hold keeps the number from the
+    /// draw until the teardown has withdrawn the last of them.
+    #[test]
+    fn an_admitted_childs_number_is_held_until_its_teardown_withdraws_its_records() {
+        use tairix_kernel_sched_api::{choose_task_id, ExitDisposition, SchedError};
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let program = EmbeddedProgram {
+            path: SPAWN_PATH,
+            rxe: SPAWN_RXE,
+            caps: &[],
+            args: &[],
+        };
+        let ctx = KernelSpawnCtx::new(
+            sink,
+            &sched,
+            &table,
+            &aspaces,
+            arch.as_ref(),
+            ProcessId(0),
+            &NULL_PROCESS_WAIT,
+            DescriptorTable::standard(),
+            Vec::new(),
+            &[],
+            None,
+            tairix_abi::ProcId::from_raw([0x44; 16]),
+            ProcName::EMPTY,
+            alloc::vec::Vec::new(),
+            SpawnCredential::system(),
+            false,
+        );
+        let pid = admit_prebuilt_child(&ctx, &program).expect("child admitted");
+        let process = ProcessId(pid);
+
+        assert_eq!(sched.exit(pid), Ok(ExitDisposition::Quiesced));
+        assert_eq!(
+            choose_task_id(Some(pid), |_| false),
+            Err(SchedError::TaskIdInUse),
+            "a number that still keys a capability record and an address space was drawable"
+        );
+
+        reclaim_process_bookkeeping(&table, &aspaces, &NULL_PROCESS_WAIT, None, process);
+        assert!(table.read().caps_of_process(process).is_none());
+        assert_eq!(aspaces.read().stale_task_entry(process), None);
+        assert_eq!(choose_task_id(Some(pid), |_| false), Ok(pid));
+    }
+
     /// Unwrap the error of a deferred load, panicking if it unexpectedly
     /// succeeded. [`ReadyToEnter`] is not `Debug` (it holds boxed closures),
     /// so a direct `expect_err` will not compile. Takes the result **by
@@ -23853,6 +23870,62 @@ mod tests {
         assert_eq!(
             h.keyboard_read(&ctx, 42, 0x1000, KeyInput::WIRE_LEN),
             Err(Errno::NotFound)
+        );
+    }
+
+    /// A seat lease is the acquiring thread's process's: a sibling thread
+    /// drains it, and the process teardown releases it. Keyed
+    /// by the acquiring thread, it would outlive the process and pass to
+    /// whichever task drew that thread's id next.
+    #[test]
+    fn a_seat_lease_belongs_to_the_acquiring_threads_process() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat);
+        let process = crate::test_boot::claim_task();
+        let worker = crate::test_boot::claim_peer_task();
+        let caps = make_caps_record(process, &[], sink);
+        let worker_ctx = CallerContext {
+            task_id: SecTaskId(worker),
+            caps: &caps,
+        };
+        let leader_ctx = CallerContext {
+            task_id: SecTaskId(process),
+            caps: &caps,
+        };
+
+        assert_eq!(h.display_acquire(&worker_ctx, SEAT_PRIMARY), Ok(1));
+        assert_eq!(
+            h.keyboard_read(&leader_ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
+            Ok(0),
+            "a sibling of the acquiring thread drains the seat"
+        );
+
+        seat.release_owned_by(SeatOwner(process), sink);
+        let other = crate::test_boot::claim_peer_task();
+        let other_caps = make_caps_record(other, &[], sink);
+        let other_ctx = CallerContext {
+            task_id: SecTaskId(other),
+            caps: &other_caps,
+        };
+        assert_eq!(
+            h.display_acquire(&other_ctx, SEAT_PRIMARY),
+            Ok(2),
+            "the process teardown left the seat held"
         );
     }
 
@@ -36233,7 +36306,7 @@ mod tests {
 
         // A live endpoint owned by the service task: the grant lands on the
         // endpoint's *server*, resolved kernel-side at grant time.
-        let server_caps = make_caps_record(server, &[], sink);
+        let server_caps = admitted_record(&table, server, &[], sink);
         let id = 0xD15_2001;
         let ep = Arc::new(
             CallEndpoint::create(
@@ -36269,6 +36342,18 @@ mod tests {
         // …and the handle is meaningless when presented by anyone else
         // (owner-checked at `shm_map`; the number is useless to a bystander).
         assert_eq!(aspaces.read().grant(ProcessId(stranger), handle), None);
+
+        // The server ends and a successor is admitted under its number, where
+        // the endpoint record can still be reached: the successor is not the
+        // server, and is minted nothing.
+        let _second = aspaces
+            .write()
+            .mint_grant(ProcessId(holder), tairix_abi::HwResource::shared(43));
+        admit_successor(&table, server, sink);
+        assert_eq!(h.shm_grant(&ctx, 43, id), Err(Errno::NotFound));
+        assert!(!aspaces
+            .read()
+            .grant_covers(ProcessId(server), &tairix_abi::HwResource::shared(43)));
         crate::callreg::unregister(EndpointId(id));
     }
 
@@ -36310,7 +36395,8 @@ mod tests {
         let lent = tairix_abi::HwResource::endpoint(0xD15_3000);
         aspaces.write().mint_grant(ProcessId(donor), region);
         aspaces.write().mint_grant(ProcessId(donor), lent);
-        let server_caps = make_caps_record(server, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
+        let server_caps =
+            admitted_record(&table, server, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
         let endpoint = |id: u64, send: &[CapabilityId]| {
             let mut send_caps = CapabilitySet::empty();
             for cap in send {
@@ -36404,7 +36490,7 @@ mod tests {
         // grant lands on that endpoint's *server*, resolved kernel-side at
         // grant time rather than from a caller-supplied pid.
         let composer = crate::test_boot::claim_peer_task();
-        let server_caps = make_caps_record(composer, &[], sink);
+        let server_caps = admitted_record(&table, composer, &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(registry),
@@ -36455,6 +36541,17 @@ mod tests {
             h.call_grant(&ctx, member, registry),
             Ok(handle),
             "repeating a delegation must not mint a second entry"
+        );
+        // A successor admitted under the composer's number is not the
+        // composer, though the endpoint record still names that number.
+        let _other = aspaces.write().mint_grant(
+            ProcessId(donor.0),
+            tairix_abi::HwResource::endpoint(member + 2),
+        );
+        admit_successor(&table, composer, sink);
+        assert_eq!(
+            h.call_grant(&ctx, member + 2, registry),
+            Err(Errno::NotFound)
         );
         crate::callreg::unregister(EndpointId(registry));
     }
@@ -37351,7 +37448,7 @@ mod tests {
         // test tearing down a shared low id cancels this call and the reads
         // below answer "no such ticket" instead of the seat's own refusal.
         let client = crate::test_boot::claim_task();
-        let client_caps = make_caps_record(client, &[], sink);
+        let client_caps = admitted_record(&table, client, &[], sink);
         let ticket = ep
             .post(&client_caps, client, b"present", u64::MAX, sink)
             .expect("posted");
@@ -37415,12 +37512,21 @@ mod tests {
             h.call_peer_seat(&ctx, id, ticket.0, SEAT_PRIMARY),
             Err(Errno::SeatRevoked)
         );
+        // Once the poster has ended and its number been issued to a successor,
+        // the seat's record under that number is not the poster's.
+        admit_successor(&table, client, sink);
+        assert_eq!(
+            h.call_peer_seat(&ctx, id, ticket.0, SEAT_PRIMARY),
+            Err(Errno::NotFound)
+        );
         crate::callreg::unregister(EndpointId(id));
     }
 
-    /// A served endpoint with one call posted by `client` and received, so the
-    /// call is in service: the state every peer query answers about.
+    /// A served endpoint with one call posted by `client`, admitted into
+    /// `table`, and received, so the call is in service: the state every peer
+    /// query answers about.
     fn in_service_call(
+        table: &RwLock<CapTable>,
         id: u64,
         server_caps: &TaskCapabilities,
         client: u64,
@@ -37442,7 +37548,7 @@ mod tests {
             .expect("unrestricted endpoint"),
         );
         crate::callreg::register(ep.clone(), sink).expect("registered");
-        let client_caps = make_caps_record(client, &[], sink);
+        let client_caps = admitted_record(table, client, &[], sink);
         let ticket = ep
             .post(&client_caps, client, b"open", u64::MAX, sink)
             .expect("posted");
@@ -37461,8 +37567,124 @@ mod tests {
         )
     }
 
-    /// `call_peer_holds` answers the endpoint's server, about the caller it is
-    /// serving, whether that caller holds a grant covering a quoted record.
+    /// A call on the DMA controller endpoint `dma_request_record` names, posted
+    /// by `client` holding that line, a FIFO window and an interrupt line, and
+    /// in service with the endpoint's server: what `call_peer_holds` answers
+    /// about. Returns the endpoint, the ticket, and the controller's duty.
+    fn dma_holds_scene(
+        table: &RwLock<CapTable>,
+        aspaces: &RwLock<AddressSpaceRegistry>,
+        server_caps: &TaskCapabilities,
+        client: u64,
+        sink: &'static (dyn Sink + Sync),
+    ) -> (u64, CallTicket, tairix_abi::HwResource) {
+        use tairix_abi::driver::dmaengine::DmaControllerDuty;
+        let request = dma_request_record();
+        let id = request
+            .dma_request_line()
+            .expect("a request line")
+            .endpoint();
+        let (_ep, ticket) = in_service_call(table, id, server_caps, client, sink);
+        for held in [
+            request,
+            tairix_abi::HwResource::mmio(0xFE20_3000, 0x24),
+            tairix_abi::HwResource::irq(33, 1),
+        ] {
+            aspaces.write().mint_grant(ProcessId(client), held);
+        }
+        let duty = tairix_abi::HwResource::dma_controller(
+            &DmaControllerDuty::new(id, None).expect("a valid duty"),
+        );
+        (id, ticket, duty)
+    }
+
+    /// Stage `record` in `server`'s memory at `0x1000`, where a query quotes
+    /// it from, holding `duty` when it is given.
+    fn quote_for(
+        aspaces: &RwLock<AddressSpaceRegistry>,
+        server: u64,
+        record: &[u8],
+        duty: Option<tairix_abi::HwResource>,
+    ) {
+        aspaces.write().withdraw(ProcessId(server));
+        let (space, physmap) = call_aspace(record);
+        aspaces
+            .write()
+            .register(ProcessId(server), space, physmap)
+            .expect("registration succeeds");
+        if let Some(duty) = duty {
+            aspaces.write().mint_grant(ProcessId(server), duty);
+        }
+    }
+
+    /// `call_peer_holds` answers only the DMA controller serving its own
+    /// endpoint, and only whether the caller holds one of that controller's
+    /// request lines or a register window a channel may feed.
+    #[test]
+    fn call_peer_holds_answers_a_controller_only_about_its_lines_and_windows() {
+        use tairix_abi::driver::dmaengine::{DmaRequestLine, DMA_CONTROLLER_ENDPOINTS};
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let server = crate::test_boot::claim_peer_task();
+        let client = crate::test_boot::claim_task();
+        let server_caps = make_caps_record(server, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
+        let (id, ticket, duty) = dma_holds_scene(&table, &aspaces, &server_caps, client, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(server),
+            caps: &server_caps,
+        };
+        let answer = |record: &[u8], duty| {
+            quote_for(&aspaces, server, record, duty);
+            h.call_peer_holds(&ctx, id, ticket.0, 0x1000)
+        };
+        let request = dma_request_record().to_le_bytes();
+
+        // Serving the endpoint is not enough: only the controller's duty asks.
+        assert_eq!(answer(&request, None), Err(Errno::PermissionDenied));
+        assert_eq!(answer(&request, Some(duty)), Ok(0));
+        // A FIFO inside the client's window is covered; one past it is not.
+        let fifo = |base| tairix_abi::HwResource::mmio(base, 4).to_le_bytes();
+        assert_eq!(answer(&fifo(0xFE20_3004), Some(duty)), Ok(0));
+        assert_eq!(
+            answer(&fifo(0xFE20_3024), Some(duty)),
+            Err(Errno::PermissionDenied)
+        );
+        // Another request line on the same controller is a different grant.
+        let line = |endpoint, index, cells: &[u32], name: &[u8]| {
+            tairix_abi::HwResource::dma_request(
+                &DmaRequestLine::new(endpoint, index, cells, name).expect("valid line"),
+            )
+            .to_le_bytes()
+        };
+        assert_eq!(
+            answer(&line(id, 1, &[3], b"rx"), Some(duty)),
+            Err(Errno::PermissionDenied)
+        );
+        // A line on another controller, and a kind no channel is programmed
+        // from, is not asked about, though the client holds the interrupt.
+        let elsewhere = line(DMA_CONTROLLER_ENDPOINTS.endpoint(30), 0, &[2], b"tx");
+        let interrupt = tairix_abi::HwResource::irq(33, 1).to_le_bytes();
+        for record in [elsewhere, interrupt] {
+            assert_eq!(answer(&record, Some(duty)), Err(Errno::OutOfRange));
+        }
+        // An undecodable record is refused on its own terms.
+        assert_eq!(
+            answer(&[0xFF; tairix_abi::HwResource::WIRE_LEN], Some(duty)),
+            Err(Errno::OutOfRange)
+        );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `call_peer_holds` answers only the endpoint's server, only about a call
+    /// in service, and only while the instance that posted it still holds its
+    /// number.
     #[test]
     fn call_peer_holds_answers_only_about_the_caller_being_served() {
         let _registry = crate::callreg::registry_guard();
@@ -37474,15 +37696,8 @@ mod tests {
         let server = crate::test_boot::claim_peer_task();
         let foreign = crate::test_boot::claim_peer_task();
         let client = crate::test_boot::claim_task();
-        let server_caps = make_caps_record(server, &[], sink);
-        let id = 0xCA11_401D;
-        let (_ep, ticket) = in_service_call(id, &server_caps, client, sink);
-        let request = dma_request_record();
-        aspaces.write().mint_grant(ProcessId(client), request);
-        aspaces.write().mint_grant(
-            ProcessId(client),
-            tairix_abi::HwResource::mmio(0xFE20_3000, 0x24),
-        );
+        let server_caps = make_caps_record(server, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
+        let (id, ticket, duty) = dma_holds_scene(&table, &aspaces, &server_caps, client, sink);
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
@@ -37490,48 +37705,14 @@ mod tests {
             task_id: SecTaskId(server),
             caps: &server_caps,
         };
-        // The server quotes each record from its own memory at `0x1000`.
-        let quote = |record: &[u8]| {
-            aspaces.write().withdraw(ProcessId(server));
-            let (space, physmap) = call_aspace(record);
-            aspaces
-                .write()
-                .register(ProcessId(server), space, physmap)
-                .expect("registration succeeds");
-        };
-
-        quote(&request.to_le_bytes());
+        quote_for(
+            &aspaces,
+            server,
+            &dma_request_record().to_le_bytes(),
+            Some(duty),
+        );
         assert_eq!(h.call_peer_holds(&ctx, id, ticket.0, 0x1000), Ok(0));
-        // A FIFO inside the client's window is covered; one past it is not.
-        quote(&tairix_abi::HwResource::mmio(0xFE20_3004, 4).to_le_bytes());
-        assert_eq!(h.call_peer_holds(&ctx, id, ticket.0, 0x1000), Ok(0));
-        quote(&tairix_abi::HwResource::mmio(0xFE20_3024, 4).to_le_bytes());
-        assert_eq!(
-            h.call_peer_holds(&ctx, id, ticket.0, 0x1000),
-            Err(Errno::PermissionDenied)
-        );
-        // Another request line on the same controller is a different grant.
-        let other = {
-            use tairix_abi::driver::dmaengine::{DmaRequestLine, DMA_CONTROLLER_ENDPOINTS};
-            tairix_abi::HwResource::dma_request(
-                &DmaRequestLine::new(DMA_CONTROLLER_ENDPOINTS.endpoint(31), 1, &[3], b"rx")
-                    .expect("valid line"),
-            )
-        };
-        quote(&other.to_le_bytes());
-        assert_eq!(
-            h.call_peer_holds(&ctx, id, ticket.0, 0x1000),
-            Err(Errno::PermissionDenied)
-        );
-        // An undecodable record is refused on its own terms.
-        quote(&[0xFF; tairix_abi::HwResource::WIRE_LEN]);
-        assert_eq!(
-            h.call_peer_holds(&ctx, id, ticket.0, 0x1000),
-            Err(Errno::OutOfRange)
-        );
 
-        // Only the endpoint's server may ask, and only about a call in service.
-        quote(&request.to_le_bytes());
         let foreign_caps = make_caps_record(foreign, &[], sink);
         let foreign_ctx = CallerContext {
             task_id: SecTaskId(foreign),
@@ -37547,6 +37728,13 @@ mod tests {
         );
         assert_eq!(
             h.call_peer_holds(&ctx, id + 1, ticket.0, 0x1000),
+            Err(Errno::NotFound)
+        );
+        // A successor admitted under the client's number, holding the same
+        // grants under it, is not the caller being served.
+        admit_successor(&table, client, sink);
+        assert_eq!(
+            h.call_peer_holds(&ctx, id, ticket.0, 0x1000),
             Err(Errno::NotFound)
         );
         crate::callreg::unregister(EndpointId(id));
@@ -37815,7 +38003,7 @@ mod tests {
             .expect("registration succeeds");
         let server_caps = make_caps_record(server, &[CapabilityId::SHM], sink);
         let id = 0xCA11_6A47;
-        let (_ep, ticket) = in_service_call(id, &server_caps, client, sink);
+        let (_ep, ticket) = in_service_call(&table, id, &server_caps, client, sink);
         let region = 0x5EED_0001;
         let shared = tairix_abi::HwResource::shared(region);
         aspaces.write().mint_grant(ProcessId(server), shared);
@@ -37863,6 +38051,20 @@ mod tests {
             Err(Errno::NotFound)
         );
         assert_eq!(aspaces.read().grant(ProcessId(client), handle), None);
+
+        // Nor once a successor has been admitted under the caller's number,
+        // with an address space of its own for a mint by number to land in.
+        admit_successor(&table, client, sink);
+        let (space, physmap) = call_aspace(b"");
+        aspaces
+            .write()
+            .register(ProcessId(client), space, physmap)
+            .expect("registration succeeds");
+        assert_eq!(
+            h.shm_grant_peer(&ctx, region, id, ticket.0),
+            Err(Errno::NotFound)
+        );
+        assert!(!aspaces.read().grant_covers(ProcessId(client), &shared));
         crate::callreg::unregister(EndpointId(id));
     }
 
@@ -39211,6 +39413,81 @@ mod tests {
 
         crate::callreg::unregister(EndpointId(id));
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
+    }
+
+    /// A wait-set and the endpoints it watches are the process's, whichever of
+    /// its threads made or waits on them, and the process teardown releases
+    /// the set. Keyed by the creating thread, a worker could never watch its
+    /// own process's endpoint, and its set would outlive the process.
+    #[test]
+    fn a_wait_set_belongs_to_the_creating_threads_process() {
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let process = crate::test_boot::claim_task();
+        let worker = crate::test_boot::claim_peer_task();
+        let client = crate::test_boot::claim_peer_task();
+        aspaces
+            .write()
+            .register(ProcessId(process), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(process, &[], sink);
+        let worker_ctx = CallerContext {
+            task_id: SecTaskId(worker),
+            caps: &caps,
+        };
+        let leader_ctx = CallerContext {
+            task_id: SecTaskId(process),
+            caps: &caps,
+        };
+        let id = 0xCA11_5003;
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &caps,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("endpoint"),
+        );
+        crate::callreg::register(ep.clone(), sink).expect("registered");
+        let poster = make_caps_record(client, &[], sink);
+        ep.post(&poster, client, b"x", u64::MAX, sink)
+            .expect("post a request");
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let set = h.waitset_create(&worker_ctx).expect("create");
+        h.waitset_ctl(&worker_ctx, set, WS_OP_ADD, WS_KIND_ENDPOINT, id, 0x77)
+            .expect("a worker thread watches its process's endpoint");
+        assert_eq!(
+            h.waitset_wait(&leader_ctx, set, 0, 0x2000),
+            Ok(0),
+            "a sibling waits on the set and sees the endpoint ready"
+        );
+
+        crate::callreg::unregister(EndpointId(id));
+        assert_eq!(
+            crate::waitset::release_owned_by(process),
+            1,
+            "the process teardown left the worker's set behind"
+        );
     }
 
     /// Two members ready at once are reported in turn, not by registration

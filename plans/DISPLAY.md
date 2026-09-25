@@ -20,7 +20,7 @@ seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 
 - **The seat is a first-class kernel object with a tracked, exclusive owner.**
   Since D2 this is enforced: `display_acquire` / `display_release` bind and
-  check the kernel-attested owning task on the kernel seat registry
+  check the kernel-attested owning process on the kernel seat registry
   (`kernel/core/src/seat.rs`, which replaced the owner-less `AtomicBool`
   `InputFocus` arbiter), so a held seat is never displaced
   (`Errno::SeatBusy`), a release is owner-checked (`Errno::SeatNotOwner`),
@@ -84,7 +84,7 @@ seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 TAIRiX improves on Linux on the axes the charter already privileges:
 
 1. **The owner is an unforgeable kernel fact, not a coarse capability grant.**
-   Linux's master is a per-`fd` flag; TAIRiX records the *owning task id* on
+   Linux's master is a per-`fd` flag; TAIRiX records the *owning process id* on
    the seat and checks it on every ownership-changing call, so the "cannot
    steal focus" guarantee holds even if two principals legitimately hold
    `CAP_DISPLAY` (two graphical sessions). No ambient authority (§4).

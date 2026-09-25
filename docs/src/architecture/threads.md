@@ -24,7 +24,7 @@ What a thread has of its own, and what belongs to the group:
 | Kernel stack (guarded arena slot) | Capability record, credentials, attested name |
 | User stack + its unbacked guard page | Descriptor table and standard streams |
 | psABI thread pointer | Resource limits, working directory, I/O counters |
-| Signal-intake and kill-gate state | IPC ports, IRQ bindings, shared memory, wait-sets |
+| Signal-intake and kill-gate state | IPC ports, IRQ bindings, shared memory, wait-sets, seat leases |
 
 The single shared capability record is a **security** decision, not a
 convenience: a `cap_revoke` by one thread binds its siblings immediately,
@@ -218,6 +218,13 @@ against it, carrying the terminal status
 the first dying thread declared, and whichever thread lands last performs the
 teardown. Carrying the status through the deferral is what stops a sibling's
 synthesised `128 + n` from overwriting a real `exit` code.
+
+A thread's id outlives its task too. A kill removes a parked victim from the
+scheduler before any of this runs, and the leader's id is the process's number
+for as long as the group lives, so every id is held against the id draw from
+admission until the state it keys is gone: a non-leader's is returned by its
+own `retire`, the leader's by the process teardown's last step. No admission
+can be issued a number whose previous holder's records still stand.
 
 `wait` therefore reports a child only when its whole thread group is gone —
 and **any** thread of the parent may be the one that reaps it. The child rows

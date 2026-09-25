@@ -4221,7 +4221,8 @@ pub fn call_grant(endpoint: u64, recipient: u64) -> i64 {
 /// zero for a read-only descriptor and non-zero for a writable one, so an
 /// unbounded writable delegation cannot be minted at all. A descriptor that
 /// names a directory, or that is not a plain file backing, fails closed
-/// with `-errno` (`OutOfRange`).
+/// with `-errno` (`OutOfRange`), and a fresh delegation past the caller's
+/// pending bound to `recipient` with `LimitExceeded`.
 ///
 /// The caller forwards the returned handle in-band (e.g. a window-channel
 /// event field, or an app-data reply); it resolves only when presented by
@@ -4346,11 +4347,14 @@ pub fn shm_grant_peer(region: u64, endpoint: u64, ticket: u64) -> i64 {
 }
 
 /// Whether the task whose call `ticket` on `endpoint` the caller is serving
-/// holds a grant covering `resource` (`SyscallNumber::CALL_PEER_HOLDS`).
+/// holds a grant covering `resource` (`SyscallNumber::CALL_PEER_HOLDS`), for
+/// the DMA controller serving `endpoint`.
 ///
 /// `0` when it does, else `-errno`: `PermissionDenied` when it holds none or
-/// the caller does not serve `endpoint`, `NotFound` for an unknown endpoint or
-/// a call not in service.
+/// the caller does not serve `endpoint` under its controller duty,
+/// `OutOfRange` for a record other than a request line naming `endpoint` or an
+/// MMIO window, and `NotFound` for an unknown endpoint, a call not in service,
+/// or a caller that has ended.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 zero-or-errno encoding.
 pub fn call_peer_holds(

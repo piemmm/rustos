@@ -325,7 +325,7 @@ last tag shown.
 | `2c/6: kernel gigapage mask configured` | `gigapage_mask_from_extents` built + `configure_kernel_gigapages` stored it | kernel-extent mask construction / the atomic mask store |
 | `3/6: identity map built, enabling mmu` | Device + kernel-extent gigapage masks built | identity-map mask construction |
 | `4/6: mmu on` (or `mmu enable FAILED`) | translation is live | **the MMU enable itself** — a mis-typed identity map (the metal Pi 4B hang) |
-| `4a/6: pcie discovery logged (post-mmu)` | the discovered `brcm,bcm2711-pcie` windows were logged | a metal diagnostic of the PCIe root-complex windows; the windows themselves reach the user-space `pcie_brcm` driver as grants on the discovered node, not a kernel stash |
+| `4a/6: pcie discovery logged (post-mmu)` | the discovered `brcm,bcm2711-pcie` windows were logged (event `4100`: the controller registers, the inbound aperture, and the outbound window) | a metal diagnostic of the PCIe root-complex windows; the windows themselves reach the user-space `pcie_brcm` driver as grants on the discovered node, not a kernel stash |
 | `5/6: post-mmu …discovered` | post-MMU `/memory`/timer/PSCI walk done | the full-tree FDT walk that needs the MMU |
 | `6/6: entering kernel core` (or `handover REJECTED`) | hand-off assembled | memory-map build / `BootInfo` assembly |
 
@@ -1528,47 +1528,18 @@ controller hand-off and the live enumerate→emit→autoload chain (a real BAR,
 link training, a keyboard driving the login) is the on-metal acceptance
 item (§0.9).
 
-> **Note (`plans/PI.md` P10 D5d):** the per-register PCIe/xHCI/firmware
-> diagnostics the chronicle below references (events in the `4101`–`4126`
-> range) were emitted by the now-deleted in-kernel scaffold. They are gone
-> from the live kernel path; the chronicle is retained only for the **PCIe
-> root-cause findings** that still apply to `drivers/bus/pcie_brcm` and the
-> user-space bring-up.
+> **Note (`plans/PI.md` P10 D5d):** but for `4100`, the numbered events the
+> chronicle below cites (`4101`–`4131`) were emitted by the in-kernel keyboard
+> scaffold that P10 D5d deleted, and the kernel's audit catalogue has since
+> reissued several of those ids to unrelated events (`4101` is
+> `FsMutationDenied`, `4120` `CpuOpsRoutineSelected`), so a live record
+> carrying one is not a USB diagnostic. `4100` is still the boot path's PCIe
+> discovery record (beacon `4a/6`), an id the catalogue's `FsNodeMutated` also
+> claims (`plans/OPEN-DEFECTS.md` D169). The chronicle is retained only for the
+> **PCIe root-cause findings** that still apply to `drivers/bus/pcie_brcm` and
+> the user-space bring-up.
 
-### Discovery and bring-up logging (metal diagnostics)
-
-Because the live bring-up is metal-only, it logs its progress to the
-serial sink so a silent keyboard can be diagnosed from a UART capture
-alone (the boot beacons above bound the *boot* path; these events bound
-the *USB* path). All are allocation-free (§2.9). The bring-up events are
-one-shot; the three poll-loop events (`4129`/`4130`/`4131`) run *on* the
-forever poll loop but are **bounded** (a one-shot first report, an
-on-change capped error, and a capped heartbeat), so the log stays finite
-(§2.16 / §19.4):
-
-| Event id | Emitted by | Says |
-| -------- | ---------- | ---- |
-| `4100` | `boot_aarch64` (post-MMU, beacon `4a`) | the discovered `brcm,bcm2711-pcie` chipset windows — `regs_base/len`, the inbound aperture (`dma_aperture_top`, `inbound_size`, `inbound_pcie_base`), and the outbound window (`outbound_cpu_base/pcie_base/size`) — so a capture shows the hardware the chain will program. Absent on `virt` (no bridge). |
-| `4103` | `keyboard_service::bring_up_keyboard_into_tree` / `spawn_pump` | the report-pump kthread was admitted, or the bring-up was skipped because no kernel frame allocator was available (an error). Silent on `virt`. |
-| `4101` | `usb_keyboard::bring_up_keyboard` | each bring-up stage: link-training start, root-complex link trained, xHCI online, and — at `Error` level with an `err=` field — the stage that refused (PCIe link, xHCI, or root-hub enumeration). An xHCI open failure also carries `stage` (`capability`, `halted_before_reset`, `reset_self_clear`, or `controller_ready_after_reset`) plus `usbcmd_hex`/`usbsts_hex`, so a valid capability block followed by `device_fault` is localised to the exact stuck reset condition. |
-| `4105` | `keyboard_service::IdentityMmioMapper` | one map-window decision: `phys_base_hex`/`len_hex` (the address the PCI driver asked the bridge to map — for the BAR, the value the VL805's BAR register holds), `resolved_cpu_hex` (the backed CPU address, or the `ffff_ffff_ffff_ffff` sentinel when refused), and the accepted-window bounds (`regs_base/end`, `outbound_pcie_base/end`). Logged at `Error` when refused. Two lines on a healthy bring-up: the controller regs block (identity) and the VL805 BAR (bus→CPU translated). |
-| `4108` | `usb_keyboard::bring_up_keyboard` | the outcome of the per-boot VL805 firmware reload (`NOTIFY_XHCI_RESET`), issued once after the link trains (its `PERST#` drops the VL805's `VideoCore`-loaded firmware on EEPROM-less Pi 4 boards): `skipped because no videocore mailbox is available` (`NotAvailable`), the honoured reload (`Reloaded`), or — at `Error` level — `reload via the videocore mailbox failed reason=<window\|timeout\|firmware_error\|malformed_response\|bad_aperture\|bad_geometry\|unknown>`. The VL805 device driver (`drivers/bus/usb/vl805`) runs the reload over `DriverHost::mailbox` from inside the floor xHCI bring-up; best-effort, the authoritative liveness gate is `Xhci::open`. A `reason=timeout` is expanded by the `4121` record, which says *where* the mailbox exchange timed out. |
-| `4120` | `usb_keyboard::bring_up_keyboard` | a one-shot capture of the controller's **inbound** (PCIe→system-memory) viewport registers **as the previous boot stage (`start4.elf`) left them**, sampled before bring-up programs `RC_BAR2` (`BrcmPcieRc::entry_inbound_window`): `rc_bar1_lo_hex`/`rc_bar3_lo_hex` (the unused PCIe→GISB / PCIe→SCB inbound windows), `rc_bar2_lo_hex`/`rc_bar2_hi_hex` (the active PCIe→system-memory viewport — offset bits plus the encoded size in the low field), `misc_ctrl_hex` (the inbound-path `MISC_MISC_CTRL`, whose `SCB0_SIZE` field in bits `[31:27]` sizes the inbound SCB→memory decode window), and `pcie_status_hex` for correlation. raspberrypi/firmware #1495: `VideoCore`'s `NOTIFY_XHCI_RESET` firmware load *assumes* the `RC_BAR2` state it set at power-on, so this capture both drives bring-up's "preserve a firmware-configured `RC_BAR2`" decision and lets a metal run compare the firmware's own inbound window against the known-good `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`. A faulting read renders the all-ones sentinel; always `Info`. |
-| `4121` | `keyboard_service::KernelMailboxChannel` | one-shot diagnostics from each VL805 firmware-reload mailbox exchange (`MmioMailbox::last_exchange_stats`), logged by the channel after every `exchange` whether it succeeded or failed: `timeout_stage` (`post_room` = the firmware never accepted the request; `response` = it accepted but never replied; `none` = no timeout), `posted_word_hex`, `post_room_polls_hex`/`response_reads_hex`, `foreign_channel_reads_hex`, `last_status_hex`, plus `wait_elapsed_us_hex` (the `CNTPCT_EL0`-measured wall time the exchange took) and `poll_budget_hex` (`FIRMWARE_RELOAD_POLL_BUDGET`). A bare `4108 reason=timeout` cannot tell a transport fault from `VideoCore` dropping the tag; this localises it. Always `Info`. |
-| `4116` | `keyboard_service::bring_up_keyboard_into_tree` | a one-shot **bring-up delay timing measurement**, logged once right after the VL805 bring-up chain returns. `requested_us_hex` is the total the code *asked* its `GenericTimerDelay` to wait across the whole chain (over `delay_calls_hex` calls); `counter_elapsed_us_hex` is the same span measured by `CNTPCT_EL0` against `CNTFRQ_EL0` (also echoed as `timer_hz_hex`). The metal capture read `requested_us_hex=0x57030` (≈356 ms / `0x103`=259 calls) yet `counter_elapsed_us_hex≈14.3 s` at the correct `timer_hz_hex=0x337_f980` — so ≈14 s of *real* time elapsed with only ≈356 ms of it in `busy_delay_us`: the counter is sound, the seconds are code-side. `4116` cannot split *where* in the chain they go; the per-line `[t=<ms>ms]` timestamps and `4117` do. The earlier guess that the ≈14 s was the 256 caps-readiness polls (`4109`) was **wrong**: a timestamped capture showed the caps wait is only ~0.35 s (the wall-time `wait_for_caps_ready` bound works; the master-abort returns the poison fast, not ~54 ms) and ~11 s of the pause is inside `BrcmPcieRc::bring_up` (`4117`). Always `Info`. |
-| `4117` | `usb_keyboard::bring_up_keyboard` | a one-shot per-phase wall-time split of the PCIe root-complex `bring_up`, logged right after the link-trained line: `reset_swinit_us_hex` (releasing the always-accessible `RGR1_SW_INIT_1` `0x9210` bridge `sw_init` reset the previous boot stage left asserted, run **first**; `train_link` deasserts the already-asserted `PERST#`, and that deassert edge re-triggers the `VideoCore` VL805 firmware reload), `reset_settle_us_hex` (the post-de-reset MISC settle — the gentlest no-touch-probe bring-up does **not** toggle the SerDes IDDQ or re-assert a fundamental reset, either of which could drop the resident VL805 firmware), `config_us_hex`, `linkwait_us_hex`, `link_polls_hex`, and `entry_rgr1_sw_init_hex`. The BCM2711 holds the controller core off until the RGR1 bridge `sw_init` reset is cycled, so the bring-up releases that reset **before** any MISC access (matching the BCM2711 PCIe bring-up sequence); the metal capture confirmed `reset_swinit_us`/`reset_settle_us` collapse to microseconds (the ~11 s pause is gone). `entry_rgr1_sw_init_hex` is the raw `RGR1_SW_INIT_1` register sampled at bring-up entry **before** the reset cycles it (the always-accessible RGR1 block needs no link/MISC). The metal capture read `0x3` (both `PERST#` bit 0 and the bridge `sw_init` bit set), i.e. the previous boot stage handed off with PCIe held in fundamental reset — TAIRiX never writes this register outside its own reset, so it is the firmware handoff state, not something TAIRiX asserted, and is the same cold-reset state the BCM2711 bring-up handles (so **not** itself the fault). The persistent `dead_dead`/`vl805_fw_version_hex=0` is instead explained by the root-port bridge command not latching Memory Space Enable when written pre-link (see the bridge-command section) — which blocks both our BAR reads and `VideoCore`'s firmware-load writes over the same bus — now enabled after link-up. The `*_us` spans sum to the whole bring-up; `BringUpTiming` and both the release-before-MISC ordering and the no-re-assert / `PERST#`-deassert-edge invariant are host-tested in `tairix_pcie_brcm` (`AGENTS.md` §15.7). Always `Info`. |
-| `4129` | `usb_keyboard::KeyboardPumpDiagnostics` | **one-shot**, the first time the poll loop drains a non-zero event count after bring-up: the addressed keyboard's interrupt-IN endpoint is actually completing transfers and decoded edges are reaching the input arbiter. Carries `polls_hex`/`events_hex`. Its *absence* in a capture while `4131` keeps climbing localises a silent keyboard to "addressed but the controller never completes the interrupt endpoint", distinct from `4130`. `Info`. |
-| `4130` | `usb_keyboard::KeyboardPumpDiagnostics` | the poll loop's `pump_once` returned an error, logged when the error *kind* changes (capped at `MAX_ERROR_LOGS` = 16 so a wedged controller faulting every poll cannot flood the log). Carries the `err` name (e.g. `device_fault` — an unexpected event type or a slot/endpoint mismatch in `UsbDevice::next_report`), `polls_hex`, and `errors_hex`, so a capture names *why* the report path faults rather than the loop silently swallowing it. `Error`. |
-| `4131` | `usb_keyboard::KeyboardPumpDiagnostics` | a periodic liveness heartbeat of the keyboard poll loop, emitted every `HEARTBEAT_POLLS` (1024) polls and capped at `MAX_HEARTBEATS` (32) total so the log is finite though the loop runs forever. Carries cumulative `polls_hex`/`events_hex`/`errors_hex`: a capture where polls climb while events and errors stay zero proves the loop is alive and polling but the keyboard delivers no reports — the exact signal a "typing produces nothing" symptom needs. `Info`. |
-
-The last `4101` line a capture shows pins which stage a silent keyboard
-stalled at; the absence of `4102` after an `xHCI online` `4101` means the
-root hub bring-up failed, and the `4125` records then show every root-hub
-port's `PORTSC` (whether power stuck and whether any port reports a device
-attached) while the single `4126` record names the enumeration step the
-bring-up last entered and the xHCI completion code it saw there — together
-they distinguish an empty hub (`err=not_found`, `4126 stage=0`) from a
-device that is present but faults part-way through enumeration.
+### Enumeration
 
 **Enumeration orchestration.** The arch-neutral root→hub→downstream
 bring-up sequence (attach **every** connected root-hub port; a hub tier is
@@ -1585,28 +1556,6 @@ the first-connect watch armed (the onboard hub's status-change endpoint, or
 the root port), so a cold boot with nothing plugged in works and each device
 autoloads when plugged in. A real enumeration fault on one port skips that
 port fail-closed without costing the others their service.
-
-**Keyboard poll-loop diagnostics (`4129`/`4130`/`4131`).** Once the
-keyboard is brought up, the keyboard
-service polls it forever (`pump_once` → decode → `ArbiterConsoleSink`).
-That loop historically discarded its result, so a capture where the
-keyboard was addressed yet typing produced nothing could not say whether
-reports were arriving, whether `next_report` was faulting, or whether the
-loop was even running. `KeyboardPumpDiagnostics` folds each poll result
-into bounded audit events: a one-shot `4129` the first time a report
-drains (keystrokes are flowing), an on-change `4130` carrying the
-`DriverError` name when `pump_once` faults (capped at 16), and a capped
-`4131` heartbeat (every 1024 polls, ≤ 32 total) carrying cumulative
-`polls`/`events`/`errors`. The three readings split the failure cleanly:
-`4129` present ⇒ the path works; `4130 err=device_fault` recurring ⇒
-`next_report` rejects the controller's interrupt-IN events (a slot/EP or
-event-type mismatch); `4131` polls climbing with `events=0 errors=0` ⇒
-the loop is alive but the controller never completes the interrupt
-endpoint (the addressed keyboard delivers no report). Host-proven by the
-`usb_keyboard` tests `pump_diagnostics_logs_the_first_report_only_once`,
-`pump_diagnostics_logs_a_pump_error_on_change_and_caps_it`, and
-`pump_diagnostics_emits_a_bounded_heartbeat`; metal-only beyond that
-(§0.4).
 
 **Interrupt-endpoint Max ESIT Payload — the no-report fix.** The metal
 capture then read exactly the `4131` branch: the heartbeat climbed

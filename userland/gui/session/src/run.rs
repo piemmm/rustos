@@ -6851,6 +6851,10 @@ mod program {
                 .filter(|&handle| handle != 0)
                 .ok_or(Errno::PermissionDenied)
         }
+
+        fn decline(&mut self, grant: u64) {
+            drop(tairix_rt::File::from_delegation(grant));
+        }
     }
 
     impl LaunchCtx<'_> {

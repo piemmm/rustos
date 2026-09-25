@@ -60,12 +60,12 @@ pub struct Member {
     pub observed: u64,
 }
 
-/// A caller-owned wait-set: the owning task, its growable membership, and
+/// A caller-owned wait-set: the owning process, its growable membership, and
 /// the round-robin position that keeps the membership fair.
 struct WaitSet {
-    /// Task that created the set. Only this task may add/remove members, wait
-    /// on it, or have it observed; every entry point owner-checks against it
-    /// (no ambient authority).
+    /// Process that created the set, whose teardown releases it. Only its
+    /// threads may add/remove members, wait on it, or have it observed; every
+    /// entry point owner-checks against it (no ambient authority).
     owner: u64,
     members: Vec<Member>,
     /// The `(kind, id)` the previous successful wait reported, so the next

@@ -92,7 +92,8 @@ peripheral, and no memory-to-memory or one-shot scatter-gather transfer.
 - **`call_peer_holds`** answers whether the caller being served holds a grant
   covering a quoted record, so the controller checks a request line, or a
   FIFO's register window, against the kernel's grants rather than the
-  client's word.
+  client's word. Only the duty holder may ask, and only about those two:
+  a request line naming its own endpoint, or an MMIO window.
 - **`shm_create_dma`** carves a channel's buffer below the controller's own
   `Dma` window, mapped coherent in every process that maps it, and returns
   the bus address the controller programs; **`shm_grant_peer`** mints that

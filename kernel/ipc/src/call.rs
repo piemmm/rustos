@@ -45,7 +45,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_abi::ipc::{IPC_CALL_CAPACITY_MAX, IPC_MESSAGE_MAX_PAYLOAD_LEN};
-use tairix_abi::{Errno, Origin};
+use tairix_abi::{Errno, Origin, ProcId};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::SensitiveBuffer;
 use tairix_kernel_sec::captable::TaskCapabilities;
@@ -272,6 +272,9 @@ pub struct CallEndpoint {
     /// released fail-closed rather than blocked forever; a single thread of a
     /// multi-threaded server exiting does not take the endpoint with it.
     owner: u64,
+    /// The instance of [`Self::owner`] that bound the endpoint. The endpoint
+    /// can be reached after its owner has ended, and the number with it.
+    owner_instance: ProcId,
     /// The serving task's *scheduler* id, recorded the first time the server
     /// receives on this endpoint (`0` until then). The post path wakes
     /// exactly this task instead of broadcasting to every parked server
@@ -479,6 +482,7 @@ impl CallEndpoint {
             max_reply,
             capacity,
             owner: creator.process().0,
+            owner_instance: creator.proc_id(),
             server_task: AtomicU64::new(0),
             state: AtomicU32::new(state::OPEN),
             inner: tairix_sync::SpinLock::new(Inner {
@@ -527,6 +531,14 @@ impl CallEndpoint {
     #[must_use]
     pub fn owner(&self) -> u64 {
         self.owner
+    }
+
+    /// The process instance that bound this endpoint: what a mint aimed at
+    /// its server resolves, where [`Self::owner`]'s number may since have
+    /// been issued to a successor.
+    #[must_use]
+    pub fn owner_instance(&self) -> ProcId {
+        self.owner_instance
     }
 
     /// Record the serving task's *scheduler* id so a post can wake exactly
@@ -1815,7 +1827,7 @@ mod tests {
     #[test]
     fn owner_reports_the_creating_task() {
         let sink = RecordingSink::new();
-        let creator = task_with(0x4242, &[]);
+        let creator = task_with(0x4242, &[]).with_proc_id(tairix_abi::ProcId::from_raw([0x42; 16]));
         let ep = CallEndpoint::create(
             EndpointId(0xF),
             &creator,
@@ -1830,6 +1842,10 @@ mod tests {
         )
         .expect("created");
         assert_eq!(ep.owner(), 0x4242);
+        assert_eq!(
+            ep.owner_instance(),
+            tairix_abi::ProcId::from_raw([0x42; 16])
+        );
     }
 
     #[test]

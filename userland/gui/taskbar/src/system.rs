@@ -97,8 +97,9 @@ impl SystemRow {
 /// installed.
 pub const TASK_SHELL_BUNDLE: &str = "os.tairix.terminal";
 
-/// The catalog identifier of the settings bundle the *Settings…* row opens,
-/// on the same terms as [`TASK_SHELL_BUNDLE`].
+/// The Settings bundle's signed identifier: the catalog entry the
+/// *Settings…* row opens, on the same terms as [`TASK_SHELL_BUNDLE`], and the
+/// identity the desktop trusts Settings by.
 pub const SETTINGS_BUNDLE: &str = "os.tairix.settings";
 
 /// The system menu, in order. This is the single definition of the menu's
