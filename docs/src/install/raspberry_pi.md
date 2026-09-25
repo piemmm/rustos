@@ -30,21 +30,25 @@ Two image profiles exist (`--profile`, default `debug`):
 | --- | --- |
 | Sector 0 | MBR: three primary partitions, `0x55AA` signature |
 | Partition 1 (`0x0C`, FAT32, 64 MiB at sector 2048) | `start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`, `overlays/disable-bt.dtbo`, generated `config.txt`, `kernel8.img`, `root.unlock` |
-| Partition 2 (`0x7E`, ARXFS, 64 MiB) | read-only, signed-bundle `/System` volume (the §16.2 skeleton); keyed by the non-secret well-known `SYSTEM_VOLUME_KEY` (effectively unencrypted — integrity rests on the per-bundle signatures, `AGENTS.md` §18.6), mounted read-only before unlock (the design-B pre-unlock driver store, `plans/PI.md`) |
-| Partition 3 (`0x7F`, ARXFS, 64 MiB) | encrypted data-root volume with the `AGENTS.md` §16 skeleton (`/Users`, `/Apps`, `/Storage`, `/System/Security`), plus — for a debug image — the seeded `Users` database and `Groups` registry; unlocked by a passphrase-derived key |
+| Partition 2 (`0x7E`, ARXFS, sized to its content, directly after partition 1) | read-only, signed-bundle `/System` volume (the §16.2 skeleton); keyed by the non-secret well-known `SYSTEM_VOLUME_KEY` (effectively unencrypted — integrity rests on the per-bundle signatures, `AGENTS.md` §18.6), mounted read-only before unlock (the design-B pre-unlock driver store, `plans/PI.md`) |
+| Partition 3 (`0x7F`, ARXFS, 64 MiB, directly after partition 2) | encrypted data-root volume with the `AGENTS.md` §16 skeleton (`/Users`, `/Apps`, `/Storage`, `/System/Security`), plus — for a debug image — the seeded `Users` database and `Groups` registry; unlocked by a passphrase-derived key |
 
 The read-only `/System` volume carries, beside its signed driver and app
 bundles, the **discovered system payload**: each command app's
 internationalised `Help/` tree, its bundle `Resources/`, and the desktop's
-graphics assets — the raster icon masters — planted under
-`/System/Graphics/Icons` (`AGENTS.md` §16.2, §10). All three are discovered
-from their own on-disk sources at build time (`tools/syshelp`) and planted by
-one shared walk, so a new help document, resource, or icon (a
-`<asset-id>.png` dropped under `lib/icon/assets/`) ships without editing the
-image builder. Each icon is validated against the desktop's own icon contract
-as it is discovered, so an unresolvable name or an over-large file fails the
-image build closed rather than shipping artwork that would silently render as
-a fallback glyph.
+graphics assets — icon masters, wallpapers and cursor sets — planted under
+`/System/Graphics` (`AGENTS.md` §16.2, §10). All of it is discovered from its
+own on-disk sources at build time (`tools/syshelp`) and planted by one shared
+walk, so a new help document, resource or graphics asset ships without
+editing the image builder. Each asset is validated against its own family's
+contract as it is discovered, so an unresolvable name or an over-large file
+fails the image build closed rather than shipping artwork that would silently
+render as a fallback glyph or never be offered.
+
+The `/System` partition is the smallest power-of-two multiple of 32 MiB that
+holds that content (`tairix_syshelp::build_system_volume`), so the image grows
+with what it ships instead of failing against a fixed partition size. The
+kernel finds every partition by its MBR type, never by offset.
 
 `root.unlock` is the root volume's plaintext key-derivation descriptor
 (`AGENTS.md` §11): the per-volume random salt and PBKDF2 iteration count

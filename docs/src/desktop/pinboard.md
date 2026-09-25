@@ -116,12 +116,12 @@ session reads the bytes under its own identity, bounded, and hands them to
 the [parser sandbox](../security/sandbox.md), which decodes the image,
 places it, and returns the finished pixels.
 
-Three properties make this affordable:
+What makes this affordable:
 
-- **Reduced-scale decode.** The shipped masters are 8.3-megapixel JPEGs. The
-  decoder picks the smallest DCT scale that still covers the screen, so a
-  1920×1080 desktop never materialises 8.3 million pixels to throw most of
-  them away.
+- **Reduced-scale decode.** A JPEG decodes at the smallest DCT scale that
+  still covers the screen, so a 1920×1080 desktop never materialises a 4K
+  master's 8.3 million pixels to throw most of them away. PNG has no reduced
+  scale and decodes whole.
 - **Banding.** A screenful of RGBA exceeds the sandbox's fixed 8 MiB frame
   bound above 1080p. The bound is a defence and is not raised; the pixels
   are transported in bands instead.

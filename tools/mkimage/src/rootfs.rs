@@ -27,6 +27,7 @@
 
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
 use tairix_abi::driver_store::SystemConfigFile;
+use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{
     plant_nested_file, EntropySource, Security, VolumeKey, ARXFS, SYSTEM_VOLUME_KEY,
 };
@@ -35,7 +36,7 @@ use tairix_users::{
     HOME_SUBDIRS,
 };
 
-use crate::device::MemBlock;
+use crate::device::{MemBlock, SECTOR_BYTES};
 use crate::MkimageError;
 
 /// The top-level directories. Exactly these four; any
@@ -241,20 +242,19 @@ fn create_home_dir(
     Ok(())
 }
 
-/// Author the read-only, signed-bundle `/System` partition: format
-/// `sectors` sectors under the non-secret well-known
-/// [`SYSTEM_VOLUME_KEY`] and lay the `/System` subtree
-/// **at the volume root** (the volume *is* `/System` once mounted, so its
-/// root carries `Kernel`, `Drivers`, … directly).
+/// Author the read-only, signed-bundle `/System` partition at the smallest
+/// size that holds it ([`tairix_syshelp::build_system_volume`]), formatted
+/// under the non-secret well-known [`SYSTEM_VOLUME_KEY`] with the `/System`
+/// subtree **at the volume root** (the volume *is* `/System` once mounted,
+/// so its root carries `Kernel`, `Drivers`, … directly).
 ///
 /// This is the design-B pre-unlock store (`plans/PI.md`): it carries no
 /// secrets, so it is keyed by the public [`SYSTEM_VOLUME_KEY`] and the
 /// kernel mounts it read-only (`ARXFS::open_read_only`) *before* the
-/// encrypted data root is unlocked. The signed driver bundles land here in
-/// the later design-B increments; B1 establishes the volume and its
-/// skeleton. The subdirectories are laid down through the one shared
-/// `create_system_subdirs` helper used by the encrypted root too. No users database is written here — that secret
-/// stays on the encrypted root.
+/// encrypted data root is unlocked. The subdirectories are laid down through
+/// the one shared `create_system_subdirs` helper used by the encrypted root
+/// too. No users database is written here — that secret stays on the
+/// encrypted root.
 ///
 /// `network_conf` is the per-interface network-configuration document this
 /// image ships. The caller composes it, so *which* interfaces an image
@@ -271,6 +271,23 @@ fn create_home_dir(
 /// key hierarchy), or [`MkimageError::NetworkConfig`] if `network_conf` does
 /// not parse.
 pub fn build_system_partition(
+    entropy: &mut dyn EntropySource,
+    drivers: &[(&[&[u8]], &[u8])],
+    apps: &[(&[&[u8]], &[u8])],
+    network_conf: &str,
+) -> Result<Vec<u8>, MkimageError> {
+    tairix_syshelp::build_system_volume(
+        &[drivers, apps],
+        |len| {
+            let sectors = len / SECTOR_BYTES as u64;
+            author_system_partition(sectors, entropy, drivers, apps, network_conf)
+        },
+        |refusal| matches!(refusal, MkimageError::SystemPartition(DriverError::NoSpace)),
+    )
+}
+
+/// [`build_system_partition`] into exactly `sectors` sectors.
+fn author_system_partition(
     sectors: u64,
     entropy: &mut dyn EntropySource,
     drivers: &[(&[&[u8]], &[u8])],
@@ -607,8 +624,6 @@ fn write_key_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::SECTOR_BYTES;
-    use tairix_abi::DriverError;
 
     const TEST_SECTORS: u64 = 131_072; // 64 MiB, the production root size.
     const TEST_KEY: VolumeKey = [0x42; tairix_drv_fs_arxfs::VOLUME_KEY_LEN];
@@ -704,11 +719,10 @@ mod tests {
         }
     }
 
-    /// Build a `/System` volume carrying `network_conf` and nothing else,
-    /// then walk to the document through the ABI's own volume-relative path.
+    /// Build a `/System` volume planting `network_conf` and no bundles, then
+    /// walk to the document through the ABI's own volume-relative path.
     fn system_volume_network_conf(network_conf: &str) -> Result<Vec<u8>, MkimageError> {
-        let bytes =
-            build_system_partition(TEST_SECTORS, &mut TestEntropy(11), &[], &[], network_conf)?;
+        let bytes = build_system_partition(&mut TestEntropy(11), &[], &[], network_conf)?;
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
         let mut fs = ARXFS::open(dev, &SYSTEM_VOLUME_KEY).expect("the system volume mounts");
         let mut node = fs.root();
@@ -743,6 +757,64 @@ mod tests {
         let wan = parsed.interface("wan").expect("the planted interface");
         assert_eq!(wan.match_node, Some(0xfd58_0000));
         assert_eq!(wan.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
+    }
+
+    /// Content the payload's own volume has no room for doubles the volume
+    /// instead of failing the build, and still reads back intact.
+    #[test]
+    fn the_system_volume_grows_to_hold_content_its_first_size_cannot() {
+        use tairix_abi::driver::filesystem::FilesystemStats;
+
+        let alone = build_system_partition(&mut TestEntropy(11), &[], &[], TEST_NETWORK)
+            .expect("the payload alone builds");
+        let mut fs = ARXFS::open(
+            MemBlock::from_bytes(alone.clone()).expect("whole sectors"),
+            &SYSTEM_VOLUME_KEY,
+        )
+        .expect("the payload volume mounts");
+        let space = fs.stats().expect("the volume reports its space");
+        let room =
+            usize::try_from(space.free_blocks * u64::from(space.block_size)).expect("fits usize");
+
+        // Pseudo-random, so neither the zero-block elision nor cluster
+        // compression can shrink it back into the room it overflows.
+        let mut run = Vec::with_capacity(room + 8);
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        while run.len() <= room {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            run.extend_from_slice(&state.to_le_bytes());
+        }
+        let path: &[&[u8]] = &[b"Commands", b"big.app", b"Run"];
+        let bundle = [(path, run.as_slice())];
+        let grown = build_system_partition(&mut TestEntropy(11), &[], &bundle, TEST_NETWORK)
+            .expect("the overflowing content still builds");
+        assert_eq!(grown.len(), alone.len() * 2);
+
+        let mut fs = ARXFS::open(
+            MemBlock::from_bytes(grown).expect("whole sectors"),
+            &SYSTEM_VOLUME_KEY,
+        )
+        .expect("the grown volume mounts");
+        let mut node = fs.root();
+        for component in path {
+            node = fs
+                .lookup(node, component)
+                .expect("the bundle path resolves");
+        }
+        let mut back = Vec::with_capacity(run.len());
+        let mut chunk = vec![0u8; 1 << 20];
+        loop {
+            let read = fs
+                .read_at(node, back.len() as u64, &mut chunk)
+                .expect("the bundle reads back");
+            if read == 0 {
+                break;
+            }
+            back.extend_from_slice(&chunk[..read]);
+        }
+        assert!(back == run, "the grown volume returns the bundle intact");
     }
 
     #[test]

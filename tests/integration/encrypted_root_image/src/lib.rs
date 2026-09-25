@@ -6,12 +6,14 @@
 //! drivers and encoders so the fixture cannot drift from the system that
 //! mounts the disk:
 //!
-//! 1. An **MBR** ([`tairix_partition::mbr::encode`]) describing two
-//!    1 MiB-aligned primary partitions.
+//! 1. An **MBR** ([`tairix_partition::mbr::encode`]) describing three
+//!    1 MiB-aligned primary partitions, back to back.
 //! 2. A **FAT32 boot partition** at [`BOOT_LBA`], authored by the real
 //!    [`Fat32`] driver, carrying the plaintext `root.unlock`
 //!    key-derivation descriptor ([`ROOT_UNLOCK_NAME`]).
-//! 3. An **encrypted `ARXFS` root partition** at [`ROOT_LBA`], whose
+//! 3. The read-only **`/System` partition** at [`SYSTEM_LBA`], sized to the
+//!    signed bundles and discovered system payload it carries.
+//! 4. An **encrypted `ARXFS` root partition** directly after it, whose
 //!    volume key is **derived from [`PASSPHRASE`]** through the descriptor
 //!    above, carrying `/System/Security/Users` with the
 //!    single [`USERNAME`]/[`PASSWORD`] account — the shared
@@ -70,52 +72,9 @@ pub const FAT_BOOT_SECTORS: u64 = 131_072;
 /// design-B pre-unlock signed-driver store (`plans/PI.md` B1).
 pub const SYSTEM_LBA: u64 = BOOT_LBA + FAT_BOOT_SECTORS;
 
-/// **Minimum** sectors in the read-only `ARXFS` `/System` partition:
-/// 32 MiB. The partition is *not* a fixed size — the builder grows it to fit
-/// the content it must actually carry (the skeleton, the
-/// design-B signed driver bundle(s) the pre-unlock autoload reads from its
-/// `Drivers/` store, and the full set of self-contained application bundles
-/// — every discovered program's signed `AppInfo` + `Run` rxe beside its
-/// `Help/` tree). A fixed ceiling would fit one architecture's store and
-/// overflow another's (the x86_64 bundle set is materially larger than the
-/// aarch64/riscv64 one), so the size is derived from the content and this
-/// constant is only the floor it never drops below. Only non-zero sectors
-/// are planted on the backing file, so an over-large volume stays trivial
-/// against the whole-disk image.
-pub const SYSTEM_SECTORS: u64 = 65_536;
-
-/// First sector of the encrypted `ARXFS` root partition for a
-/// **floor-sized** `/System` partition.
-///
-/// This is the *lower bound* on where the root partition can begin, not a
-/// promise about any particular image: `/System` sizes itself to the content
-/// it carries, so a built image's real root LBA is derived from the produced
-/// partition length in [`build_image_with_contents`] and read back from the
-/// image's own partition table. Consumers must take the LBA from the table,
-/// never from this constant.
-pub const ROOT_LBA: u64 = SYSTEM_LBA + SYSTEM_SECTORS;
-
 /// Sectors in the encrypted `ARXFS` root partition — the shared
 /// [`tairix_test_arxfs_image`] users-root volume's footprint.
 pub const ROOT_SECTORS: u64 = root_image::TOTAL_SECTORS;
-
-/// Total sectors in the assembled whole-disk image for a **floor-sized**
-/// `/System` partition — the smallest image this builder can produce, and a
-/// lower bound rather than the size of any given image.
-///
-/// A built image describes its own true size through its partition table and
-/// byte length, and consumers plant exactly `bytes.len() / SECTOR_BYTES`
-/// sectors. The shipped `/System` content (the skeleton, the signed driver
-/// store, every application bundle beside its `Help/` tree, and the desktop's
-/// graphics assets) already exceeds the floor, so a real image is larger than
-/// this; it is never smaller.
-pub const TOTAL_SECTORS: u64 = ROOT_LBA + ROOT_SECTORS;
-
-/// Upper bound the `/System` partition may grow to (256 MiB). A fixture
-/// volume this large already dwarfs any realistic bundle set on any
-/// architecture; exceeding it means the caller planted something absurd, so
-/// the builder fails closed rather than growing without limit.
-const SYSTEM_MAX_SECTORS: u64 = 524_288;
 
 /// The passphrase the test "operator" types at the unlock prompt. The root
 /// volume's key is derived from it through the on-disk descriptor; the
@@ -246,13 +205,15 @@ fn build_boot_partition(descriptor: &[u8]) -> Result<Vec<u8>, DriverError> {
     Ok(fs.into_block().store)
 }
 
-/// Author the read-only `/System` partition: format a small `ARXFS`
-/// volume under the non-secret well-known [`SYSTEM_VOLUME_KEY`], lay the
-/// `/System` skeleton at its root (`Drivers` plus `Security`), and
-/// plant the design-B signed driver `drivers` into its `Drivers/` store —
-/// the layout `tools/mkimage::build_system_partition` writes. The kernel mounts it read-only and autoloads the store **before**
-/// unlocking the encrypted root (`plans/PI.md` design B / B2), so the store
-/// — not the encrypted root — carries the boot drivers.
+/// Author the read-only `/System` partition at the smallest size that holds
+/// it (`tairix_syshelp::build_system_volume`): an `ARXFS` volume under the
+/// non-secret well-known [`SYSTEM_VOLUME_KEY`] with the `/System` skeleton at
+/// its root (`Drivers` plus `Security`) and the design-B signed driver
+/// `drivers` in its `Drivers/` store — the layout
+/// `tools/mkimage::build_system_partition` writes. The kernel mounts it
+/// read-only and autoloads the store **before** unlocking the encrypted root
+/// (`plans/PI.md` design B / B2), so the store — not the encrypted root —
+/// carries the boot drivers.
 ///
 /// Each driver is `(path_components, bytes)` where `path_components` is the
 /// bundle leaf's path **relative to this `/System` volume's root** (the
@@ -271,32 +232,14 @@ fn build_system_partition(
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
 ) -> Result<Vec<u8>, DriverError> {
-    // Grow to fit the content, never a fixed ceiling a larger architecture's
-    // (bigger) bundle set overflows: the x86_64 store is materially larger
-    // than the aarch64/riscv64 one, so a hand-picked size that fits one arch
-    // runs another out of space. Start at the 32 MiB floor and double only on
-    // a genuine out-of-space, so the common case (a store that fits the
-    // floor, e.g. aarch64/riscv64) formats at exactly the default size and is
-    // byte-identical to before, while a larger store (x86_64) grows to the
-    // smallest power-of-two multiple of the floor that holds it. `ARXFS`'s own
-    // metadata/copy-on-write overhead is thereby accounted for by measurement
-    // rather than a guessed multiplier.
-    let mut sectors = SYSTEM_SECTORS;
-    loop {
-        match try_build_system_partition(sectors, drivers, apps) {
-            Ok(bytes) => return Ok(bytes),
-            Err(DriverError::NoSpace) if sectors < SYSTEM_MAX_SECTORS => {
-                sectors = sectors.saturating_mul(2).min(SYSTEM_MAX_SECTORS);
-            }
-            Err(e) => return Err(e),
-        }
-    }
+    tairix_syshelp::build_system_volume(
+        &[drivers, apps],
+        |len| try_build_system_partition(len / SECTOR_BYTES as u64, drivers, apps),
+        |refusal| matches!(refusal, DriverError::NoSpace),
+    )
 }
 
-/// Author the `/System` partition into an `ARXFS` volume of exactly
-/// `sectors` sectors, returning [`DriverError::NoSpace`] if the content does
-/// not fit (the signal [`build_system_partition`] grows on). See that
-/// wrapper for the parameter contract.
+/// [`build_system_partition`] into exactly `sectors` sectors.
 fn try_build_system_partition(
     sectors: u64,
     drivers: &[(&[&[u8]], &[u8])],
@@ -496,8 +439,8 @@ mod tests {
     /// The `/System` partition sizes itself to the content it holds, so its
     /// length — and therefore the root partition's start and the whole
     /// image's size — are asserted against the image's *own* table and the
-    /// floor/ceiling the builder promises, never against a hand-computed
-    /// total. Pinning an exact byte count here would make every change to the
+    /// shape the sizing policy promises, never against a hand-computed total.
+    /// Pinning an exact byte count here would make every change to the
     /// shipped `/System` payload fail this test for no reason.
     #[test]
     fn the_image_carries_the_documented_partition_layout() {
@@ -520,18 +463,13 @@ mod tests {
             .first_of_type(PartitionType::ARXFSSystem)
             .expect("a read-only /System partition is present");
         assert_eq!(system.start_lba, SYSTEM_LBA, "/System follows the boot");
+        // Every size the policy chooses is a power-of-two multiple of its
+        // floor, which also keeps the root partition 1 MiB-aligned.
+        let floor = tairix_syshelp::SYSTEM_VOLUME_MIN_BYTES / SECTOR_BYTES as u64;
         assert!(
-            (SYSTEM_SECTORS..=SYSTEM_MAX_SECTORS).contains(&system.block_count),
-            "/System sized itself within its floor and ceiling: {} sectors",
-            system.block_count
-        );
-        // The builder starts at the floor and doubles only on a genuine
-        // out-of-space, so every admissible size is a power-of-two multiple of
-        // the floor — which also keeps the root partition 1 MiB-aligned.
-        assert!(
-            system.block_count.is_multiple_of(SYSTEM_SECTORS)
-                && (system.block_count / SYSTEM_SECTORS).is_power_of_two(),
-            "/System grew by doubling from its floor: {} sectors",
+            system.block_count.is_multiple_of(floor)
+                && (system.block_count / floor).is_power_of_two(),
+            "/System is a power-of-two multiple of its floor: {} sectors",
             system.block_count
         );
 
@@ -548,10 +486,6 @@ mod tests {
             sectors,
             root.start_lba + root.block_count,
             "the image is exactly as long as its own table describes"
-        );
-        assert!(
-            sectors >= TOTAL_SECTORS,
-            "an image is never smaller than the floor layout"
         );
     }
 

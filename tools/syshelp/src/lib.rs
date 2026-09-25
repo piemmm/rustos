@@ -42,7 +42,8 @@
 //!
 //! [`plant_system_payload`] is the single walk both planters drive their own
 //! `plant_nested_file` from, so they can never lay down a different set of
-//! files or spell a path differently.
+//! files or spell a path differently, and [`build_system_volume`] is the one
+//! definition of how large the volume holding it is.
 //!
 //! The payload is `&'static [u8]` bytes embedded at build time, so this crate
 //! is `no_std` and depends on no app crate: both the host image builder and
@@ -267,6 +268,60 @@ pub fn plant_system_payload<E>(
         }?;
     }
     Ok(())
+}
+
+/// The smallest `/System` volume [`build_system_volume`] formats, in bytes.
+pub const SYSTEM_VOLUME_MIN_BYTES: u64 = 32 * 1024 * 1024;
+
+/// A caller's own file set for the `/System` volume: each file's
+/// volume-relative path components and its bytes.
+pub type PlantedFiles<'a> = &'a [(&'a [&'a [u8]], &'a [u8])];
+
+/// Author the `/System` volume holding the system payload and `bundles` at
+/// the smallest power-of-two multiple of [`SYSTEM_VOLUME_MIN_BYTES`] it fits.
+///
+/// `bundles` are the caller's driver and application bundles; `build`
+/// formats and fills a volume of the byte length it is given. No length too
+/// short for the planted bytes themselves is tried. A refusal `is_no_space`
+/// recognises means the filesystem's own metadata did not fit beside them,
+/// so the length doubles: the overhead is measured, never estimated. Every
+/// length is a multiple of the floor, which keeps the partition after the
+/// volume 1 MiB-aligned.
+///
+/// # Errors
+///
+/// The first refusal that is not a lack of space, or a lack of space at four
+/// times the first length: overhead that large is a planter defect, not a
+/// sizing question.
+pub fn build_system_volume<T, E>(
+    bundles: &[PlantedFiles<'_>],
+    mut build: impl FnMut(u64) -> Result<T, E>,
+    is_no_space: impl Fn(&E) -> bool,
+) -> Result<T, E> {
+    let payload = HELP_FILES
+        .iter()
+        .map(|doc| doc.bytes.len())
+        .chain(RESOURCE_FILES.iter().map(|res| res.bytes.len()))
+        .chain(GRAPHICS_FILES.iter().map(|asset| asset.bytes.len()))
+        .chain(
+            bundles
+                .iter()
+                .flat_map(|set| set.iter().map(|(_, bytes)| bytes.len())),
+        )
+        .fold(0u64, |total, len| {
+            total.saturating_add(u64::try_from(len).unwrap_or(u64::MAX))
+        });
+    let mut len = SYSTEM_VOLUME_MIN_BYTES;
+    while len < payload {
+        len = len.saturating_mul(2);
+    }
+    let last = len.saturating_mul(4);
+    loop {
+        match build(len) {
+            Err(refusal) if is_no_space(&refusal) && len < last => len = len.saturating_mul(2),
+            outcome => return outcome,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -554,6 +609,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every volume length `build_system_volume` asks for until `fits`
+    /// accepts one, and its outcome; every refusal is a lack of space.
+    fn lengths_tried(
+        bundles: &[super::PlantedFiles<'_>],
+        fits: impl Fn(u64) -> bool,
+    ) -> (Vec<u64>, Result<u64, u64>) {
+        let mut tried = Vec::new();
+        let outcome = super::build_system_volume(
+            bundles,
+            |len| {
+                tried.push(len);
+                if fits(len) {
+                    Ok(len)
+                } else {
+                    Err(len)
+                }
+            },
+            |_| true,
+        );
+        (tried, outcome)
+    }
+
+    /// The planted bytes of the shipped payload, summed independently of
+    /// the policy under test.
+    fn payload_bytes() -> u64 {
+        let docs = HELP_FILES.iter().map(|doc| doc.bytes.len());
+        let resources = super::RESOURCE_FILES.iter().map(|res| res.bytes.len());
+        let graphics = super::GRAPHICS_FILES.iter().map(|asset| asset.bytes.len());
+        docs.chain(resources)
+            .chain(graphics)
+            .map(|len| u64::try_from(len).expect("a file length fits u64"))
+            .sum()
+    }
+
+    /// The first length tried is the smallest power-of-two multiple of the
+    /// floor that the planted bytes alone do not overflow.
+    #[test]
+    fn the_first_volume_tried_is_the_smallest_the_payload_could_fit() {
+        use super::SYSTEM_VOLUME_MIN_BYTES as FLOOR;
+
+        let (tried, outcome) = lengths_tried(&[], |_| true);
+        let first = tried[0];
+        assert_eq!(outcome, Ok(first));
+        assert!(first.is_multiple_of(FLOOR) && (first / FLOOR).is_power_of_two());
+        let payload = payload_bytes();
+        assert!(first >= payload, "{first} holds the {payload}-byte payload");
+        assert!(
+            first == FLOOR || first / 2 < payload,
+            "{first} is not oversized"
+        );
+    }
+
+    /// The caller's bundles count towards the first length exactly as the
+    /// payload does.
+    #[test]
+    fn a_bundle_counts_towards_the_first_volume_tried() {
+        let (alone, _) = lengths_tried(&[], |_| true);
+        let spill = usize::try_from(alone[0] - payload_bytes() + 1).expect("fits usize");
+        let run = std::vec![0u8; spill];
+        let components: &[&[u8]] = &[b"Commands", b"big.app", b"Run"];
+        let bundle = [(components, run.as_slice())];
+        let (tried, outcome) = lengths_tried(&[&[], &bundle], |_| true);
+        assert_eq!(tried, [alone[0] * 2]);
+        assert_eq!(outcome, Ok(alone[0] * 2));
+    }
+
+    /// A lack of space doubles the length, and nothing else does.
+    #[test]
+    fn the_volume_doubles_only_until_the_content_fits() {
+        let (alone, _) = lengths_tried(&[], |_| true);
+        let first = alone[0];
+        let (tried, outcome) = lengths_tried(&[], |len| len >= first * 2);
+        assert_eq!(tried, [first, first * 2]);
+        assert_eq!(outcome, Ok(first * 2));
+    }
+
+    /// Four times the first length is the last one tried: a volume that
+    /// still has no room is a planter defect, returned as the refusal.
+    #[test]
+    fn a_lack_of_space_at_four_times_the_first_volume_is_returned() {
+        let (tried, outcome) = lengths_tried(&[], |_| false);
+        let first = tried[0];
+        assert_eq!(tried, [first, first * 2, first * 4]);
+        assert_eq!(outcome, Err(first * 4));
+    }
+
+    /// A refusal that is not a lack of space is returned at once.
+    #[test]
+    fn a_refusal_other_than_a_lack_of_space_is_returned_at_once() {
+        let mut tried = 0;
+        let outcome: Result<(), &str> = super::build_system_volume(
+            &[],
+            |_| {
+                tried += 1;
+                Err("device fault")
+            },
+            |refusal| *refusal == "no space",
+        );
+        assert_eq!(outcome, Err("device fault"));
+        assert_eq!(tried, 1);
     }
 
     /// The shared payload walk yields every discovered file exactly once,

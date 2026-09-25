@@ -1825,9 +1825,10 @@ user mode (operator metal acceptance).
 
 - `tools/mkimage` (`tairix-mkimage`, lib + bin) authors
   `images/tairix-aarch64-rpi.img` in pure Rust (§12 — no
-  `parted`/`mkfs` shell-outs): an MBR (two 1 MiB-aligned primaries,
-  `0x0C` FAT32 boot @ LBA 2048, `0x7F` ARXFS root, 64 MiB each), with
-  both partitions laid down by the **real** in-tree drivers
+  `parted`/`mkfs` shell-outs): an MBR (three 1 MiB-aligned primaries back
+  to back: `0x0C` FAT32 boot @ LBA 2048 and `0x7F` ARXFS root, 64 MiB
+  each, around the `0x7E` read-only `/System` sized to its content), with
+  every partition laid down by the **real** in-tree drivers
   (`Fat32::format` / `ARXFS::format` — author and consumer share one
   on-disk definition, §2.2), mirroring the
   `tests/integration/{fat32,arxfs}_image` fixture pattern.
@@ -3784,8 +3785,9 @@ keyboard never regresses (§2.17), until the final flip:
   SYSTEM_VOLUME_STORE_PATH` (`/Drivers`), the §16.2 `/System/Drivers/` store.
   The fixtures plant the signed `virtio_kbd` bundle into the `/System` volume's
   `Drivers/` store (shared `tairix_test_arxfs_image::plant_nested_file`; the
-  encrypted root carries no drivers, §2.14); `SYSTEM_SECTORS` grown to 8 MiB to
-  hold it. `autoload_input_qemu_aarch64` proves the full discover→signed
+  encrypted root carries no drivers, §2.14), which sizes itself to what it
+  holds (`tairix_syshelp::build_system_volume`). `autoload_input_qemu_aarch64`
+  proves the full discover→signed
   gate→spawn→`key_inject` path runs pre-unlock (PASS on
   `AuditEvent::InputDelivered` 4050).
 - **B3 — floor USB→`hwtree` enumeration. DONE (host + metal).** Design A

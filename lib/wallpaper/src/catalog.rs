@@ -53,7 +53,7 @@ pub fn default_wallpaper_path() -> String {
 /// Largest wallpaper file any consumer will read, in bytes.
 ///
 /// A fixed validation bound on untrusted input, not a growable capacity:
-/// 8 MiB admits every shipped photographic master with headroom while still
+/// 8 MiB admits every shipped master with headroom while still
 /// bounding how much hostile work a single file can demand before any byte
 /// is decoded. That relationship is pinned against the real assets rather
 /// than a copied figure — `the_byte_bound_admits_the_largest_shipped_master_with_headroom`

@@ -1739,16 +1739,10 @@ mod tests {
     /// a full-bleed photograph, so it carries none of an icon master's shape
     /// rules (square, a minimum side, at least one opaque pixel).
     ///
-    /// The shipped masters run to several megapixels each, so this decodes
-    /// through [`tairix_image::decode_fitted`] at a tiny destination box
-    /// rather than at natural size. For the shipped JPEG masters that makes
-    /// the decoder pick its coarsest reduced scale — an eighth of natural
-    /// size — which keeps this check fast and light over every shipped master
-    /// without ever exercising the full-resolution decode a real screen would
-    /// need.
-    /// PNG has no reduced-scale decode process, so a PNG wallpaper would
-    /// still decode at natural size here; every master shipped today is
-    /// JPEG.
+    /// This decodes through [`tairix_image::decode_fitted`] at a tiny
+    /// destination box, so a JPEG master decodes at its coarsest reduced
+    /// scale, an eighth of natural size. PNG has no reduced scale, so a PNG
+    /// master decodes whole.
     ///
     /// # Errors
     ///

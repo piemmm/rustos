@@ -10,11 +10,15 @@
 //!
 //! [`build_rpi_image`] assembles the flashable Raspberry Pi 4 SD image:
 //!
-//! - **MBR** ([`mbr`]): two primary partitions, both 1 MiB-aligned.
+//! - **MBR** ([`mbr`]): three primary partitions, all 1 MiB-aligned and
+//!   back to back.
 //! - **Boot partition** ([`fatboot`], FAT32, [`BOOT_PART_SECTORS`]): the
 //!   pinned third-party firmware blobs ([`firmware`]),
 //!   the generated `config.txt`, and `kernel8.img` — the freestanding
 //!   aarch64 `tairix-kernel` ELF flattened by [`elfflat`].
+//! - **`/System` partition** ([`rootfs::build_system_partition`], read-only
+//!   `ARXFS`): the signed driver and program bundles and the discovered
+//!   system payload, at the smallest size that holds them.
 //! - **Root partition** ([`rootfs`], `ARXFS`, [`ROOT_PART_SECTORS`]): an
 //!   encrypted volume carrying the directory skeleton. Its
 //!   volume key is **derived from a passphrase**: the
@@ -82,29 +86,16 @@ pub const BOOT_PART_SECTORS: u32 = 131_072;
 
 /// First sector of the read-only `ARXFS` `/System` partition (contiguous
 /// with the boot partition, which already ends 1 MiB-aligned). This is the
-/// design-B pre-unlock signed-driver store (`plans/PI.md`).
+/// design-B pre-unlock signed-driver store (`plans/PI.md`). It is sized to
+/// its content ([`rootfs::build_system_partition`]), and the encrypted
+/// data-root partition follows it directly.
 pub const SYSTEM_PART_LBA: u32 = BOOT_PART_LBA + BOOT_PART_SECTORS;
-
-/// Sectors in the read-only `ARXFS` `/System` partition: 128 MiB — the
-/// skeleton plus the signed driver bundles and the discovered program and
-/// service stores (`/System/Commands`, `/System/Applications`,
-/// `/System/Services`), each app a self-contained `Run` rxe beside its
-/// `Help/` tree, with headroom for the stores to keep growing as apps are
-/// added.
-pub const SYSTEM_PART_SECTORS: u32 = 262_144;
-
-/// First sector of the encrypted `ARXFS` data-root partition (contiguous
-/// with the `/System` partition, which already ends 1 MiB-aligned).
-pub const ROOT_PART_LBA: u32 = SYSTEM_PART_LBA + SYSTEM_PART_SECTORS;
 
 /// Sectors in the `ARXFS` root partition: 64 MiB — the skeleton plus
 /// installer headroom. The installer grows the layout on first boot;
 /// `ARXFS::grow` expands a volume to its device, so a card-sized root is
 /// a first-boot job, not an image-build job.
 pub const ROOT_PART_SECTORS: u32 = 131_072;
-
-/// Total sectors in the assembled image.
-pub const IMAGE_SECTORS: u32 = ROOT_PART_LBA + ROOT_PART_SECTORS;
 
 /// Everything that can go wrong while authoring an image. Every variant is
 /// a refusal: mkimage never emits a best-effort image.
@@ -433,7 +424,8 @@ fn debug_machine_id(entropy: &mut dyn EntropySource) -> Result<[u8; MACHINE_ID_L
 
 /// The assembled image plus the material the operator must keep.
 pub struct RpiImage {
-    /// The flashable image bytes ([`IMAGE_SECTORS`] sectors).
+    /// The flashable image bytes, exactly as long as its partition table
+    /// describes.
     pub image: Vec<u8>,
     /// The passphrase-unlock descriptor the root was provisioned under,
     /// laid down in the clear on the boot partition
@@ -562,13 +554,7 @@ pub fn build_rpi_image(
         &descriptor,
         CONSOLE_BAUD,
     )?;
-    let system = rootfs::build_system_partition(
-        u64::from(SYSTEM_PART_SECTORS),
-        entropy,
-        drivers,
-        apps,
-        network_conf,
-    )?;
+    let system = rootfs::build_system_partition(entropy, drivers, apps, network_conf)?;
     let root = rootfs::build_root_partition(
         u64::from(ROOT_PART_SECTORS),
         &root_key,
@@ -583,6 +569,12 @@ pub fn build_rpi_image(
         },
     )?;
 
+    let too_large = || MkimageError::SystemPartition(DriverError::LengthOutOfRange);
+    let system_at = SYSTEM_PART_LBA as usize * SECTOR_BYTES;
+    let root_at = system_at.checked_add(system.len()).ok_or_else(too_large)?;
+    let image_len = root_at.checked_add(root.len()).ok_or_else(too_large)?;
+    let sectors = |bytes: usize| u64::try_from(bytes / SECTOR_BYTES).map_err(|_| too_large());
+
     let mbr_sector = mbr::encode(&[
         Partition {
             ty: PartitionType::FatBoot,
@@ -592,23 +584,21 @@ pub fn build_rpi_image(
         Partition {
             ty: PartitionType::ARXFSSystem,
             start_lba: u64::from(SYSTEM_PART_LBA),
-            block_count: u64::from(SYSTEM_PART_SECTORS),
+            block_count: sectors(system.len())?,
         },
         Partition {
             ty: PartitionType::ARXFSRoot,
-            start_lba: u64::from(ROOT_PART_LBA),
-            block_count: u64::from(ROOT_PART_SECTORS),
+            start_lba: sectors(root_at)?,
+            block_count: sectors(root.len())?,
         },
     ])?;
 
-    let mut image = vec![0u8; IMAGE_SECTORS as usize * SECTOR_BYTES];
+    let mut image = vec![0u8; image_len];
     image[..SECTOR_BYTES].copy_from_slice(&mbr_sector);
     let boot_at = BOOT_PART_LBA as usize * SECTOR_BYTES;
     image[boot_at..boot_at + boot.len()].copy_from_slice(&boot);
-    let system_at = SYSTEM_PART_LBA as usize * SECTOR_BYTES;
-    image[system_at..system_at + system.len()].copy_from_slice(&system);
-    let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
-    image[root_at..root_at + root.len()].copy_from_slice(&root);
+    image[system_at..root_at].copy_from_slice(&system);
+    image[root_at..].copy_from_slice(&root);
 
     Ok(RpiImage {
         image,
@@ -728,6 +718,20 @@ mod tests {
         ]
     }
 
+    /// The byte range `ty`'s partition occupies in `image`, read from the
+    /// image's own partition table.
+    fn extent(image: &[u8], ty: PartitionType) -> core::ops::Range<usize> {
+        let table = mbr::parse(&image[..SECTOR_BYTES]).expect("the MBR parses");
+        let part = table.first_of_type(ty).expect("the partition is present");
+        let at = usize::try_from(part.start_lba).expect("fits usize") * SECTOR_BYTES;
+        at..at + usize::try_from(part.block_count).expect("fits usize") * SECTOR_BYTES
+    }
+
+    /// The bytes of `image`'s encrypted data-root partition.
+    fn root_partition(image: &[u8]) -> Vec<u8> {
+        image[extent(image, PartitionType::ARXFSRoot)].to_vec()
+    }
+
     /// Read the encoded unlock descriptor planted on a built image's FAT
     /// boot partition.
     fn read_unlock_descriptor(image: &[u8]) -> UnlockDescriptor {
@@ -758,7 +762,11 @@ mod tests {
             &test_network_conf(),
         )
         .expect("image builds");
-        assert_eq!(built.image.len(), IMAGE_SECTORS as usize * SECTOR_BYTES);
+        assert_eq!(
+            extent(&built.image, PartitionType::ARXFSRoot).end,
+            built.image.len(),
+            "the image ends where its last partition does"
+        );
 
         // The MBR carries the expected three-partition table: FAT boot,
         // read-only `/System`, encrypted data root.
@@ -794,11 +802,8 @@ mod tests {
         );
 
         // The root partition mounts under that re-derived key.
-        let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
-        let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
-        let root_bytes = built.image[root_at..root_at + root_len].to_vec();
         let mut rfs = ARXFS::open(
-            MemBlock::from_bytes(root_bytes).expect("whole sectors"),
+            MemBlock::from_bytes(root_partition(&built.image)).expect("whole sectors"),
             &descriptor.derive_volume_key(INSTALLER_PASSPHRASE),
         )
         .expect("root partition mounts");
@@ -834,14 +839,25 @@ mod tests {
         .expect("image builds");
 
         // The whole-disk table parses and locates the read-only `/System`
-        // partition by role at the documented offset.
+        // partition by role at the documented offset, sized in whole
+        // multiples of the shared floor and followed directly by the root.
         let mut disk = MemBlock::from_bytes(built.image.clone()).expect("whole sectors");
         let table = parse_partition_table(&mut disk).expect("the MBR parses");
         let system = table
             .first_of_type(PartitionType::ARXFSSystem)
             .expect("a /System partition is present");
         assert_eq!(system.start_lba, u64::from(SYSTEM_PART_LBA));
-        assert_eq!(system.block_count, u64::from(SYSTEM_PART_SECTORS));
+        let floor = tairix_syshelp::SYSTEM_VOLUME_MIN_BYTES / SECTOR_BYTES as u64;
+        assert!(
+            system.block_count.is_multiple_of(floor)
+                && (system.block_count / floor).is_power_of_two(),
+            "/System is a power-of-two multiple of the floor: {} sectors",
+            system.block_count
+        );
+        let root = table
+            .first_of_type(PartitionType::ARXFSRoot)
+            .expect("a data root is present");
+        assert_eq!(root.start_lba, system.start_lba + system.block_count);
 
         // It mounts read-only under the non-secret well-known key and its
         // root *is* `/System`, carrying the skeleton directly.
@@ -1098,9 +1114,7 @@ mod tests {
         // AEAD-wrapped master key rejects — no separate oracle.
         let wrong = descriptor.derive_volume_key(b"not the passphrase");
         assert_ne!(wrong, built.root_key);
-        let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
-        let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
-        let root_bytes = built.image[root_at..root_at + root_len].to_vec();
+        let root_bytes = root_partition(&built.image);
         assert!(ARXFS::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
             &wrong,
@@ -1121,9 +1135,7 @@ mod tests {
         )
         .expect("image builds");
 
-        let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
-        let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
-        let root_bytes = built.image[root_at..root_at + root_len].to_vec();
+        let root_bytes = root_partition(&built.image);
         let mut rfs = ARXFS::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
             &built.root_key,
@@ -1189,9 +1201,7 @@ mod tests {
         .expect("image builds");
 
         // The installer root is provisioned under the blank passphrase.
-        let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
-        let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
-        let root_bytes = built.image[root_at..root_at + root_len].to_vec();
+        let root_bytes = root_partition(&built.image);
         let mut rfs = ARXFS::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
             &built.root_key,
@@ -1255,9 +1265,7 @@ mod tests {
         )
         .expect("image builds");
 
-        let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
-        let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
-        let root_bytes = built.image[root_at..root_at + root_len].to_vec();
+        let root_bytes = root_partition(&built.image);
         let mut rfs = ARXFS::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
             &built.root_key,
