@@ -60,7 +60,7 @@ jobs:
     # Fail closed: only the owner pushing to the canonical repo may execute on
     # the self-hosted runner. Forks (a different `github.repository`) and any
     # other actor are refused before checkout, so untrusted code never runs.
-    if: github.repository == 'piemmm/rustos' && github.actor == 'piemmm'
+    if: github.repository == 'piemmm/tairix' && github.actor == 'piemmm'
     runs-on: [self-hosted, linux]
     timeout-minutes: 240
     steps:

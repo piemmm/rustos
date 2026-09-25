@@ -76,7 +76,7 @@ jobs:
     # Fail closed: only the owner in the canonical repo may execute on the
     # self-hosted runner. Refuses forks (different `github.repository`) and any
     # non-owner actor (e.g. a collaborator's manual dispatch) before checkout.
-    if: github.repository == 'piemmm/rustos' && github.actor == 'piemmm'
+    if: github.repository == 'piemmm/tairix' && github.actor == 'piemmm'
     # Dedicated `long` label so the hunt runs on its own runner instance and
     # never queues `ci.yml` (which uses the bare `[self-hosted, linux]`) behind
     # it.
