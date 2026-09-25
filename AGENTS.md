@@ -752,8 +752,8 @@ tairix/
 │   ├── xtask/           # Build orchestration (cargo xtask ...).
 │   ├── mkimage/         # Image builders per platform.
 │   ├── syshelp/         # Build-discovered shipped /System payload (bundle
-│   │                    #   Help/Resources trees, desktop graphics) and the
-│   │                    #   sizing of the volume that holds it.
+│   │                    #   Help/Resources trees, desktop graphics), the
+│   │                    #   /System volume's sizing, and the boot-disk layout.
 │   ├── cc/              # Host-only C toolchain wrapper for the C-ABI test.
 │   ├── tzcompile/       # Host-only IANA tzdata -> zone-store compiler.
 │   ├── qemu/            # QEMU run scripts.

@@ -1,43 +1,47 @@
 # tairix-syshelp
 
-Build-discovered **system payload** for image authoring: the command apps'
-Help documents and bundle resources, plus the desktop's graphics assets.
+Build-discovered **system payload** for image authoring, and the one
+definition both disk authors build their disk through.
 
 Stability tier: **experimental** (host build tooling).
 
-TAIRiX ships each command app's internationalised command help as a
-structured-Markdown `Help/` tree on the read-only `/System` volume, at
-`<store>/<name>.app/Help/<locale>/<doc>.md` (`plans/APPS.md`) — where `<store>`
-is the bundle's own declared store — each app's bundle resources at
-`<store>/<name>.app/Resources/<file>`, and the
-desktop's graphics assets — the raster icon masters — under `/System/Graphics`
-(`AGENTS.md` §16.2, §10). The image builder (`tools/mkimage`) and the QEMU
-image fixture must plant all of these onto the volume they author.
+## Payload
 
-This crate's `build.rs` walks the command-app source roots
-(`userland/{apps,gui,shell}/*/Help/` and `.../Resources/`) and the desktop
-icon directory (`lib/icon/assets/`), finds every file, and embeds each as a
-row in `HELP_FILES` / `RESOURCE_FILES` / `GRAPHICS_FILES`. Both planters drive
-their own `plant_nested_file` from the one shared walk `plant_system_payload`,
-so they can never lay down a different set of files or spell a path
-differently. The payload is never a hand-maintained list, and no help text,
-resource, or icon is hardcoded into a binary. The source of truth is each
-family's own on-disk directory; adding a help document, a resource, or an icon
-(`<asset-id>.png`) is dropping files on disk, and the next build rediscovers
-them (`AGENTS.md` §2.2, the §16.5 self-contained-bundle rule).
+TAIRiX ships on the read-only `/System` volume each command app's
+internationalised `Help/` tree at `<store>/<name>.app/Help/<locale>/<doc>.md`
+(`plans/APPS.md`), each app's bundle resources at
+`<store>/<name>.app/Resources/<file>` (`<store>` being the store the bundle's
+own manifest kind installs it to), and the desktop's graphics assets (icon
+masters, wallpaper masters, cursor sets) under `/System/Graphics`.
+
+`build.rs` walks the command-app source roots (`userland/{apps,gui,shell}`)
+and each graphics family's own directory (`lib/icon/assets/`,
+`lib/wallpaper/assets/`, `lib/cursor/assets/`), and embeds every file it finds
+as a row of `HELP_FILES`, `RESOURCE_FILES` or `GRAPHICS_FILES`. Adding a help
+document, a resource or an asset is dropping a file on disk; nothing keeps a
+hand-maintained list, and nothing hardcodes the payload into a binary.
 
 - A resource (e.g. `lspci.app`'s compiled `pci.ids.bin` lookup table) is
-  planted at `Apps/<bundle>/Resources/<file>` and covered by the bundle's
-  signed `AppInfo` content hash, so a tampered resource fails the load gate
-  closed.
-- A graphics asset is planted at `Graphics/<dir>/<file>` (today `dir` is
-  `Icons`). Each is validated against the desktop's own icon contract
-  (`tairix_icon`) as it is discovered — a legal `<asset-id>.png` name, within
-  the `MAX_ARTWORK_BYTES` bound, with a unique asset id — so a name the
-  desktop could never resolve or an over-large file fails the build closed
-  rather than shipping artwork that would silently render as a fallback glyph.
+  covered by the bundle's signed `AppInfo` content hash, so a tampered
+  resource fails the load gate closed.
+- Each graphics asset is validated against its own family's contract as it is
+  discovered, so a name its consumer could never resolve or an over-large file
+  fails the build closed instead of shipping artwork that never draws.
+
+## The disk
+
+The image builder (`tools/mkimage`) and the QEMU whole-disk fixture
+(`tests/integration/encrypted_root_image`) both build through this crate, so
+neither keeps its own copy of the file set, the sizing or the layout.
+
+- `build_system_volume` counts and plants the payload and the caller's
+  bundles in one walk, through the caller's `SystemVolume`, into a volume of
+  whole `SYSTEM_VOLUME_GRAIN_BYTES` grains: the planted bytes rounded up, plus
+  one grain whenever the filesystem's own metadata does not fit.
+- `assemble_disk` lays the boot, `/System` and root partitions back to back
+  from `BOOT_PART_LBA` behind an MBR, refusing a partition that is not whole
+  `SECTOR_BYTES` sectors or that the table cannot describe.
 
 The payload is `&'static [u8]` bytes embedded at build time, so the crate is
-`no_std` and depends on no app crate: both the host image builder and the
-freestanding QEMU fixture (which also links into the aarch64 guest tail)
-consume it unchanged.
+`no_std` (with `alloc`) and depends on no app crate: both the host image
+builder and the freestanding QEMU fixture consume it unchanged.

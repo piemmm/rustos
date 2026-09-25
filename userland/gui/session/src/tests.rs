@@ -56,14 +56,14 @@ use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, load_icon_set, load_library,
     load_programs, maybe_send_seat_report, open_tray, picker_cells, resolve_launch,
     resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
-    AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, Batch, BundleIndex, DesktopSession,
+    AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, BundleIndex, DesktopSession,
     DesktopShell, DocumentRelay, FrameContent, FramePacer, FrameReportGate, Handover,
     IconRasteriser, InputSource, Launch, LaunchHost, LaunchTable, LaunchTarget, LockOutcome,
     LockedDrain, OwnerBundleGate, OwnerWindow, PresentedOwners, ScreenFade, ScreenLock,
     SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows, ShellOutcome,
-    ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
-    TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
-    DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
+    ShellWindowHost, Stopped, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
+    SwitchboardServe, TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED,
+    DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
     MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_svg::font::NoFonts;
@@ -1251,7 +1251,12 @@ fn register_theme_rejects_a_duplicate_id() {
 }
 
 /// A filled opaque test window the input router can hit-test against.
-fn opaque_window(comp: &mut Compositor, origin: Point, width: u32, height: u32) -> WindowId {
+pub(crate) fn opaque_window(
+    comp: &mut Compositor,
+    origin: Point,
+    width: u32,
+    height: u32,
+) -> WindowId {
     let surface =
         Surface::filled(width, height, Color::rgb(0, 120, 255).premultiply()).expect("surface");
     comp.add_window(origin, surface)
@@ -1829,14 +1834,14 @@ fn a_press_on_an_app_slot_reaches_the_taskbar_through_the_seat() {
 
 /// An in-memory [`InputSource`]: a queue of events, optionally faulting once
 /// the queue is drained, standing in for the kernel's input channel.
-struct MemoryInput {
+pub(crate) struct MemoryInput {
     events: Vec<InputEvent>,
     next: usize,
     fault: Option<Errno>,
 }
 
 impl MemoryInput {
-    fn new(events: &[InputEvent]) -> Self {
+    pub(crate) fn new(events: &[InputEvent]) -> Self {
         Self {
             events: events.to_vec(),
             next: 0,
@@ -1844,7 +1849,7 @@ impl MemoryInput {
         }
     }
 
-    fn faulting(events: &[InputEvent], fault: Errno) -> Self {
+    pub(crate) fn faulting(events: &[InputEvent], fault: Errno) -> Self {
         Self {
             events: events.to_vec(),
             next: 0,
@@ -1853,9 +1858,20 @@ impl MemoryInput {
     }
 
     /// Queued events no poll has taken yet.
-    fn remaining(&self) -> usize {
+    pub(crate) fn remaining(&self) -> usize {
         self.events.len() - self.next
     }
+}
+
+/// One `pump` batch of `source`: its outcomes, and where it stopped.
+fn pump_once<S: InputSource + ?Sized>(
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+    source: &mut S,
+) -> Result<(Vec<ShellOutcome>, Stopped), Errno> {
+    let mut outcomes = Vec::new();
+    let stopped = shell.pump(source, comp, 0, &mut outcomes)?;
+    Ok((outcomes, stopped))
 }
 
 /// Every outcome `events` produce, drained batch after batch as the serve loop
@@ -1868,11 +1884,10 @@ fn pump_to_empty(
     let mut source = MemoryInput::new(events);
     let mut outcomes = Vec::new();
     loop {
-        let batch = shell
-            .pump(&mut source, comp, 0)
-            .expect("an in-memory source does not fault");
-        outcomes.extend(batch.outcomes);
-        if !batch.at_edge {
+        let (batch, stopped) =
+            pump_once(shell, comp, &mut source).expect("an in-memory source does not fault");
+        outcomes.extend(batch);
+        if stopped == Stopped::Empty {
             return outcomes;
         }
     }
@@ -1891,29 +1906,29 @@ impl InputSource for MemoryInput {
     }
 }
 
-fn shell() -> DesktopShell {
+pub(crate) fn shell() -> DesktopShell {
     shell_for(TaskbarConfig::bottom_bar(1920, 1080))
 }
 
-fn moved(x: i32, y: i32) -> InputEvent {
+pub(crate) fn moved(x: i32, y: i32) -> InputEvent {
     InputEvent::PointerMoved {
         to: Point::new(x, y),
     }
 }
 
-const PRIMARY_PRESS: InputEvent = InputEvent::PointerPressed {
+pub(crate) const PRIMARY_PRESS: InputEvent = InputEvent::PointerPressed {
     button: PointerButton::Primary,
 };
 
-const SECONDARY_PRESS: InputEvent = InputEvent::PointerPressed {
+pub(crate) const SECONDARY_PRESS: InputEvent = InputEvent::PointerPressed {
     button: PointerButton::Secondary,
 };
 
-const SECONDARY_RELEASE: InputEvent = InputEvent::PointerReleased {
+pub(crate) const SECONDARY_RELEASE: InputEvent = InputEvent::PointerReleased {
     button: PointerButton::Secondary,
 };
 
-const PRIMARY_RELEASE: InputEvent = InputEvent::PointerReleased {
+pub(crate) const PRIMARY_RELEASE: InputEvent = InputEvent::PointerReleased {
     button: PointerButton::Primary,
 };
 
@@ -1940,14 +1955,13 @@ fn pump_opens_the_popup_and_presents_it() {
     // that is not on screen claims nothing (fail closed).
     shell.present(&mut comp);
 
-    let outcomes = shell
-        .pump(
-            &mut MemoryInput::new(&[moved(24, 1060), PRIMARY_PRESS]),
-            &mut comp,
-            0,
-        )
-        .expect("an in-memory source does not fault")
-        .outcomes;
+    let outcomes = pump_once(
+        &mut shell,
+        &mut comp,
+        &mut MemoryInput::new(&[moved(24, 1060), PRIMARY_PRESS]),
+    )
+    .expect("an in-memory source does not fault")
+    .0;
 
     assert_eq!(
         outcomes,
@@ -2221,16 +2235,19 @@ fn pump_propagates_a_source_fault_after_applying_prior_events() {
 
     // The press is an edge, so its batch ends before the fault queued behind it.
     assert_eq!(
-        shell.pump(&mut source, &mut comp, 0),
-        Ok(Batch {
-            outcomes: vec![
+        pump_once(&mut shell, &mut comp, &mut source),
+        Ok((
+            vec![
                 ShellOutcome::Ignored,
                 ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary),
             ],
-            at_edge: true,
-        })
+            Stopped::AtEdge,
+        ))
     );
-    assert_eq!(shell.pump(&mut source, &mut comp, 0), Err(Errno::NotFound));
+    assert_eq!(
+        pump_once(&mut shell, &mut comp, &mut source),
+        Err(Errno::NotFound)
+    );
     assert!(
         shell.session().taskbar().library().is_open(),
         "the events drained before the fault were still applied"
@@ -2249,10 +2266,9 @@ fn pump_coalesces_adjacent_pointer_motions_over_one_window() {
 
     // A run of N pointer motions over one window.
     let events = &[moved(251, 251), moved(252, 252), moved(253, 253)];
-    let outcomes = shell
-        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+    let outcomes = pump_once(&mut shell, &mut comp, &mut MemoryInput::new(events))
         .expect("source does not fault")
-        .outcomes;
+        .0;
 
     assert_eq!(outcomes.len(), 1);
     assert_eq!(
@@ -2308,10 +2324,9 @@ fn pump_settles_one_frame_for_a_whole_motion_batch() {
 
     let path: Vec<InputEvent> = (0..16).map(|step| moved(251 + step, 251 + step)).collect();
     let before = shell.settle_work();
-    let outcomes = shell
-        .pump(&mut MemoryInput::new(&path), &mut comp, 0)
+    let outcomes = pump_once(&mut shell, &mut comp, &mut MemoryInput::new(&path))
         .expect("source does not fault")
-        .outcomes;
+        .0;
 
     assert_eq!(outcomes.len(), 1, "the motion run folds app-ward too");
     assert_eq!(
@@ -2355,10 +2370,9 @@ fn pump_leaves_the_same_desktop_as_one_handle_per_sample() {
     }
 
     let batched_before = batched.settle_work();
-    let batched_outcomes = batched
-        .pump(&mut MemoryInput::new(path), &mut batched_comp, 0)
+    let batched_outcomes = pump_once(&mut batched, &mut batched_comp, &mut MemoryInput::new(path))
         .expect("source does not fault")
-        .outcomes;
+        .0;
     let sampled_before = sampled.settle_work();
     let sampled_outcomes: Vec<ShellOutcome> = path
         .iter()
@@ -2424,14 +2438,12 @@ fn pump_applies_an_order_sensitive_stream_in_order() {
 
     let batched_before = batched.settle_work();
     let mut source = MemoryInput::new(script);
-    let first = batched
-        .pump(&mut source, &mut batched_comp, 0)
+    let first = pump_once(&mut batched, &mut batched_comp, &mut source)
         .expect("source does not fault")
-        .outcomes;
-    let second = batched
-        .pump(&mut source, &mut batched_comp, 0)
+        .0;
+    let second = pump_once(&mut batched, &mut batched_comp, &mut source)
         .expect("source does not fault")
-        .outcomes;
+        .0;
     assert_eq!(
         source.remaining(),
         0,
@@ -2484,10 +2496,9 @@ fn pump_applies_an_order_sensitive_stream_in_order() {
     );
 }
 
-/// The regression: `pump` drained the whole queue before the embedder routed
-/// any of it, so an event queued behind an edge was applied against the holder
-/// the edge was about to replace. It now stops at each edge and leaves the rest
-/// queued, while a run of samples still drains as one batch.
+/// A batch stops at each edge and leaves what follows queued, because routing
+/// the edge can hand the seat to another holder; a run of samples still drains
+/// as one batch.
 #[test]
 fn pump_stops_at_each_edge_and_leaves_the_rest_queued() {
     let mut shell = shell();
@@ -2504,12 +2515,11 @@ fn pump_stops_at_each_edge_and_leaves_the_rest_queued() {
         PRIMARY_PRESS,
         moved(254, 254),
     ]);
-    let batches: Vec<(Batch, usize)> = (0..3)
+    let batches: Vec<(Vec<ShellOutcome>, Stopped, usize)> = (0..3)
         .map(|_| {
-            let batch = shell
-                .pump(&mut source, &mut comp, 0)
-                .expect("source does not fault");
-            (batch, source.remaining())
+            let (outcomes, stopped) =
+                pump_once(&mut shell, &mut comp, &mut source).expect("source does not fault");
+            (outcomes, stopped, source.remaining())
         })
         .collect();
 
@@ -2523,39 +2533,60 @@ fn pump_stops_at_each_edge_and_leaves_the_rest_queued() {
         batches,
         [
             (
-                Batch {
-                    outcomes: vec![
-                        moved_to(252),
-                        ShellOutcome::WindowManager(InputResponse::ClientPointerReleased {
-                            window,
-                            local: Point::new(52, 52),
-                        }),
-                    ],
-                    at_edge: true,
-                },
+                vec![
+                    moved_to(252),
+                    ShellOutcome::WindowManager(InputResponse::ClientPointerReleased {
+                        window,
+                        local: Point::new(52, 52),
+                    }),
+                ],
+                Stopped::AtEdge,
                 3,
             ),
             (
-                Batch {
-                    outcomes: vec![
-                        moved_to(253),
-                        ShellOutcome::WindowManager(InputResponse::Activated {
-                            window,
-                            local: Point::new(53, 53),
-                        }),
-                    ],
-                    at_edge: true,
-                },
+                vec![
+                    moved_to(253),
+                    ShellOutcome::WindowManager(InputResponse::Activated {
+                        window,
+                        local: Point::new(53, 53),
+                    }),
+                ],
+                Stopped::AtEdge,
                 1,
             ),
-            (
-                Batch {
-                    outcomes: vec![moved_to(254)],
-                    at_edge: false,
-                },
-                0,
-            ),
+            (vec![moved_to(254)], Stopped::Empty, 0),
         ]
+    );
+}
+
+/// The outcome buffer is the caller's to reuse: a batch replaces whatever it
+/// held rather than folding into it.
+#[test]
+fn pump_replaces_what_its_buffer_held() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+    shell.handle(moved(250, 250), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    // An outcome nothing folds into, so a batch appended to it would show.
+    let mut outcomes = vec![ShellOutcome::Ignored];
+    let stopped = shell
+        .pump(
+            &mut MemoryInput::new(&[moved(251, 251)]),
+            &mut comp,
+            0,
+            &mut outcomes,
+        )
+        .expect("source does not fault");
+    assert_eq!(stopped, Stopped::Empty);
+    assert_eq!(
+        outcomes,
+        [ShellOutcome::WindowManager(
+            InputResponse::ClientPointerMoved {
+                window,
+                local: Point::new(51, 51),
+            }
+        )]
     );
 }
 
@@ -2568,10 +2599,9 @@ fn pump_settles_nothing_when_the_source_is_empty() {
     shell.present(&mut comp);
 
     let before = shell.settle_work();
-    let outcomes = shell
-        .pump(&mut MemoryInput::new(&[]), &mut comp, 0)
+    let outcomes = pump_once(&mut shell, &mut comp, &mut MemoryInput::new(&[]))
         .expect("source does not fault")
-        .outcomes;
+        .0;
 
     assert!(outcomes.is_empty());
     assert_eq!(work_since(&shell, before), (0, 0, 0));
@@ -2587,10 +2617,10 @@ fn pump_settles_the_events_applied_before_a_fault() {
     let onto = centre(shell.session().taskbar().layout(Scale::ONE).library);
 
     let before = shell.settle_work();
-    let result = shell.pump(
-        &mut MemoryInput::faulting(&[moved(onto.x, onto.y)], Errno::NotFound),
+    let result = pump_once(
+        &mut shell,
         &mut comp,
-        0,
+        &mut MemoryInput::faulting(&[moved(onto.x, onto.y)], Errno::NotFound),
     );
 
     assert_eq!(result, Err(Errno::NotFound));
@@ -2663,10 +2693,9 @@ fn pump_folds_a_run_of_wheel_ticks_over_one_window() {
         InputEvent::PointerScrolled { dx: 0, dy: 1 },
         InputEvent::PointerScrolled { dx: 0, dy: 1 },
     ];
-    let outcomes = shell
-        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+    let outcomes = pump_once(&mut shell, &mut comp, &mut MemoryInput::new(events))
         .expect("source does not fault")
-        .outcomes;
+        .0;
 
     assert_eq!(
         outcomes,
@@ -2712,10 +2741,9 @@ fn pump_folds_a_run_of_resize_samples_over_one_window() {
         moved(bounds.right() + 29, bounds.bottom() + 29),
         PRIMARY_RELEASE,
     ];
-    let outcomes = shell
-        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+    let outcomes = pump_once(&mut shell, &mut comp, &mut MemoryInput::new(events))
         .expect("source does not fault")
-        .outcomes;
+        .0;
 
     assert_eq!(
         outcomes,
@@ -2752,10 +2780,9 @@ fn pump_ends_a_wheel_run_at_a_reversal() {
         InputEvent::PointerScrolled { dx: 0, dy: 1 },
         InputEvent::PointerScrolled { dx: 0, dy: -1 },
     ];
-    let outcomes = shell
-        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+    let outcomes = pump_once(&mut shell, &mut comp, &mut MemoryInput::new(events))
         .expect("source does not fault")
-        .outcomes;
+        .0;
 
     assert_eq!(
         outcomes,
@@ -2791,10 +2818,9 @@ fn pump_keeps_a_wheel_tick_and_a_motion_apart() {
         moved(251, 251),
         InputEvent::PointerScrolled { dx: 0, dy: 1 },
     ];
-    let outcomes = shell
-        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+    let outcomes = pump_once(&mut shell, &mut comp, &mut MemoryInput::new(events))
         .expect("source does not fault")
-        .outcomes;
+        .0;
 
     assert_eq!(outcomes.len(), 3);
     assert!(matches!(
@@ -2900,8 +2926,7 @@ fn pump_coalescing_is_safe_because_handle_runs_per_event() {
 
     // Run of motions.
     let events = &[moved(251, 251), moved(252, 252), moved(253, 253)];
-    let _ = shell
-        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+    let _ = pump_once(&mut shell, &mut comp, &mut MemoryInput::new(events))
         .expect("source does not fault");
 
     // Observable: pointer position reflects the last sample.
@@ -2918,10 +2943,13 @@ fn motion_is_ignored_and_repaints_only_when_the_hover_changes() {
 
     // Motion over the empty desktop (far from the bar). It reaches the
     // session as the desktop's own motion — the bar draws nothing for it.
-    let outcomes = shell
-        .pump(&mut MemoryInput::new(&[moved(900, 500)]), &mut comp, 0)
-        .expect("source does not fault")
-        .outcomes;
+    let outcomes = pump_once(
+        &mut shell,
+        &mut comp,
+        &mut MemoryInput::new(&[moved(900, 500)]),
+    )
+    .expect("source does not fault")
+    .0;
 
     assert_eq!(
         outcomes,
@@ -2943,14 +2971,13 @@ fn motion_is_ignored_and_repaints_only_when_the_hover_changes() {
     // because the bar has none. A hover is a pixel-only change, latched on the
     // model rather than reported.
     let onto = centre(shell.session().taskbar().layout(Scale::ONE).library);
-    let outcomes = shell
-        .pump(
-            &mut MemoryInput::new(&[moved(onto.x, onto.y)]),
-            &mut comp,
-            0,
-        )
-        .expect("source does not fault")
-        .outcomes;
+    let outcomes = pump_once(
+        &mut shell,
+        &mut comp,
+        &mut MemoryInput::new(&[moved(onto.x, onto.y)]),
+    )
+    .expect("source does not fault")
+    .0;
     assert_eq!(outcomes, [ShellOutcome::Ignored]);
 
     // The hover changed, so the bar — and only the bar — was repainted.
@@ -3791,7 +3818,7 @@ fn library_row_at(shell: &DesktopShell, label: &str) -> Point {
 ///
 /// The caller clones the session's floating ground into `theme`, so the chain
 /// holds no borrow of the shell across the events it drives next.
-fn chain_geometry_over<'t>(comp: &Compositor, theme: &'t Theme) -> ChainGeometry<'t> {
+pub(crate) fn chain_geometry_over<'t>(comp: &Compositor, theme: &'t Theme) -> ChainGeometry<'t> {
     ChainGeometry {
         screen: comp.screen_rect(),
         scale: comp.scale(),
@@ -3802,7 +3829,7 @@ fn chain_geometry_over<'t>(comp: &Compositor, theme: &'t Theme) -> ChainGeometry
 
 /// Open and draw the chain a bar `request` asks for, as `open_bar_menu` does,
 /// returning it with the centre of its row labelled `label`.
-fn open_bar_chain(
+pub(crate) fn open_bar_chain(
     shell: &mut DesktopShell,
     comp: &mut Compositor,
     request: tairix_taskbar::MenuRequest,
@@ -5534,108 +5561,6 @@ fn secondary_press_over_an_app_slot_opens_the_menu_it_declared() {
     );
 }
 
-/// The nightly soak's `appbar-qemu-aarch64` failure. Under load the desktop
-/// drained a right-click on an application's slot *and* the click on the row of
-/// the menu it asks for in one wake: the row click was hit-tested against what
-/// lay behind a chain that did not exist yet, and the chain then opened with
-/// nothing left to choose from it. Driven as the serve loop drives it — the
-/// drain, the `OpenMenu` routed into a chain, the rest of the queue into that
-/// chain.
-#[test]
-fn a_row_click_queued_behind_the_press_that_opens_a_bar_menu_is_the_chains() {
-    let new_window = AppMenuItemId::new(tairix_window::QUIT_ROW + 1).expect("non-zero");
-    let desktop = || {
-        let bar = tairix_window::declaration(
-            0,
-            AppBarClick::Open,
-            &[AppMenuRow::Item(AppMenuItem::new(
-                new_window,
-                AppMenuLabel::new("New window").expect("short"),
-            ))],
-        )
-        .expect("the convention fits");
-        let mut shell = shell();
-        let mut comp = compositor();
-        shell.set_apps(
-            &mut comp,
-            vec![
-                tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
-                    .with_declaration(bar.menu, bar.click),
-            ],
-        );
-        (shell, comp)
-    };
-
-    // Where the chain draws the row, read off a twin desktop the way the
-    // vertical's own script reconstructs it.
-    let (mut twin, mut twin_comp) = desktop();
-    let slot = app_slot_point(&twin, 0);
-    twin.handle(moved(slot.x, slot.y), &mut twin_comp, 0);
-    let ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(asked)) =
-        twin.handle(SECONDARY_PRESS, &mut twin_comp, 0)
-    else {
-        panic!("a secondary press on a declared slot asked for no menu");
-    };
-    let twin_theme = twin.session().floating_theme().clone();
-    let twin_geom = chain_geometry_over(&twin_comp, &twin_theme);
-    let (_, row) = open_bar_chain(&mut twin, &mut twin_comp, asked, "New window", &twin_geom);
-
-    let (mut shell, mut comp) = desktop();
-    let mut queued = MemoryInput::new(&[
-        moved(slot.x, slot.y),
-        SECONDARY_PRESS,
-        SECONDARY_RELEASE,
-        moved(row.x, row.y),
-        PRIMARY_PRESS,
-        PRIMARY_RELEASE,
-    ]);
-    let batch = shell
-        .pump(&mut queued, &mut comp, 0)
-        .expect("source does not fault");
-    let Some(ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(request))) =
-        batch.outcomes.last().cloned()
-    else {
-        panic!("the drain ran past the press that asks for the menu: {batch:?}");
-    };
-    assert!(batch.at_edge, "the batch says the press ended it");
-    assert_eq!(
-        queued.remaining(),
-        4,
-        "everything after that press waits for the chain it opens"
-    );
-
-    // `open_bar_menu`, then `drain_menu_chain` over what is still queued.
-    let theme = shell.session().floating_theme().clone();
-    let geom = chain_geometry_over(&comp, &theme);
-    let subject = request.subject.clone();
-    let (mut chain, _) = open_bar_chain(&mut shell, &mut comp, request, "New window", &geom);
-    shell.yield_pointer(&mut comp);
-    while chain.is_open() {
-        let Some(event) = queued.poll().expect("source does not fault") else {
-            break;
-        };
-        shell.route_to_chain(&mut comp, &mut chain, &event, 0);
-    }
-    assert_eq!(
-        chain.take_answers(),
-        [(
-            ChainOwner::Bar(subject.clone()),
-            ChainOutcome::Chosen(new_window)
-        )],
-        "the queued click chose the row it was aimed at"
-    );
-    assert_eq!(
-        shell
-            .session_mut()
-            .taskbar_mut()
-            .menu_chosen(&subject, new_window),
-        Some(TaskbarResponse::AppMenuChosen {
-            app: 0,
-            item: new_window,
-        })
-    );
-}
-
 #[test]
 fn hovering_a_two_window_app_shows_the_picker_as_its_own_window() {
     let mut shell = shell();
@@ -6120,7 +6045,7 @@ fn centre(rect: tairix_wm::Rect) -> Point {
     rect.center()
 }
 
-fn app_slot_point(shell: &DesktopShell, index: usize) -> Point {
+pub(crate) fn app_slot_point(shell: &DesktopShell, index: usize) -> Point {
     let layout = shell.session().taskbar().layout(Scale::ONE);
     let slot = layout.apps.get(index).expect("an application slot");
     centre(*slot)
@@ -8580,7 +8505,7 @@ fn setting_an_appearance_switches_the_theme_and_re_themes_the_bar() {
 /// first, and records every password it was ever offered — so a test can
 /// assert both what was typed and what came back for it.
 #[derive(Default)]
-struct ScriptedUnlocker {
+pub(crate) struct ScriptedUnlocker {
     answers: Vec<Verdict>,
     offered: Vec<String>,
 }
@@ -8597,7 +8522,7 @@ impl ScriptedUnlocker {
     }
 
     /// Refuses every password it is ever offered.
-    fn refusing() -> Self {
+    pub(crate) fn refusing() -> Self {
         Self::scripted(Vec::new())
     }
 }
@@ -11937,6 +11862,7 @@ fn a_flood_of_pointer_samples_inside_one_period_is_one_composite() {
     // Sixteen samples crossing the bar, all inside one frame period.
     let step = Timeline::FRAME_NS / 16;
     let mut composites = 0u32;
+    let mut outcomes = Vec::new();
     for sample in 1..=16i32 {
         let at = u64::try_from(sample).expect("a positive sample") * step;
         shell
@@ -11944,6 +11870,7 @@ fn a_flood_of_pointer_samples_inside_one_period_is_one_composite() {
                 &mut MemoryInput::new(&[moved(24 + sample * 8, 1060)]),
                 &mut comp,
                 at,
+                &mut outcomes,
             )
             .expect("the in-memory source never faults");
         assert!(comp.has_damage(), "sample {sample} changed nothing");

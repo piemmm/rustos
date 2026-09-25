@@ -111,7 +111,9 @@
 //! each to the window manager or taskbar, applies the light/dark toggle
 //! itself, re-presents the bar, and surfaces every other effect as a
 //! [`ShellOutcome`] for the embedder (which holds the framebuffer, power, and
-//! spawn capabilities) to act on.
+//! spawn capabilities) to act on. Which holder — the shell, the menu chain or
+//! the lock — takes each event of a wake is [`SeatDrain`]'s (the [`drain`]
+//! module).
 //!
 //! The live backing for that [`InputSource`] is [`DeviceInputSource`] (the
 //! [`device`] module): it reads framed
@@ -181,6 +183,7 @@ pub mod config;
 pub mod confirm;
 pub mod desktop;
 pub mod device;
+pub mod drain;
 pub mod elevate;
 pub mod fade;
 pub mod frames;
@@ -215,6 +218,8 @@ pub mod windows;
 #[cfg(test)]
 mod desktop_tests;
 #[cfg(test)]
+mod drain_tests;
+#[cfg(test)]
 mod fade_tests;
 #[cfg(test)]
 mod holdback_tests;
@@ -245,6 +250,7 @@ pub use desktop::{
     PinboardChange, DESKTOP_MARGIN, RELIST_MIN_INTERVAL_NS,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
+pub use drain::{drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake};
 pub use elevate::{
     ElevatePrompt, Elevator, PromptOutcome, ELEVATE_ORIGIN, ELEVATE_PROMPT_SHOWN,
     ELEVATE_PROMPT_SHOWN_MESSAGE, NOT_STARTED_REASON, REFUSED_REASON,
@@ -287,7 +293,7 @@ pub use settings::{
     PinboardApplyRefusal,
 };
 pub use shell::{
-    Batch, DesktopShell, InputSource, ShellOutcome, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE,
+    DesktopShell, InputSource, ShellOutcome, Stopped, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE,
 };
 pub use switchboard::{
     deliver_pending_open, drop_is_noteworthy, maybe_send_seat_report, open_tray, relay_power,

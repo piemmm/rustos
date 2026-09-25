@@ -2054,8 +2054,9 @@ mod tests {
 
     // --- read_root_unlock_descriptor ----------------------------------
 
-    /// 512-byte sector size — the FAT boot partition's geometry.
-    const FAT_SECTOR_BYTES: usize = 512;
+    /// The whole-disk fixture's sector size, which the FAT boot partition
+    /// is addressed in.
+    const FAT_SECTOR_BYTES: usize = disk_image::SECTOR_BYTES;
 
     /// 64 MiB, the production boot-partition size `tools/mkimage` formats.
     /// A valid FAT32 volume needs far more than the small arxfs fixture's
@@ -2063,7 +2064,7 @@ mod tests {
     /// rather than reusing `image::VecBlock` (whose fixed geometry is the
     /// arxfs fixture's). Forwarded from the shared whole-disk fixture so
     /// the boot-partition size has one definition.
-    const FAT_BOOT_SECTORS: u64 = disk_image::FAT_BOOT_SECTORS;
+    const FAT_BOOT_SECTORS: u64 = disk_image::BOOT_PART_SECTORS;
 
     /// In-memory FAT boot-partition [`Block`] double: a `Vec<u8>` addressed
     /// in [`FAT_SECTOR_BYTES`]-byte sectors, exactly as the board's
@@ -2363,17 +2364,17 @@ mod tests {
         // encrypted root cannot be located, so none is mounted.
         let (descriptor_bytes, _key) = provision();
         let boot = author_boot_partition(&descriptor_bytes);
-        let total_sectors = disk_image::BOOT_LBA + FAT_BOOT_SECTORS;
+        let total_sectors = disk_image::BOOT_PART_LBA + FAT_BOOT_SECTORS;
         let mut store =
             alloc::vec![0u8; usize::try_from(total_sectors).expect("fits") * FAT_SECTOR_BYTES];
         let table = mbr::encode(&[Partition {
             ty: PartitionType::FatBoot,
-            start_lba: disk_image::BOOT_LBA,
+            start_lba: disk_image::BOOT_PART_LBA,
             block_count: FAT_BOOT_SECTORS,
         }])
         .expect("the boot-only MBR encodes");
         store[..FAT_SECTOR_BYTES].copy_from_slice(&table);
-        let boot_at = usize::try_from(disk_image::BOOT_LBA).expect("fits") * FAT_SECTOR_BYTES;
+        let boot_at = usize::try_from(disk_image::BOOT_PART_LBA).expect("fits") * FAT_SECTOR_BYTES;
         store[boot_at..boot_at + boot.store.len()].copy_from_slice(&boot.store);
         let disk = FatVecBlock { store };
         let sink = RecordingSink::new();

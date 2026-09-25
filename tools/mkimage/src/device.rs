@@ -9,8 +9,7 @@
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::DriverError;
 
-/// Logical sector size of every authored image, in bytes.
-pub const SECTOR_BYTES: usize = 512;
+pub use tairix_syshelp::SECTOR_BYTES;
 
 /// A zero-initialised, vector-backed [`Block`] device of a fixed sector
 /// count.

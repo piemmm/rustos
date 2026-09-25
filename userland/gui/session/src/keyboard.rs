@@ -75,8 +75,9 @@ struct Held {
 /// A source that decodes [`KeyInput`] records from a [`KeyInputChannel`] and
 /// repeats the held key.
 ///
-/// Wrap a channel with [`new`](Self::new) and drain it with
-/// [`poll_record`](Self::poll_record) until it answers `None`.
+/// Wrap a channel with [`new`](Self::new) and drain it through
+/// [`DesktopShell::poll_key`](crate::DesktopShell::poll_key), the one drain
+/// that keeps the seat's modifiers current.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyboardInputSource<C> {
     channel: C,
@@ -216,22 +217,24 @@ pub(crate) fn to_input_event(record: KeyInput) -> InputEvent {
 
 impl<C: KeyInputChannel> KeyboardInputSource<C> {
     /// Poll one keyboard record at monotonic `now_ns`, returning the decoded
-    /// routing event **and** the validated wire [`KeyInput`] it came from.
-    ///
-    /// The window server routes the original record to a focused app window
-    /// (`WindowEvent::Key` embeds the one `KeyInput` codec), so the serve loop
-    /// drains through this form and hands the decoded event to the shell —
-    /// one drain, both consumers, no re-encoding.
+    /// routing event **and** the validated wire [`KeyInput`] it came from, so
+    /// the window server can forward the original record to a focused app
+    /// without re-encoding it.
     ///
     /// Once the channel is empty a repeat of the held key that has come due
     /// is answered, one per drain: a loop that was late repeats once rather
     /// than catching up in a burst. A press of the key already held is the
     /// device's own repeat and is dropped.
     ///
+    /// Crate-private: drains go through [`DesktopShell::poll_key`](crate::DesktopShell::poll_key).
+    ///
     /// # Errors
     ///
     /// A channel fault, or the fail-closed refusal of a malformed record.
-    pub fn poll_record(&mut self, now_ns: u64) -> Result<Option<(InputEvent, KeyInput)>, Errno> {
+    pub(crate) fn poll_record(
+        &mut self,
+        now_ns: u64,
+    ) -> Result<Option<(InputEvent, KeyInput)>, Errno> {
         while let Some(bytes) = self.channel.next_record()? {
             let record = KeyInput::from_bytes(&bytes)?;
             let event = to_input_event(record);

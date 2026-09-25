@@ -45,10 +45,12 @@ contract as it is discovered, so an unresolvable name or an over-large file
 fails the image build closed rather than shipping artwork that would silently
 render as a fallback glyph or never be offered.
 
-The `/System` partition is the smallest power-of-two multiple of 32 MiB that
-holds that content (`tairix_syshelp::build_system_volume`), so the image grows
-with what it ships instead of failing against a fixed partition size. The
-kernel finds every partition by its MBR type, never by offset.
+The `/System` partition is a whole number of 32 MiB grains: the planted bytes
+rounded up, plus one grain whenever the filesystem's own metadata does not fit
+beside them (`tairix_syshelp::build_system_volume`). The image grows with what
+it ships instead of failing against a fixed partition size, and is never more
+than one grain larger than it needs to be. The kernel finds every partition by
+its MBR type, never by offset.
 
 `root.unlock` is the root volume's plaintext key-derivation descriptor
 (`AGENTS.md` §11): the per-volume random salt and PBKDF2 iteration count

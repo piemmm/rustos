@@ -1463,10 +1463,12 @@ event reaches it. Three properties, each load-bearing:
 - **It covers the screen.** An opaque surface at the compositor's full
   extent, so a passer-by learns nothing about what is on the machine.
 - **It takes every event.** While `is_locked()`, the session drains the seat's
-  pointer and keyboard *straight into the lock* rather than through
-  `DesktopShell::pump`/`handle`, so no motion, click, or keystroke reaches
-  the window manager, the taskbar, a served application, or the confirmation
-  prompt. On a mid-batch unlock the remainder of the batch is drained and
+  pointer and keyboard *straight into the lock* (`drain_locked`) rather than
+  through `DesktopShell::pump`/`handle`, so no motion, click, or keystroke
+  reaches the window manager, the taskbar, a served application, or the
+  confirmation prompt. Only the seat's modifier state is kept, so the first
+  click after unlocking is not stamped with a modifier released while locked.
+  On a mid-batch unlock the remainder of the batch is drained and
   **discarded** — it is the tail of the password-entry gesture and must never
   land in the session that just became visible.
 - **It stays on top.** `keep_topmost` raises it before every composite, so a

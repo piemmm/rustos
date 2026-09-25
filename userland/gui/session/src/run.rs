@@ -112,9 +112,7 @@ mod program {
     };
     use tairix_caps::CapabilitySet;
     use tairix_controls::damage;
-    use tairix_desktop_session::menu::{
-        open_desktop_menu, ChainAction, ChainOutcome, ChainOwner, MenuChain,
-    };
+    use tairix_desktop_session::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
     use tairix_desktop_session::pinboard::{self, PinboardCommand};
     use tairix_desktop_session::switchuser::{
         SeatPresentation, SessionAuthority, SwitchUser, NO_DEADLINE_NS,
@@ -122,27 +120,28 @@ mod program {
     use tairix_desktop_session::windows::window_menu_placement;
     use tairix_desktop_session::{
         admitted_pid, bundle_of_run_path, catalogued, chain_geometry, deliver_pending_open,
-        desktop_info, drop_is_noteworthy, launch_argv, load_pinboard as read_pinboard_store,
-        load_programs, maybe_send_seat_report, open_tray, parse, publish_pinboard, reap_launched,
-        relay_power, resolve_launch, resolve_window_identities, serve_pinboard_apply,
-        serve_switchboard_request, window_control_alternate_event, window_control_event, Answer,
-        AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
-        BundleIndex, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
-        DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
-        DocumentRelay, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
-        FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, IdleAction,
-        IdleClock, IdlePolicy, InputPolicy, InputSource, KeyboardInputSource, Launch, LaunchHost,
-        LaunchTable, LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms,
-        LockedDrain, OwnerBundleGate, OwnerWindow, PickConclusion, Prepared, PresentedOwners,
-        PreviewDone, PreviewJob, PreviewRequest, PromptOutcome, ScreenFade, ScreenLock,
-        Screensaver, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
-        SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource,
-        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
-        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, DESKTOP_RESTYLED,
-        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        FILES_RUN_PATH, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE,
-        LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        desktop_info, drain_away, drain_locked, drop_is_noteworthy, launch_argv,
+        load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report, open_tray,
+        parse, publish_pinboard, reap_launched, relay_power, resolve_launch,
+        resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
+        window_control_alternate_event, window_control_event, Answer, AppBarBridge, AppBarService,
+        AppearanceWork, ArtworkFileReader, ArtworkSandbox, BundleIndex, CliError, Command,
+        ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
+        DesktopOutcome, DesktopShell, DeviceInputSource, DocumentRelay, ElevatePrompt, Elevator,
+        FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
+        HangTracker, HoldBack, IconRasteriser, IdleAction, IdleClock, IdlePolicy, InputPolicy,
+        KeyboardInputSource, Launch, LaunchHost, LaunchTable, LaunchTarget, LayerDecision,
+        LayerFeed, LoadedPinboard, LoadedPrograms, OwnerBundleGate, OwnerWindow, PickConclusion,
+        Prepared, PresentedOwners, PreviewDone, PreviewJob, PreviewRequest, PromptOutcome, Routed,
+        ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
+        SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker, SessionWindows,
+        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk,
+        WallpaperJob, WallpaperService, WallpaperSource, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
+        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
+        DATETIME_RUN_PATH, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
+        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
+        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
+        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
         SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
@@ -743,64 +742,6 @@ mod program {
         }
     }
 
-    /// How a seat drain ended.
-    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-    enum Drained {
-        /// Both channels are empty. The screen may or may not still be
-        /// locked; a verified password takes the lock down mid-drain.
-        Empty,
-        /// The menu chain closed with pointer input still queued, which is
-        /// the next holder's.
-        Handed,
-        /// A channel faulted. The seat is no longer trustworthy.
-        Faulted,
-    }
-
-    /// Drain the seat's pointer and keyboard straight into the lock while
-    /// the screen is secured, routing nothing anywhere else.
-    ///
-    /// This is what makes the lock a lock. The shell is never given the
-    /// events, so no motion, click, or keystroke can reach the window
-    /// manager, the taskbar, a served application, or the confirmation
-    /// prompt while the screen is locked.
-    ///
-    /// Both channels are drained to empty even once a password has been
-    /// verified mid-batch, and everything after that point is discarded by
-    /// the shared [`LockedDrain`] rule, which states why.
-    fn drain_locked(
-        lock: &mut ScreenLock,
-        now_ns: u64,
-        pointer: &mut DeviceInputSource<SeatInputChannel<PointerReader>>,
-        keyboard: &mut KeyboardInputSource<SeatInputChannel<KeyboardReader>>,
-        unlocker: &mut dyn Verifier,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-    ) -> Drained {
-        // The lock is taking the stream, so the shell will not see the release
-        // that ends any gesture in flight: it gives the pointer up rather than
-        // holding a grab for a button it can never be told about, and drops the
-        // hover anything was drawing behind the plate.
-        shell.yield_pointer(compositor);
-        let mut drain = LockedDrain::new();
-        loop {
-            match pointer.poll() {
-                Ok(None) => break,
-                Ok(Some(event)) => drain.feed(lock, &event, now_ns, unlocker, shell, compositor),
-                Err(_) => return Drained::Faulted,
-            }
-        }
-        loop {
-            match keyboard.poll_record(now_ns) {
-                Ok(None) => break,
-                Ok(Some((event, _))) => {
-                    drain.feed(lock, &event, now_ns, unlocker, shell, compositor);
-                }
-                Err(_) => return Drained::Faulted,
-            }
-        }
-        Drained::Empty
-    }
-
     /// Secure the screen, however it was asked for: the icon bar's Lock row,
     /// the idle policy, or the desktop's Settings application.
     ///
@@ -820,35 +761,6 @@ mod program {
         if !lock.engage(named, shell, compositor) {
             io::write_stderr_line("desktop: could not lock the screen; it is still open");
         }
-    }
-
-    /// Drain the seat's pointer and keyboard into nothing, keeping only the
-    /// pointer's position — the wake that takes the screensaver down.
-    fn drain_away(
-        pointer: &mut DeviceInputSource<SeatInputChannel<PointerReader>>,
-        keyboard: &mut KeyboardInputSource<SeatInputChannel<KeyboardReader>>,
-        compositor: &mut Compositor,
-        now_ns: u64,
-    ) -> Drained {
-        loop {
-            match pointer.poll() {
-                Ok(None) => break,
-                Ok(Some(tairix_wm::InputEvent::PointerMoved { to })) => {
-                    let _ = compositor.move_cursor(to);
-                }
-                Ok(Some(_)) => {}
-                Err(_) => return Drained::Faulted,
-            }
-        }
-        loop {
-            match keyboard.poll_record(now_ns) {
-                Ok(None) => break,
-                Ok(Some(_)) => {}
-                Err(_) => return Drained::Faulted,
-            }
-        }
-        keyboard.cancel_repeat();
-        Drained::Empty
     }
 
     /// The slideshow picture at catalog position `index`, placed to fill a
@@ -2002,11 +1914,11 @@ mod program {
         // The seat's one menu chain. Every menu on the desktop — an
         // application's and the desktop's own — is this one service's.
         let mut menu = MenuChain::new();
-        // What a chosen row of one of the **icon bar's** own chains resolved
-        // to. The bar's menus answer with the very same typed responses a
-        // click on the bar produces, so they are routed where those are
-        // rather than acted on a second way; the seat branch drains this in
-        // the wake the row was chosen in.
+        // The seat's drain, and the answer sink the window-server path hands
+        // the chain's delivery point. A chain displaced there is dismissed,
+        // never chosen, so no bar answer lands in it; chosen rows are the
+        // seat drain's, which routes them in the wake they were chosen in.
+        let mut seat_drain = SeatDrain::new();
         let mut answered: Vec<tairix_desktop_session::ShellOutcome> = Vec::new();
         // First frame: place the bar, paint the desktop's icons beneath
         // every window, install the pointer cursor at the seat's initial
@@ -3186,267 +3098,92 @@ mod program {
             } else if token == SEAT_TOKEN && saver.is_shown() {
                 // The waking gesture reaches nothing behind the screensaver;
                 // the next input goes to a lock, if one came up underneath.
-                let now_ns = tairix_rt::clock_get();
-                if drain_away(&mut pointer, &mut keyboard, &mut compositor, now_ns)
-                    == Drained::Faulted
-                {
-                    return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
+                let drained = drain_away(
+                    &mut Seat {
+                        shell: &mut shell,
+                        compositor: &mut compositor,
+                        menu: &mut menu,
+                        lock: &mut lock,
+                    },
+                    &mut pointer,
+                    &mut keyboard,
+                    tairix_rt::clock_get(),
+                );
+                if let Err(err) = drained {
+                    return drain_fault(&mut shell, &mut compositor, err);
                 }
                 saver.dismiss(&mut compositor);
                 wallpapers.forget_slides();
             } else if token == SEAT_TOKEN && lock.is_locked() {
-                // Locked: the seat's events belong to the lock and to
-                // nothing else. They are drained straight out of the
-                // channels here — not through the shell — so no pointer
-                // motion, click, or keystroke can reach the window manager,
-                // the taskbar, or a served application while the screen is
-                // secured. This is the routing half of the lock; the
-                // full-screen surface only hides the session.
-                // One wake is one instant here too: the whole drained batch
-                // reaches the surface against the clock read once, so the
-                // motion it times cannot step mid-batch.
-                if drain_locked(
-                    &mut lock,
-                    tairix_rt::clock_get(),
+                // The lock's surface only hides the session; this drain is
+                // what keeps the seat's input from reaching it.
+                let drained = drain_locked(
+                    &mut Seat {
+                        shell: &mut shell,
+                        compositor: &mut compositor,
+                        menu: &mut menu,
+                        lock: &mut lock,
+                    },
                     &mut pointer,
                     &mut keyboard,
                     &mut BrokerUnlocker,
-                    &mut shell,
-                    &mut compositor,
-                ) == Drained::Faulted
-                {
-                    return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
+                    tairix_rt::clock_get(),
+                );
+                if let Err(err) = drained {
+                    return drain_fault(&mut shell, &mut compositor, err);
                 }
             } else if token == SEAT_TOKEN {
-                // Drain the seat into whoever holds it; applied events stay
-                // applied, and a faulting drain ends the session. One wake is
-                // one instant: its time-driven gestures (a held capsule press)
-                // resolve against the clock read here.
-                let now_ns = tairix_rt::clock_get();
-                // Set once the session has given the screen up: what is left
-                // of this batch, and everything still queued behind it, is
-                // input for a seat this desktop no longer owns.
-                let mut stepped_aside = false;
-                // Batch by batch, each into whoever holds the seat once the one
-                // before it is routed, so a gesture an edge split is timed as
-                // one. What the lock is handed waits for its own wake.
-                loop {
-                    // A chain holds the seat: every pointer and key event
-                    // routes into it and none reaches what is behind, which is
-                    // what makes a press outside a dismissal rather than a
-                    // click on the window the menu was covering. Its own
-                    // answers then route through the very same path a click on
-                    // the bar's takes, so a *Log Out* row and a *Log Out* click
-                    // are honoured in one place.
-                    let (outcomes, handed_on) = if menu.is_open() {
-                        let drained = drain_menu_chain(
-                            &mut menu,
-                            &mut pointer,
-                            &mut keyboard,
-                            &mut shell,
-                            &mut compositor,
-                            &mut windows,
-                            &mut server,
-                            &mut sink,
-                            &mut picker,
-                            &mut apps.service,
-                            &identity,
-                            &mut DesktopMenuDesk {
-                                pinboard: &mut pinboard,
-                                wallpapers: &wallpapers,
-                                publisher: &publisher,
-                                catalogs: &catalogs,
-                                desktop: &mut desktop,
-                                launched: &mut launched,
-                                programs: &mut programs,
-                                answered: &mut answered,
-                            },
-                            now_ns,
-                        );
-                        if drained == Drained::Faulted {
-                            return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
-                        }
-                        (core::mem::take(&mut answered), drained == Drained::Handed)
-                    } else {
-                        match shell.pump(&mut pointer, &mut compositor, now_ns) {
-                            Ok(batch) => (batch.outcomes, batch.at_edge),
-                            Err(err) => return drain_fault(&mut shell, &mut compositor, err),
-                        }
-                    };
-                    for outcome in outcomes {
-                        route_desktop(
-                            &outcome,
-                            &publisher,
-                            &catalogs,
-                            &mut pinboard,
-                            &wallpapers,
-                            &mut desktop,
-                            &mut shell,
-                            &mut compositor,
-                            &windows,
-                            &mut menu,
-                            seat_held(&lock, &picker),
-                            &mut LaunchCtx {
-                                launched: &mut launched,
-                                apps: &apps.service,
-                                server: &mut server,
-                                sink: &mut sink,
-                                windows: &windows,
-                                identity: &identity,
-                            },
-                            &mut programs,
-                            now_ns,
-                        );
-                        match route_outcome(
-                            outcome,
-                            None,
-                            &catalogs,
-                            &mut focused,
-                            &mut shell,
-                            &mut compositor,
-                            &mut windows,
-                            &mut server,
-                            &mut sink,
-                            &mut picker,
-                            &mut confirm,
-                            &mut elevate,
-                            &mut lock,
-                            &mut menu,
-                            account,
-                            shown_name,
-                            &identity,
-                            &mut launched,
-                            &mut apps,
-                            &mut switchboard_pid,
-                            &mut pending_open,
-                            &mut programs,
-                        ) {
-                            Routed::Continue => {}
-                            Routed::EndSession => {
-                                fade_to_black(&mut fade, &mut compositor, &mut display);
-                                shell.teardown(&mut compositor);
-                                return EXIT_LOGGED_OUT;
-                            }
-                            Routed::SwitchUser => {
-                                stepped_aside = step_aside(
-                                    &mut switch,
-                                    SessionScreen {
-                                        display: &mut display,
-                                        region: &mut region,
-                                        compositor: &mut compositor,
-                                        shell: &mut shell,
-                                        desktop: &desktop,
-                                        pinboard: &mut pinboard,
-                                        wallpapers: &wallpapers,
-                                        fade: &mut fade,
-                                        set,
-                                    },
-                                );
-                                if stepped_aside {
-                                    break;
-                                }
-                            }
-                        }
+                // One wake is one instant: its time-driven gestures (a held
+                // capsule press) resolve against the clock read here.
+                let drained = seat_drain.wake(
+                    &mut Seat {
+                        shell: &mut shell,
+                        compositor: &mut compositor,
+                        menu: &mut menu,
+                        lock: &mut lock,
+                    },
+                    &mut pointer,
+                    &mut keyboard,
+                    &mut SessionRoute {
+                        publisher: &publisher,
+                        catalogs: &catalogs,
+                        pinboard: &mut pinboard,
+                        wallpapers: &wallpapers,
+                        desktop: &mut desktop,
+                        windows: &mut windows,
+                        focused: &mut focused,
+                        server: &mut server,
+                        sink: &mut sink,
+                        picker: &mut picker,
+                        confirm: &mut confirm,
+                        elevate: &mut elevate,
+                        account,
+                        shown_name,
+                        identity: &identity,
+                        launched: &mut launched,
+                        apps: &mut apps,
+                        switchboard_pid: &mut switchboard_pid,
+                        pending_open: &mut pending_open,
+                        programs: &mut programs,
+                        switch: &mut switch,
+                        display: &mut display,
+                        region: &mut region,
+                        fade: &mut fade,
+                        set,
+                    },
+                    tairix_rt::clock_get(),
+                );
+                match drained {
+                    Ok(SeatWake::Served) => {}
+                    // The screen belongs to somebody else now: nothing more of
+                    // this wake is applied, and nothing is drawn.
+                    Ok(SeatWake::SteppedAside) => continue,
+                    Ok(SeatWake::EndSession) => {
+                        fade_to_black(&mut fade, &mut compositor, &mut display);
+                        shell.teardown(&mut compositor);
+                        return EXIT_LOGGED_OUT;
                     }
-                    if !handed_on || stepped_aside || lock.is_locked() {
-                        break;
-                    }
-                }
-                // Every keystroke is applied in order, and the screen is
-                // settled once for the whole batch below: a held key
-                // repeating costs one taskbar present, active-frame sync and
-                // cursor refresh rather than one of each per repeat. The keys
-                // are the shell's only while it holds the seat: what was routed
-                // above, or an earlier key, may have opened a chain or locked
-                // the screen.
-                let mut typed = false;
-                while !stepped_aside && !menu.is_open() && !lock.is_locked() {
-                    match keyboard.poll_record(now_ns) {
-                        Ok(None) => break,
-                        Ok(Some((event, record))) => {
-                            let outcome = shell.apply(event, &mut compositor, now_ns);
-                            typed = true;
-                            route_desktop(
-                                &outcome,
-                                &publisher,
-                                &catalogs,
-                                &mut pinboard,
-                                &wallpapers,
-                                &mut desktop,
-                                &mut shell,
-                                &mut compositor,
-                                &windows,
-                                &mut menu,
-                                seat_held(&lock, &picker),
-                                &mut LaunchCtx {
-                                    launched: &mut launched,
-                                    apps: &apps.service,
-                                    server: &mut server,
-                                    sink: &mut sink,
-                                    windows: &windows,
-                                    identity: &identity,
-                                },
-                                &mut programs,
-                                now_ns,
-                            );
-                            match route_outcome(
-                                outcome,
-                                Some(record),
-                                &catalogs,
-                                &mut focused,
-                                &mut shell,
-                                &mut compositor,
-                                &mut windows,
-                                &mut server,
-                                &mut sink,
-                                &mut picker,
-                                &mut confirm,
-                                &mut elevate,
-                                &mut lock,
-                                &mut menu,
-                                account,
-                                shown_name,
-                                &identity,
-                                &mut launched,
-                                &mut apps,
-                                &mut switchboard_pid,
-                                &mut pending_open,
-                                &mut programs,
-                            ) {
-                                Routed::Continue => {}
-                                Routed::EndSession => {
-                                    fade_to_black(&mut fade, &mut compositor, &mut display);
-                                    shell.teardown(&mut compositor);
-                                    return EXIT_LOGGED_OUT;
-                                }
-                                Routed::SwitchUser => {
-                                    stepped_aside = step_aside(
-                                        &mut switch,
-                                        SessionScreen {
-                                            display: &mut display,
-                                            region: &mut region,
-                                            compositor: &mut compositor,
-                                            shell: &mut shell,
-                                            desktop: &desktop,
-                                            pinboard: &mut pinboard,
-                                            wallpapers: &wallpapers,
-                                            fade: &mut fade,
-                                            set,
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                        Err(err) => return drain_fault(&mut shell, &mut compositor, err),
-                    }
-                }
-                if stepped_aside {
-                    // The screen belongs to somebody else now: nothing this
-                    // wake read is applied any further, and nothing is drawn.
-                    continue;
-                }
-                if typed {
-                    shell.settle(&mut compositor);
+                    Err(err) => return drain_fault(&mut shell, &mut compositor, err),
                 }
                 // A window minimised while the machine was already short of
                 // memory had its content released by the gesture itself, so
@@ -4621,6 +4358,143 @@ mod program {
         answered: &'a mut Vec<tairix_desktop_session::ShellOutcome>,
     }
 
+    /// Everything a drained seat event reaches beyond the [`Seat`] itself:
+    /// the window channel, the launch table, the prompts and the session
+    /// authority.
+    struct SessionRoute<'a, S: DirectorySource, F: FnMut() -> S> {
+        publisher: &'a Publisher,
+        catalogs: &'a Catalogs,
+        pinboard: &'a mut PinboardPanel,
+        wallpapers: &'a Wallpapers,
+        desktop: &'a mut Desktop<S>,
+        windows: &'a mut SessionWindows,
+        focused: &'a mut Option<u64>,
+        server: &'a mut WindowServer<RtShmMapper>,
+        sink: &'a mut RtEventSink,
+        picker: &'a mut SessionPicker<S, F>,
+        confirm: &'a mut ConfirmPrompt,
+        elevate: &'a mut ElevatePrompt,
+        account: &'a str,
+        shown_name: &'a str,
+        identity: &'a RtWindowIdentity,
+        launched: &'a mut LaunchTable,
+        apps: &'a mut AppBarPanel,
+        switchboard_pid: &'a mut Option<u64>,
+        pending_open: &'a mut Option<CommandSection>,
+        programs: &'a mut Programs,
+        switch: &'a mut SwitchUser,
+        display: &'a mut Option<RemoteDisplay<'static, RtDisplayTransport>>,
+        region: &'a mut Option<FrameRegion>,
+        fade: &'a mut ScreenFade,
+        set: u64,
+    }
+
+    impl<S: DirectorySource, F: FnMut() -> S> SeatRouter for SessionRoute<'_, S, F> {
+        fn route(
+            &mut self,
+            seat: &mut Seat<'_>,
+            outcome: tairix_desktop_session::ShellOutcome,
+            key: Option<KeyInput>,
+            now_ns: u64,
+        ) -> Routed {
+            route_desktop(
+                &outcome,
+                self.publisher,
+                self.catalogs,
+                self.pinboard,
+                self.wallpapers,
+                self.desktop,
+                seat.shell,
+                seat.compositor,
+                self.windows,
+                seat.menu,
+                seat_held(seat.lock, self.picker),
+                &mut LaunchCtx {
+                    launched: self.launched,
+                    apps: &self.apps.service,
+                    server: self.server,
+                    sink: self.sink,
+                    windows: self.windows,
+                    identity: self.identity,
+                },
+                self.programs,
+                now_ns,
+            );
+            route_outcome(
+                outcome,
+                key,
+                self.catalogs,
+                self.focused,
+                seat.shell,
+                seat.compositor,
+                self.windows,
+                self.server,
+                self.sink,
+                self.picker,
+                self.confirm,
+                self.elevate,
+                seat.lock,
+                seat.menu,
+                self.account,
+                self.shown_name,
+                self.identity,
+                self.launched,
+                self.apps,
+                self.switchboard_pid,
+                self.pending_open,
+                self.programs,
+            )
+        }
+
+        fn settle_chain(
+            &mut self,
+            seat: &mut Seat<'_>,
+            answered: &mut Vec<tairix_desktop_session::ShellOutcome>,
+            now_ns: u64,
+        ) {
+            present_menu_chain(seat.menu, seat.shell, seat.compositor, self.windows);
+            answer_menu_chain(
+                seat.menu,
+                seat.shell,
+                seat.compositor,
+                self.windows,
+                self.server,
+                self.sink,
+                self.picker,
+                &mut self.apps.service,
+                self.identity,
+                &mut DesktopMenuDesk {
+                    pinboard: self.pinboard,
+                    wallpapers: self.wallpapers,
+                    publisher: self.publisher,
+                    catalogs: self.catalogs,
+                    desktop: self.desktop,
+                    launched: self.launched,
+                    programs: self.programs,
+                    answered,
+                },
+                now_ns,
+            );
+        }
+
+        fn step_aside(&mut self, seat: &mut Seat<'_>) -> bool {
+            step_aside(
+                self.switch,
+                SessionScreen {
+                    display: self.display,
+                    region: self.region,
+                    compositor: seat.compositor,
+                    shell: seat.shell,
+                    desktop: self.desktop,
+                    pinboard: self.pinboard,
+                    wallpapers: self.wallpapers,
+                    fade: self.fade,
+                    set: self.set,
+                },
+            )
+        }
+    }
+
     /// Load the user's pinboard settings into `desktop` (reporting an
     /// unusable store loudly) and answer with the session's pinboard state
     /// over the production file seams and `sandbox`.
@@ -4694,105 +4568,6 @@ mod program {
                 true
             }
         }
-    }
-
-    /// Drain the seat straight into the open menu chain, which holds it.
-    ///
-    /// The routing half of the grab: nothing behind a chain is reachable
-    /// while it is up, a press with none of the chain under it dismisses and
-    /// is consumed, and every answer the chain settles on leaves through the
-    /// one delivery point below. Draining stops the moment the chain closes:
-    /// what follows belongs to whichever holder its answer leaves, so it is
-    /// left queued for that holder's drain, and a close with pointer input
-    /// still unread is [`Drained::Handed`].
-    #[allow(clippy::too_many_arguments)] // The chain's whole mutable surround, threaded explicitly.
-    fn drain_menu_chain<S: DirectorySource, F: FnMut() -> S>(
-        menu: &mut MenuChain,
-        pointer: &mut DeviceInputSource<SeatInputChannel<PointerReader>>,
-        keyboard: &mut KeyboardInputSource<SeatInputChannel<KeyboardReader>>,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-        windows: &mut SessionWindows,
-        server: &mut WindowServer<RtShmMapper>,
-        sink: &mut RtEventSink,
-        picker: &mut SessionPicker<S, F>,
-        apps: &mut dyn AppBarBridge,
-        identity: &RtWindowIdentity,
-        desk: &mut DesktopMenuDesk<'_, S>,
-        now_ns: u64,
-    ) -> Drained {
-        // The chain is taking the stream, so the shell gives the pointer up
-        // for the reason the lock's drain does: no gesture of its own can be
-        // completed from here, and nothing behind the plates may be left
-        // showing a hover.
-        shell.yield_pointer(compositor);
-        let mut moved = false;
-        let pointer_drained = loop {
-            if !menu.is_open() {
-                break false;
-            }
-            match pointer.poll() {
-                Ok(None) => break true,
-                Ok(Some(event)) => {
-                    moved |= matches!(event, tairix_wm::InputEvent::PointerMoved { .. });
-                    let acted = shell.route_to_chain(compositor, menu, &event, now_ns);
-                    settle_menu_chain(
-                        &acted, menu, shell, compositor, windows, server, sink, picker, apps,
-                        identity, desk, now_ns,
-                    );
-                }
-                Err(_) => return Drained::Faulted,
-            }
-        };
-        if moved {
-            shell.settle(compositor);
-        }
-        if !pointer_drained {
-            return Drained::Handed;
-        }
-        while menu.is_open() {
-            match keyboard.poll_record(now_ns) {
-                Ok(None) => break,
-                Ok(Some((event @ tairix_wm::InputEvent::KeyPressed { .. }, _))) => {
-                    let acted = shell.route_to_chain(compositor, menu, &event, now_ns);
-                    settle_menu_chain(
-                        &acted, menu, shell, compositor, windows, server, sink, picker, apps,
-                        identity, desk, now_ns,
-                    );
-                }
-                Ok(Some(_)) => {}
-                Err(_) => return Drained::Faulted,
-            }
-        }
-        Drained::Empty
-    }
-
-    /// Apply one chain outcome: repaint what moved, ask an owner for a
-    /// surface, or take the chain's own surfaces down and answer it.
-    #[allow(clippy::too_many_arguments)] // The chain's whole mutable surround, threaded explicitly.
-    fn settle_menu_chain<S: DirectorySource, F: FnMut() -> S>(
-        acted: &ChainAction,
-        menu: &mut MenuChain,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-        windows: &mut SessionWindows,
-        server: &mut WindowServer<RtShmMapper>,
-        sink: &mut RtEventSink,
-        picker: &mut SessionPicker<S, F>,
-        apps: &mut dyn AppBarBridge,
-        identity: &RtWindowIdentity,
-        desk: &mut DesktopMenuDesk<'_, S>,
-        now_ns: u64,
-    ) {
-        match acted {
-            ChainAction::Consumed => {}
-            ChainAction::Redraw | ChainAction::Closed => {
-                present_menu_chain(menu, shell, compositor, windows);
-            }
-        }
-        answer_menu_chain(
-            menu, shell, compositor, windows, server, sink, picker, apps, identity, desk, now_ns,
-        );
     }
 
     /// Deliver every answer the chain owes, and bring the screen into line
@@ -5203,20 +4978,6 @@ mod program {
         let mut held = held;
         held.sort_unstable();
         sorted != held
-    }
-
-    /// Whether the serve loop carries on after an outcome was routed.
-    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-    enum Routed {
-        /// Keep serving.
-        Continue,
-        /// The user asked to log out. The loop unwinds so the one
-        /// owner-checked release runs and the login supervisor prompts again.
-        EndSession,
-        /// The user asked to switch to another account. The loop asks the
-        /// session authority and, only if it accepts, gives up the screen —
-        /// the session itself keeps running, so nothing unwinds here.
-        SwitchUser,
     }
 
     /// Ask the authority to record this session as background and, only on

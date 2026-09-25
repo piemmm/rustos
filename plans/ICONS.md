@@ -196,11 +196,11 @@ ranks a specific declaration ahead of a generic one.
 ## 4. I3 — build-time discovery and planting — **done**
 
 `tools/syshelp` walks `lib/icon/assets/` and emits `GRAPHICS_FILES`
-alongside the existing per-bundle `Help/` and `Resources/` tables. One
-shared planting walk (`plant_system_payload`) now serves both the image
-builder and the QEMU encrypted-root fixture, which previously carried
-hand-mirrored copies of the same loops. A read-back test mounts the built
-`/System` read-only and proves the bytes arrive intact.
+alongside the existing per-bundle `Help/` and `Resources/` tables. The
+image builder and the QEMU encrypted-root fixture both author `/System`
+through `tairix_syshelp::build_system_volume`, which counts and plants the
+one file set. A read-back test mounts the built `/System` read-only and
+proves the bytes arrive intact.
 
 The same stage closed a live defect: a bundle could declare a
 `library-icon` larger than the desktop will ever decode, and would then

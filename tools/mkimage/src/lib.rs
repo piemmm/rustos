@@ -10,15 +10,16 @@
 //!
 //! [`build_rpi_image`] assembles the flashable Raspberry Pi 4 SD image:
 //!
-//! - **MBR** ([`mbr`]): three primary partitions, all 1 MiB-aligned and
-//!   back to back.
+//! - **MBR** ([`tairix_syshelp::assemble_disk`]): three primary partitions,
+//!   all 1 MiB-aligned and back to back.
 //! - **Boot partition** ([`fatboot`], FAT32, [`BOOT_PART_SECTORS`]): the
 //!   pinned third-party firmware blobs ([`firmware`]),
 //!   the generated `config.txt`, and `kernel8.img` — the freestanding
 //!   aarch64 `tairix-kernel` ELF flattened by [`elfflat`].
 //! - **`/System` partition** ([`rootfs::build_system_partition`], read-only
 //!   `ARXFS`): the signed driver and program bundles and the discovered
-//!   system payload, at the smallest size that holds them.
+//!   system payload, in whole 32 MiB grains and at most one grain more than
+//!   they need ([`tairix_syshelp::build_system_volume`]).
 //! - **Root partition** ([`rootfs`], `ARXFS`, [`ROOT_PART_SECTORS`]): an
 //!   encrypted volume carrying the directory skeleton. Its
 //!   volume key is **derived from a passphrase**: the
@@ -67,35 +68,18 @@ pub use tairix_drv_fs_arxfs::{
     VOLUME_KEY_LEN,
 };
 
-use device::SECTOR_BYTES;
 use firmware::FirmwareFile;
 use tairix_abi::{DriverError, MACHINE_ID_LEN};
-use tairix_partition::mbr::{self, MbrError};
-use tairix_partition::{Partition, PartitionType};
+use tairix_syshelp::{DiskLayoutError, BOOT_PART_SECTORS};
 use tairix_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, Salt, Uid, UserRecord, UsersDb, STORAGE_GID,
 };
-
-/// First sector of the FAT32 boot partition (1 MiB alignment, the
-/// universal SD-card convention).
-pub const BOOT_PART_LBA: u32 = 2048;
-
-/// Sectors in the FAT32 boot partition: 64 MiB — ample for the firmware
-/// blobs (~2.5 MiB) plus the kernel, while keeping the image small.
-pub const BOOT_PART_SECTORS: u32 = 131_072;
-
-/// First sector of the read-only `ARXFS` `/System` partition (contiguous
-/// with the boot partition, which already ends 1 MiB-aligned). This is the
-/// design-B pre-unlock signed-driver store (`plans/PI.md`). It is sized to
-/// its content ([`rootfs::build_system_partition`]), and the encrypted
-/// data-root partition follows it directly.
-pub const SYSTEM_PART_LBA: u32 = BOOT_PART_LBA + BOOT_PART_SECTORS;
 
 /// Sectors in the `ARXFS` root partition: 64 MiB — the skeleton plus
 /// installer headroom. The installer grows the layout on first boot;
 /// `ARXFS::grow` expands a volume to its device, so a card-sized root is
 /// a first-boot job, not an image-build job.
-pub const ROOT_PART_SECTORS: u32 = 131_072;
+pub const ROOT_PART_SECTORS: u64 = 131_072;
 
 /// Everything that can go wrong while authoring an image. Every variant is
 /// a refusal: mkimage never emits a best-effort image.
@@ -107,8 +91,8 @@ pub enum MkimageError {
     Firmware(String),
     /// The kernel ELF cannot be flattened into `kernel8.img`.
     KernelElf(&'static str),
-    /// The requested MBR partition table is invalid.
-    Partition(MbrError),
+    /// The partitions could not be laid out on the disk.
+    Disk(DiskLayoutError),
     /// Authoring the FAT32 boot partition failed.
     BootPartition(DriverError),
     /// Authoring the read-only `ARXFS` `/System` partition failed.
@@ -138,7 +122,7 @@ impl fmt::Display for MkimageError {
             Self::Manifest(msg) => write!(f, "firmware manifest: {msg}"),
             Self::Firmware(msg) => write!(f, "firmware input: {msg}"),
             Self::KernelElf(msg) => write!(f, "kernel ELF: {msg}"),
-            Self::Partition(err) => write!(f, "partition table: {err:?}"),
+            Self::Disk(err) => write!(f, "disk layout: {err:?}"),
             Self::BootPartition(err) => write!(f, "boot partition: driver error {err:?}"),
             Self::SystemPartition(err) => write!(f, "system partition: driver error {err:?}"),
             Self::RootPartition(err) => write!(f, "root partition: driver error {err:?}"),
@@ -151,12 +135,6 @@ impl fmt::Display for MkimageError {
             Self::GroupsDb(msg) => write!(f, "group registry: {msg}"),
             Self::LibraryCatalog(msg) => write!(f, "program-library catalog: {msg}"),
         }
-    }
-}
-
-impl From<MbrError> for MkimageError {
-    fn from(err: MbrError) -> Self {
-        Self::Partition(err)
     }
 }
 
@@ -548,7 +526,7 @@ pub fn build_rpi_image(
         .map_err(MkimageError::Unlock)?;
 
     let boot = fatboot::build_boot_partition(
-        u64::from(BOOT_PART_SECTORS),
+        BOOT_PART_SECTORS,
         firmware,
         &kernel8,
         &descriptor,
@@ -556,7 +534,7 @@ pub fn build_rpi_image(
     )?;
     let system = rootfs::build_system_partition(entropy, drivers, apps, network_conf)?;
     let root = rootfs::build_root_partition(
-        u64::from(ROOT_PART_SECTORS),
+        ROOT_PART_SECTORS,
         &root_key,
         entropy,
         &rootfs::RootSeed {
@@ -569,36 +547,7 @@ pub fn build_rpi_image(
         },
     )?;
 
-    let too_large = || MkimageError::SystemPartition(DriverError::LengthOutOfRange);
-    let system_at = SYSTEM_PART_LBA as usize * SECTOR_BYTES;
-    let root_at = system_at.checked_add(system.len()).ok_or_else(too_large)?;
-    let image_len = root_at.checked_add(root.len()).ok_or_else(too_large)?;
-    let sectors = |bytes: usize| u64::try_from(bytes / SECTOR_BYTES).map_err(|_| too_large());
-
-    let mbr_sector = mbr::encode(&[
-        Partition {
-            ty: PartitionType::FatBoot,
-            start_lba: u64::from(BOOT_PART_LBA),
-            block_count: u64::from(BOOT_PART_SECTORS),
-        },
-        Partition {
-            ty: PartitionType::ARXFSSystem,
-            start_lba: u64::from(SYSTEM_PART_LBA),
-            block_count: sectors(system.len())?,
-        },
-        Partition {
-            ty: PartitionType::ARXFSRoot,
-            start_lba: sectors(root_at)?,
-            block_count: sectors(root.len())?,
-        },
-    ])?;
-
-    let mut image = vec![0u8; image_len];
-    image[..SECTOR_BYTES].copy_from_slice(&mbr_sector);
-    let boot_at = BOOT_PART_LBA as usize * SECTOR_BYTES;
-    image[boot_at..boot_at + boot.len()].copy_from_slice(&boot);
-    image[system_at..root_at].copy_from_slice(&system);
-    image[root_at..].copy_from_slice(&root);
+    let image = tairix_syshelp::assemble_disk(&boot, &system, &root).map_err(MkimageError::Disk)?;
 
     Ok(RpiImage {
         image,
@@ -638,11 +587,12 @@ pub fn volume_key_to_hex(key: &VolumeKey) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use device::MemBlock;
+    use device::{MemBlock, SECTOR_BYTES};
     use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
     use tairix_abi::CapabilityId;
     use tairix_drv_fs_arxfs::ARXFS;
     use tairix_drv_fs_fat32::Fat32;
+    use tairix_partition::{mbr, PartitionType};
     use tairix_users::STORAGE_GROUP;
 
     const TEST_KEY: VolumeKey = [0x42; VOLUME_KEY_LEN];
@@ -735,9 +685,7 @@ mod tests {
     /// Read the encoded unlock descriptor planted on a built image's FAT
     /// boot partition.
     fn read_unlock_descriptor(image: &[u8]) -> UnlockDescriptor {
-        let boot_at = BOOT_PART_LBA as usize * SECTOR_BYTES;
-        let boot_len = BOOT_PART_SECTORS as usize * SECTOR_BYTES;
-        let boot = image[boot_at..boot_at + boot_len].to_vec();
+        let boot = image[extent(image, PartitionType::FatBoot)].to_vec();
         let mut fat = Fat32::open(MemBlock::from_bytes(boot).expect("whole sectors"))
             .expect("boot partition mounts");
         let root = fat.root();
@@ -777,9 +725,13 @@ mod tests {
         assert_eq!(built.image[446 + 32 + 4], mbr::PART_TYPE_ARXFS);
 
         // The boot partition mounts and carries the flat kernel.
-        let boot_at = BOOT_PART_LBA as usize * SECTOR_BYTES;
-        let boot_len = BOOT_PART_SECTORS as usize * SECTOR_BYTES;
-        let boot = built.image[boot_at..boot_at + boot_len].to_vec();
+        let boot_extent = extent(&built.image, PartitionType::FatBoot);
+        assert_eq!(
+            boot_extent.start,
+            1024 * 1024,
+            "the boot partition is 1 MiB in"
+        );
+        let boot = built.image[boot_extent].to_vec();
         let mut fat = Fat32::open(MemBlock::from_bytes(boot).expect("whole sectors"))
             .expect("boot partition mounts");
         let root = fat.root();
@@ -838,20 +790,19 @@ mod tests {
         )
         .expect("image builds");
 
-        // The whole-disk table parses and locates the read-only `/System`
-        // partition by role at the documented offset, sized in whole
-        // multiples of the shared floor and followed directly by the root.
+        // The whole-disk table locates the read-only `/System` partition by
+        // role at the documented offset, in whole grains and followed
+        // directly by the root.
         let mut disk = MemBlock::from_bytes(built.image.clone()).expect("whole sectors");
         let table = parse_partition_table(&mut disk).expect("the MBR parses");
         let system = table
             .first_of_type(PartitionType::ARXFSSystem)
             .expect("a /System partition is present");
-        assert_eq!(system.start_lba, u64::from(SYSTEM_PART_LBA));
-        let floor = tairix_syshelp::SYSTEM_VOLUME_MIN_BYTES / SECTOR_BYTES as u64;
+        assert_eq!(system.start_lba, tairix_syshelp::SYSTEM_PART_LBA);
+        let grain = tairix_syshelp::SYSTEM_VOLUME_GRAIN_BYTES / SECTOR_BYTES as u64;
         assert!(
-            system.block_count.is_multiple_of(floor)
-                && (system.block_count / floor).is_power_of_two(),
-            "/System is a power-of-two multiple of the floor: {} sectors",
+            system.block_count.is_multiple_of(grain),
+            "/System is whole grains: {} sectors",
             system.block_count
         );
         let root = table

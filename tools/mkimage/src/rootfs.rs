@@ -36,7 +36,7 @@ use tairix_users::{
     HOME_SUBDIRS,
 };
 
-use crate::device::{MemBlock, SECTOR_BYTES};
+use crate::device::MemBlock;
 use crate::MkimageError;
 
 /// The top-level directories. Exactly these four; any
@@ -242,105 +242,81 @@ fn create_home_dir(
     Ok(())
 }
 
-/// Author the read-only, signed-bundle `/System` partition at the smallest
-/// size that holds it ([`tairix_syshelp::build_system_volume`]), formatted
-/// under the non-secret well-known [`SYSTEM_VOLUME_KEY`] with the `/System`
-/// subtree **at the volume root** (the volume *is* `/System` once mounted,
-/// so its root carries `Kernel`, `Drivers`, … directly).
+/// Author the read-only, signed-bundle `/System` partition, sized by
+/// [`tairix_syshelp::build_system_volume`]: formatted under the non-secret
+/// well-known [`SYSTEM_VOLUME_KEY`] with the `/System` skeleton **at the
+/// volume root** (the volume *is* `/System` once mounted), carrying the
+/// discovered system payload, `drivers`, `apps` and `network_conf`.
 ///
-/// This is the design-B pre-unlock store (`plans/PI.md`): it carries no
-/// secrets, so it is keyed by the public [`SYSTEM_VOLUME_KEY`] and the
-/// kernel mounts it read-only (`ARXFS::open_read_only`) *before* the
-/// encrypted data root is unlocked. The subdirectories are laid down through
-/// the one shared `create_system_subdirs` helper used by the encrypted root
-/// too. No users database is written here — that secret stays on the
-/// encrypted root.
+/// This is the design-B pre-unlock store (`plans/PI.md`): it holds no secret,
+/// so the kernel mounts it read-only before the encrypted root is unlocked.
+/// The bundles arrive composed and signed; this only plants them, and the
+/// load gate refuses a tampered one.
 ///
-/// `network_conf` is the per-interface network-configuration document this
-/// image ships. The caller composes it, so *which* interfaces an image
-/// manages stays a property of the image being built rather than of this
-/// board-neutral writer: a platform image whose NIC sits at a known bus
-/// location ships an addressing default keyed to it, while an image with no
-/// such NIC ships the canonical empty document ("no managed interfaces
-/// beyond loopback").
+/// `network_conf` is the per-interface network configuration the image ships.
+/// It lives here rather than under the `/System/Settings` view because its
+/// only reader, the device manager, reads it before the encrypted root that
+/// backs that view is unlocked. It is parsed and re-rendered through the one
+/// `tairix_netconfig` engine `netstack` reads it with, so an image can never
+/// ship an addressing default its own stack rejects.
 ///
 /// # Errors
 ///
-/// [`MkimageError::SystemPartition`] if formatting or any directory
-/// creation fails (including an entropy failure provisioning the volume's
-/// key hierarchy), or [`MkimageError::NetworkConfig`] if `network_conf` does
-/// not parse.
+/// [`MkimageError::NetworkConfig`] if `network_conf` does not parse, or
+/// [`MkimageError::SystemPartition`] if formatting (including an entropy
+/// failure provisioning the volume's key hierarchy) or planting fails.
 pub fn build_system_partition(
     entropy: &mut dyn EntropySource,
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
     network_conf: &str,
 ) -> Result<Vec<u8>, MkimageError> {
-    tairix_syshelp::build_system_volume(
-        &[drivers, apps],
-        |len| {
-            let sectors = len / SECTOR_BYTES as u64;
-            author_system_partition(sectors, entropy, drivers, apps, network_conf)
-        },
-        |refusal| matches!(refusal, MkimageError::SystemPartition(DriverError::NoSpace)),
-    )
+    let network_conf = tairix_netconfig::NetworkConfig::parse(network_conf)
+        .map_err(|_| MkimageError::NetworkConfig)?
+        .render();
+    let network_path: Vec<&[u8]> = SystemConfigFile::Network
+        .volume_path()
+        .split('/')
+        .map(str::as_bytes)
+        .collect();
+    let network = [(network_path.as_slice(), network_conf.as_bytes())];
+    tairix_syshelp::build_system_volume(&[drivers, apps, &network], |sectors| {
+        let dev = MemBlock::new(sectors).map_err(MkimageError::SystemPartition)?;
+        let mut fs = ARXFS::format(dev, ROOT_INODE_HINT, &SYSTEM_VOLUME_KEY, entropy)
+            .map_err(MkimageError::SystemPartition)?;
+        let root = fs.root();
+        create_system_subdirs(&mut fs, root, MkimageError::SystemPartition)?;
+        Ok(SystemVolume { fs, root })
+    })
 }
 
-/// [`build_system_partition`] into exactly `sectors` sectors.
-fn author_system_partition(
-    sectors: u64,
-    entropy: &mut dyn EntropySource,
-    drivers: &[(&[&[u8]], &[u8])],
-    apps: &[(&[&[u8]], &[u8])],
-    network_conf: &str,
-) -> Result<Vec<u8>, MkimageError> {
-    let dev = MemBlock::new(sectors).map_err(MkimageError::SystemPartition)?;
-    let mut fs = ARXFS::format(dev, ROOT_INODE_HINT, &SYSTEM_VOLUME_KEY, entropy)
-        .map_err(MkimageError::SystemPartition)?;
-    let root = fs.root();
-    create_system_subdirs(&mut fs, root, MkimageError::SystemPartition)?;
-    // Lay each signed driver bundle into the read-only `/System` store at its
-    // volume-relative path (`Drivers/<class>/<leaf>/Run`), creating any
-    // intermediate directory the skeleton did not (the `Drivers`
-    // directory already exists, so the shared planter reuses it). This is the
-    // on-disk shape the autoload scan reads back; the bundle is
-    // already Ed25519-signed against the kernel's trust anchor, so a tampered
-    // read-only store fails the load gate closed.
-    for (components, bytes) in drivers {
-        plant_nested_file(&mut fs, root, components, bytes)
-            .map_err(MkimageError::SystemPartition)?;
+/// The `/System` volume [`build_system_partition`] is filling.
+struct SystemVolume {
+    fs: ARXFS<MemBlock>,
+    root: NodeId,
+}
+
+impl tairix_syshelp::SystemVolume for SystemVolume {
+    type Error = MkimageError;
+    type Image = Vec<u8>;
+
+    fn is_no_space(error: &MkimageError) -> bool {
+        matches!(error, MkimageError::SystemPartition(DriverError::NoSpace))
     }
-    // The system payload ships on every image through the one shared walk
-    // (`tairix_syshelp::plant_system_payload`): each command app's
-    // internationalised `Help/` tree and its `Resources/` files, discovered
-    // from the bundle's own on-disk sources, plus the desktop's graphics
-    // assets (the icon masters, and the wallpaper masters under their own
-    // category directories) planted under `Graphics/`. Driving the
-    // walk here — and, identically, in the QEMU image fixture — from one
-    // definition means the two planters can never lay down a different set of
-    // files, and a new help document, resource, or icon ships without editing
-    // this file (never a hand-maintained per-bundle list). The signed
-    // `AppInfo` content hash covers a bundle's help and resources, so a
-    // tampered one fails the load gate closed.
-    tairix_syshelp::plant_system_payload(|components, bytes| {
-        plant_nested_file(&mut fs, root, components, bytes).map_err(MkimageError::SystemPartition)
-    })?;
-    // Each program's signed `AppInfo` + `Run` land beside its `Help/` tree
-    // (`Apps/<name>.app/…`, `Services/<name>.app/…`), making every bundle a
-    // complete, self-contained on-disk directory. The files are composed and
-    // signed by the image pipeline's caller (this crate stays a pure
-    // planter); the same discovered set feeds the QEMU fixture, so image and
-    // fixture cannot drift.
-    for (components, bytes) in apps {
-        plant_nested_file(&mut fs, root, components, bytes)
-            .map_err(MkimageError::SystemPartition)?;
+
+    fn plant(&mut self, components: &[&[u8]], bytes: &[u8]) -> Result<(), MkimageError> {
+        plant_nested_file(&mut self.fs, self.root, components, bytes)
+            .map_err(MkimageError::SystemPartition)
     }
-    plant_network_config(&mut fs, root, network_conf)?;
-    fs.flush().map_err(MkimageError::SystemPartition)?;
-    Ok(fs
-        .into_block()
-        .map_err(MkimageError::SystemPartition)?
-        .into_bytes())
+
+    fn finish(mut self) -> Result<Vec<u8>, MkimageError> {
+        self.fs.flush().map_err(MkimageError::SystemPartition)?;
+        Ok(self
+            .fs
+            .into_block()
+            .map_err(MkimageError::SystemPartition)?
+            .into_bytes())
+    }
 }
 
 /// Lay the **writable-state** `/System` subtree under `system` on the
@@ -457,39 +433,6 @@ fn write_security_file(
         .map_err(MkimageError::RootPartition)?;
     fs.write_all(security, name.as_bytes(), 0, text.as_bytes())
         .map_err(MkimageError::RootPartition)
-}
-
-/// Plant the per-interface network-configuration document on the read-only
-/// `/System` volume, at the volume-relative path the ABI names
-/// ([`SystemConfigFile::volume_path`]).
-///
-/// That path — not the `/System/Settings` *view* path — is where the document
-/// has to live: its only reader is the device manager, which reads it through
-/// the pre-unlock store endpoint before the encrypted root is unlocked, so it
-/// can configure interfaces on the same volume the NIC drivers autoload from.
-/// At runtime `/System/Settings` is the writable sub-mount backed by that
-/// encrypted root, which no bootstrap client can reach.
-///
-/// The document is **parsed and re-rendered** rather than copied: the engine
-/// that validates it here is the same one `netstack` reads it with, so an
-/// image can never ship an addressing default its own stack would reject
-/// (fail closed at build time, not at first boot). An unparseable document is
-/// a build failure, and the rendered text is stored whole — never a
-/// truncated store.
-fn plant_network_config(
-    fs: &mut ARXFS<MemBlock>,
-    root: NodeId,
-    document: &str,
-) -> Result<(), MkimageError> {
-    let text = tairix_netconfig::NetworkConfig::parse(document)
-        .map_err(|_| MkimageError::NetworkConfig)?
-        .render();
-    let components: Vec<&[u8]> = SystemConfigFile::Network
-        .volume_path()
-        .split('/')
-        .map(str::as_bytes)
-        .collect();
-    plant_nested_file(fs, root, &components, text.as_bytes()).map_err(MkimageError::SystemPartition)
 }
 
 /// Create `/System/Settings/Services` on the writable root, owned by the
@@ -624,6 +567,7 @@ fn write_key_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::SECTOR_BYTES;
 
     const TEST_SECTORS: u64 = 131_072; // 64 MiB, the production root size.
     const TEST_KEY: VolumeKey = [0x42; tairix_drv_fs_arxfs::VOLUME_KEY_LEN];
@@ -759,7 +703,7 @@ mod tests {
         assert_eq!(wan.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
     }
 
-    /// Content the payload's own volume has no room for doubles the volume
+    /// Content the payload's own volume has no room for costs one more grain
     /// instead of failing the build, and still reads back intact.
     #[test]
     fn the_system_volume_grows_to_hold_content_its_first_size_cannot() {
@@ -790,7 +734,8 @@ mod tests {
         let bundle = [(path, run.as_slice())];
         let grown = build_system_partition(&mut TestEntropy(11), &[], &bundle, TEST_NETWORK)
             .expect("the overflowing content still builds");
-        assert_eq!(grown.len(), alone.len() * 2);
+        let grain = usize::try_from(tairix_syshelp::SYSTEM_VOLUME_GRAIN_BYTES).expect("fits usize");
+        assert_eq!(grown.len(), alone.len() + grain);
 
         let mut fs = ARXFS::open(
             MemBlock::from_bytes(grown).expect("whole sectors"),

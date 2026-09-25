@@ -40,10 +40,10 @@
 //! an icon that would silently render as a fallback glyph or a wallpaper
 //! that would never be offered.
 //!
-//! [`plant_system_payload`] is the single walk both planters drive their own
-//! `plant_nested_file` from, so they can never lay down a different set of
-//! files or spell a path differently, and [`build_system_volume`] is the one
-//! definition of how large the volume holding it is.
+//! Both authors build their disk through this crate: [`build_system_volume`]
+//! counts and plants the `/System` volume's files in one walk and chooses its
+//! length, and [`assemble_disk`] lays the partitions behind the MBR. Neither
+//! author keeps its own copy of the file set, the sizing, or the layout.
 //!
 //! The payload is `&'static [u8]` bytes embedded at build time, so this crate
 //! is `no_std` and depends on no app crate: both the host image builder and
@@ -53,6 +53,15 @@
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+extern crate alloc;
+
+use alloc::vec;
+use alloc::vec::Vec;
+use core::convert::Infallible;
+
+use tairix_partition::mbr::{self, MbrError};
+use tairix_partition::{Partition, PartitionType};
 
 /// One shipped Help document, ready to plant at
 /// `/System/<store>/<bundle>/Help/<locale>/<file>` on the read-only `/System`
@@ -211,30 +220,14 @@ pub struct GraphicsFile {
 pub const GRAPHICS_FILES: &[GraphicsFile] =
     &include!(concat!(env!("OUT_DIR"), "/graphics_files.rs"));
 
-/// Invoke `plant` once for every discovered system payload file — each
-/// command app's [`HelpFile`] and [`ResourceFile`], and every desktop
-/// [`GraphicsFile`] — passing the file's `/System`-volume-relative path
-/// components and its bytes.
-///
-/// The image builder (`tools/mkimage`) and the QEMU whole-disk image fixture
-/// (`tests/integration/encrypted_root_image`) both lay these files onto the
-/// read-only `/System` volume, each with its own `plant_nested_file` and its
-/// own error type. Driving both from this one walk is the single definition
-/// of *which* files ship and *where* they land, so the two planters can never
-/// list a different payload set (the duplication the charter forbids). It
-/// takes a closure rather than returning owned paths so it needs no
-/// allocation and stays `no_std`; `plant` returns the caller's own error on
-/// failure, which stops the walk.
-///
-/// # Errors
-///
-/// Returns the first error `plant` reports, failing the whole planting closed
-/// rather than shipping a partial payload.
-pub fn plant_system_payload<E>(
-    mut plant: impl FnMut(&[&[u8]], &[u8]) -> Result<(), E>,
+/// Visit every discovered payload file — each [`HelpFile`], [`ResourceFile`]
+/// and [`GraphicsFile`] — with its `/System`-volume-relative path components
+/// and its bytes, stopping at the first error `visit` returns.
+fn for_each_payload_file<E>(
+    mut visit: impl FnMut(&[&[u8]], &[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
     for doc in HELP_FILES {
-        plant(
+        visit(
             &[
                 doc.store.as_bytes(),
                 doc.bundle.as_bytes(),
@@ -246,7 +239,7 @@ pub fn plant_system_payload<E>(
         )?;
     }
     for res in RESOURCE_FILES {
-        plant(
+        visit(
             &[
                 res.store.as_bytes(),
                 res.bundle.as_bytes(),
@@ -260,68 +253,219 @@ pub fn plant_system_payload<E>(
         let family = asset.family.target_dir().as_bytes();
         let file = asset.file.as_bytes();
         match asset.category {
-            Some(category) => plant(
+            Some(category) => visit(
                 &[b"Graphics", family, category.as_bytes(), file],
                 asset.bytes,
             ),
-            None => plant(&[b"Graphics", family, file], asset.bytes),
+            None => visit(&[b"Graphics", family, file], asset.bytes),
         }?;
     }
     Ok(())
 }
 
-/// The smallest `/System` volume [`build_system_volume`] formats, in bytes.
-pub const SYSTEM_VOLUME_MIN_BYTES: u64 = 32 * 1024 * 1024;
-
-/// A caller's own file set for the `/System` volume: each file's
+/// A caller's own files for the `/System` volume: each file's
 /// volume-relative path components and its bytes.
 pub type PlantedFiles<'a> = &'a [(&'a [&'a [u8]], &'a [u8])];
 
-/// Author the `/System` volume holding the system payload and `bundles` at
-/// the smallest power-of-two multiple of [`SYSTEM_VOLUME_MIN_BYTES`] it fits.
+/// Visit every file a `/System` volume carries: the payload, then `bundles`.
+fn for_each_file<E>(
+    bundles: &[PlantedFiles<'_>],
+    mut visit: impl FnMut(&[&[u8]], &[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    for_each_payload_file(&mut visit)?;
+    for (components, bytes) in bundles.iter().flat_map(|set| set.iter()) {
+        visit(components, bytes)?;
+    }
+    Ok(())
+}
+
+/// Every byte [`for_each_file`] visits.
+fn planted_bytes(bundles: &[PlantedFiles<'_>]) -> u64 {
+    let mut total = 0u64;
+    let counted = for_each_file(bundles, |_, bytes| {
+        total = total.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        Ok::<(), Infallible>(())
+    });
+    match counted {
+        Ok(()) => total,
+        Err(never) => match never {},
+    }
+}
+
+/// A `/System` volume an author is filling at the length
+/// [`build_system_volume`] chose.
+pub trait SystemVolume: Sized {
+    /// Why the author refused.
+    type Error;
+    /// The finished volume.
+    type Image;
+
+    /// Whether `error` says the volume ran out of room: the one refusal a
+    /// longer volume can answer.
+    fn is_no_space(error: &Self::Error) -> bool;
+
+    /// Lay `bytes` at the volume-relative path `components`.
+    ///
+    /// # Errors
+    ///
+    /// The author's refusal, which ends this attempt.
+    fn plant(&mut self, components: &[&[u8]], bytes: &[u8]) -> Result<(), Self::Error>;
+
+    /// Complete the volume.
+    ///
+    /// # Errors
+    ///
+    /// The author's refusal, which ends this attempt.
+    fn finish(self) -> Result<Self::Image, Self::Error>;
+}
+
+/// The unit a `/System` volume's length is a whole number of, and so its
+/// smallest length.
 ///
-/// `bundles` are the caller's driver and application bundles; `build`
-/// formats and fills a volume of the byte length it is given. No length too
-/// short for the planted bytes themselves is tried. A refusal `is_no_space`
-/// recognises means the filesystem's own metadata did not fit beside them,
-/// so the length doubles: the overhead is measured, never estimated. Every
-/// length is a multiple of the floor, which keeps the partition after the
-/// volume 1 MiB-aligned.
+/// A whole number of MiB keeps the partition after the volume 1 MiB-aligned.
+/// It is this coarse so one grain covers the filesystem's own metadata and a
+/// volume rarely needs a second attempt.
+pub const SYSTEM_VOLUME_GRAIN_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Author the `/System` volume: the system payload and `bundles`, planted
+/// into what `format` makes of the sector count it is given.
+///
+/// One walk both counts and plants the files, so the length is chosen for
+/// exactly the set planted. The first length is their bytes rounded up to a
+/// whole [`SYSTEM_VOLUME_GRAIN_BYTES`]. The filesystem's own metadata is
+/// measured rather than estimated: a lack of room adds a grain and the
+/// volume is authored again, so it is never more than one grain longer than
+/// it has to be.
 ///
 /// # Errors
 ///
-/// The first refusal that is not a lack of space, or a lack of space at four
-/// times the first length: overhead that large is a planter defect, not a
-/// sizing question.
-pub fn build_system_volume<T, E>(
+/// The first refusal that is not a lack of room, or a lack of room at twice
+/// the first length: metadata as large as the payload is an author defect,
+/// not a sizing question.
+pub fn build_system_volume<V: SystemVolume>(
     bundles: &[PlantedFiles<'_>],
-    mut build: impl FnMut(u64) -> Result<T, E>,
-    is_no_space: impl Fn(&E) -> bool,
-) -> Result<T, E> {
-    let payload = HELP_FILES
-        .iter()
-        .map(|doc| doc.bytes.len())
-        .chain(RESOURCE_FILES.iter().map(|res| res.bytes.len()))
-        .chain(GRAPHICS_FILES.iter().map(|asset| asset.bytes.len()))
-        .chain(
-            bundles
-                .iter()
-                .flat_map(|set| set.iter().map(|(_, bytes)| bytes.len())),
-        )
-        .fold(0u64, |total, len| {
-            total.saturating_add(u64::try_from(len).unwrap_or(u64::MAX))
-        });
-    let mut len = SYSTEM_VOLUME_MIN_BYTES;
-    while len < payload {
-        len = len.saturating_mul(2);
-    }
-    let last = len.saturating_mul(4);
+    mut format: impl FnMut(u64) -> Result<V, V::Error>,
+) -> Result<V::Image, V::Error> {
+    let first = planted_bytes(bundles)
+        .div_ceil(SYSTEM_VOLUME_GRAIN_BYTES)
+        .max(1)
+        .saturating_mul(SYSTEM_VOLUME_GRAIN_BYTES);
+    let last = first.saturating_mul(2);
+    let mut len = first;
     loop {
-        match build(len) {
-            Err(refusal) if is_no_space(&refusal) && len < last => len = len.saturating_mul(2),
+        let authored = format(len / SECTOR_BYTES as u64).and_then(|mut volume| {
+            for_each_file(bundles, |components, bytes| volume.plant(components, bytes))?;
+            volume.finish()
+        });
+        match authored {
+            Err(refusal) if V::is_no_space(&refusal) && len < last => {
+                len = len.saturating_add(SYSTEM_VOLUME_GRAIN_BYTES);
+            }
             outcome => return outcome,
         }
     }
+}
+
+/// Bytes in one sector of the disks TAIRiX authors.
+pub const SECTOR_BYTES: usize = 512;
+
+/// First sector of the boot partition: the 1 MiB offset SD cards align to.
+pub const BOOT_PART_LBA: u64 = 2048;
+
+/// Sectors in the FAT32 boot partition: 64 MiB, room for the firmware blobs
+/// and the kernel and enough clusters for a valid FAT32 volume.
+pub const BOOT_PART_SECTORS: u64 = 131_072;
+
+/// First sector of the `/System` partition, directly after the boot
+/// partition.
+pub const SYSTEM_PART_LBA: u64 = BOOT_PART_LBA + BOOT_PART_SECTORS;
+
+/// A partition of the boot disk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiskPartition {
+    /// The FAT32 boot partition.
+    Boot,
+    /// The read-only `/System` partition.
+    System,
+    /// The encrypted data-root partition.
+    Root,
+}
+
+/// Why [`assemble_disk`] refused a layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiskLayoutError {
+    /// The partition is not a whole number of sectors.
+    PartialSector(DiskPartition),
+    /// The boot partition is not [`BOOT_PART_SECTORS`] long.
+    BootLength,
+    /// The partition ends beyond what the disk can address.
+    OutOfRange(DiskPartition),
+    /// The partition table refused the extents.
+    Table(MbrError),
+}
+
+/// The boot disk: an MBR naming each partition by its role, then `boot`,
+/// `system` and `root` back to back from [`BOOT_PART_LBA`].
+///
+/// # Errors
+///
+/// A [`DiskLayoutError`] when a partition is not whole sectors, the boot
+/// partition is not [`BOOT_PART_SECTORS`] long, or an extent lies beyond what
+/// the disk or its table can address.
+pub fn assemble_disk(boot: &[u8], system: &[u8], root: &[u8]) -> Result<Vec<u8>, DiskLayoutError> {
+    use DiskPartition::{Boot, Root, System};
+
+    let sectors = |part: DiskPartition, bytes: &[u8]| {
+        if !bytes.len().is_multiple_of(SECTOR_BYTES) {
+            return Err(DiskLayoutError::PartialSector(part));
+        }
+        u64::try_from(bytes.len() / SECTOR_BYTES).map_err(|_| DiskLayoutError::OutOfRange(part))
+    };
+    if sectors(Boot, boot)? != BOOT_PART_SECTORS {
+        return Err(DiskLayoutError::BootLength);
+    }
+    let system_sectors = sectors(System, system)?;
+    let root_sectors = sectors(Root, root)?;
+    let root_lba = SYSTEM_PART_LBA
+        .checked_add(system_sectors)
+        .ok_or(DiskLayoutError::OutOfRange(System))?;
+    let end = root_lba
+        .checked_add(root_sectors)
+        .ok_or(DiskLayoutError::OutOfRange(Root))?;
+    let table = mbr::encode(&[
+        Partition {
+            ty: PartitionType::FatBoot,
+            start_lba: BOOT_PART_LBA,
+            block_count: BOOT_PART_SECTORS,
+        },
+        Partition {
+            ty: PartitionType::ARXFSSystem,
+            start_lba: SYSTEM_PART_LBA,
+            block_count: system_sectors,
+        },
+        Partition {
+            ty: PartitionType::ARXFSRoot,
+            start_lba: root_lba,
+            block_count: root_sectors,
+        },
+    ])
+    .map_err(DiskLayoutError::Table)?;
+
+    let offset = |lba: u64, part: DiskPartition| {
+        usize::try_from(lba)
+            .ok()
+            .and_then(|lba| lba.checked_mul(SECTOR_BYTES))
+            .ok_or(DiskLayoutError::OutOfRange(part))
+    };
+    let boot_at = offset(BOOT_PART_LBA, Boot)?;
+    let system_at = offset(SYSTEM_PART_LBA, System)?;
+    let root_at = offset(root_lba, Root)?;
+    let mut disk = vec![0u8; offset(end, Root)?];
+    disk[..table.len()].copy_from_slice(&table);
+    disk[boot_at..system_at].copy_from_slice(boot);
+    disk[system_at..root_at].copy_from_slice(system);
+    disk[root_at..].copy_from_slice(root);
+    Ok(disk)
 }
 
 #[cfg(test)]
@@ -611,30 +755,65 @@ mod tests {
         }
     }
 
-    /// Every volume length `build_system_volume` asks for until `fits`
-    /// accepts one, and its outcome; every refusal is a lack of space.
-    fn lengths_tried(
+    const GRAIN: u64 = super::SYSTEM_VOLUME_GRAIN_BYTES;
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum Refusal {
+        NoRoom,
+        Fault,
+    }
+
+    /// Each planted file's path components and length, in order.
+    type Planted = Vec<(Vec<Vec<u8>>, u64)>;
+
+    /// A volume holding `room` planted bytes, recording each file planted.
+    #[derive(Debug)]
+    struct Volume {
+        room: u64,
+        planted: Planted,
+    }
+
+    impl super::SystemVolume for Volume {
+        type Error = Refusal;
+        type Image = Planted;
+
+        fn is_no_space(error: &Refusal) -> bool {
+            *error == Refusal::NoRoom
+        }
+
+        fn plant(&mut self, components: &[&[u8]], bytes: &[u8]) -> Result<(), Refusal> {
+            let len = u64::try_from(bytes.len()).expect("a file length fits u64");
+            self.room = self.room.checked_sub(len).ok_or(Refusal::NoRoom)?;
+            let path = components.iter().map(|c| c.to_vec()).collect();
+            self.planted.push((path, len));
+            Ok(())
+        }
+
+        fn finish(self) -> Result<Self::Image, Refusal> {
+            Ok(self.planted)
+        }
+    }
+
+    /// Every volume length tried, in bytes, when each volume loses
+    /// `overhead` bytes to its own metadata, and the outcome.
+    fn build(
         bundles: &[super::PlantedFiles<'_>],
-        fits: impl Fn(u64) -> bool,
-    ) -> (Vec<u64>, Result<u64, u64>) {
+        overhead: u64,
+    ) -> (Vec<u64>, Result<Planted, Refusal>) {
         let mut tried = Vec::new();
-        let outcome = super::build_system_volume(
-            bundles,
-            |len| {
-                tried.push(len);
-                if fits(len) {
-                    Ok(len)
-                } else {
-                    Err(len)
-                }
-            },
-            |_| true,
-        );
+        let outcome = super::build_system_volume(bundles, |sectors| {
+            let len = sectors * super::SECTOR_BYTES as u64;
+            tried.push(len);
+            Ok(Volume {
+                room: len.saturating_sub(overhead),
+                planted: Vec::new(),
+            })
+        });
         (tried, outcome)
     }
 
-    /// The planted bytes of the shipped payload, summed independently of
-    /// the policy under test.
+    /// The shipped payload's bytes, summed independently of the walk under
+    /// test.
     fn payload_bytes() -> u64 {
         let docs = HELP_FILES.iter().map(|doc| doc.bytes.len());
         let resources = super::RESOURCE_FILES.iter().map(|res| res.bytes.len());
@@ -645,91 +824,170 @@ mod tests {
             .sum()
     }
 
-    /// The first length tried is the smallest power-of-two multiple of the
-    /// floor that the planted bytes alone do not overflow.
     #[test]
-    fn the_first_volume_tried_is_the_smallest_the_payload_could_fit() {
-        use super::SYSTEM_VOLUME_MIN_BYTES as FLOOR;
-
-        let (tried, outcome) = lengths_tried(&[], |_| true);
-        let first = tried[0];
-        assert_eq!(outcome, Ok(first));
-        assert!(first.is_multiple_of(FLOOR) && (first / FLOOR).is_power_of_two());
+    fn the_first_volume_is_the_planted_bytes_rounded_up_to_a_grain() {
+        let (tried, outcome) = build(&[], 0);
+        assert!(outcome.is_ok());
         let payload = payload_bytes();
-        assert!(first >= payload, "{first} holds the {payload}-byte payload");
-        assert!(
-            first == FLOOR || first / 2 < payload,
-            "{first} is not oversized"
-        );
+        assert_eq!(tried, [payload.div_ceil(GRAIN).max(1) * GRAIN]);
     }
 
-    /// The caller's bundles count towards the first length exactly as the
-    /// payload does.
     #[test]
-    fn a_bundle_counts_towards_the_first_volume_tried() {
-        let (alone, _) = lengths_tried(&[], |_| true);
+    fn a_bundle_counts_towards_the_first_volume() {
+        let (alone, _) = build(&[], 0);
         let spill = usize::try_from(alone[0] - payload_bytes() + 1).expect("fits usize");
         let run = std::vec![0u8; spill];
         let components: &[&[u8]] = &[b"Commands", b"big.app", b"Run"];
         let bundle = [(components, run.as_slice())];
-        let (tried, outcome) = lengths_tried(&[&[], &bundle], |_| true);
-        assert_eq!(tried, [alone[0] * 2]);
-        assert_eq!(outcome, Ok(alone[0] * 2));
+        let (tried, outcome) = build(&[&[], &bundle], 0);
+        assert!(outcome.is_ok());
+        assert_eq!(tried, [alone[0] + GRAIN]);
     }
 
-    /// A lack of space doubles the length, and nothing else does.
+    /// Metadata that overflows the first volume by a byte costs exactly one
+    /// more grain.
     #[test]
-    fn the_volume_doubles_only_until_the_content_fits() {
-        let (alone, _) = lengths_tried(&[], |_| true);
+    fn a_lack_of_room_adds_a_grain_until_the_content_fits() {
+        let (alone, _) = build(&[], 0);
         let first = alone[0];
-        let (tried, outcome) = lengths_tried(&[], |len| len >= first * 2);
-        assert_eq!(tried, [first, first * 2]);
-        assert_eq!(outcome, Ok(first * 2));
+        let overhead = first - payload_bytes() + 1;
+        let (tried, outcome) = build(&[], overhead);
+        assert!(outcome.is_ok());
+        assert_eq!(tried, [first, first + GRAIN]);
     }
 
-    /// Four times the first length is the last one tried: a volume that
-    /// still has no room is a planter defect, returned as the refusal.
     #[test]
-    fn a_lack_of_space_at_four_times_the_first_volume_is_returned() {
-        let (tried, outcome) = lengths_tried(&[], |_| false);
+    fn a_lack_of_room_at_twice_the_first_length_is_returned() {
+        let (tried, outcome) = build(&[], u64::MAX);
         let first = tried[0];
-        assert_eq!(tried, [first, first * 2, first * 4]);
-        assert_eq!(outcome, Err(first * 4));
+        let expected: Vec<u64> = (0..=first / GRAIN)
+            .map(|step| first + step * GRAIN)
+            .collect();
+        assert_eq!(tried, expected);
+        assert_eq!(tried.last(), Some(&(first * 2)));
+        assert_eq!(outcome, Err(Refusal::NoRoom));
     }
 
-    /// A refusal that is not a lack of space is returned at once.
     #[test]
-    fn a_refusal_other_than_a_lack_of_space_is_returned_at_once() {
+    fn a_refusal_other_than_a_lack_of_room_is_returned_at_once() {
         let mut tried = 0;
-        let outcome: Result<(), &str> = super::build_system_volume(
-            &[],
-            |_| {
-                tried += 1;
-                Err("device fault")
-            },
-            |refusal| *refusal == "no space",
-        );
-        assert_eq!(outcome, Err("device fault"));
+        let outcome = super::build_system_volume(&[], |_| -> Result<Volume, Refusal> {
+            tried += 1;
+            Err(Refusal::Fault)
+        });
+        assert_eq!(outcome.unwrap_err(), Refusal::Fault);
         assert_eq!(tried, 1);
     }
 
-    /// The shared payload walk yields every discovered file exactly once,
-    /// at its `/System`-volume-relative path: a help document under
-    /// `Apps/<bundle>/Help/<locale>/`, a resource under
-    /// `Apps/<bundle>/Resources/`, an icon under `Graphics/Icons/`, and a
-    /// wallpaper under `Graphics/Wallpapers/<category>/`. All planters drive
-    /// their own `plant_nested_file` from this one walk, so this pins the
-    /// count and the path spelling they share — for a vector class master and
-    /// a raster one alike, since the walk plants an icon by its discovered
-    /// file name and never by an assumed extension, and for a categorised
-    /// family, whose extra path component the flat one must not gain.
+    /// What a volume is sized for is exactly what is planted in it: every
+    /// payload file and every bundle file, each once.
     #[test]
-    fn the_shared_walk_visits_every_payload_file_at_its_planted_path() {
-        use super::{plant_system_payload, GRAPHICS_FILES, HELP_FILES, RESOURCE_FILES};
+    fn the_counted_set_and_the_planted_set_are_one() {
+        let components: &[&[u8]] = &[b"Drivers", b"input", b"kbd", b"Run"];
+        let bundle = [(components, b"a signed driver".as_slice())];
+        let (tried, outcome) = build(&[&bundle], 0);
+        let planted = outcome.expect("the volume is authored");
+        assert_eq!(
+            planted.len(),
+            HELP_FILES.len() + super::RESOURCE_FILES.len() + super::GRAPHICS_FILES.len() + 1
+        );
+        let planted_bytes: u64 = planted.iter().map(|(_, len)| len).sum();
+        assert_eq!(planted_bytes, payload_bytes() + 15);
+        assert_eq!(tried, [planted_bytes.div_ceil(GRAIN) * GRAIN]);
+        assert!(planted.iter().any(|(path, _)| path
+            .iter()
+            .map(Vec::as_slice)
+            .eq(components.iter().copied())));
+    }
+
+    /// A partition of `sectors` sectors of `fill`, so its placement reads
+    /// back.
+    fn part(sectors: u64, fill: u8) -> Vec<u8> {
+        std::vec![fill; usize::try_from(sectors).expect("fits usize") * super::SECTOR_BYTES]
+    }
+
+    #[test]
+    fn the_disk_packs_its_partitions_back_to_back_behind_the_table() {
+        use super::{BOOT_PART_LBA, BOOT_PART_SECTORS, SECTOR_BYTES, SYSTEM_PART_LBA};
+        use tairix_partition::PartitionType;
+
+        let disk = super::assemble_disk(
+            &part(BOOT_PART_SECTORS, 0xB0),
+            &part(3, 0x5E),
+            &part(2, 0x7A),
+        )
+        .expect("the disk assembles");
+        let table = tairix_partition::mbr::parse(&disk[..SECTOR_BYTES]).expect("the MBR parses");
+        let extent = |ty| {
+            let found = table.first_of_type(ty).expect("the partition is present");
+            (found.start_lba, found.block_count)
+        };
+        assert_eq!(
+            extent(PartitionType::FatBoot),
+            (BOOT_PART_LBA, BOOT_PART_SECTORS)
+        );
+        assert_eq!(extent(PartitionType::ARXFSSystem), (SYSTEM_PART_LBA, 3));
+        assert_eq!(extent(PartitionType::ARXFSRoot), (SYSTEM_PART_LBA + 3, 2));
+        let at = |lba: u64| usize::try_from(lba).expect("fits usize") * SECTOR_BYTES;
+        assert_eq!(disk.len(), at(SYSTEM_PART_LBA + 5));
+        assert!(disk[at(BOOT_PART_LBA)..at(SYSTEM_PART_LBA)]
+            .iter()
+            .all(|&b| b == 0xB0));
+        assert!(disk[at(SYSTEM_PART_LBA)..at(SYSTEM_PART_LBA + 3)]
+            .iter()
+            .all(|&b| b == 0x5E));
+        assert!(disk[at(SYSTEM_PART_LBA + 3)..].iter().all(|&b| b == 0x7A));
+    }
+
+    #[test]
+    fn a_partition_that_is_not_whole_sectors_is_refused() {
+        use super::{DiskLayoutError::PartialSector, DiskPartition};
+
+        let boot = part(super::BOOT_PART_SECTORS, 0);
+        let whole = part(1, 0);
+        let ragged = std::vec![0u8; super::SECTOR_BYTES + 1];
+        assert_eq!(
+            super::assemble_disk(&ragged, &whole, &whole),
+            Err(PartialSector(DiskPartition::Boot))
+        );
+        assert_eq!(
+            super::assemble_disk(&boot, &ragged, &whole),
+            Err(PartialSector(DiskPartition::System))
+        );
+        assert_eq!(
+            super::assemble_disk(&boot, &whole, &ragged),
+            Err(PartialSector(DiskPartition::Root))
+        );
+    }
+
+    #[test]
+    fn a_boot_partition_of_any_other_length_is_refused() {
+        let whole = part(1, 0);
+        for sectors in [
+            1,
+            super::BOOT_PART_SECTORS - 1,
+            super::BOOT_PART_SECTORS + 1,
+        ] {
+            assert_eq!(
+                super::assemble_disk(&part(sectors, 0), &whole, &whole),
+                Err(super::DiskLayoutError::BootLength)
+            );
+        }
+    }
+
+    /// The payload walk yields every discovered file exactly once, at its
+    /// `/System`-volume-relative path: a help document under
+    /// `Apps/<bundle>/Help/<locale>/`, a resource under
+    /// `Apps/<bundle>/Resources/`, an icon under `Graphics/Icons/` by its
+    /// discovered file name whatever its format, and a wallpaper under
+    /// `Graphics/Wallpapers/<category>/`.
+    #[test]
+    fn the_payload_walk_visits_every_file_at_its_planted_path() {
+        use super::{for_each_payload_file, GRAPHICS_FILES, HELP_FILES, RESOURCE_FILES};
 
         let mut visited: Vec<Vec<Vec<u8>>> = Vec::new();
         let outcome: Result<(), core::convert::Infallible> =
-            plant_system_payload(|components, _bytes| {
+            for_each_payload_file(|components, _bytes| {
                 visited.push(components.iter().map(|c| c.to_vec()).collect());
                 Ok(())
             });

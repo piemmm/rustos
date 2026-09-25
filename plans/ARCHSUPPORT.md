@@ -155,14 +155,11 @@ root-mount->login *policy* over the virtio-**PCI** bus. It is a thin bin over
 the shared virtio-PCI bring-up (`run_virtio_pci_scenario`) and the shared
 `root_unlock_login` scenario tail — the same tail the aarch64 vertical runs,
 hoisted into `tests/integration/virtio_qemu_support` and made generic over the
-transport so both ports drive one definition (§2.2). Authoring it surfaced and
-fixed a fixture scaling defect: the encrypted-root fixture's `/System` `ARXFS`
-partition was a fixed 32 MiB that the (larger) x86_64 bundle set overflowed;
-`tairix_test_encrypted_root_image` now sizes that partition from the planted
-content (`tairix_syshelp::build_system_volume`, the policy the Pi image shares,
-never below the 32 MiB floor) and derives the root LBA / total from the
-produced image, so one fixture serves every arch (§24.1) and `qemu_tests.rs`
-reads each image's true sector count.
+transport so both ports drive one definition (§2.2). The encrypted-root
+fixture's `/System` partition is sized from its planted content by the policy
+and assembly the Pi image uses (`tairix_syshelp::build_system_volume`,
+`tairix_syshelp::assemble_disk`), so one fixture serves every arch's bundle set
+(§24.1) and `qemu_tests.rs` reads each image's true sector count.
 
 **`users_db_qemu_x86_64` passes a real guest boot too** — the first live-boot
 exercise of the x86_64 boot-time users-database read path over virtio-**PCI**.

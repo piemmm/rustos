@@ -6,13 +6,14 @@
 //! drivers and encoders so the fixture cannot drift from the system that
 //! mounts the disk:
 //!
-//! 1. An **MBR** ([`tairix_partition::mbr::encode`]) describing three
-//!    1 MiB-aligned primary partitions, back to back.
-//! 2. A **FAT32 boot partition** at [`BOOT_LBA`], authored by the real
+//! 1. An **MBR** describing three 1 MiB-aligned primary partitions, back to
+//!    back, laid out by the one assembly `tools/mkimage` uses
+//!    ([`tairix_syshelp::assemble_disk`]).
+//! 2. A **FAT32 boot partition** at [`BOOT_PART_LBA`], authored by the real
 //!    [`Fat32`] driver, carrying the plaintext `root.unlock`
 //!    key-derivation descriptor ([`ROOT_UNLOCK_NAME`]).
-//! 3. The read-only **`/System` partition** at [`SYSTEM_LBA`], sized to the
-//!    signed bundles and discovered system payload it carries.
+//! 3. The read-only **`/System` partition** at [`SYSTEM_PART_LBA`], sized to
+//!    the signed bundles and discovered system payload it carries.
 //! 4. An **encrypted `ARXFS` root partition** directly after it, whose
 //!    volume key is **derived from [`PASSPHRASE`]** through the descriptor
 //!    above, carrying `/System/Security/Users` with the
@@ -42,35 +43,17 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{
     EntropySource, UnlockDescriptor, VolumeKey, ARXFS, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY,
     UNLOCK_DESCRIPTOR_LEN, UNLOCK_MIN_ITERATIONS,
 };
 use tairix_drv_fs_fat32::Fat32;
-use tairix_partition::{mbr, Partition, PartitionType};
+use tairix_syshelp::DiskLayoutError;
 use tairix_test_arxfs_image as root_image;
 
-/// Logical block (sector) size of the produced image, in bytes. Matches
-/// the 512-byte sector QEMU's virtio-blk reports by default and the sector
-/// size every in-tree filesystem driver addresses.
-pub const SECTOR_BYTES: usize = 512;
-
-/// First sector of the FAT32 boot partition (1 MiB alignment, the
-/// universal SD-card convention `tools/mkimage` uses).
-pub const BOOT_LBA: u64 = 2048;
-
-/// Sectors in the FAT32 boot partition: 64 MiB. A valid FAT32 volume needs
-/// far more clusters than the tiny `root.unlock` descriptor occupies, so
-/// the partition is sized for a real format rather than the descriptor's
-/// footprint — the same size `tools/mkimage` formats the boot partition at.
-pub const FAT_BOOT_SECTORS: u64 = 131_072;
-
-/// First sector of the read-only `ARXFS` `/System` partition: directly
-/// after the boot partition, which already ends 1 MiB-aligned. This is the
-/// design-B pre-unlock signed-driver store (`plans/PI.md` B1).
-pub const SYSTEM_LBA: u64 = BOOT_LBA + FAT_BOOT_SECTORS;
+pub use tairix_syshelp::{BOOT_PART_LBA, BOOT_PART_SECTORS, SECTOR_BYTES, SYSTEM_PART_LBA};
 
 /// Sectors in the encrypted `ARXFS` root partition — the shared
 /// [`tairix_test_arxfs_image`] users-root volume's footprint.
@@ -194,7 +177,7 @@ fn provision(passphrase: &[u8]) -> Result<([u8; UNLOCK_DESCRIPTOR_LEN], VolumeKe
 fn build_boot_partition(descriptor: &[u8]) -> Result<Vec<u8>, DriverError> {
     // A fixed test serial: the fixture's boot partition never meets the
     // volume forest.
-    let mut fs = Fat32::format(MemDisk::new(FAT_BOOT_SECTORS), 0x0B00_7F1E)?;
+    let mut fs = Fat32::format(MemDisk::new(BOOT_PART_SECTORS), 0x0B00_7F1E)?;
     let root = fs.root();
     fs.create(root, ROOT_UNLOCK_NAME.as_bytes(), NodeKind::RegularFile)?;
     let written = fs.write_at(root, ROOT_UNLOCK_NAME.as_bytes(), 0, descriptor)?;
@@ -205,82 +188,60 @@ fn build_boot_partition(descriptor: &[u8]) -> Result<Vec<u8>, DriverError> {
     Ok(fs.into_block().store)
 }
 
-/// Author the read-only `/System` partition at the smallest size that holds
-/// it (`tairix_syshelp::build_system_volume`): an `ARXFS` volume under the
-/// non-secret well-known [`SYSTEM_VOLUME_KEY`] with the `/System` skeleton at
-/// its root (`Drivers` plus `Security`) and the design-B signed driver
-/// `drivers` in its `Drivers/` store — the layout
-/// `tools/mkimage::build_system_partition` writes. The kernel mounts it
-/// read-only and autoloads the store **before** unlocking the encrypted root
-/// (`plans/PI.md` design B / B2), so the store — not the encrypted root —
-/// carries the boot drivers.
+/// Author the read-only `/System` partition through the sizing and file walk
+/// `tools/mkimage` uses (`tairix_syshelp::build_system_volume`): an `ARXFS`
+/// volume under the non-secret well-known [`SYSTEM_VOLUME_KEY`] with the
+/// `Drivers` and `Security` skeleton at its root, carrying the discovered
+/// system payload, `drivers` and `apps`. The kernel mounts it read-only and
+/// autoloads the `Drivers/` store **before** unlocking the encrypted root
+/// (`plans/PI.md` design B / B2).
 ///
-/// Each driver is `(path_components, bytes)` where `path_components` is the
-/// bundle leaf's path **relative to this `/System` volume's root** (the
-/// volume's root *is* `/System`, so the `/System/Drivers/` store is at
-/// the volume-relative `Drivers/…`, e.g.
-/// `&[b"Drivers", b"input", b"virtio_kbd", b"Run"]`).
-///
-/// `apps` is the application-bundle file set in the same shape — every
-/// program's signed `AppInfo` + `Run` at its volume-relative store path
-/// (e.g. `&[b"Apps", b"ls.app", b"Run"]`), planted beside the `Help/`
-/// trees below so each on-disk bundle is complete and self-contained
-/// (`plans/APPS.md` deliverable 8). The caller composes and signs the
-/// files; this fixture only plants bytes. Returns the partition's
-/// on-disk bytes.
+/// Each file is `(path_components, bytes)`, its path relative to the volume
+/// root, which *is* `/System` (e.g. `&[b"Drivers", b"input", b"virtio_kbd",
+/// b"Run"]` or `&[b"Commands", b"ls.app", b"Run"]`). The caller composes and
+/// signs the files; this fixture only plants them.
 fn build_system_partition(
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
 ) -> Result<Vec<u8>, DriverError> {
-    tairix_syshelp::build_system_volume(
-        &[drivers, apps],
-        |len| try_build_system_partition(len / SECTOR_BYTES as u64, drivers, apps),
-        |refusal| matches!(refusal, DriverError::NoSpace),
-    )
+    tairix_syshelp::build_system_volume(&[drivers, apps], |sectors| {
+        let mut fs = ARXFS::format(
+            MemDisk::new(sectors),
+            64,
+            &SYSTEM_VOLUME_KEY,
+            &mut FixtureEntropy { next: 3 },
+        )?;
+        let root = fs.root();
+        let security = fs.create(root, b"Security", NodeKind::Directory)?;
+        fs.create(security, b"Keys", NodeKind::Directory)?;
+        fs.create(security, b"Policy", NodeKind::Directory)?;
+        fs.create(root, b"Drivers", NodeKind::Directory)?;
+        Ok(SystemVolume { fs, root })
+    })
 }
 
-/// [`build_system_partition`] into exactly `sectors` sectors.
-fn try_build_system_partition(
-    sectors: u64,
-    drivers: &[(&[&[u8]], &[u8])],
-    apps: &[(&[&[u8]], &[u8])],
-) -> Result<Vec<u8>, DriverError> {
-    let mut fs = ARXFS::format(
-        MemDisk::new(sectors),
-        64,
-        &SYSTEM_VOLUME_KEY,
-        &mut FixtureEntropy { next: 3 },
-    )?;
-    let root = fs.root();
-    let security = fs.create(root, b"Security", NodeKind::Directory)?;
-    fs.create(security, b"Keys", NodeKind::Directory)?;
-    fs.create(security, b"Policy", NodeKind::Directory)?;
-    fs.create(root, b"Drivers", NodeKind::Directory)?;
-    for (components, bytes) in drivers {
-        root_image::plant_nested_file(&mut fs, root, components, bytes)?;
+/// The `/System` volume [`build_system_partition`] is filling.
+struct SystemVolume {
+    fs: ARXFS<MemDisk>,
+    root: NodeId,
+}
+
+impl tairix_syshelp::SystemVolume for SystemVolume {
+    type Error = DriverError;
+    type Image = Vec<u8>;
+
+    fn is_no_space(error: &DriverError) -> bool {
+        matches!(error, DriverError::NoSpace)
     }
-    // The system payload, planted through the exact same one shared walk
-    // `tools/mkimage` drives (`tairix_syshelp::plant_system_payload`): each
-    // command app's internationalised Help/ tree and its Resources/ files,
-    // discovered from the bundle's own on-disk sources, plus the desktop's
-    // graphics assets (the icon masters, and the wallpaper masters under
-    // their own category directories) under Graphics/ — every intermediate
-    // directory created on demand, however deep.
-    // Sharing the walk with mkimage means the session vertical reads the same
-    // bytes a real image ships and the two planters cannot list a different
-    // payload set (there is no third, hand-mirrored copy of the loops here).
-    tairix_syshelp::plant_system_payload(|components, bytes| {
-        root_image::plant_nested_file(&mut fs, root, components, bytes)
-    })?;
-    // Each program's signed `AppInfo` + `Run` land beside its `Help/` tree
-    // (`Apps/<name>.app/…`, `Services/<name>.app/…`), exactly as
-    // `tools/mkimage` plants them, so every on-disk bundle the vertical
-    // browses is complete and self-contained.
-    for (components, bytes) in apps {
-        root_image::plant_nested_file(&mut fs, root, components, bytes)?;
+
+    fn plant(&mut self, components: &[&[u8]], bytes: &[u8]) -> Result<(), DriverError> {
+        root_image::plant_nested_file(&mut self.fs, self.root, components, bytes)
     }
-    fs.flush()?;
-    Ok(fs.into_block()?.store)
+
+    fn finish(mut self) -> Result<Vec<u8>, DriverError> {
+        self.fs.flush()?;
+        Ok(self.fs.into_block()?.store)
+    }
 }
 
 /// Build the whole-disk encrypted-root image described in the module docs.
@@ -288,10 +249,8 @@ fn try_build_system_partition(
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`ARXFS`
-/// authoring, or the MBR encode. The fixed geometry makes a failure a
-/// programming error in this fixture, but it is surfaced rather than
-/// panicked so the builder holds to in every path it links
-/// into.
+/// authoring, or the disk assembly: a fixture defect, surfaced rather than
+/// panicked because the fixture also links into the freestanding guest.
 pub fn build_image() -> Result<Vec<u8>, DriverError> {
     build_image_with_contents(&[], &[], &[], PASSPHRASE)
 }
@@ -328,13 +287,13 @@ pub fn build_image_with_apps(
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`ARXFS`
-/// authoring, or the MBR encode (surfaced rather than panicked).
+/// authoring, or the disk assembly (surfaced rather than panicked).
 pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverError> {
     build_image_with_contents(&[], &[], &[], passphrase)
 }
 
 /// Build the whole-disk encrypted-root image, additionally planting a set of
-/// installed driver bundles into the encrypted root's `/System/Drivers/`
+/// installed driver bundles into the read-only `/System` volume's `Drivers/`
 /// store.
 ///
 /// This is [`build_image`] with the discovered driver store populated:
@@ -350,7 +309,7 @@ pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverE
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`ARXFS`
-/// authoring, or the MBR encode (surfaced rather than panicked).
+/// authoring, or the disk assembly (surfaced rather than panicked).
 pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
     build_image_with_contents(drivers, &[], &[], PASSPHRASE)
 }
@@ -370,7 +329,7 @@ pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`ARXFS`
-/// authoring, or the MBR encode (surfaced rather than panicked).
+/// authoring, or the disk assembly (surfaced rather than panicked).
 pub fn build_image_with_contents(
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
@@ -381,48 +340,12 @@ pub fn build_image_with_contents(
     let boot = build_boot_partition(&descriptor)?;
     let system = build_system_partition(drivers, apps)?;
     let root = root_image::build_users_root_image_with_key(&key, root_files)?;
-
-    // The `/System` partition sizes itself to the content it holds
-    // (`build_system_partition`), so the root partition's start and the
-    // total image size are derived from the produced partition length rather
-    // than a fixed constant — the layout follows the content, on every arch.
-    let system_sectors =
-        u64::try_from(system.len() / SECTOR_BYTES).map_err(|_| DriverError::LengthOutOfRange)?;
-    let root_lba = SYSTEM_LBA
-        .checked_add(system_sectors)
-        .ok_or(DriverError::LengthOutOfRange)?;
-    let total_sectors = root_lba
-        .checked_add(ROOT_SECTORS)
-        .ok_or(DriverError::LengthOutOfRange)?;
-
-    let table = mbr::encode(&[
-        Partition {
-            ty: PartitionType::FatBoot,
-            start_lba: BOOT_LBA,
-            block_count: FAT_BOOT_SECTORS,
-        },
-        Partition {
-            ty: PartitionType::ARXFSSystem,
-            start_lba: SYSTEM_LBA,
-            block_count: system_sectors,
-        },
-        Partition {
-            ty: PartitionType::ARXFSRoot,
-            start_lba: root_lba,
-            block_count: ROOT_SECTORS,
-        },
-    ])
-    .map_err(|_| DriverError::DeviceFault)?;
-
-    let mut image = vec![0u8; usize::try_from(total_sectors).unwrap_or(0) * SECTOR_BYTES];
-    image[..table.len()].copy_from_slice(&table);
-    let boot_at = usize::try_from(BOOT_LBA).unwrap_or(0) * SECTOR_BYTES;
-    image[boot_at..boot_at + boot.len()].copy_from_slice(&boot);
-    let system_at = usize::try_from(SYSTEM_LBA).unwrap_or(0) * SECTOR_BYTES;
-    image[system_at..system_at + system.len()].copy_from_slice(&system);
-    let root_at = usize::try_from(root_lba).unwrap_or(0) * SECTOR_BYTES;
-    image[root_at..root_at + root.len()].copy_from_slice(&root);
-    Ok(image)
+    tairix_syshelp::assemble_disk(&boot, &system, &root).map_err(|refused| match refused {
+        DiskLayoutError::Table(_) => DriverError::DeviceFault,
+        DiskLayoutError::PartialSector(_)
+        | DiskLayoutError::BootLength
+        | DiskLayoutError::OutOfRange(_) => DriverError::LengthOutOfRange,
+    })
 }
 
 #[cfg(test)]
@@ -430,18 +353,15 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use tairix_partition::{parse_partition_table, PartitionBlock};
+    use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
     /// The assembled image carries exactly the three design-B partitions, of
     /// the right types, packed back to back from the documented 1 MiB-aligned
     /// boot offset, and it is exactly as long as the table it carries says.
     ///
-    /// The `/System` partition sizes itself to the content it holds, so its
-    /// length — and therefore the root partition's start and the whole
-    /// image's size — are asserted against the image's *own* table and the
-    /// shape the sizing policy promises, never against a hand-computed total.
-    /// Pinning an exact byte count here would make every change to the
-    /// shipped `/System` payload fail this test for no reason.
+    /// `/System` sizes itself to its content, so its length is asserted
+    /// against the image's own table and the sizing policy's shape: an exact
+    /// byte count would fail on every change to the shipped payload.
     #[test]
     fn the_image_carries_the_documented_partition_layout() {
         let bytes = build_image().expect("the whole-disk image assembles");
@@ -456,20 +376,20 @@ mod tests {
         let boot = table
             .first_of_type(PartitionType::FatBoot)
             .expect("a FAT boot partition is present");
-        assert_eq!(boot.start_lba, BOOT_LBA);
-        assert_eq!(boot.block_count, FAT_BOOT_SECTORS);
+        assert_eq!(boot.start_lba, BOOT_PART_LBA);
+        assert_eq!(boot.block_count, BOOT_PART_SECTORS);
 
         let system = table
             .first_of_type(PartitionType::ARXFSSystem)
             .expect("a read-only /System partition is present");
-        assert_eq!(system.start_lba, SYSTEM_LBA, "/System follows the boot");
-        // Every size the policy chooses is a power-of-two multiple of its
-        // floor, which also keeps the root partition 1 MiB-aligned.
-        let floor = tairix_syshelp::SYSTEM_VOLUME_MIN_BYTES / SECTOR_BYTES as u64;
+        assert_eq!(
+            system.start_lba, SYSTEM_PART_LBA,
+            "/System follows the boot"
+        );
+        let grain = tairix_syshelp::SYSTEM_VOLUME_GRAIN_BYTES / SECTOR_BYTES as u64;
         assert!(
-            system.block_count.is_multiple_of(floor)
-                && (system.block_count / floor).is_power_of_two(),
-            "/System is a power-of-two multiple of its floor: {} sectors",
+            system.block_count.is_multiple_of(grain),
+            "/System is whole grains, keeping the root 1 MiB-aligned: {} sectors",
             system.block_count
         );
 
@@ -478,7 +398,7 @@ mod tests {
             .expect("a ARXFS root partition is present");
         assert_eq!(
             root.start_lba,
-            SYSTEM_LBA + system.block_count,
+            SYSTEM_PART_LBA + system.block_count,
             "the root follows /System with no gap"
         );
         assert_eq!(root.block_count, ROOT_SECTORS);

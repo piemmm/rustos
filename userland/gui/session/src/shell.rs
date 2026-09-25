@@ -38,6 +38,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::input::KeyInput;
 use tairix_abi::notify_ipc::NotifyRequest;
 use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_abi::{AppIdentity, BundleId, Errno, Origin};
@@ -68,7 +69,8 @@ use crate::apps::{picker_cells, prefetch_bar_icons, resolve_library_icons, thumb
 use crate::desktop::Desktop;
 use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
-use crate::menu::{resolve_chain_icons, ChainAction, MenuChain, SurfaceKind};
+use crate::keyboard::{KeyInputChannel, KeyboardInputSource};
+use crate::menu::{resolve_chain_icons, MenuChain, SurfaceKind};
 use crate::notify::{is_settings_surface, producer_of, NotifySources};
 use crate::presenter::{chrome_blur, TaskbarPresenter};
 use crate::session::DesktopSession;
@@ -133,14 +135,14 @@ pub enum ShellOutcome {
     Taskbar(TaskbarResponse),
 }
 
-/// What one [`DesktopShell::pump`] drained.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Batch {
-    /// The batch's outcomes, in order.
-    pub outcomes: Vec<ShellOutcome>,
-    /// The batch ended at an edge rather than on an empty source, so the
-    /// source may still hold events for whichever holder routing it leaves.
-    pub at_edge: bool,
+/// Where a [`DesktopShell::pump`] batch stopped.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Stopped {
+    /// The source is empty.
+    Empty,
+    /// At an edge. The source may still hold input, which belongs to
+    /// whoever routing the edge leaves holding the seat.
+    AtEdge,
 }
 
 /// The desktop session frontend: the session state, the input router, the
@@ -1320,7 +1322,7 @@ impl DesktopShell {
     }
 
     /// Route one seat event into `chain`, which holds the seat, at the pointer
-    /// the shell tracks.
+    /// the shell tracks. A close queues its answer on the chain.
     ///
     /// Motion alone still reaches the shell, so the tracked pointer and the
     /// cursor stay in step; its outcome is dropped, and nothing else the chain
@@ -1331,15 +1333,45 @@ impl DesktopShell {
         chain: &mut MenuChain,
         event: &InputEvent,
         now_ns: u64,
-    ) -> ChainAction {
+    ) {
         if matches!(event, InputEvent::PointerMoved { .. }) {
             let _ = self.apply(*event, compositor, now_ns);
         }
-        chain.handle(
+        let _ = chain.handle(
             event,
             self.router.pointer(),
             &chain_geometry(&self.session, compositor),
-        )
+        );
+    }
+
+    /// Take the next key record from `keyboard`, keeping the seat's modifiers
+    /// current whoever holds the seat.
+    ///
+    /// Every keyboard drain goes through here. A modifier edge is seat state,
+    /// not a key any holder receives, so it reaches the window manager's copy
+    /// that clicks are stamped with even while a menu chain, the lock or the
+    /// screensaver takes the keys.
+    ///
+    /// # Errors
+    ///
+    /// The channel's fault, or the refusal of a malformed record.
+    pub fn poll_key<C: KeyInputChannel>(
+        &mut self,
+        keyboard: &mut KeyboardInputSource<C>,
+        compositor: &mut Compositor,
+        now_ns: u64,
+    ) -> Result<Option<(InputEvent, KeyInput)>, Errno> {
+        let polled = keyboard.poll_record(now_ns)?;
+        if let Some((edge @ InputEvent::ModifiersChanged { .. }, _)) = polled {
+            let _ = self.router.handle(
+                edge,
+                compositor,
+                self.session.taskbar_mut(),
+                &self.presenter,
+                now_ns,
+            );
+        }
+        Ok(polled)
     }
 
     /// Record what `window` declared for a region of its own client area, or
@@ -2016,8 +2048,9 @@ impl DesktopShell {
     /// gesture ends, and both routers are told the pointer has left, so nothing
     /// sits there with a control lit under a plate the user is looking at. It is
     /// idempotent — the drain says it on every pass rather than working out
-    /// which pass was the first — and the stream coming back needs no
-    /// announcement, because the next event resolves the pointer afresh.
+    /// which pass was the first. The stream coming back is resolved afresh at
+    /// its next motion; a press before any motion is `plans/OPEN-DEFECTS.md`
+    /// D228.
     pub fn yield_pointer(&mut self, compositor: &mut Compositor) {
         self.router
             .yield_pointer(compositor, self.session.taskbar_mut());
@@ -2101,78 +2134,47 @@ impl DesktopShell {
         let _ = self.tasks.sync_focus(self.session.taskbar_mut(), focus);
     }
 
-    /// Drain `source` up to and including its next edge, applying each event
-    /// against the monotonic `now_ns`, and return the outcomes in order —
-    /// folding an adjacent run of one continuing gesture over the same window
-    /// into a single outcome.
+    /// Drain `source` into `outcomes`, which it clears first, up to and
+    /// including the next edge, applying each event against `now_ns`, and say
+    /// where it stopped.
     ///
     /// An edge is any event but a motion or scroll sample. Routing one can
     /// hand the seat to another holder — a menu chain, the lock, another
-    /// session — so the batch ends there and says so ([`Batch::at_edge`]):
-    /// the embedder routes it, then drains the rest into whichever holder that
-    /// leaves. Samples never move the seat, so a burst of them still drains as
-    /// one batch.
+    /// session — so the batch ends there and the embedder routes it before
+    /// draining the rest into whoever holds the seat then. Samples never move
+    /// the seat, so a burst of them drains as one batch. Every batch of a wake
+    /// gets that wake's one `now_ns`, so a press and release an edge split are
+    /// timed alike.
     ///
-    /// One wake is one instant: every event resolves against the same
-    /// `now_ns`, which the embedder read when the source woke it and passes to
-    /// each batch of that wake, so a queued press and release are timed alike
-    /// whether or not an edge split them.
-    /// Every drained event is still applied in order, so the window
-    /// manager's own hover, drag, and cursor state track the full sample
-    /// stream; only the *returned* outcome list is compressed. That
-    /// is what makes the folding safe: it is the app-ward forwarding path
-    /// (the embedder turns each outcome into one event to the owning app)
-    /// that a dense gesture would otherwise flood with samples the app must
-    /// then drain one at a time from a bounded mailbox.
+    /// Every event is applied in order, so the window manager's hover, drag
+    /// and cursor state follow the whole stream; only the outcomes handed on
+    /// are folded, so a dense gesture does not flood the owning app's bounded
+    /// mailbox. Motion and interactive-resize samples are level-triggered, so
+    /// the newest of a run supersedes the rest; wheel ticks are additive, so a
+    /// run in one direction sums and a reversal ends it. A run holds only over
+    /// one window and one kind of sample, and anything else ends it, so
+    /// nothing an app must see is dropped or reordered.
     ///
-    /// The shell's *own* per-frame work is folded by the same reasoning: the
-    /// batch is settled once at the end rather than
-    /// after each event, so a burst of N motion samples costs one taskbar
-    /// present, one active-frame sync, and one cursor refresh instead of N of
-    /// each. Nothing observes the intermediate passes — the embedder publishes
-    /// one frame per wake — and all three read current state, so the desktop
-    /// this leaves is the one N settles would have left. A drain that found no
-    /// event settles nothing, keeping an idle wake free.
-    ///
-    /// Three gestures fold, each by the rule its own quantity obeys: pointer
-    /// motion carries a position, which is level-triggered, so the newest
-    /// sample supersedes the ones before it; an interactive resize names a
-    /// geometry, likewise level-triggered, and the embedder reads the window's
-    /// *current* client extent when it forwards one — so every sample of a run
-    /// would carry the size the last one settled on, and all but the last are
-    /// duplicates by construction; wheel ticks carry a delta, which is
-    /// additive, so a run in one direction sums into a single tick that leaves
-    /// the app's scroll model exactly where the run would. A reversal is a
-    /// distinct gesture — a tick that clamps at a range end is not recovered
-    /// by the tick back — so it ends the run.
-    ///
-    /// [`ResizeEnded`](InputResponse::ResizeEnded) is not part of that run: it
-    /// is the settle the app must witness, so it ends one like a release does.
-    ///
-    /// A run holds only while it stays an unbroken
-    /// sequence of the same foldable outcome naming the *same* window: a
-    /// press, a release, a taskbar response, an
-    /// [`Ignored`](ShellOutcome::Ignored), a switch between motion and
-    /// scrolling, or one over a different window ends the run, so nothing
-    /// the app must see (a `Moved, Moved, Released` sequence still delivers
-    /// both a `Moved` and the `Released`) can ever be reordered or dropped.
+    /// The batch settles its frame once, at the end. The next batch's owner
+    /// lookup hit-tests the windows the taskbar presenter placed, so a surface
+    /// an edge opened must reach the compositor before the rest is resolved. A
+    /// drain that found no event settles nothing.
     ///
     /// # Errors
     ///
-    /// Returns the [`Errno`] from a faulting [`InputSource::poll`]. The events
-    /// drained before the fault have already been applied to the desktop state
-    /// and the compositor (the desktop never rolls back what it has shown); the
-    /// embedder replaces or re-polls the source.
+    /// The [`Errno`] of a faulting [`InputSource::poll`]. The events drained
+    /// before it stay applied and are settled.
     pub fn pump<S>(
         &mut self,
         source: &mut S,
         compositor: &mut Compositor,
         now_ns: u64,
-    ) -> Result<Batch, Errno>
+        outcomes: &mut Vec<ShellOutcome>,
+    ) -> Result<Stopped, Errno>
     where
         S: InputSource + ?Sized,
     {
-        let mut batch = Batch::default();
+        outcomes.clear();
         let mut applied = false;
         let drained = loop {
             match source.poll() {
@@ -2183,19 +2185,18 @@ impl DesktopShell {
                     );
                     let outcome = self.apply(event, compositor, now_ns);
                     applied = true;
-                    let unfolded = match batch.outcomes.last_mut() {
+                    let unfolded = match outcomes.last_mut() {
                         Some(last) => fold_outcome(last, outcome),
                         None => Some(outcome),
                     };
                     if let Some(outcome) = unfolded {
-                        batch.outcomes.push(outcome);
+                        outcomes.push(outcome);
                     }
                     if edge {
-                        batch.at_edge = true;
-                        break Ok(batch);
+                        break Ok(Stopped::AtEdge);
                     }
                 }
-                Ok(None) => break Ok(batch),
+                Ok(None) => break Ok(Stopped::Empty),
                 Err(err) => break Err(err),
             }
         };

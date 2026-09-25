@@ -1990,18 +1990,23 @@ action, and bring the on-screen bar back in step. `DesktopShell` runs exactly
 that loop over an injected `InputSource` seam (a real pointer/keyboard channel
 on a running system, an in-memory queue in tests, `AGENTS.md` §7):
 
-- `pump(source, &mut Compositor, now_ns)` drains every pending event, applying
-  each in order and returning a `ShellOutcome` per event. To avoid flooding an
-  app with a dense gesture, an adjacent run of one gesture over one window is
-  folded in the returned list: pointer motions collapse to the latest
-  position, and wheel ticks in one direction sum into a single delta (a
-  reversal ends the run, because a tick that clamps at a range end is not
-  recovered by the tick back). Every sample still drives the window manager's
-  own hover and drag state, so the folding is safe. Outcomes are `Ignored`, a
-  `WindowManager` action the embedder may observe, or a `Taskbar` response.
-  One drain is one instant: the embedder reads the monotonic clock once when
-  the source wakes it and every event of that batch resolves its
-  tap-versus-hold gesture against the same `now_ns`;
+- `pump(source, &mut Compositor, now_ns, &mut outcomes)` drains one batch into
+  a caller-owned buffer, applying each event in order, and stops at the next
+  **edge** — any event but a motion or scroll sample — saying where it stopped
+  (`Stopped`). Routing an edge can hand the seat to another holder (a menu
+  chain, the lock), so the embedder routes the batch before draining the rest
+  into whoever holds the seat then; samples never move the seat, so a burst
+  of them drains as one batch. To avoid flooding an app with a dense gesture,
+  an adjacent run of one gesture over one window is folded in the batch:
+  pointer motions collapse to the latest position, and wheel ticks in one
+  direction sum into a single delta (a reversal ends the run, because a tick
+  that clamps at a range end is not recovered by the tick back). Every sample
+  still drives the window manager's own hover and drag state, so the folding
+  is safe. Outcomes are `Ignored`, a `WindowManager` action the embedder may
+  observe, or a `Taskbar` response. One wake is one instant: the embedder
+  reads the monotonic clock once when the source wakes it and every batch of
+  that wake resolves its tap-versus-hold gesture against the same `now_ns`,
+  so a press and release an edge split are timed alike;
 - a taskbar response is applied where the shell's own state suffices (a task
   activate/minimise outcome drives the compositor) and the bar is
   re-presented straight from the taskbar's drained per-surface repaint latch.
@@ -2010,19 +2015,36 @@ on a running system, an in-memory queue in tests, `AGENTS.md` §7):
   screen without double-painting, while a motion that crosses no control —
   over the desktop, over a window, or over dead space on the bar — repaints
   nothing at all;
-- the frame is settled **once per drained batch, at one site**: one taskbar
-  present, one active-frame sync, one cursor refresh, whether the batch held
-  one event or sixteen. All three read *current* state rather than the event
-  that changed it — the present repaints the union of the surfaces the batch
+- the frame is settled **once per batch, at one site**: one taskbar present,
+  one active-frame sync, one cursor refresh, whether the batch held one event
+  or sixteen. All three read *current* state rather than the event that
+  changed it — the present repaints the union of the surfaces the batch
   latched, the sync compares the current focus against the shown active
   frame, and the cursor follows the pointer's latest position — so settling
-  once leaves the desktop N settles would have left, and drops work nothing
-  could observe, because the embedder publishes one frame per drain. A drain
-  that found no event settles nothing, so an idle wake is free. `handle` is
-  the single-event form of the same thing: apply, then settle;
+  once leaves the desktop N settles would have left. Each batch settles
+  before the next is taken because the next batch's owner lookup hit-tests
+  the windows the taskbar presenter placed: a surface an edge opened must be
+  on the compositor before the rest is resolved. A batch that found no event
+  settles nothing, so an idle wake is free. `handle` is the single-event form
+  of the same thing: apply, then settle;
 - a faulting `InputSource` ends the `pump` with its `Errno`; the events drained
   before the fault stay applied and are settled, so the screen never shows a
   state the model has left, and the embedder replaces or re-polls the source.
+
+One wake's whole drain is library code, host-tested, rather than part of the
+freestanding serve loop. `SeatDrain::wake` drains the pointer batch by batch
+into whoever holds the seat — the menu chain while it is open, otherwise the
+shell — then the keys, each only while the shell still holds the seat; what
+the lock is handed stays queued for `drain_locked`, and the screensaver's
+waking gesture drains through `drain_away`. Every keyboard drain takes its
+keys through `DesktopShell::poll_key`, which keeps the seat's modifier state
+current whoever holds the seat, so a click after a grab is not stamped with a
+modifier released during it. A chain is settled — presented, then answered —
+once per drain phase that changed it, and before input is handed on, so the
+next holder never hit-tests a plate that has gone. What only the program can
+act on (the window channel, launches, the session authority) leaves through
+`SeatRouter`, and a channel fault comes back as its own `Errno`, so a seat
+lost in any drain ends the session with the seat-lost exit.
 
 The shell holds no framebuffer and grants itself no authority: the `Compositor`
 is the embedder's and is passed in on each call. A loaded notification-icon set
