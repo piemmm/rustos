@@ -17,11 +17,11 @@ in all of them applies here without exception.
 
 | Id | Item | Status |
 |---|---|---|
-| A1 | x86_64 whole-disk image builder | planned — delivered by `plans/BOOTLOADER.md` B4 |
-| A2 | Production boot storage floor + registry deletion | in progress — the deletion is blocked on A1 and the riscv64 image |
+| A1 | x86_64 whole-disk image builder, delivered by `plans/BOOTLOADER.md` B4 | planned |
+| A2 | Production boot storage floor + registry deletion | blocked: A1 and the riscv64 disk image |
 | A3 | Interrupt-driven COM1 console + login/session supervision | done |
 | A4 | `devmgr` autoload over the ACPI/PCI tree | in progress |
-| A5 | Boot display, seat registry, graphical session | planned — delivered by `plans/FINISH-x86_64.md` |
+| A5 | Boot display, seat registry, graphical session, delivered by `plans/FINISH-x86_64.md` | planned |
 | A6 | QEMU vertical parity sweep + docs | planned |
 | A7 | ACPI power-off | planned |
 | A8 | x86_64 hardening unblock | planned |

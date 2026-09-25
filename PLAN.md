@@ -829,8 +829,7 @@ plan's own text is corrected when it is next touched, or sooner.
   (its QEMU vertical), FIX-RANDOMNESS (the D111 statistic), NEW-SERVICEMANAGER
   (SVC-3's store scan).
 - A stale blocker or cross-plan fact: ARXFS-FEC (FEC0 waits on stage 17, which
-  is done), ARXFS-MAINTENANCE (WB4 is done), ARCHSUPPORT (A3's D7/D8 note),
-  DRIVES (its open-P4 note), FIX-PANICS (the D128 and D79 cites), STRESSTEST
+  is done), ARXFS-MAINTENANCE (WB4 is done), DRIVES (its open-P4 note), FIX-PANICS (the D128 and D79 cites), STRESSTEST
   (ST6's `ramzip` caveat), FIX-HARDWARE-FEATURES (the FIQ probe "depends on
   P1"), COLLECTIONS (C4a against "C0 through C5 landed"), WIRING (the parity
   matrix's aarch64 FDT cell).
