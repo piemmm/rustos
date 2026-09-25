@@ -5,14 +5,13 @@
 # (and the shell resolves it by name, like any program in either system store).
 #
 # The capability list is the minimum the client needs: CAP_CONSOLE_WRITE for
-# its fail-loud stderr diagnostics, and CAP_SHM to create and grant the
-# zero-copy window frame region the desktop session maps. It reads no
-# filesystem and spawns no process: the world it draws is generated from a
-# seed in this process, and the realm binaries a later stage adds will be
-# launched through the app loader rather than by this bundle reaching for
-# spawn authority. It ships no DefaultSettings/, so it needs no CAP_FS_ACCESS
-# to look for a file it does not contain. The launched process receives this
-# set intersected with the launching user's grants, never more.
+# its fail-loud stderr diagnostics, CAP_SHM to create and grant the zero-copy
+# window frame region the desktop session maps, and CAP_FS_ACCESS to read the
+# figure presets in its own Resources/. It spawns no process: the world it
+# draws is generated from a seed in this process, and the realm binaries a
+# later stage adds will be launched through the app loader rather than by
+# this bundle reaching for spawn authority. The launched process receives
+# this set intersected with the launching user's grants, never more.
 id = "os.tairix.wintersun"
 name = "wintersun"
 title = "WinterSun"
@@ -23,7 +22,7 @@ kind = "application"
 # about itself.
 purpose = "Walk a procedurally generated winter world"
 author = "The TAIRiX Project"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_FS_ACCESS"]
 library = "Games"
 # This bundle's own icon in its Resources/, authored as a vector so one file
 # serves every slot and every UI scale exactly.

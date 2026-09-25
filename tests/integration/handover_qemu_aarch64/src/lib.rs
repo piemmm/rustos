@@ -98,6 +98,12 @@ pub const GRANT_SYSCALL: &str = tairix_test_filepick_qemu_aarch64::GRANT_SYSCALL
 /// field renders it.
 pub const REDEEM_SYSCALL: &str = tairix_test_filepick_qemu_aarch64::REDEEM_SYSCALL;
 
+/// Name of the syscall the session redeems the manager's delegation with —
+/// bound to the manager it relays for, so a relay can never consume a
+/// delegation some other process minted — as the syscall audit field renders
+/// it.
+pub const RELAY_REDEEM_SYSCALL: &str = tairix_test_filepick_qemu_aarch64::BOUND_REDEEM_SYSCALL;
+
 /// Complete relays the PASS gate wants.
 ///
 /// Two, because one relay proves the chain and the second proves *whose*: the
@@ -129,7 +135,7 @@ pub const ACTIVATIONS: u32 = RELAY_ROUNDS + 1;
 /// that opened the file to the principal with no authority to open it.
 pub const RELAY_CHAIN: [(&str, &str); 4] = [
     (MANAGER_COMM, GRANT_SYSCALL),
-    (SESSION_COMM, REDEEM_SYSCALL),
+    (SESSION_COMM, RELAY_REDEEM_SYSCALL),
     (SESSION_COMM, GRANT_SYSCALL),
     (VIEWER_COMM, REDEEM_SYSCALL),
 ];
@@ -173,22 +179,26 @@ pub const FOREIGN_VIEWER_MARKER: &str = "HANDOVER a foreign viewer redeemed; rel
 #[cfg(test)]
 mod tests {
     use super::{
-        GRANT_SYSCALL, MANAGER_COMM, REDEEM_SYSCALL, RELAY_CHAIN, SESSION_COMM, VIEWER_COMM,
-        VIEWER_REDEEM_STEP,
+        GRANT_SYSCALL, MANAGER_COMM, REDEEM_SYSCALL, RELAY_CHAIN, RELAY_REDEEM_SYSCALL,
+        SESSION_COMM, VIEWER_COMM, VIEWER_REDEEM_STEP,
     };
 
-    /// The chain crosses three *distinct* principals, and ends at the viewer.
+    /// The chain crosses three *distinct* principals, the session redeems
+    /// bound to the manager, and the chain ends at the viewer.
     ///
     /// A chain whose principals collapsed — two of these names becoming
     /// equal — would still latch four records while proving nothing about a
     /// hand-off between processes, so the distinctness is pinned rather than
-    /// assumed from the bundle names happening to differ today.
+    /// assumed from the bundle names happening to differ today. A session
+    /// step naming the unbound redemption would latch a relay that could have
+    /// been steered into another process's delegation.
     #[test]
     fn the_chain_crosses_three_distinct_principals_and_ends_at_the_viewer() {
         assert_ne!(MANAGER_COMM, SESSION_COMM);
         assert_ne!(SESSION_COMM, VIEWER_COMM);
         assert_ne!(MANAGER_COMM, VIEWER_COMM);
         assert_eq!(RELAY_CHAIN[0], (MANAGER_COMM, GRANT_SYSCALL));
+        assert_eq!(RELAY_CHAIN[1], (SESSION_COMM, RELAY_REDEEM_SYSCALL));
         assert_eq!(
             RELAY_CHAIN[VIEWER_REDEEM_STEP],
             (VIEWER_COMM, REDEEM_SYSCALL)

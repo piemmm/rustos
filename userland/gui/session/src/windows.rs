@@ -685,12 +685,12 @@ impl LaunchHost for DeskReach<'_, '_> {
     fn queue_open_target(&mut self, app: ProcId, target: LaunchTarget<'_>) -> bool {
         let entry = match target {
             LaunchTarget::Path(path) => OpenEntry::Path(String::from(path)),
-            LaunchTarget::Document { name, grant } => {
+            LaunchTarget::Document { name, grant, from } => {
                 // The relay is what makes the document the instance's to
                 // read: the grant it arrived as was minted to the session.
                 // A refused relay delegates nothing, so the launch falls
                 // back to a fresh process, which still has the document.
-                match self.host.relay.relay(grant, app) {
+                match self.host.relay.relay(grant, from, app) {
                     Ok(grant) => OpenEntry::Document {
                         name: String::from(name),
                         grant,
@@ -1303,7 +1303,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
     fn hand_over_requested(
         &mut self,
         desk: &mut dyn HandOverDesk,
-        _caller: ProcId,
+        caller: ProcId,
         run_path: &str,
         document: Option<&HandOverDocument>,
     ) -> Result<HandOverOutcome, Errno> {
@@ -1316,9 +1316,12 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         let bundle = bundle_of_run_path(run_path);
         let running = self.apps.resident(bundle);
         let one_instance = self.apps.runs_one_instance(bundle);
+        // The grant is redeemed only as the caller's own, so a caller naming
+        // a delegation somebody else minted to the session gets nothing.
         let target = document.map(|doc| LaunchTarget::Document {
             name: doc.name.as_str(),
             grant: doc.grant,
+            from: caller,
         });
         let mut reach = DeskReach { desk, host: self };
         match resolve_launch(&mut reach, running, one_instance, target) {
@@ -1328,7 +1331,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             // grant it sent was for the session to hand on, so it is consumed.
             Launch::Spawn => {
                 if let Some(document) = document {
-                    self.relay.decline(document.grant);
+                    self.relay.decline(document.grant, caller);
                 }
                 Ok(HandOverOutcome::NotRunning)
             }
@@ -1541,11 +1544,11 @@ mod tests {
     struct RefusingRelay;
 
     impl DocumentRelay for RefusingRelay {
-        fn relay(&mut self, _grant: u64, _app: ProcId) -> Result<u64, Errno> {
+        fn relay(&mut self, _grant: u64, _from: ProcId, _app: ProcId) -> Result<u64, Errno> {
             Err(Errno::NotSupported)
         }
 
-        fn decline(&mut self, _grant: u64) {}
+        fn decline(&mut self, _grant: u64, _from: ProcId) {}
     }
 
     /// An icon-bar seam that records what the bridge relayed: these tests
@@ -1619,19 +1622,19 @@ mod tests {
     /// A relay that hands on whatever a test wired, recording every ask.
     #[derive(Default)]
     struct WiredRelay {
-        relayed: alloc::vec::Vec<(u64, ProcId)>,
-        declined: alloc::vec::Vec<u64>,
+        relayed: alloc::vec::Vec<(u64, ProcId, ProcId)>,
+        declined: alloc::vec::Vec<(u64, ProcId)>,
         mints: Option<u64>,
     }
 
     impl DocumentRelay for WiredRelay {
-        fn relay(&mut self, grant: u64, app: ProcId) -> Result<u64, Errno> {
-            self.relayed.push((grant, app));
+        fn relay(&mut self, grant: u64, from: ProcId, app: ProcId) -> Result<u64, Errno> {
+            self.relayed.push((grant, from, app));
             self.mints.ok_or(Errno::NotSupported)
         }
 
-        fn decline(&mut self, grant: u64) {
-            self.declined.push(grant);
+        fn decline(&mut self, grant: u64, from: ProcId) {
+            self.declined.push((grant, from));
         }
     }
 
@@ -1691,8 +1694,9 @@ mod tests {
         assert!(desk.handed.is_empty());
         assert_eq!(
             relay.declined,
-            [31],
-            "the grant sent to the session was left pending in its table"
+            [(31, caller)],
+            "the grant sent to the session was left pending in its table, or \
+             was consumed as somebody else's"
         );
         relay.declined.clear();
 
@@ -1705,7 +1709,11 @@ mod tests {
             reach(&mut bar, &mut desk, &mut relay, Some(&document)),
             Ok(HandOverOutcome::Reached)
         );
-        assert_eq!(relay.relayed, [(31, resident)]);
+        assert_eq!(
+            relay.relayed,
+            [(31, caller, resident)],
+            "the grant is redeemed only as the asking process's own"
+        );
         assert!(
             relay.declined.is_empty(),
             "a relayed grant is the instance's"
@@ -1729,7 +1737,7 @@ mod tests {
             reach(&mut bar, &mut desk, &mut refusing, Some(&document)),
             Ok(HandOverOutcome::NotRunning)
         );
-        assert_eq!(refusing.relayed, [(31, resident)]);
+        assert_eq!(refusing.relayed, [(31, caller, resident)]);
         assert!(desk.handed.is_empty(), "a refused relay queues nothing");
 
         // A bare hand-over asks the instance for its icon-bar default and

@@ -100,8 +100,99 @@ fn sustained_overload_walks_the_whole_ladder_in_order_and_then_stops() {
         "the ladder stops at the bottom rather than wrapping"
     );
     // Frame rate is the last thing to move, which here means: it never
-    // does. A spent ladder leaves the renderer where it is.
-    assert!(!governor.observe(&slow));
+    // does. A spent ladder leaves the renderer where it is, and says so.
+    for _ in 0..3 {
+        assert!(!governor.observe(&slow));
+    }
+    assert!(governor.floored());
+}
+
+#[test]
+fn shedding_stops_at_the_floor_and_says_so() {
+    let floor = Ladder::new(4);
+    let mut governor = Governor::new();
+    assert!(!governor.hold(floor), "a floor below the ladder moved it");
+    let mut slow = on_budget();
+    slow.record(Pass::Terrain, Pass::Terrain.budget_ns() * 8);
+    for _ in 0..u32::from(Ladder::MAX_STEP) * 3 {
+        governor.observe(&slow);
+        assert!(governor.ladder() <= floor, "shed past the floor");
+    }
+    assert_eq!(governor.ladder(), floor);
+    assert!(
+        governor.floored(),
+        "an overrun at the floor went unreported"
+    );
+
+    // A frame that merely fits is not a machine that has caught up.
+    governor.observe(&on_budget());
+    assert!(governor.floored());
+}
+
+#[test]
+fn a_floor_that_rises_takes_the_ladder_back_before_the_next_frame() {
+    let mut governor = Governor::new();
+    let mut slow = on_budget();
+    slow.record(Pass::Terrain, Pass::Terrain.budget_ns() * 8);
+    for _ in 0..(u32::from(Ladder::MAX_STEP) + 1) * 3 {
+        governor.observe(&slow);
+    }
+    assert!(governor.floored());
+
+    let risen = Ladder::new(3);
+    assert!(governor.hold(risen), "the ladder stayed past its floor");
+    assert_eq!(governor.ladder(), risen);
+    assert!(
+        !governor.floored(),
+        "a moved ladder is not the one that floored"
+    );
+    assert!(
+        !governor.hold(risen),
+        "holding the same floor moved it again"
+    );
+}
+
+#[test]
+fn a_floor_that_falls_lets_shedding_resume() {
+    let mut governor = Governor::new();
+    governor.hold(Ladder::new(2));
+    let mut slow = on_budget();
+    slow.record(Pass::Terrain, Pass::Terrain.budget_ns() * 8);
+    for _ in 0..12 {
+        governor.observe(&slow);
+    }
+    assert!(governor.floored());
+
+    assert!(
+        !governor.hold(Ladder::new(6)),
+        "a deeper floor moved the ladder"
+    );
+    assert!(!governor.floored(), "the ladder is no longer at its floor");
+    for _ in 0..3 {
+        governor.observe(&slow);
+    }
+    assert_eq!(governor.ladder(), Ladder::new(3));
+}
+
+#[test]
+fn a_restored_notch_clears_the_floor() {
+    let mut governor = Governor::new();
+    governor.hold(Ladder::new(2));
+    let mut slow = on_budget();
+    slow.record(Pass::Terrain, Pass::Terrain.budget_ns() * 8);
+    for _ in 0..12 {
+        governor.observe(&slow);
+    }
+    assert!(governor.floored());
+
+    let mut fast = FrameTimes::new();
+    fast.record(Pass::Terrain, 1_000_000);
+    let mut restored = false;
+    for _ in 0..256 {
+        restored |= governor.observe(&fast);
+    }
+    assert!(restored);
+    assert!(!governor.floored());
 }
 
 #[test]

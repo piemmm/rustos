@@ -470,10 +470,12 @@ pub trait WindowHost {
     /// owner — so the launch rule stays in one place rather than being
     /// re-derived here.
     ///
-    /// `document`'s grant was minted by `caller` **to the session**, from a
+    /// `document`'s grant is one `caller` minted **to the session**, from a
     /// descriptor the caller opened under its own authority. The host redeems
-    /// it and hands it on to the instance it resolved; it never opens a path
-    /// on a caller's behalf, which would lend the session's own larger reach.
+    /// it only as `caller`'s own — bound to its attested instance, so a caller
+    /// naming a delegation somebody else minted to the session gets nothing —
+    /// and hands it on to the instance it resolved; it never opens a path on a
+    /// caller's behalf, which would lend the session's own larger reach.
     ///
     /// The default refuses: a host with no launch table cannot say whether
     /// anything is running, and telling the caller so is more honest than

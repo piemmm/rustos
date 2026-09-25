@@ -1,4 +1,4 @@
-//! Cutting a frame into bands does not change it.
+//! Cutting a frame into bands does not change it, figures included.
 //!
 //! The claim needs a [`JobRunner`] reporting several threads' width, and
 //! `lib/parallel` owns the shared one: `Reversed` reports a width and
@@ -17,8 +17,11 @@
 
 use tairix_parallel::{JobRunner, Reversed};
 use tairix_raster::color::Pixel;
+use tairix_raster::surface::Surface;
 use tairix_reclaim::{PressureBand, ReportedPressure};
+use tairix_wintersun_app::budget::FRAME_NS;
 use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
+use tairix_wintersun_app::figures::Cast;
 use tairix_wintersun_app::frame::{Renderer, Scene, Stopped};
 use tairix_wintersun_app::light::{Sky, Sun};
 use tairix_wintersun_app::quality::{Ladder, RenderScale};
@@ -27,7 +30,11 @@ use tairix_wintersun_app::view::Viewport;
 use tairix_wintersun_art::cache::MaterialCache;
 use tairix_wintersun_art::decal::Fray;
 use tairix_wintersun_art::splat::Warp;
-use tairix_wintersun_net::value::WorldPoint;
+use tairix_wintersun_figure::actor::Actor;
+use tairix_wintersun_figure::motion::{Kind, Set};
+use tairix_wintersun_figure::reference;
+use tairix_wintersun_figure::species::Species;
+use tairix_wintersun_net::value::{EntityId, Facing, WorldPoint};
 use tairix_wintersun_world::chunk::{Chunk, ChunkBuild, ChunkWindow};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
@@ -56,8 +63,7 @@ fn draw(runner: &dyn JobRunner, view: &Viewport) -> Vec<Pixel> {
         Zoom::FURTHEST,
         realm_bounds(params),
     );
-    let (w, h) = view.render();
-    let held: Vec<Chunk> = visible_chunks(camera.visible(w, h))
+    let held: Vec<Chunk> = visible_chunks(camera.visible(view))
         .filter(|c| params.holds_chunk(c.x, c.y))
         .map(|coord| {
             ChunkBuild::new(coord)
@@ -73,10 +79,38 @@ fn draw(runner: &dyn JobRunner, view: &Viewport) -> Vec<Pixel> {
     let warp = Warp::new(params.seed());
     let fray = Fray::new(params.seed());
 
+    // A figure of each species across the view, some in mid-stride and one
+    // mid-cast, so every band boundary a runner could cut falls through one.
+    let set = Set::new().expect("the shipped set");
+    let clips = set.clips().expect("the shipped clips");
+    let centre = camera.centre(view);
+    let mut cast = Cast::new();
+    for (id, species) in (0u64..).zip(Species::ALL) {
+        let identity = reference::identity(species).expect("a record");
+        let mut actor = Actor::new(&identity, &clips, Facing(0x4000)).expect("a figure");
+        if species == Species::Elf {
+            actor.perform(Kind::Cast).expect("it casts");
+        }
+        let offset = i32::try_from(id).expect("a handful") - 2;
+        let mut at = WorldPoint {
+            x: centre.x + offset * 2600,
+            y: centre.y + offset * 900,
+        };
+        cast.join(EntityId(id), actor, at).expect("it joins");
+        let figure = cast.get_mut(EntityId(id)).expect("it is there");
+        for _ in 0..10 {
+            at.y += 40;
+            figure
+                .step(FRAME_NS, at, Facing(0x4000), 0)
+                .expect("a frame");
+        }
+    }
+
     PRESSURE.report(PressureBand::Normal);
     let mut cache = MaterialCache::new("wintersun-bands-test", 32 * 1024 * 1024, &PRESSURE, &SINK);
     let mut renderer = Renderer::new();
-    let mut target = vec![Pixel::TRANSPARENT; view.render_pixels()];
+    let (width, height) = view.render();
+    let mut target = Surface::new(width, height).expect("a target");
     renderer
         .render(
             &mut target,
@@ -90,13 +124,19 @@ fn draw(runner: &dyn JobRunner, view: &Viewport) -> Vec<Pixel> {
                 sun: Sun::winter(),
                 sky: Sky::winter(),
                 ladder: Ladder::FULL,
+                cast: &cast,
             },
             &mut cache,
             runner,
             &Stopped,
         )
         .expect("the frame draws");
-    target
+    assert_eq!(
+        renderer.figures(),
+        Species::ALL.len(),
+        "a figure was culled"
+    );
+    target.pixels().to_vec()
 }
 
 #[test]

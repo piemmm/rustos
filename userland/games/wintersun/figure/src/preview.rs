@@ -203,13 +203,23 @@ impl<'a> Preview<'a> {
         out: &mut Placement,
     ) -> Result<Placed, FigureError> {
         let planted = self.planted()?;
-        let reach = match frame {
-            Frame::Shared => humanoid::MOST_REACH,
-            Frame::Measured => self.staged.rig().reach(),
+        // A measured view frames the clip playing as the harness frames its
+        // cells; the shared view keeps one scale for every figure and clip.
+        let (kind, reach) = match frame {
+            Frame::Shared => (Kind::Idle, humanoid::MOST_REACH),
+            Frame::Measured => (self.playing(), self.staged.rig().reach()),
         };
-        let (scale, at) = reference::fit(reach, side)?;
+        let (scale, at) = reference::fit(kind, reach, side)?;
         self.staged.place(&planted, self.facing, scale, at, out)?;
         Reference::shadow(0.0, scale, at)
+    }
+
+    /// The motion the machine is playing into.
+    fn playing(&self) -> Kind {
+        Kind::ALL
+            .get(self.animator.state().index())
+            .copied()
+            .unwrap_or(Kind::Idle)
     }
 
     /// The pose the clock stands at, planted on the stage.

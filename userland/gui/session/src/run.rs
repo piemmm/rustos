@@ -6789,16 +6789,18 @@ mod program {
         fn queue_open_target(&mut self, app: ProcId, target: LaunchTarget<'_>) -> bool {
             let entry = match target {
                 LaunchTarget::Path(path) => OpenEntry::Path(alloc::string::String::from(path)),
-                LaunchTarget::Document { name, grant } => match RtDocumentRelay.relay(grant, app) {
-                    Ok(grant) => OpenEntry::Document {
-                        name: alloc::string::String::from(name),
-                        grant,
-                    },
-                    Err(err) => {
-                        let _ = writeln!(Stderr, "desktop: cannot relay a document ({err:?})");
-                        return false;
+                LaunchTarget::Document { name, grant, from } => {
+                    match RtDocumentRelay.relay(grant, from, app) {
+                        Ok(grant) => OpenEntry::Document {
+                            name: alloc::string::String::from(name),
+                            grant,
+                        },
+                        Err(err) => {
+                            let _ = writeln!(Stderr, "desktop: cannot relay a document ({err:?})");
+                            return false;
+                        }
                     }
-                },
+                }
                 LaunchTarget::Pane(pane) => OpenEntry::Pane(alloc::string::String::from(pane)),
             };
             match self
@@ -6843,8 +6845,9 @@ mod program {
     struct RtDocumentRelay;
 
     impl DocumentRelay for RtDocumentRelay {
-        fn relay(&mut self, grant: u64, app: ProcId) -> Result<u64, Errno> {
-            let held = tairix_rt::File::from_delegation(grant).map_err(Errno::from_syscall)?;
+        fn relay(&mut self, grant: u64, from: ProcId, app: ProcId) -> Result<u64, Errno> {
+            let held =
+                tairix_rt::File::from_delegation_by(grant, from).map_err(Errno::from_syscall)?;
             let minted = tairix_rt::fd_grant(held.fd(), 0, app);
             u64::try_from(minted)
                 .ok()
@@ -6852,8 +6855,8 @@ mod program {
                 .ok_or(Errno::PermissionDenied)
         }
 
-        fn decline(&mut self, grant: u64) {
-            drop(tairix_rt::File::from_delegation(grant));
+        fn decline(&mut self, grant: u64, from: ProcId) {
+            drop(tairix_rt::File::from_delegation_by(grant, from));
         }
     }
 

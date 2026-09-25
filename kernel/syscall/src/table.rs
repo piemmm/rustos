@@ -2218,6 +2218,29 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// [`Self::fd_redeem`], only if the delegation was minted by the process
+    /// instance whose attested `ProcId` is at `grantor` (`grantor_len` bytes,
+    /// at least [`PROC_ID_LEN`](tairix_abi::PROC_ID_LEN)).
+    ///
+    /// What a deputy redeems with, so a caller naming a handle to a service
+    /// cannot have the service consume a delegation some other process
+    /// minted to it. A handle the named instance did not mint fails closed
+    /// with [`Errno::NotFound`] and stays pending; a short buffer answers
+    /// [`Errno::BufferTooSmall`].
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn fd_redeem_from(
+        &self,
+        _caller: &CallerContext<'_>,
+        _handle: u64,
+        _grantor: u64,
+        _grantor_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Create a caller-owned wait-set that multiplexes the readiness of
     /// several event sources, returning its kernel-minted handle
     /// (`plans/USB.md`).
@@ -4051,6 +4074,14 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // (resolved owner-bound by the handler; one-shot).
                 self.handlers.fd_redeem(caller, args.0[0])
             }
+            SyscallNumber::FD_REDEEM_FROM => {
+                // args[0] is the grant handle; args[1] is the non-null
+                // attested-`ProcId` `UserPtr` (dispatcher-checked) naming the
+                // grantor it must come from, and args[2] is its length.
+                let grantor_len = decode_len(args.0[2])?;
+                self.handlers
+                    .fd_redeem_from(caller, args.0[0], args.0[1], grantor_len)
+            }
             SyscallNumber::SYSINFO_INTROSPECT => {
                 // args[0] is the `IntrospectDomain` discriminant (validated by
                 // the handler); args[1] is the domain-specific selector/offset;
@@ -5693,6 +5724,17 @@ mod tests {
             self.record("fd_redeem");
             // Echo the handle so the reachability test sees a non-error
             // result.
+            Ok(handle)
+        }
+
+        fn fd_redeem_from(
+            &self,
+            _c: &CallerContext<'_>,
+            handle: u64,
+            _grantor: u64,
+            _grantor_len: usize,
+        ) -> SyscallResult {
+            self.record("fd_redeem_from");
             Ok(handle)
         }
     }

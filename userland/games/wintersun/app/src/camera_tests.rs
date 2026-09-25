@@ -2,7 +2,12 @@
 //! never leaves the realm.
 
 use super::*;
+use crate::quality::RenderScale;
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
+
+fn viewport(width: u32, height: u32) -> Viewport {
+    Viewport::new(width, height, RenderScale::ONE).expect("a window with pixels")
+}
 
 fn params(extent_chunks: u32) -> RealmParams {
     let spec = RealmSpec {
@@ -46,15 +51,16 @@ fn a_pixel_round_trips_through_the_projection() {
         realm_bounds(params(64)),
     );
     let (w, h) = (640u32, 360u32);
+    let view = viewport(w, h);
     let (wi, hi) = (
         i32::try_from(w).expect("small"),
         i32::try_from(h).expect("small"),
     );
     for py in [0, 1, hi / 2, hi - 1] {
         for px in [0, 1, wi / 2, wi - 1] {
-            let world = camera.world_at(w, h, px, py);
+            let world = camera.world_at(&view, px, py);
             assert_eq!(
-                camera.screen_at(w, h, world),
+                camera.screen_at(&view, world),
                 (px, py),
                 "pixel ({px},{py}) did not survive the round trip"
             );
@@ -69,16 +75,16 @@ fn a_world_point_between_samples_lands_in_the_pixel_that_covers_it() {
         Zoom::DEFAULT,
         realm_bounds(params(64)),
     );
-    let (w, h) = (64, 64);
+    let view = viewport(64, 64);
     let span = Zoom::DEFAULT.sub_units_per_pixel();
-    let base = camera.world_at(w, h, 10, 10);
+    let base = camera.world_at(&view, 10, 10);
     for offset in 0..span {
         let inside = WorldPoint {
             x: base.x + offset,
             y: base.y + offset,
         };
         assert_eq!(
-            camera.screen_at(w, h, inside),
+            camera.screen_at(&view, inside),
             (10, 10),
             "an offset of {offset} inside one pixel left it"
         );
@@ -87,7 +93,7 @@ fn a_world_point_between_samples_lands_in_the_pixel_that_covers_it() {
         x: base.x + span,
         y: base.y + span,
     };
-    assert_eq!(camera.screen_at(w, h, next), (11, 11));
+    assert_eq!(camera.screen_at(&view, next), (11, 11));
 }
 
 #[test]
@@ -99,13 +105,13 @@ fn a_point_west_or_north_of_the_origin_floors_rather_than_truncating() {
         Zoom::DEFAULT,
         realm_bounds(params(64)),
     );
-    let (w, h) = (2, 2);
-    let origin = camera.origin(w, h);
+    let view = viewport(2, 2);
+    let origin = camera.origin(&view);
     let just_west = WorldPoint {
         x: origin.x - 1,
         y: origin.y - 1,
     };
-    assert_eq!(camera.screen_at(w, h, just_west), (-1, -1));
+    assert_eq!(camera.screen_at(&view, just_west), (-1, -1));
 }
 
 #[test]
@@ -116,24 +122,24 @@ fn the_visible_extent_is_exactly_the_pixels_drawn() {
         realm_bounds(params(64)),
     );
     let (w, h) = (100, 50);
-    let visible = camera.visible(w, h);
-    assert_eq!(camera.world_at(w, h, 0, 0).x, visible.min_x);
-    assert_eq!(camera.world_at(w, h, 0, 0).y, visible.min_y);
+    let view = viewport(w, h);
+    let visible = camera.visible(&view);
+    assert_eq!(camera.world_at(&view, 0, 0).x, visible.min_x);
+    assert_eq!(camera.world_at(&view, 0, 0).y, visible.min_y);
     let last = camera.world_at(
-        w,
-        h,
+        &view,
         i32::try_from(w).expect("small") - 1,
         i32::try_from(h).expect("small") - 1,
     );
     assert_eq!((last.x, last.y), (visible.max_x, visible.max_y));
-    assert!(visible.contains(camera.centre(w, h)));
+    assert!(visible.contains(camera.centre(&view)));
 }
 
 #[test]
 fn aiming_never_shows_ground_outside_the_realm() {
     let bounds = realm_bounds(params(8));
     let mut camera = Camera::new(WorldPoint::default(), Zoom::DEFAULT, bounds);
-    let (w, h) = (320, 200);
+    let view = viewport(320, 200);
     for target in [
         WorldPoint {
             x: i32::MIN,
@@ -150,7 +156,7 @@ fn aiming_never_shows_ground_outside_the_realm() {
         WorldPoint { x: 0, y: 0 },
     ] {
         camera.look_at(target);
-        let visible = camera.visible(w, h);
+        let visible = camera.visible(&view);
         assert!(
             visible.min_x >= bounds.min_x && visible.max_x <= bounds.max_x,
             "aiming at {target:?} put {visible:?} outside {bounds:?} horizontally"
@@ -172,7 +178,7 @@ fn aiming_tracks_the_target_where_the_realm_has_room() {
     };
     camera.look_at(target);
     assert_eq!(
-        camera.centre(320, 200),
+        camera.centre(&viewport(320, 200)),
         target,
         "an interior target is centred exactly"
     );
@@ -190,9 +196,9 @@ fn a_window_that_grows_after_the_camera_settled_still_shows_only_the_realm() {
         x: bounds.max_x,
         y: bounds.max_y,
     });
-    let _ = camera.visible(1, 1);
+    let _ = camera.visible(&viewport(1, 1));
     for (w, h) in [(2u32, 2u32), (320, 200), (4096, 4096)] {
-        let visible = camera.visible(w, h);
+        let visible = camera.visible(&viewport(w, h));
         assert!(
             visible.min_x >= bounds.min_x
                 && visible.max_x <= bounds.max_x
@@ -215,7 +221,7 @@ fn a_realm_narrower_than_the_view_is_centred_rather_than_pinned() {
         y: bounds.max_y,
     });
     assert_eq!(
-        camera.centre(4096, 4096),
+        camera.centre(&viewport(4096, 4096)),
         WorldPoint {
             x: i32::midpoint(bounds.min_x, bounds.max_x),
             y: i32::midpoint(bounds.min_y, bounds.max_y),
@@ -236,12 +242,11 @@ fn the_projection_does_not_overflow_at_the_coordinate_extremes() {
         Zoom::FURTHEST,
         realm_bounds(params(64)),
     );
-    let (w, h) = (4096, 4096);
-    let _ = camera.visible(w, h);
-    let _ = camera.world_at(w, h, i32::MAX, i32::MIN);
+    let view = viewport(4096, 4096);
+    let _ = camera.visible(&view);
+    let _ = camera.world_at(&view, i32::MAX, i32::MIN);
     let _ = camera.screen_at(
-        w,
-        h,
+        &view,
         WorldPoint {
             x: i32::MIN,
             y: i32::MAX,

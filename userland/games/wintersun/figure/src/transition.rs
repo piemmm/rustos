@@ -14,7 +14,7 @@
 use tairix_util::mathf;
 
 use crate::blend::Blend;
-use crate::clip::Clip;
+use crate::clip::{Clip, Loop};
 use crate::error::FigureError;
 
 /// How many states one machine holds.
@@ -335,6 +335,40 @@ impl<'a> Animator<'a> {
             elapsed: 0.0,
         };
         Ok(())
+    }
+
+    /// Begin `to` from its start with nothing fading out from under it.
+    ///
+    /// For a layer taking a clip up having shown none: there is nothing on
+    /// screen to fade from, so the machine's edges — which say how one clip
+    /// gives way to another — have nothing to govern.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::NoSuchState`] for a state the machine does not have.
+    pub fn restart(&mut self, to: StateId) -> Result<(), FigureError> {
+        if to.index() >= self.machine.states() {
+            return Err(FigureError::NoSuchState);
+        }
+        self.current = Play {
+            state: to,
+            elapsed: 0.0,
+        };
+        self.outgoing = None;
+        Ok(())
+    }
+
+    /// Whether the clip playing has played through and holds its last pose.
+    ///
+    /// Only a clip that plays once can be done; a cycle never is.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::NoSuchState`] if the state playing has no clip, which a
+    /// machine this crate assembled cannot have.
+    pub fn done(&self) -> Result<bool, FigureError> {
+        let clip = self.clip(self.current)?;
+        Ok(clip.repeat() == Loop::Hold && self.current.elapsed >= clip.seconds())
     }
 
     /// Advance every live clip by `seconds`.

@@ -95,6 +95,23 @@ This crate owns:
   producing no anti-aliased fringe at all, while a diagonal keeps sub-pixel
   placement and stays smooth. The shape is *placed*, not stretched, so a glyph
   needs no square scratch surface and blit to position it.
+- `Surface::row_bands_mut` / `RowBand` / `Canvas` — a surface split into bands
+  of whole rows, each borrowed exclusively, so a per-row pass runs on several
+  cores at once; every band carries the surface's width and clip window, so it
+  admits exactly the pixels the surface would. `Canvas` is what a placed
+  polygon fill reaches — a whole surface or one band — so one paint routine
+  draws a picture band by band that is bit-identical to the picture drawn
+  whole. `RowBand::narrowed` confines a fill to fewer rows than its band holds
+  (a figure standing in water is drawn only above the surface), with no window
+  to set and restore.
+- `ScanScratch` — the scan converter's working memory: its edge table, one row
+  of accumulators and that row's alphas. A caller that fills many shapes holds
+  one and hands it to `Canvas::fill_polygon_subpixel`, so the fills allocate
+  nothing once it has grown to the largest; on a frame that fills thousands of
+  strips across several cores, that is thousands of allocations a frame not
+  taken on the process's one heap. `shape::Scratch` carries one, so a
+  `shape::fill` allocates nothing either. A refused row buffer paints nothing
+  rather than aborting.
 - `FillRule` / `Paint` — what a contour fill resolves and paints with. A
   `Paint` is a flat `Color`, a `Gradient`, or a `Pattern`. A `Gradient` is
   linear or radial (with a focal

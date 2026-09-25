@@ -195,3 +195,31 @@ impl tairix_log::Sink for Quiet {
 
 static SINK: Quiet = Quiet;
 static PRESSURE: tairix_reclaim::ReportedPressure = tairix_reclaim::ReportedPressure::unknown();
+
+#[test]
+fn the_ground_worth_holding_is_the_view_and_a_chunk_around_it() {
+    let visible = bounds(-5_000, -5_000, 5_000, 5_000);
+    let needed: alloc::vec::Vec<_> = visible_chunks(visible).collect();
+    assert!(
+        needed.iter().all(|coord| worth_holding(*coord, visible)),
+        "the view gave away ground it draws"
+    );
+    let (min_x, max_x) = (
+        needed.iter().map(|c| c.x).min().expect("a chunk"),
+        needed.iter().map(|c| c.x).max().expect("a chunk"),
+    );
+    let y = needed[0].y;
+    assert!(worth_holding(ChunkCoord { x: max_x + 1, y }, visible));
+    assert!(worth_holding(ChunkCoord { x: min_x - 1, y }, visible));
+    assert!(!worth_holding(ChunkCoord { x: max_x + 2, y }, visible));
+    assert!(!worth_holding(ChunkCoord { x: min_x, y: y - 2 }, visible));
+    // At the coordinate extremes the margin saturates rather than wrapping.
+    let edge = bounds(i32::MIN, i32::MIN, i32::MIN + 1, i32::MIN + 1);
+    assert!(!worth_holding(
+        ChunkCoord {
+            x: i32::MAX,
+            y: i32::MAX
+        },
+        edge
+    ));
+}

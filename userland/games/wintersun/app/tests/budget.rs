@@ -4,8 +4,9 @@
 //! four-core reference machine and says plainly that it "is the single
 //! most likely number in this plan to be wrong". This is where it stops
 //! being a guess: the passes are timed at the baseline resolution over
-//! generated terrain, and the numbers are printed so a run says what the
-//! renderer actually costs.
+//! generated terrain with the plan's sixty-four rigged figures standing on
+//! it, and the numbers are printed so a run says what the renderer actually
+//! costs.
 //!
 //! # Why no elapsed time is asserted here
 //!
@@ -40,18 +41,24 @@ use std::time::Instant;
 
 use tairix_parallel::{JobRunner, Threaded};
 use tairix_raster::color::Pixel;
+use tairix_raster::surface::Surface;
 use tairix_reclaim::{PressureBand, ReportedPressure};
 use tairix_wintersun_app::budget::{FrameTimes, Pass, BASELINE_HEIGHT, BASELINE_WIDTH, FRAME_NS};
 use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
+use tairix_wintersun_app::figures::Cast;
 use tairix_wintersun_app::frame::{Clock, Renderer, Scene};
 use tairix_wintersun_app::light::{Sky, Sun};
 use tairix_wintersun_app::quality::{Ladder, RenderScale};
 use tairix_wintersun_app::terrain::{visible_chunks, RoadDecals};
 use tairix_wintersun_app::view::Viewport;
 use tairix_wintersun_art::cache::MaterialCache;
-use tairix_wintersun_art::decal::Fray;
+use tairix_wintersun_art::decal::{Bounds, Fray};
 use tairix_wintersun_art::splat::Warp;
-use tairix_wintersun_net::value::WorldPoint;
+use tairix_wintersun_figure::actor::Actor;
+use tairix_wintersun_figure::motion::{Clips, Kind, Set};
+use tairix_wintersun_figure::reference;
+use tairix_wintersun_figure::species::Species;
+use tairix_wintersun_net::value::{EntityId, Facing, WorldPoint};
 use tairix_wintersun_world::chunk::{Chunk, ChunkBuild, ChunkWindow};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
@@ -64,6 +71,21 @@ const RUNS: usize = 5;
 /// How many cores the budget is stated for, and so how many threads the
 /// bands are handed to.
 const REFERENCE_CORES: usize = 4;
+
+/// How many figures carrying a full rig the budget is stated for.
+const RIGS: u64 = 64;
+
+/// What the rigs are doing, a figure each in turn: a mixture of strides,
+/// both action layers and a wader, so the pass is costed at the poses the
+/// game draws rather than at one.
+const ACTIVITIES: [(Option<Kind>, i32, i32); 6] = [
+    (None, 20, 0),
+    (None, 61, 0),
+    (Some(Kind::Cast), 20, 0),
+    (Some(Kind::MeleeLight), 0, 0),
+    (Some(Kind::Dodge), 0, 0),
+    (None, 0, 60),
+];
 
 /// A clock that reads the host's monotonic time.
 struct Host(Instant);
@@ -82,6 +104,34 @@ impl tairix_log::Sink for Quiet {
 
 static SINK: Quiet = Quiet;
 static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+
+/// The rigs, spread evenly across `visible` on an eight-by-eight grid, and
+/// how far each moves east a frame and how deep the water it stands in is.
+fn rigs<'a>(clips: &'a Clips<'a>, visible: Bounds) -> (Cast<'a>, Vec<(EntityId, i32, i32)>) {
+    let mut cast = Cast::new();
+    let mut walks = Vec::new();
+    for id in 0..RIGS {
+        let index = usize::try_from(id).expect("a small id");
+        let identity =
+            reference::identity(Species::ALL[index % Species::ALL.len()]).expect("a record");
+        let (performs, dx, depth) = ACTIVITIES[index % ACTIVITIES.len()];
+        let mut actor = Actor::new(&identity, clips, Facing(0)).expect("a figure");
+        if let Some(kind) = performs {
+            actor.perform(kind).expect("it plays");
+        }
+        let (column, row) = (
+            i32::try_from(id % 8).expect("a column"),
+            i32::try_from(id / 8).expect("a row"),
+        );
+        let at = WorldPoint {
+            x: visible.min_x + (visible.max_x - visible.min_x) * (2 * column + 1) / 16,
+            y: visible.min_y + (visible.max_y - visible.min_y) * (2 * row + 1) / 16,
+        };
+        cast.join(EntityId(id), actor, at).expect("it joins");
+        walks.push((EntityId(id), dx, depth));
+    }
+    (cast, walks)
+}
 
 /// Draw the baseline frame [`RUNS`] times, returning the cheapest run's
 /// per-pass costs and the picture every run drew.
@@ -102,7 +152,7 @@ fn measure(runner: &dyn JobRunner) -> (FrameTimes, Vec<Pixel>) {
     let view = Viewport::new(BASELINE_WIDTH, BASELINE_HEIGHT, RenderScale::ONE)
         .expect("the baseline is a real window");
     let (w, h) = view.render();
-    let held: Vec<Chunk> = visible_chunks(camera.visible(w, h))
+    let held: Vec<Chunk> = visible_chunks(camera.visible(&view))
         .filter(|c| params.holds_chunk(c.x, c.y))
         .map(|coord| {
             ChunkBuild::new(coord)
@@ -118,14 +168,28 @@ fn measure(runner: &dyn JobRunner) -> (FrameTimes, Vec<Pixel>) {
     let warp = Warp::new(params.seed());
     let fray = Fray::new(params.seed());
 
+    let set = Set::new().expect("the shipped set");
+    let clips = set.clips().expect("the shipped clips");
+    let (mut cast, walks) = rigs(&clips, camera.visible(&view));
+
     PRESSURE.report(PressureBand::Normal);
     let mut cache = MaterialCache::new("wintersun-budget", 64 * 1024 * 1024, &PRESSURE, &SINK);
     let mut renderer = Renderer::new();
-    let mut target = vec![Pixel::TRANSPARENT; view.render_pixels()];
+    let mut target = Surface::new(w, h).expect("the baseline frame fits");
     let clock = Host(Instant::now());
 
     let mut best = FrameTimes::new();
     for run in 0..RUNS {
+        for &(id, dx, depth) in &walks {
+            let figure = cast.get_mut(id).expect("it is there");
+            let to = WorldPoint {
+                x: figure.ground().x + dx,
+                y: figure.ground().y,
+            };
+            figure
+                .step(FRAME_NS, to, Facing(0), depth)
+                .expect("a frame");
+        }
         let times = renderer
             .render(
                 &mut target,
@@ -139,12 +203,18 @@ fn measure(runner: &dyn JobRunner) -> (FrameTimes, Vec<Pixel>) {
                     sun: Sun::winter(),
                     sky: Sky::winter(),
                     ladder: Ladder::FULL,
+                    cast: &cast,
                 },
                 &mut cache,
                 runner,
                 &clock,
             )
             .expect("the frame draws");
+        assert_eq!(
+            renderer.figures() as u64,
+            RIGS,
+            "a rig was culled from the view it stands in"
+        );
         // The frame is timed and then not read until the last run, so the
         // measurement is only honest if the optimiser cannot see that.
         black_box(&target);
@@ -152,7 +222,7 @@ fn measure(runner: &dyn JobRunner) -> (FrameTimes, Vec<Pixel>) {
             best = times;
         }
     }
-    (best, target)
+    (best, target.pixels().to_vec())
 }
 
 /// Print one measurement's per-pass costs against their budgets.

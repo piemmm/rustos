@@ -23,7 +23,7 @@
 //! for the full invariants.
 
 use tairix_collections::HashSet;
-use tairix_hash::BuildFastHash;
+use tairix_hash::BuildSipHash13;
 use tairix_rng::{FastRng, RandU64, StreamKey};
 use tairix_sync::SpinLock;
 
@@ -145,10 +145,16 @@ pub fn choose_task_id(
 
 /// Ids withheld from the draw while the kernel holds state keyed by them.
 ///
-/// Bounded by the live user threads, since every entry is released by its
-/// holder's teardown.
-static RESERVED_TASK_IDS: SpinLock<HashSet<TaskId, BuildFastHash>> =
-    SpinLock::new(HashSet::with_hasher(BuildFastHash::new()));
+/// Bounded by the live user threads, the exited processes whose parents have
+/// yet to reap them, and one per driver unloaded through the immediate path
+/// that never returns its number (`plans/OPEN-DEFECTS.md` D271).
+///
+/// Built on first use under the per-boot hash key, which is published before
+/// userland can admit anything: which ids are held is shaped by what an
+/// unprivileged user spawns and keeps, so an unkeyed table would let one pile
+/// its threads into one bucket. A boot that never got a key hashes unkeyed,
+/// the same honest fallback the futex table takes.
+static RESERVED_TASK_IDS: SpinLock<Option<HashSet<TaskId, BuildSipHash13>>> = SpinLock::new(None);
 
 /// Hold `id` against the draw until [`release_task_id`] returns it.
 ///
@@ -157,7 +163,8 @@ static RESERVED_TASK_IDS: SpinLock<HashSet<TaskId, BuildFastHash>> =
 /// that id — its capability record, address space, grants, and endpoints.
 /// Drawn in that window, the id would admit a newcomer whose records the
 /// victim's teardown then deletes. The kernel therefore takes this hold when
-/// it admits a user task and returns it only once that teardown is done. A
+/// it admits a user task and returns it only once nothing keyed by the id
+/// stands: the teardown done, and a parent's row for it reaped. A
 /// process is its leader thread's task, so the leader's hold is the process's
 /// and outlives the leader task itself for as long as the group does.
 ///
@@ -173,24 +180,31 @@ pub fn reserve_task_id(id: TaskId) -> SchedResult<()> {
     if id == NO_TASK {
         return Err(SchedError::NoTaskIdAvailable);
     }
-    RESERVED_TASK_IDS
-        .lock()
-        .try_insert(id)
-        .map(|_| ())
-        .map_err(|_| SchedError::OutOfMemory)
+    let mut held = RESERVED_TASK_IDS.lock();
+    held.get_or_insert_with(|| {
+        HashSet::with_hasher(BuildSipHash13::keyed().unwrap_or(BuildSipHash13::UNKEYED))
+    })
+    .try_insert(id)
+    .map(|_| ())
+    .map_err(|_| SchedError::OutOfMemory)
 }
 
 /// Return an id [`reserve_task_id`] withheld. Idempotent: releasing an id that
 /// was never reserved is not an error, so the teardown path can call it
 /// unconditionally.
 pub fn release_task_id(id: TaskId) {
-    RESERVED_TASK_IDS.lock().remove(&id);
+    if let Some(held) = RESERVED_TASK_IDS.lock().as_mut() {
+        held.remove(&id);
+    }
 }
 
 /// Whether `id` is currently held against the draw.
 #[must_use]
 pub fn task_id_reserved(id: TaskId) -> bool {
-    RESERVED_TASK_IDS.lock().contains(&id)
+    RESERVED_TASK_IDS
+        .lock()
+        .as_ref()
+        .is_some_and(|held| held.contains(&id))
 }
 
 /// Validate a caller-chosen reserved id.

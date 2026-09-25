@@ -175,6 +175,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 129 | `call_peer_holds` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (resource) | `errno` | —              | no      |
 | 130 | `peer_watch`   | `u32 op`, `user_ptr` (instance), `len`  | `errno`       | —                       | no      |
 | 131 | `call_peer_node` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (node out), `len` | `u64` (bytes) | —            | no      |
+| 132 | `fd_redeem_from` | `Handle` (grant), `*const ProcId grantor`, `usize len` | `u64` (fd) | —                 | yes     |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -1172,13 +1173,24 @@ right, and these descriptors carry no position (every read names its own
 offset), so a second identical entry conveys nothing the first does not.
 Once redeemed the entry is consumed, so a later grant of the same file
 legitimately mints afresh. Distinct delegations are bounded too: a grantor may
-have at most 64 pending to one recipient, and a fresh one past that is refused
-with `LimitExceeded` while the earlier ones stay redeemable. The bound is
-charged to the grantor, so one that leaves its delegations unredeemed cannot
-exhaust a recipient's table for any other, and an honest hand-over, redeemed as
-it arrives, never nears it. Wrappers
-`tairix_rt::fd_grant` / `tairix_rt::fd_redeem`; C stubs
-`tairix_sys_fd_grant` / `tairix_sys_fd_redeem`.
+have at most `FD_DELEGATIONS_PENDING_PER_GRANTOR` pending to one recipient, and
+a fresh one past that is refused with `LimitExceeded` while the earlier ones
+stay redeemable. The bound is charged to the grantor, so one that leaves its
+delegations unredeemed cannot exhaust a recipient's table for any other, and an
+honest hand-over, redeemed as it arrives, never nears it.
+
+`fd_redeem_from(handle, grantor)` (no. 132) is `fd_redeem` bound to the
+process *instance* that must have minted the delegation, and is what a
+**deputy** redeems with. A service that redeems a handle another process named
+to it — the desktop session handing a document on to a running instance — must
+not be made to consume a delegation somebody else minted to it: handles are
+dealt to each recipient in sequence, so a caller could otherwise name the next
+one and have the session hand another application's document to it. A handle
+the named instance did not mint answers `NotFound`, exactly like one that does
+not exist, and stays pending for its own grantor. Wrappers
+`tairix_rt::fd_grant` / `tairix_rt::fd_redeem` / `tairix_rt::fd_redeem_from`;
+C stubs `tairix_sys_fd_grant` / `tairix_sys_fd_redeem` /
+`tairix_sys_fd_redeem_from`.
 
 `waitset_wait` (no. 45) reports **one** member per call, and hands the
 ready ones out **in turn**. Most member kinds are level-triggered peeks
@@ -2173,8 +2185,8 @@ re-validates arguments — the dispatcher does that first.
 | `dma_quiesced`  | reads the caller's own load record (hardware-tree node and admission generation, kernel-attested; no argument crosses the trap) and has the installed `DmaQuarantineFacility` (`with_dma_quarantine`; default `NULL_DMA_QUARANTINE`) free, scrubbed, every block the node's quarantine holds from an earlier generation, auditing `DMA_QUARANTINE_RELEASED` with `cause=reset` (D167) | No load record → `NotFound`. No quarantine wired → `NotImplemented`. Otherwise `Ok(bytes freed)`. |
 | `shm_create_dma` | demands `CAP_SHM` in the handler, resolves `handle` against the caller (owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`) and `len` against it, requires the caller's load record, then has `sharedreg::create_dma` bind the node's quarantine and the installed `SharedMemFacility` carve one block below the grant's `addr_limit` (`alloc_dma_region`, `FrameAllocator::alloc_order_under`) and map it `DmaCoherent`; translates the block through `devres::translate_device_addr`, publishes the mapping, copies the id and device address out, and mints the caller the region's `Shared` grant | No `CAP_SHM`, or no load record → `PermissionDenied`. Unknown / non-owned handle → `NotFound`. Non-DMA grant, over-the-grant-maximum `len`, a limit no RAM lies below, or a block the window cannot name → `OutOfRange`. `len == 0`, or past the largest contiguous block → `LengthOutOfRange`. No quarantine or no DMA-capable facility wired → `NotImplemented`. No free block below the limit → `OutOfMemory`. Faulting out pointer → `BadAddress` (the region released). Otherwise `Ok(base)`. |
 | `shm_grant_peer` | checks the caller's own `Shared` grant for the region, resolves the endpoint and gates the caller against its `recv_caps` and owner, resolves the ticket to the kernel-recorded poster (`CallEndpoint::peer_origin`), then, under the capability table's read lock, the poster's instance to its live process (`CapTable::process_of_instance`), and mints that process the region grant (`AddressSpaceRegistry::delegate_grant`, which carries the covering grant's origin) | Unheld region, unknown endpoint or ticket, or an ended recipient → `NotFound`. Not the endpoint's server, or a retired region → `PermissionDenied`. Otherwise `Ok(handle)`. |
-| `call_peer_holds` | resolves the endpoint and gates the caller against its `recv_caps` and owner, then its `DmaController` duty for the endpoint (`AddressSpaceRegistry::holds_dma_controller_duty`), resolves the ticket to the kernel-recorded poster, copies the `HwResource` record in and decodes it canonically, admits only a `DmaRequest` line naming the endpoint or an `Mmio` window, then tests the grants of the poster's live process, confirming its instance after the read | Unknown endpoint or ticket, or a poster no longer live → `NotFound`. Not the endpoint's server, no duty for it, or no covering grant → `PermissionDenied`. Any other record → `OutOfRange`. Faulting pointer → `BadAddress`. Undecodable record → its decode error. Otherwise `Ok(0)`. |
-| `call_peer_node` | resolves the endpoint and gates the caller against its `recv_caps` and owner, checks the buffer holds a whole node, resolves the ticket to the kernel-recorded poster, then the poster's instance to its live process (`CapTable::process_of_instance`), that process's loaded node (`AddressSpaceRegistry::loaded_node`), and the instance again, and finds the node in the live tree | Not the endpoint's server → `PermissionDenied`. Buffer short of one record → `BufferTooSmall`. Unknown endpoint or ticket, a poster no longer live or loaded for no node, or a node gone from the tree → `NotFound`. Faulting pointer → `BadAddress`. Otherwise the record's length. |
+| `call_peer_holds` | resolves the endpoint and gates the caller against its `recv_caps` and owner, then its `DmaController` duty for the endpoint (`AddressSpaceRegistry::holds_dma_controller_duty`), resolves the ticket to the kernel-recorded poster, copies the `HwResource` record in and decodes it canonically, admits only a `DmaRequest` line naming the endpoint or an `Mmio` window, then tests the grants of the poster's live process under the capability table's read lock, so the answer is about that instance and never a successor under its number | Unknown endpoint or ticket, or a poster no longer live → `NotFound`. Not the endpoint's server, no duty for it, or no covering grant → `PermissionDenied`. Any other record → `OutOfRange`. Faulting pointer → `BadAddress`. Undecodable record → its decode error. Otherwise `Ok(0)`. |
+| `call_peer_node` | resolves the endpoint and gates the caller against its `recv_caps` and owner, checks the buffer holds a whole node, resolves the ticket to the kernel-recorded poster, then, under the capability table's read lock, the poster's instance to its live process (`CapTable::process_of_instance`) and that process's loaded node (`AddressSpaceRegistry::loaded_node`), and finds the node in the live tree | Not the endpoint's server → `PermissionDenied`. Buffer short of one record → `BufferTooSmall`. Unknown endpoint or ticket, a poster no longer live or loaded for no node, or a node gone from the tree → `NotFound`. Faulting pointer → `BadAddress`. Otherwise the record's length. |
 
 `spawn` also carries the **parser-sandbox mode**
 (`docs/src/security/sandbox.md`): an attach block whose `flags` word

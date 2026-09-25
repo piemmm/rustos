@@ -214,15 +214,56 @@ pub fn dump_aarch64_virt_dtb(out_dir: &std::ffi::OsStr, cpus: u32) -> Vec<u8> {
 /// it.
 pub fn x86_64_guest_build() {
     emit_target_cfg();
-    if std::env::var("TARGET").is_ok_and(|target| target == "x86_64-unknown-none") {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-        let linker_script = format!(
-            "{}/../../../kernel/arch/x86_64/linker.ld",
-            manifest_dir.trim_end_matches('/')
-        );
-        println!("cargo:rerun-if-changed={linker_script}");
-        println!("cargo:rustc-link-arg=-T{linker_script}");
+    if let Some(layout) = x86_64_layout() {
+        println!("cargo:rustc-link-arg=-T{layout}");
     }
+}
+
+/// [`x86_64_guest_build`] for a vertical whose workload runs on the boot stack
+/// at the depth the aarch64 and riscv64 `virt` layouts give every image, rather
+/// than the shared layout's own 64 KiB: it links a script of its own that
+/// states that size and includes the shared layout.
+///
+/// # Panics
+///
+/// When cargo set no manifest or output directory, or the script cannot be
+/// written: a build script cannot go on without them.
+pub fn x86_64_guest_build_with_virt_boot_stack() {
+    emit_target_cfg();
+    if let Some(layout) = x86_64_layout() {
+        let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
+        let script = format!("{out_dir}/virt-boot-stack.ld");
+        std::fs::write(&script, virt_boot_stack_script(&layout))
+            .expect("the image's linker script is written");
+        println!("cargo:rustc-link-arg=-T{script}");
+    }
+}
+
+/// The boot stack the aarch64 and riscv64 `virt` layouts give every image.
+const VIRT_BOOT_STACK: &str = "256K";
+
+/// A linker script sizing the boot stack at [`VIRT_BOOT_STACK`] and then
+/// including `layout`. The size is stated ahead of the layout rather than by
+/// `--defsym`, which the linker applies only after the layout it would have
+/// sized.
+fn virt_boot_stack_script(layout: &str) -> String {
+    format!("BOOT_STACK_BYTES = {VIRT_BOOT_STACK};\nINCLUDE \"{layout}\"\n")
+}
+
+/// The shared x86_64 kernel layout, when cargo is building for the
+/// freestanding x86_64 target; `None` on every other, so the crate still
+/// checks on the host.
+fn x86_64_layout() -> Option<String> {
+    if !std::env::var("TARGET").is_ok_and(|target| target == "x86_64-unknown-none") {
+        return None;
+    }
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let layout = format!(
+        "{}/../../../kernel/arch/x86_64/linker.ld",
+        manifest_dir.trim_end_matches('/')
+    );
+    println!("cargo:rerun-if-changed={layout}");
+    Some(layout)
 }
 
 /// The whole build script of an aarch64 `virt` production-boot vertical: link
@@ -343,6 +384,16 @@ pub fn trim_fdt_to_extent(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The size is stated before the layout is included, because the shared
+    /// layout reads `BOOT_STACK_BYTES` as it lays the stack out.
+    #[test]
+    fn the_virt_boot_stack_script_sizes_the_stack_before_including_the_layout() {
+        assert_eq!(
+            virt_boot_stack_script("/k/linker.ld"),
+            "BOOT_STACK_BYTES = 256K;\nINCLUDE \"/k/linker.ld\"\n"
+        );
+    }
 
     #[test]
     fn hosted_targets_are_inert() {

@@ -350,3 +350,27 @@ fn a_stance_that_sinks_the_body_is_fitted_over_the_ground() {
         "a stride a tenth off slid only {off}: the window missed most of the stance"
     );
 }
+
+/// A restride keeps the phase and changes only how far a cycle carries the
+/// figure, so two gaits blended stay in step.
+#[test]
+fn a_restride_keeps_the_phase_and_changes_the_pace() {
+    let mut gait = Gait::new(40.0).expect("a real stride");
+    gait.travel(10.0).expect("a real distance");
+    let quicker = gait.restrided(20.0).expect("a real stride");
+    assert!(mathf::fabs(quicker.phase() - gait.phase()) < 1e-12);
+    assert!(mathf::fabs(quicker.stride() - 20.0) < 1e-12);
+    let mut quicker = quicker;
+    quicker.travel(10.0).expect("a real distance");
+    assert!(
+        mathf::fabs(quicker.phase() - 0.75) < 1e-12,
+        "{}",
+        quicker.phase()
+    );
+    for stride in [0.0, -3.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            gait.restrided(stride).err(),
+            Some(FigureError::StrideUnreal)
+        );
+    }
+}

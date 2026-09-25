@@ -189,6 +189,77 @@ impl Contact {
     }
 }
 
+/// How many nested rings a softened shadow is drawn as.
+pub const PENUMBRA: usize = 3;
+
+/// How far out each ring of a softened shadow reaches, as a factor on the
+/// hard shadow's own axes, outermost first — the order they are painted in.
+const PENUMBRA_REACH: [f64; PENUMBRA] = [1.3, 1.15, 1.0];
+
+impl Contact {
+    /// The shadow a figure `lift` above its ground point throws, with its edge
+    /// softened: [`PENUMBRA`] nested rings, painted outermost first, whose
+    /// alphas compose to exactly the hard shadow's at the middle, where all of
+    /// them overlap, and fall away in steps across the band between.
+    ///
+    /// A stepped penumbra rather than a blurred one, because it costs three
+    /// fills where a blur costs a pass over every pixel it touches.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::cast`].
+    pub fn penumbra(
+        self,
+        light: Light,
+        lift: f64,
+        scale: f64,
+        at: (f64, f64),
+    ) -> Result<[Placed; PENUMBRA], FigureError> {
+        let hard = self.cast(light, lift, scale, at)?;
+        let Shape::Superellipse { rx, ry, square } = hard.shape else {
+            return Err(FigureError::GeometryUnreal);
+        };
+        let each = ring_alpha(hard.color.a);
+        Ok(PENUMBRA_REACH.map(|reach| Placed {
+            shape: Shape::Superellipse {
+                rx: rx * reach,
+                ry: ry * reach,
+                square,
+            },
+            color: Color::rgba(hard.color.r, hard.color.g, hard.color.b, each),
+            ..hard
+        }))
+    }
+}
+
+/// The least alpha each of [`PENUMBRA`] overlapping rings needs for the stack
+/// of them to reach `alpha`.
+///
+/// Searched over the bytes a ring can hold rather than solved as a root: the
+/// stack's alpha rises with the ring's, so a bisection finds the exact byte
+/// in eight steps with no convergence to argue about.
+fn ring_alpha(alpha: u8) -> u8 {
+    let wanted = f64::from(alpha) / 255.0;
+    let stacked = |each: u8| {
+        let clear = 1.0 - f64::from(each) / 255.0;
+        let mut through = 1.0;
+        for _ in 0..PENUMBRA {
+            through *= clear;
+        }
+        1.0 - through
+    };
+    let (mut low, mut high) = (0u8, alpha);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if stacked(middle) < wanted {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
 /// `alpha` thinned by `soften`.
 ///
 /// Only the alpha: the shadow keeps its authored tone and changes how much of

@@ -75,9 +75,17 @@
 //! motions on the art grid's own stage, and [`plausible::figure`] draws a
 //! random figure that looks chosen rather than rolled.
 //!
+//! **An actor plays a figure for the simulation, and never moves itself.**
+//! An [`Actor`] is told where a body is, which way it faces, what it is
+//! doing and how deep the water it stands in is, and answers a pose planted
+//! on the ground the scene draws: one gait at a time, chosen by speed and
+//! paced by distance, under a whole-body and an upper-body action layer,
+//! each action timed by the rules that own it rather than by its clip.
+//!
 //! # The order it runs in
 //!
-//! 1. [`Animator`] picks the clips, [`Blend`] resolves a [`Pose`].
+//! 1. [`Animator`] picks the clips, [`Blend`] resolves a [`Pose`]; an
+//!    [`Actor`] lays its action layers over its locomotion.
 //! 2. [`Breath`], [`Look`] and [`Recoil`] add their overlays; the sum is
 //!    applied.
 //! 3. [`Legs::plant`] solves the feet onto the ground and answers the root.
@@ -88,10 +96,12 @@
 //!
 //! The designer's surfaces — its sliders, its windows, the character library
 //! — are the game's, and so is its preset set: a preset is a record, shipped
-//! as `WinterSun` bundle content and applied with [`Designer::apply`]. The
-//! contact-sheet harness that makes art quality a measured property is
+//! as `WinterSun` bundle content, applied with [`Designer::apply`] and
+//! measured by the harness like every figure of the grid. The contact-sheet
+//! harness that makes art quality a measured property is
 //! `cargo xtask artsheet`; the measurements it gates on live here.
 //!
+//! [`Actor`]: actor::Actor
 //! [`Designer`]: design::Designer
 //! [`Designer::apply`]: design::Designer::apply
 //! [`Change::between`]: design::Change::between
@@ -123,6 +133,7 @@
 #[cfg(test)]
 extern crate alloc;
 
+pub mod actor;
 pub mod blend;
 pub mod breath;
 pub mod clip;

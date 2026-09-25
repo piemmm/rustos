@@ -528,3 +528,69 @@ fn every_identifier_reads_back_the_index_it_was_made_from() {
     assert_eq!(ClipId::new(3).index(), 3);
     assert_eq!(StateId::new(7).index(), 7);
 }
+
+/// A restart takes a state up from its start with nothing fading out, even
+/// where the machine has no edge from the state playing — a layer showing
+/// nothing has nothing for an edge to govern.
+#[test]
+fn a_restart_begins_a_state_with_nothing_fading_out() {
+    let clips = plain_clips();
+    let states = states();
+    let edges = edges();
+    let machine = Transitions::new(&clips, &states, &edges, IDLE).expect("a sound machine");
+    let mut animator = Animator::new(machine);
+    animator.request(WALK).expect("an edge leads there");
+    animator.advance(0.1).expect("a real step");
+    assert!(animator.fading());
+
+    assert!(machine.edge(WALK, CAST).is_none());
+    animator.restart(CAST).expect("a state of the machine");
+    assert_eq!(animator.state(), CAST);
+    assert!(!animator.fading(), "a restart left a clip fading out");
+    let advanced = animator.advance(0.25).expect("a real step");
+    assert!(
+        close(advanced.current.from, 0.0),
+        "it did not begin at the start"
+    );
+    assert!(advanced.outgoing.is_none());
+
+    assert_eq!(
+        animator.restart(StateId::new(9)).err(),
+        Some(FigureError::NoSuchState)
+    );
+    assert_eq!(
+        animator.state(),
+        CAST,
+        "a refused restart moved the animator"
+    );
+}
+
+/// A clip that plays once is done when it has played through, and a cycle
+/// never is, however long it runs.
+#[test]
+fn only_a_clip_that_plays_once_is_ever_done() {
+    let once = Clip::new(0.5, Loop::Hold, &[], &[]).expect("a well-formed clip");
+    let cycle = Clip::new(0.5, Loop::Wrap, &[], &[]).expect("a well-formed clip");
+    let clips = [once, cycle];
+    let states = [ClipId::new(0), ClipId::new(1)];
+    let edges = [Edge::new(IDLE, WALK, 0.1), Edge::new(WALK, IDLE, 0.1)];
+    let machine = Transitions::new(&clips, &states, &edges, IDLE).expect("a sound machine");
+
+    let mut held = Animator::new(machine);
+    assert!(!held.done().expect("a clip"));
+    held.advance(0.49).expect("a real step");
+    assert!(
+        !held.done().expect("a clip"),
+        "done before the clip played through"
+    );
+    held.advance(0.01).expect("a real step");
+    assert!(
+        held.done().expect("a clip"),
+        "not done once the clip played through"
+    );
+
+    let mut cycling = Animator::new(machine);
+    cycling.restart(WALK).expect("a state of the machine");
+    cycling.advance(40.0).expect("a real step");
+    assert!(!cycling.done().expect("a clip"), "a cycle reported done");
+}

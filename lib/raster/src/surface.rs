@@ -36,7 +36,7 @@ use crate::dither::DitherRow;
 use crate::paint::{Paint, Pattern};
 use crate::resample::{resample_pixels, Region, ResampleError};
 use crate::round::round_rect_coverage;
-use crate::scan::{FillRule, SampleSpace, ScanFill, MAX_DRAWING_EXTENT};
+use crate::scan::{FillRule, SampleSpace, ScanFill, ScanScratch, MAX_DRAWING_EXTENT};
 
 /// The most pixels one surface may hold.
 ///
@@ -1117,17 +1117,18 @@ impl Surface {
         depth: usize,
     ) -> bool {
         let space = SampleSpace::design(design, (over.x, over.y, over.width, over.height));
-        let Some(fill) = ScanFill::new(contours, space, rule) else {
+        let mut scratch = ScanScratch::new();
+        let Some(fill) = ScanFill::new(contours, space, rule, &mut scratch) else {
             return true;
         };
         match paint {
             Paint::Solid(color) => {
                 let source = color.premultiply();
-                self.fill_coverage(fill, |_, _| source);
+                fill_coverage(self, fill, |_, _| source);
                 true
             }
             Paint::Gradient(gradient) => {
-                self.fill_coverage(fill, |x, y| {
+                fill_coverage(self, fill, |x, y| {
                     gradient.sample(space.pixel_centre(x, y)).premultiply()
                 });
                 true
@@ -1136,7 +1137,7 @@ impl Surface {
                 let Some(tile) = render_tile(pattern, space, design, depth) else {
                     return false;
                 };
-                self.fill_coverage(fill, |x, y| {
+                fill_coverage(self, fill, |x, y| {
                     sample_tile(pattern, &tile, space.pixel_centre(x, y))
                 });
                 true
@@ -1290,12 +1291,7 @@ impl Surface {
     /// stretched: it is drawn where its coordinates say, so a glyph needs no
     /// square scratch surface and blit to be positioned.
     pub fn fill_polygon_subpixel(&mut self, polygon: &[(i32, i32)], color: Color) {
-        self.fill_solid(
-            slice::from_ref(&polygon),
-            SampleSpace::device(),
-            FillRule::EvenOdd,
-            color,
-        );
+        Canvas::fill_polygon_subpixel(self, polygon, color, &mut ScanScratch::new());
     }
 
     /// Fill an anti-aliased polygon whose vertices are in *device* sub-pixel
@@ -1329,14 +1325,16 @@ impl Surface {
         if color.a == 0 {
             return;
         }
+        let mut scratch = ScanScratch::new();
         let Some(mut fill) = ScanFill::new(
             slice::from_ref(&polygon),
             SampleSpace::device(),
             FillRule::EvenOdd,
+            &mut scratch,
         ) else {
             return;
         };
-        self.scan_rows(&mut fill, |pixel, dst| {
+        scan_rows(self, &mut fill, |pixel, dst| {
             let strength = mask(pixel.x, pixel.y);
             if strength == 0 {
                 return;
@@ -1418,82 +1416,9 @@ impl Surface {
         rule: FillRule,
         color: Color,
     ) {
-        if let Some(fill) = ScanFill::new(contours, space, rule) {
+        if let Some(fill) = ScanFill::new(contours, space, rule, &mut ScanScratch::new()) {
             let source = color.premultiply();
-            self.fill_coverage(fill, |_, _| source);
-        }
-    }
-
-    /// Composite the premultiplied pixel `source` reports for each covered
-    /// pixel's surface position, scaled by that pixel's own coverage.
-    ///
-    /// One walk whatever the paint: a flat colour hands back a constant, a
-    /// gradient samples its ramp, a pattern reads its tile — so the fill's
-    /// plumbing never learns which it is drawing, and the flat case pays no
-    /// per-pixel branch for the others.
-    fn fill_coverage(&mut self, mut fill: ScanFill, source: impl Fn(u32, u32) -> Pixel) {
-        self.scan_rows(&mut fill, |pixel, dst| {
-            let ink = source(pixel.x, pixel.y);
-            // A premultiplied pixel of zero alpha leaves the destination
-            // exactly as it found it.
-            if ink.a != 0 {
-                *dst = ink.scale_alpha(pixel.coverage).over(*dst);
-            }
-        });
-    }
-
-    /// Walk every pixel `fill` covers, handing each one's position, coverage,
-    /// and row dither bias to `paint`.
-    ///
-    /// The whole of the scan-converted compositing plumbing — the clipped
-    /// bounds, the one row of coverage, and the advance past columns the clip
-    /// window cut — so a flat fill, a gradient, and a masked wash differ only
-    /// in what they do with a covered pixel rather than each carrying its own
-    /// copy of the walk.
-    ///
-    /// A fill whose one row of coverage the allocator refuses paints nothing,
-    /// exactly as one the clip window admits nothing of does — the entry
-    /// points report no outcome, and an undrawn shape beats a dead process.
-    fn scan_rows(&mut self, fill: &mut ScanFill, mut paint: impl FnMut(Covered, &mut Pixel)) {
-        let Some((x_start, x_end, y_start, y_end)) = fill.bounds(self.space_rect()) else {
-            return;
-        };
-        let span_w = x_end - x_start;
-        let Ok(pixels) = usize::try_from(span_w) else {
-            return;
-        };
-        let Some(mut alphas) = fallible::filled(pixels, 0_u8) else {
-            return;
-        };
-        for py in self.admitted_rows(y_start, y_end - y_start) {
-            let dither = DitherRow::at(py);
-            let Some((first, row)) = self.row_span_mut(py, x_start, span_w) else {
-                continue;
-            };
-            fill.coverage_row(py, x_start, &mut alphas);
-            // The clip window may have cut the row's leading columns, so the
-            // coverage is advanced to the column the span actually starts at.
-            let Ok(lead) = usize::try_from(first - x_start) else {
-                continue;
-            };
-            let Some(covered) = alphas.get(lead..) else {
-                continue;
-            };
-            for ((px, coverage), dst) in (first..).zip(covered.iter().copied()).zip(row.iter_mut())
-            {
-                if coverage == 0 {
-                    continue;
-                }
-                paint(
-                    Covered {
-                        x: px,
-                        y: py,
-                        coverage,
-                        bias: dither.bias(px),
-                    },
-                    dst,
-                );
-            }
+            fill_coverage(self, fill, |_, _| source);
         }
     }
 
@@ -1864,6 +1789,199 @@ impl Surface {
     }
 }
 
+/// A row-major block a scan-converted fill writes through: a whole surface,
+/// or one band of one.
+///
+/// The fill walk reaches pixels only through these three, so a band admits
+/// exactly the pixels the surface would have and a figure drawn band by band
+/// is the figure drawn whole.
+trait Rows {
+    /// The rectangle of the paint's coordinate space this block holds.
+    fn space_rect(&self) -> (u32, u32, u32, u32);
+    /// The rows of `[y, y+h)` a write reaches, in the paint's coordinates.
+    fn admitted_rows(&self, y: u32, h: u32) -> Range<u32>;
+    /// The writable pixels of row `y` from column `x`, for at most `w`
+    /// columns, and the column the span starts at.
+    fn row_span_mut(&mut self, y: u32, x: u32, w: u32) -> Option<(u32, &mut [Pixel])>;
+}
+
+impl Rows for Surface {
+    fn space_rect(&self) -> (u32, u32, u32, u32) {
+        Self::space_rect(self)
+    }
+
+    fn admitted_rows(&self, y: u32, h: u32) -> Range<u32> {
+        Self::admitted_rows(self, y, h)
+    }
+
+    fn row_span_mut(&mut self, y: u32, x: u32, w: u32) -> Option<(u32, &mut [Pixel])> {
+        Self::row_span_mut(self, y, x, w)
+    }
+}
+
+impl Rows for RowBand<'_> {
+    fn space_rect(&self) -> (u32, u32, u32, u32) {
+        let rows = self.rows();
+        (
+            self.origin.x,
+            rows.start,
+            self.width,
+            rows.end.saturating_sub(rows.start),
+        )
+    }
+
+    fn admitted_rows(&self, y: u32, h: u32) -> Range<u32> {
+        let (row, count) = self.origin.rows(y, h);
+        let buffer = self.clip.rows(row, count);
+        let start = buffer.start.max(self.rows.start);
+        let end = buffer.end.min(self.rows.end).max(start);
+        self.origin.space_row(start)..self.origin.space_row(end)
+    }
+
+    fn row_span_mut(&mut self, y: u32, x: u32, w: u32) -> Option<(u32, &mut [Pixel])> {
+        RowBand::row_span_mut(self, y, x, w)
+    }
+}
+
+/// Something the scan converter fills a placed polygon onto: a whole
+/// [`Surface`], or one [`RowBand`] of one.
+///
+/// What lets one paint routine draw onto a single surface and onto the bands
+/// of a frame drawn on several cores at once, rather than keeping a second
+/// paint order for the second target.
+pub trait Canvas {
+    /// Fill an anti-aliased polygon whose vertices are in device
+    /// [`SUBPIXEL`] units with `color`, as
+    /// [`Surface::fill_polygon_subpixel`] does, scan-converting it in
+    /// `scratch`.
+    fn fill_polygon_subpixel(
+        &mut self,
+        polygon: &[(i32, i32)],
+        color: Color,
+        scratch: &mut ScanScratch,
+    );
+}
+
+impl Canvas for Surface {
+    fn fill_polygon_subpixel(
+        &mut self,
+        polygon: &[(i32, i32)],
+        color: Color,
+        scratch: &mut ScanScratch,
+    ) {
+        fill_placed(self, polygon, color, scratch);
+    }
+}
+
+impl Canvas for RowBand<'_> {
+    fn fill_polygon_subpixel(
+        &mut self,
+        polygon: &[(i32, i32)],
+        color: Color,
+        scratch: &mut ScanScratch,
+    ) {
+        fill_placed(self, polygon, color, scratch);
+    }
+}
+
+/// The one body of [`Canvas::fill_polygon_subpixel`], whole surface or band.
+fn fill_placed<R: Rows + ?Sized>(
+    target: &mut R,
+    polygon: &[(i32, i32)],
+    color: Color,
+    scratch: &mut ScanScratch,
+) {
+    if let Some(fill) = ScanFill::new(
+        slice::from_ref(&polygon),
+        SampleSpace::device(),
+        FillRule::EvenOdd,
+        scratch,
+    ) {
+        let source = color.premultiply();
+        fill_coverage(target, fill, |_, _| source);
+    }
+}
+
+/// Composite the premultiplied pixel `source` reports for each covered
+/// pixel's surface position, scaled by that pixel's own coverage.
+///
+/// One walk whatever the paint: a flat colour hands back a constant, a
+/// gradient samples its ramp, a pattern reads its tile — so the fill's
+/// plumbing never learns which it is drawing, and the flat case pays no
+/// per-pixel branch for the others.
+fn fill_coverage<R: Rows + ?Sized>(
+    target: &mut R,
+    mut fill: ScanFill<'_>,
+    source: impl Fn(u32, u32) -> Pixel,
+) {
+    scan_rows(target, &mut fill, |pixel, dst| {
+        let ink = source(pixel.x, pixel.y);
+        // A premultiplied pixel of zero alpha leaves the destination
+        // exactly as it found it.
+        if ink.a != 0 {
+            *dst = ink.scale_alpha(pixel.coverage).over(*dst);
+        }
+    });
+}
+
+/// Walk every pixel `fill` covers, handing each one's position, coverage,
+/// and row dither bias to `paint`.
+///
+/// The whole of the scan-converted compositing plumbing — the clipped
+/// bounds, the one row of coverage, and the advance past columns the clip
+/// window cut — so a flat fill, a gradient, and a masked wash differ only
+/// in what they do with a covered pixel rather than each carrying its own
+/// copy of the walk.
+///
+/// A fill whose one row of coverage the allocator refuses paints nothing,
+/// exactly as one the clip window admits nothing of does — the entry
+/// points report no outcome, and an undrawn shape beats a dead process.
+fn scan_rows<R: Rows + ?Sized>(
+    target: &mut R,
+    fill: &mut ScanFill<'_>,
+    mut paint: impl FnMut(Covered, &mut Pixel),
+) {
+    let Some((x_start, x_end, y_start, y_end)) = fill.bounds(target.space_rect()) else {
+        return;
+    };
+    let span_w = x_end - x_start;
+    let Ok(pixels) = usize::try_from(span_w) else {
+        return;
+    };
+    if !fill.prepare(pixels) {
+        return;
+    }
+    for py in target.admitted_rows(y_start, y_end - y_start) {
+        let dither = DitherRow::at(py);
+        let Some((first, row)) = target.row_span_mut(py, x_start, span_w) else {
+            continue;
+        };
+        fill.coverage_row(py, x_start);
+        // The clip window may have cut the row's leading columns, so the
+        // coverage is advanced to the column the span actually starts at.
+        let Ok(lead) = usize::try_from(first - x_start) else {
+            continue;
+        };
+        let Some(covered) = fill.alphas().get(lead..) else {
+            continue;
+        };
+        for ((px, coverage), dst) in (first..).zip(covered.iter().copied()).zip(row.iter_mut()) {
+            if coverage == 0 {
+                continue;
+            }
+            paint(
+                Covered {
+                    x: px,
+                    y: py,
+                    coverage,
+                    bias: dither.bias(px),
+                },
+                dst,
+            );
+        }
+    }
+}
+
 /// Where one row-granular borrow landed.
 struct SpanPlace {
     /// The drawing column the span's first pixel is at — the coordinate the
@@ -1950,6 +2068,36 @@ impl RowBand<'_> {
             w,
         )?;
         Some((place.first, self.pixels.get_mut(place.offsets)?))
+    }
+
+    /// The part of this band inside drawing rows `rows`, borrowed from it.
+    ///
+    /// How a paint confines a shape to fewer rows than its band holds — a
+    /// figure standing in water is drawn only above the surface — with no
+    /// window to set and restore. Rows outside the band are dropped, so the
+    /// narrowed band may be empty but never reaches past this one.
+    #[must_use]
+    pub fn narrowed(&mut self, rows: Range<u32>) -> RowBand<'_> {
+        let (row, count) = self
+            .origin
+            .rows(rows.start, rows.end.saturating_sub(rows.start));
+        let start = row.clamp(self.rows.start, self.rows.end);
+        let end = row.saturating_add(count).clamp(start, self.rows.end);
+        let width = u64::from(self.width);
+        let offset = |buffer: u32| {
+            usize::try_from(u64::from(buffer - self.rows.start) * width).unwrap_or(usize::MAX)
+        };
+        let pixels = self
+            .pixels
+            .get_mut(offset(start)..offset(end))
+            .unwrap_or_default();
+        RowBand {
+            pixels,
+            rows: start..end,
+            width: self.width,
+            clip: self.clip,
+            origin: self.origin,
+        }
     }
 }
 

@@ -9,8 +9,8 @@ use tairix_raster::surface::SUBPIXEL;
 use tairix_wintersun_net::value::Facing;
 
 use super::{
-    fit, grid, spec, Cell, Figure, Reference, Sampling, ABOVE, BELOW, BREATH, FACINGS, FIGURES,
-    MARGIN, PHASES, SAMPLES, SIDES,
+    allowance, fit, framing, grid, side_at, spec, Cell, Figure, Reference, Sampling, BREATH,
+    FACINGS, FIGURES, MARGIN, PHASES, SAMPLES, SIDES, STANDING,
 };
 use crate::breath::Breath;
 use crate::frame::project;
@@ -28,7 +28,7 @@ const SCALE: f64 = 1.25;
 const AT: (f64, f64) = (37.5, 92.25);
 
 /// Every figure of the grid, the generated ones included.
-fn whole() -> Vec<Figure> {
+fn whole() -> Vec<Figure<'static>> {
     grid()
         .map(|figure| figure.expect("every sample draws a record"))
         .collect()
@@ -234,9 +234,11 @@ fn every_cell_stands_on_the_ground_it_was_given() {
                 figure.name,
                 planted.worst_miss()
             );
+            let clip = reference.clip(cell.kind).expect("a shipped clip");
+            let asked = clip.root_at(cell.phase()) * reference.legs().straight();
             assert!(
-                planted.root().at.up <= 1e-12,
-                "{} {cell:?} levitates by {}",
+                mathf::fabs(planted.root().at.up - asked) <= 1e-9,
+                "{} {cell:?} stands at {} where its clip asked for {asked}",
                 figure.name,
                 planted.root().at.up
             );
@@ -309,9 +311,10 @@ fn every_cell_of_the_grid_lies_inside_its_square() {
         let reference =
             Reference::new(&figure.identity().expect("a real record")).expect("it builds");
         for side in SIDES {
-            let (scale, at) = fit(reference.rig().reach(), side).expect("a real cell");
             let edge = i32::try_from(side).expect("a small side") * SUBPIXEL;
             for cell in figure.cells() {
+                let (scale, at) =
+                    fit(cell.kind, reference.rig().reach(), side).expect("a real cell");
                 reference
                     .place(cell, scale, at, &mut placement)
                     .expect("it places");
@@ -347,7 +350,7 @@ fn every_build_stays_within_the_allowances() {
         breath
     });
     let mut frames = Frames::new();
-    let (mut above, mut below): (f64, f64) = (0.0, 0.0);
+    let mut reached = [(0.0f64, 0.0f64); Kind::ALL.len()];
     for species in Species::ALL {
         for identity in corners(species) {
             let reference = Reference::new(&identity).expect("it builds");
@@ -384,22 +387,68 @@ fn every_build_stays_within_the_allowances() {
                                 project(facing, hoop.wide).dy,
                                 project(facing, hoop.deep).dy,
                             );
-                            above = mathf::fmax(above, (spread - centre) / reach);
-                            below = mathf::fmax(below, (centre + spread) / reach);
+                            let slot = &mut reached[kind.index()];
+                            slot.0 = mathf::fmax(slot.0, (spread - centre) / reach);
+                            slot.1 = mathf::fmax(slot.1, (centre + spread) / reach);
                         }
                     }
                 }
             }
         }
     }
-    assert!(
-        above <= ABOVE && ABOVE - above <= 0.01,
-        "drawn {above} above"
-    );
-    assert!(
-        below <= BELOW && BELOW - below <= 0.01,
-        "drawn {below} below"
-    );
+    // Locomotion shares one framing, so it is held tight to the furthest of
+    // the three; any other motion is held tight wherever it needs more room
+    // than locomotion, and framed as locomotion is wherever it does not.
+    let standing =
+        [Kind::Idle, Kind::Walk, Kind::Run]
+            .into_iter()
+            .fold((0.0f64, 0.0f64), |held, kind| {
+                let (above, below) = reached[kind.index()];
+                (mathf::fmax(held.0, above), mathf::fmax(held.1, below))
+            });
+    for kind in Kind::ALL {
+        let (above, below) = reached[kind.index()];
+        let (room_above, room_below) = allowance(kind);
+        let name = kind.name();
+        assert!(above <= room_above, "{name} drawn {above} above");
+        assert!(below <= room_below, "{name} drawn {below} below");
+        let (tight_above, tight_below) = if kind.layer() == crate::motion::Layer::Locomotion {
+            standing
+        } else {
+            (above, below)
+        };
+        if room_above > STANDING.0 || kind.layer() == crate::motion::Layer::Locomotion {
+            assert!(
+                room_above - tight_above <= 0.01,
+                "{name} has room above to spare"
+            );
+        }
+        if room_below > STANDING.1 || kind.layer() == crate::motion::Layer::Locomotion {
+            assert!(
+                room_below - tight_below <= 0.01,
+                "{name} has room below to spare"
+            );
+        }
+        assert!(
+            room_above >= STANDING.0 && room_below >= STANDING.1,
+            "{name}"
+        );
+    }
+}
+
+/// No motion is framed tighter than locomotion, which is what makes the
+/// inverse of the framing at locomotion's the conservative one.
+#[test]
+fn no_motion_is_framed_tighter_than_locomotion() {
+    let (tightest, _) = framing(Kind::Idle);
+    for kind in Kind::ALL {
+        let (share, _) = framing(kind);
+        assert!(share <= tightest, "{} is framed tighter", kind.name());
+    }
+    for side in SIDES {
+        let (scale, _) = fit(Kind::Walk, 64.0, side).expect("a real cell");
+        assert!(mathf::fabs(side_at(64.0, scale) - f64::from(side)) < 1e-9);
+    }
 }
 
 /// A figure fills the same share of every cell side and stands at the same
@@ -407,14 +456,17 @@ fn every_build_stays_within_the_allowances() {
 /// reach or a side no figure fits is refused.
 #[test]
 fn a_cell_frames_a_figure_by_its_own_reach() {
-    for side in SIDES {
-        let (scale, at) = fit(50.0, side).expect("a real cell");
-        let extent = f64::from(side);
-        let top = at.1 - ABOVE * 50.0 * scale;
-        let bottom = at.1 + BELOW * 50.0 * scale;
-        assert!(mathf::fabs(top - MARGIN * extent) < 1e-9);
-        assert!(mathf::fabs(bottom - (1.0 - MARGIN) * extent) < 1e-9);
-        assert!(mathf::fabs(at.0 - extent * 0.5) < 1e-12);
+    for kind in Kind::ALL {
+        let (above, below) = allowance(kind);
+        for side in SIDES {
+            let (scale, at) = fit(kind, 50.0, side).expect("a real cell");
+            let extent = f64::from(side);
+            let top = at.1 - above * 50.0 * scale;
+            let bottom = at.1 + below * 50.0 * scale;
+            assert!(mathf::fabs(top - MARGIN * extent) < 1e-9);
+            assert!(mathf::fabs(bottom - (1.0 - MARGIN) * extent) < 1e-9);
+            assert!(mathf::fabs(at.0 - extent * 0.5) < 1e-12);
+        }
     }
     for (reach, side) in [
         (0.0, 32),
@@ -424,7 +476,7 @@ fn a_cell_frames_a_figure_by_its_own_reach() {
         (50.0, 0),
     ] {
         assert_eq!(
-            fit(reach, side).err(),
+            fit(Kind::Idle, reach, side).err(),
             Some(crate::error::FigureError::ScaleUnreal),
             "{reach} at {side}"
         );

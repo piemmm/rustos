@@ -40,7 +40,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS3 | `wintersun/rules`: the fixed-tick authoritative step, space and collision, stats, damage, status effects | done |
 | WS4 | `wintersun/art`: material synthesis, the splat field, the decal and particle vocabulary, the WinterSun palette | done |
 | WS5 | The client shell: window, the three size states, input, frame pacing, camera, terrain draw | done |
-| WS6 | Figures on screen: presets, clips, the animation state machine, the locomotion join, and the art harness measuring every shipped preset | planned |
+| WS6 | Figures on screen: presets, clips, the animation state machine, the locomotion join, and the art harness measuring every shipped preset | done |
 | WS7 | `Code/wintersun-store`: the schemas and the realm's single writer | planned |
 | WS8 | `Code/wintersund` + `Code/wintersun-zone`: the gateway, zone shards, interest management, back-pressure, the thousand-player floor | planned |
 | WS9 | Combat: melee, ranged ballistics, traps, the archetypes | planned |
@@ -569,25 +569,12 @@ composes them. What a later item needs to know:
   allocation (81%), light **1.7 ms** against 2.0 ms (87%), 5.8 ms of drawing
   in a 16.6 ms frame, a 3.49× speedup over one thread. The number this plan
   called "the single most likely to be wrong" is right. `tests/budget.rs` is
-  the measurement and prints it; it asserts the *frame*-level claim rather
-  than each pass's own allocation, because the host is not the reference
-  machine and a per-pass assertion there would be measuring the machine.
-  - **Open: the frame assertion cannot hold under a parallel workspace run,
-    whatever the renderer costs.** It takes a wall-clock reading over a
-    four-thread runner while `cargo test --workspace` has ~20 other test
-    binaries on the same cores, so the figure it asserts against is a
-    property of what else is running. On a development host about 2.5×
-    slower per core (and reaching a 2.5× thread speedup, not 3.49×) it
-    measures terrain ~9.7 ms and light ~5.1 ms — roughly 2× and 2.5× their
-    allocations — for ~15 ms of drawing in the 16.6 ms frame: it passes run
-    alone, with ~20% variance, and fails in the suite. That is the
-    load-dependent wall-clock assertion the charter names, so it is a
-    defect in the *instrument* as well as a renderer that is over budget on
-    a slower machine, and re-running until it passes settles neither.
-    Settling it means one of: normalising against a reference the
-    measurement takes itself, asserting the shape the module doc already
-    describes while tracking the absolute figure outside the gate, or
-    holding the budget on the slower host with the suite loading it.
+  the measurement and prints it, and asserts no elapsed time: a wall-clock
+  bound is a claim about the machine and what else is running on it, so what
+  the test gates is that real threads draw the picture one thread does. On a
+  slower development host the same frame costs more per pass — the light
+  pass most, at 1.3 to 2.5 times its allocation — which is the figure to
+  re-measure whenever the reference machine changes.
   - **Three output-identical optimisations have already been taken**, so
     they are not re-derived: `FastHash::hash_bytes` is `#[inline]` (the
     noise lattice hashes a fixed 16-byte key, and folding the length at the
@@ -622,10 +609,11 @@ composes them. What a later item needs to know:
   wearing lighting's clothes. The relief term saturates at
   `MAX_STEP_RISE_SUB_UNITS` — the rules' own slope/cliff line — so ground a
   player can walk over is shaded across its whole range.
-- **The ladder's rung 4 turns the relief-shading stencil** (two cells, one
-  cell, none) until WS6's figures bring cast shadows for it to also govern.
-  The wider stencil is both the penumbra and the dearer, so narrowing it
-  before dropping the term is the right order either way.
+- **The ladder's rung 4 is shadow softness, across the frame.** Its first
+  notch hardens every shadow edge at once — each figure's contact shadow to
+  one ellipse, the relief term to a one-cell stencil — and its second drops
+  the relief term. The wider stencil is both the penumbra and the dearer, so
+  narrowing it before dropping the term is the right order either way.
 - **A paint reads nothing.** Chunk generation is handed to a worker through
   the shared deferral desk; the frame draws the ground that has arrived and
   marks the rest. The desk holds one request, which is the right policy: the
@@ -676,11 +664,16 @@ a light buffer at half resolution and upsampled.
 
 ### The frame
 
-A tiled, threaded software renderer. The visible area is split into tiles; each
-tile is a job on `lib/parallel`; within a tile the passes are terrain splat →
-decals → ground scenery → entities depth-sorted by ground y → overhead canopy
-→ particles → weather → light/fog composite → UI. Scenery and entities are
-bucketed per tile once per frame, so a tile touches only what overlaps it.
+A tiled, threaded software renderer. The visible area is split into
+full-width bands of rows, each a job on `lib/parallel`, and the passes are
+terrain splat with its decals → light/fog composite → ground scenery and
+entities depth-sorted by ground y → overhead canopy → particles → weather →
+UI. Scenery and entities come *after* the light: the light buffer is the
+ground's own relief shading, and a figure standing on a slope is neither
+tilted with it nor lit by it — it is already shaded from its own surfaces by
+the same sun — so what it takes from the ground is the fog at its feet, as a
+veil over its every stroke. Each band draws only the figures whose rows reach
+it.
 
 Per §28: input is drained, then the frame is produced once from the state the
 events left. The simulation runs at a fixed tick; the render interpolates
@@ -728,12 +721,12 @@ the checks. The floor is therefore measured off the art rather than chosen
 here, and it moves when the art does.
 
 It is measured **once, at build time**, by the FG5 contact-sheet harness, which
-renders the figure grid — authored and generated figures alike — at every drawn
-size, and compiled in as the ladder's floor. The presets are bundle content,
-and measuring every one of them is part of WS6, the item that ships them.
-Nothing measures readability on a frame: that would put the
-most expensive check in the project on the hot path to decide whether the
-frame is too expensive.
+renders the figure grid — authored and generated figures alike, and every
+preset the game ships — at every drawn size, and compiled in as the ladder's
+floor: the smallest side the harness proves its bounds at, and the reach of
+the smallest figure a record describes. Nothing measures readability on a
+frame: that would put the most expensive check in the project on the hot path
+to decide whether the frame is too expensive.
 
 Reaching the floor with the frame still over budget is **reported, not
 hidden**: the frame rate gives way, the diagnostic names the floor as the
@@ -823,6 +816,88 @@ authored clips.
 Equipment is parts, not paint: a helm, a pauldron, a cloak, a blade are parts
 attached to named sockets in the rig with their own palette, so a character's
 gear is visible, mixable, and costs no new art path.
+
+### What WS6 settled
+
+Figures are on screen. The game-side animation lives in `wintersun/figure`
+(`actor`, the `motion` set) and the drawing in `wintersun/app` (`figures`,
+the frame's third pass). What a later item needs to know:
+
+- **The ground a figure stands on is the ground drawn.** The world is drawn
+  from directly above with height shown by shading alone, so a figure's feet
+  meet a level plane everywhere; the per-foot terrain solve is for a view that
+  draws relief (`plans/FIGURE.md` FG4). Standing water is the exception that
+  shows: a wading figure stands on the bed, sunk by the depth the rules report
+  at its cell (`figures::submerged`), and nothing of it is drawn below the
+  surface.
+- **Figures are drawn after the light composite** (§3, the frame), each
+  veiled by the fog at its feet. A later item's point lights reach a figure
+  the same way: read from the light buffer where it stands, not applied to
+  its pixels as the ground's relief is.
+- **The clip set is authored whole, on reference timings.** All seventeen §4
+  clips ship. An action is authored across windup, active and recovery in
+  phase and takes its seconds from outside (`clip::Timing`), so WS9–WS11's
+  action documents set how long a blow takes without re-authoring its clip.
+- **Locomotion is chosen, not blended.** The walk and the run have different
+  stances, and a blend weighed by speed sank a planted foot half a unit and
+  slid it by several between their paces. One gait plays at a time, chosen by
+  speed with a margin either side of each change, paced by distance at its own
+  fitted stride, and a change fades over a quarter of a second at the phase
+  the two share. A test holds the planted foot still from a third of the
+  walk's pace to over three times it.
+- **The world scale is the figure's.** `actor::WORLD_SCALE` (24 world
+  sub-units a figure unit) puts a reference figure a little over two cells
+  tall, where the simulation's default pace runs at the run clip's own
+  cadence. The player's collision radius is its figure's footprint, so the
+  rules and the picture agree on how wide a body is.
+- **One sun.** `reference::SUN_TOWARD` and `SUN_ELEVATION` are the light the
+  harness measures figures under, and `light::Sun::light` builds the game's
+  figure light from the ground sun's own direction.
+- **The ladder has its floor.** `Ladder::floor` is the deepest step still
+  drawing the smallest figure a record describes at the harness's floor side
+  (`actor::readable`, from `humanoid::LEAST_REACH` and `reference::SIDES[0]`),
+  held before every frame (`Governor::hold`) and reported once when frames
+  overrun there. At the default zoom every render scale stays readable; at the
+  furthest the render scale never moves. Render scales step whole — 4/5, 2/3
+  and 1/2, under window caps of 1, 2/3, 1/2, 1/3 and 1/4 — because a fraction
+  that split a sub-unit made the view cover a different piece of the world,
+  a zoom rather than a degradation.
+- **The presets are the ten records in `app/Resources/`**, each measured by
+  the harness in every motion at the floor. The player walks as
+  `presets::DEFAULT`, read once before the window opens (`CAP_FS_ACCESS`),
+  and as the reference figure — with the reason stated — where it cannot be
+  read.
+- **The figure pass is measured with the budget's sixty-four rigs.** On the
+  development host this was measured on, at 1280×720 on four threads: terrain
+  4.7 ms (94%), light 2.6 ms (130%, as before WS6 on that host), figures
+  2.5 ms against their 3.5 ms (70%), 9.8 ms of drawing in the 16.6 ms frame.
+  Two costs were taken out on the way: every shape fill allocated its scan
+  buffers, which on the process's one heap would have serialised the bands,
+  and now reuses a `lib/raster::ScanScratch` held per band. Placing a figure
+  costs about 40 µs on one core, 40% of it in `lib/util::mathf::sqrt`'s
+  Newton iterations; a hardware square root would move every digest built on
+  `mathf`, so it is its own decision rather than this item's.
+- **Input is drained before a frame**, so a burst of events is one paint, and
+  **a minimized window stops** its clock and its frames until it is shown
+  again.
+- **The ground held is the view's working set.** A chunk is some hundred
+  kibibytes, and the client kept every one it had generated; it now gives
+  back any the view and a one-chunk margin no longer need
+  (`terrain::worth_holding`), so walking the realm no longer grows it.
+- **The client digest draws figures.** Five of them — every species, a walk
+  and a run, both action layers, a figure in the air and one wading — stand in
+  both reference frames.
+- **Open: no seat notice reaches a window application.** §10's pause on a fast
+  user switch needs one, but `plans/NEW-DESKTOP-LOGIN.md` G5 has a
+  backgrounded session keep its applications running with nothing said to
+  them. `Shell` models the seat and the property model drives it; the client
+  has nothing to feed it from. Deciding who tells an application its seat has
+  gone — and in what form — is the display and login plans' call.
+- **Open: M1's exit criterion is shown piecewise, not end to end.** The frame
+  budget, the figures and every digest are measured, but no test yet launches
+  the bundle in a guest and reads a frame back — §15's client vertical — so
+  "one character walks in a window and in exclusive fullscreen" rests on its
+  parts.
 
 ## 5. WS3/WS9/WS10/WS11/WS21 — the simulation and the rules
 

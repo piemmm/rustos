@@ -3250,6 +3250,28 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::FD_REDEEM_FROM,
+        name: "fd_redeem_from",
+        arg_count: 3,
+        args: [
+            // The grant handle minted to the calling task, then the
+            // expected grantor's attested `ProcId` and its length.
+            AbiType::Handle,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the freshly installed descriptor number (or a
+        // negated errno), like `fd_redeem`.
+        ret: AbiType::U64,
+        // Ungated and audited for `fd_redeem`'s reasons; the grantor binding
+        // narrows what may be redeemed and grants nothing.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

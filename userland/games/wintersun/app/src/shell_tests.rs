@@ -10,6 +10,7 @@ fn a_new_window_is_restored_with_no_extent_yet() {
     assert_eq!(shell.extent(), None);
     assert!(!shell.focused());
     assert!(shell.seated());
+    assert!(shell.shown());
     assert!(shell.running());
     assert_eq!(Shell::default(), shell);
 }
@@ -105,4 +106,35 @@ fn losing_the_seat_stops_the_clock_and_drops_focus() {
     assert!(!shell.seat(false), "the same report twice is one edge");
     assert!(shell.seat(true));
     assert!(shell.running());
+}
+
+#[test]
+fn a_minimized_window_stops_until_it_is_shown_again() {
+    let mut shell = Shell::new();
+    shell.resized(1280, 720, WindowSizeState::Restored);
+    shell.focus(true);
+    shell.minimized();
+    assert!(
+        !shell.shown() && !shell.running(),
+        "a minimized window kept drawing"
+    );
+    shell.focus(false);
+    assert!(!shell.running(), "losing focus is not being shown");
+    shell.focus(true);
+    assert!(
+        shell.running(),
+        "regaining focus did not bring the window back"
+    );
+
+    shell.minimized();
+    shell.resized(1280, 720, WindowSizeState::Restored);
+    assert!(
+        shell.running(),
+        "a size given back did not bring the window back"
+    );
+
+    shell.minimized();
+    shell.seat(false);
+    shell.focus(true);
+    assert!(!shell.running(), "a window shown on no seat ran");
 }

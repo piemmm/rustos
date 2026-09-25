@@ -6,11 +6,12 @@
 //! * the camera never shows ground outside the realm, whatever sequence
 //!   of follows and zooms put it where it is;
 //! * the degradation ladder never leaves its range, turns more than one
-//!   knob at a time, or gives back a knob it did not shed;
+//!   knob at a time, gives back a knob it did not shed, or goes past the
+//!   floor the window and the zoom set;
 //! * a render target is always inside the software path's cap and always
 //!   has pixels, at every window size and every ladder step;
 //! * the bands a target is cut into tile its rows exactly once, for every
-//!   count a runner could ask for;
+//!   width a runner could have;
 //! * the clock never reports more ticks than its catch-up bound allows,
 //!   and its fraction never leaves `0..=255`;
 //! * every combination of held keys produces a direction the wire
@@ -27,6 +28,8 @@
 use proptest::prelude::*;
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
 use tairix_abi::window_ipc::WindowSizeState;
+use tairix_parallel::Reversed;
+use tairix_wintersun_app::budget::{FrameTimes, Governor, Pass};
 use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
 use tairix_wintersun_app::input::Controls;
 use tairix_wintersun_app::pacing::{Pacer, MAX_CATCHUP_NS};
@@ -65,7 +68,9 @@ enum Cmd {
     Focus { focused: bool },
     /// The seat came or went.
     Seat { seated: bool },
-    /// A frame overran or fitted, moving the ladder.
+    /// The window was minimized.
+    Minimize,
+    /// A frame overran or came in comfortably, and the governor saw it.
     Frame { over: bool },
     /// The clock advanced.
     Tick { delta_ns: u64 },
@@ -106,7 +111,7 @@ struct Session {
     shell: Shell,
     controls: Controls,
     pacer: Pacer,
-    ladder: Ladder,
+    governor: Governor,
     clock_ns: u64,
     params: RealmParams,
 }
@@ -122,7 +127,7 @@ impl Session {
             shell: Shell::new(),
             controls: Controls::new(),
             pacer: Pacer::new(TickRate::default_rate()),
-            ladder: Ladder::FULL,
+            governor: Governor::new(),
             clock_ns: 0,
             params: params(),
         }
@@ -132,6 +137,13 @@ impl Session {
     /// when one is open and the baseline before that.
     fn extent(&self) -> (u32, u32) {
         self.shell.extent().unwrap_or((1280, 720))
+    }
+
+    /// The deepest the ladder may go for the window and the zoom as they
+    /// stand.
+    fn floor(&self) -> Ladder {
+        let (w, h) = self.extent();
+        Ladder::floor(w.max(1), h.max(1), self.camera.zoom())
     }
 
     fn run(&mut self, command: Cmd) -> Result<(), TestCaseError> {
@@ -176,22 +188,30 @@ impl Session {
                 }
             }
             Cmd::Seat { seated } => {
-                if self.shell.seat(seated) {
-                    if self.shell.running() {
-                        self.pacer.resume(self.clock_ns);
-                    } else {
-                        self.pacer.pause();
-                    }
-                }
+                self.shell.seat(seated);
             }
+            Cmd::Minimize => self.shell.minimized(),
             Cmd::Frame { over } => {
-                let moved = if over {
-                    self.ladder.shed()
+                let mut times = FrameTimes::new();
+                let cost = if over {
+                    Pass::Terrain.budget_ns() * 8
                 } else {
-                    self.ladder.restore()
+                    1_000_000
                 };
-                if let Some(next) = moved {
-                    self.ladder = next;
+                times.record(Pass::Terrain, cost);
+                let before = self.governor.ladder();
+                if self.governor.observe(&times) {
+                    let after = self.governor.ladder();
+                    let expected = if over {
+                        before.shed()
+                    } else {
+                        before.restore()
+                    };
+                    prop_assert_eq!(
+                        Some(after),
+                        expected,
+                        "a frame moved the ladder somewhere other than one notch"
+                    );
                 }
             }
             Cmd::Tick { delta_ns } => {
@@ -204,6 +224,16 @@ impl Session {
                 );
             }
         }
+        // What the client does with its clock after every wake, and before
+        // every frame it draws.
+        if self.shell.running() {
+            if self.pacer.paused() {
+                self.pacer.resume(self.clock_ns);
+            }
+        } else if !self.pacer.paused() {
+            self.pacer.pause();
+        }
+        self.governor.hold(self.floor());
         Ok(())
     }
 }
@@ -211,8 +241,19 @@ impl Session {
 /// Everything that must hold after every command.
 fn check(session: &Session) -> Result<(), TestCaseError> {
     let (w, h) = session.extent();
+    let ladder = session.governor.ladder();
+    prop_assert!(ladder.step() <= Ladder::MAX_STEP);
+    prop_assert!(
+        ladder <= session.floor(),
+        "the ladder stands at {:?}, past the floor {:?}",
+        ladder,
+        session.floor()
+    );
+    let view =
+        Viewport::new(w.max(1), h.max(1), ladder.render_scale()).expect("a window with pixels");
+
     let bounds = realm_bounds(session.params);
-    let visible = session.camera.visible(w, h);
+    let visible = session.camera.visible(&view);
     prop_assert!(
         visible.min_x >= bounds.min_x
             && visible.max_x <= bounds.max_x
@@ -221,9 +262,6 @@ fn check(session: &Session) -> Result<(), TestCaseError> {
         "the camera shows {visible:?}, outside the realm's {bounds:?}"
     );
 
-    prop_assert!(session.ladder.step() <= Ladder::MAX_STEP);
-    let scale = session.ladder.render_scale();
-    let view = Viewport::new(w.max(1), h.max(1), scale).expect("a window with pixels");
     let (rw, rh) = view.render();
     prop_assert!(
         rw >= 1 && rh >= 1,
@@ -235,19 +273,22 @@ fn check(session: &Session) -> Result<(), TestCaseError> {
     );
     prop_assert!(view.render_pixels() == (rw as usize) * (rh as usize));
 
-    for count in [1usize, 2, 3, 5, 9] {
-        let rows = view.band_rows(count);
-        let mut next = 0usize;
-        for index in 0..count {
-            let (start, end) = rows.range(index).expect("inside the count");
-            prop_assert_eq!(start, next, "band {} of {} did not tile", index, count);
-            next = end;
-        }
-        prop_assert_eq!(
-            next,
-            rh as usize,
-            "{} bands did not cover {} rows",
-            count,
+    for width in [1usize, 2, 3, 5, 9] {
+        let runner = Reversed::new(width);
+        let rows = view.band_rows(&runner);
+        let bands = rh.div_ceil(rows);
+        prop_assert!(rows >= 1);
+        prop_assert!(
+            bands as usize <= view.band_count(&runner),
+            "{} bands of {} rows for a runner {} wide",
+            bands,
+            rows,
+            width
+        );
+        prop_assert!(
+            rows * (bands - 1) < rh && rows * bands >= rh,
+            "bands of {} rows did not tile {} rows",
+            rows,
             rh
         );
     }
@@ -261,7 +302,7 @@ fn check(session: &Session) -> Result<(), TestCaseError> {
     prop_assert_ne!(
         session.shell.running(),
         session.pacer.paused(),
-        "the clock disagreed with the seat"
+        "the clock disagreed with whether anyone can see the window"
     );
     Ok(())
 }
@@ -283,6 +324,7 @@ fn command() -> impl Strategy<Value = Cmd> {
         (any::<u8>(), any::<bool>()).prop_map(|(code, down)| Cmd::Key { code, down }),
         any::<bool>().prop_map(|focused| Cmd::Focus { focused }),
         any::<bool>().prop_map(|seated| Cmd::Seat { seated }),
+        Just(Cmd::Minimize),
         any::<bool>().prop_map(|over| Cmd::Frame { over }),
         (0u64..5_000_000_000).prop_map(|delta_ns| Cmd::Tick { delta_ns }),
     ]
@@ -331,7 +373,7 @@ fn the_ladder_turns_one_knob_per_step_from_every_starting_point() {
                     l.particle_shift(),
                     l.light_shift(),
                     l.material_quality().octaves(),
-                    l.shadow(),
+                    (l.shadow(), l.relief()),
                     (s.numerator(), s.denominator()),
                 )
             };

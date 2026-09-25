@@ -1,9 +1,10 @@
-//! The target keeps the window's shape, never exceeds the cap, and the
-//! bands it is cut into tile its rows exactly once.
+//! The target keeps the window's shape, never exceeds the cap, keeps every
+//! zoom's step whole, and the bands it is cut into tile its rows exactly
+//! once.
 
 use super::*;
 use crate::quality::Ladder;
-use tairix_parallel::Serial;
+use tairix_parallel::{Reversed, Serial};
 
 #[test]
 fn a_window_within_the_cap_renders_at_its_own_size() {
@@ -51,11 +52,43 @@ fn capping_keeps_the_window_proportions() {
     let want = u64::from(1080u32) * u64::from(MAX_RENDER_WIDTH) / u64::from(7680u32);
     assert_eq!(u64::from(rh), want);
 
-    // A very tall one: the height binds instead.
+    // A very tall one: the height binds instead, at the largest fraction
+    // that brings it inside the cap.
     let tall = Viewport::new(1000, 4000, RenderScale::ONE).expect("a tall window");
     let (tw, th) = tall.render();
-    assert_eq!(th, MAX_RENDER_HEIGHT);
-    assert!(tw <= MAX_RENDER_WIDTH);
+    assert!(th <= MAX_RENDER_HEIGHT && tw <= MAX_RENDER_WIDTH);
+    let chosen = CAPS
+        .iter()
+        .position(|cap| *cap == tall.scale())
+        .expect("a stated cap");
+    let larger = CAPS[chosen - 1];
+    assert!(
+        larger.apply(4000) > MAX_RENDER_HEIGHT,
+        "a larger fraction fitted"
+    );
+    assert_eq!(
+        (tw, th),
+        (tall.scale().apply(1000), tall.scale().apply(4000)),
+        "the two axes were scaled by different fractions"
+    );
+}
+
+#[test]
+fn every_capped_step_is_whole() {
+    for (w, h) in [(3840u32, 2160u32), (7680, 1080), (1000, 4000), (9000, 9000)] {
+        for step in 0..=Ladder::MAX_STEP {
+            let view = Viewport::new(w, h, Ladder::new(step).render_scale()).expect("a window");
+            for zoom in [Zoom::NEAREST, Zoom::DEFAULT, Zoom::FURTHEST] {
+                let base = i64::from(zoom.sub_units_per_pixel());
+                let scale = view.scale();
+                assert_eq!(
+                    i64::from(view.step(zoom)) * i64::from(scale.numerator()),
+                    base * i64::from(scale.denominator()),
+                    "{w}x{h} at step {step} split a sub-unit at {zoom:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -70,57 +103,46 @@ fn the_ladders_last_rung_shrinks_the_target_below_the_window() {
 }
 
 #[test]
-fn bands_tile_every_row_exactly_once() {
-    for (w, h) in [(1280u32, 720u32), (17, 3), (1, 1), (640, 101)] {
+fn bands_tile_every_row_and_none_is_longer_than_a_balanced_split() {
+    for (w, h) in [(1280u32, 720u32), (17, 3), (1, 1), (640, 101), (64, 4001)] {
         let view = Viewport::new(w, h, RenderScale::ONE).expect("a real window");
-        for count in 1..=9usize {
-            let rows = view.band_rows(count);
-            let mut next = 0usize;
-            for index in 0..count {
-                let (start, end) = rows.range(index).expect("index is inside the count");
-                assert_eq!(
-                    start, next,
-                    "band {index} of {count} left a gap or overlapped"
-                );
-                assert!(end >= start);
-                next = end;
-            }
-            assert_eq!(next, h as usize, "{count} bands did not cover {h} rows");
-            assert_eq!(rows.range(count), None, "there is no band past the last");
+        let (_, rendered) = view.render();
+        for width in 1..=9usize {
+            let runner = Reversed::new(width);
+            let count = u32::try_from(view.band_count(&runner)).expect("a handful");
+            let rows = view.band_rows(&runner);
+            let bands = rendered.div_ceil(rows);
+            assert!(
+                bands <= count,
+                "{bands} bands for a runner that asked for {count}"
+            );
+            assert!(
+                rows * bands >= rendered,
+                "{bands} bands of {rows} missed rows"
+            );
+            assert!(
+                rows * (bands - 1) < rendered,
+                "a band of {rows} rows held nothing"
+            );
+            assert_eq!(
+                rows,
+                rendered.div_ceil(count),
+                "a band is longer than it need be"
+            );
         }
     }
-}
-
-#[test]
-fn band_lengths_differ_by_at_most_one_row() {
-    let view = Viewport::new(64, 101, RenderScale::ONE).expect("a real window");
-    let rows = view.band_rows(8);
-    let mut lengths = alloc::vec::Vec::new();
-    for index in 0..rows.count() {
-        let (start, end) = rows.range(index).expect("inside the count");
-        lengths.push(end - start);
-    }
-    let (min, max) = (
-        lengths.iter().copied().min().expect("at least one band"),
-        lengths.iter().copied().max().expect("at least one band"),
-    );
-    assert!(max - min <= 1, "band lengths {lengths:?} are not balanced");
 }
 
 #[test]
 fn a_serial_runner_asks_for_one_band() {
     let view = Viewport::new(1280, 720, RenderScale::ONE).expect("a real window");
     assert_eq!(view.band_count(&Serial), 1, "one thread wants one piece");
+    assert_eq!(view.band_rows(&Serial), 720);
 }
 
 #[test]
-fn a_tiny_target_is_never_split_below_one_band() {
+fn a_tiny_target_is_never_split_below_one_row() {
     let view = Viewport::new(1, 1, RenderScale::ONE).expect("a one-pixel window");
-    assert_eq!(view.band_count(&Serial), 1);
-    assert_eq!(
-        view.band_rows(0).count(),
-        1,
-        "a zero count is floored at one"
-    );
-    assert_eq!(view.band_rows(0).range(0), Some((0, 1)));
+    assert_eq!(view.band_count(&Reversed::new(16)), 1);
+    assert_eq!(view.band_rows(&Reversed::new(16)), 1);
 }

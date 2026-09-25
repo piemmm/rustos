@@ -1,5 +1,6 @@
 //! The window the game is looked at through: which of the three size
-//! states it is in, and whether it still has a seat.
+//! states it is in, whether it is on screen, and whether it still has a
+//! seat.
 //!
 //! The client *asks* for a size state and the compositor *answers* with
 //! one. Nothing here assumes a request took effect: the state is adopted
@@ -18,6 +19,7 @@ pub struct Shell {
     extent: Option<(u32, u32)>,
     focused: bool,
     seated: bool,
+    shown: bool,
 }
 
 impl Default for Shell {
@@ -36,6 +38,7 @@ impl Shell {
             extent: None,
             focused: false,
             seated: true,
+            shown: true,
         }
     }
 
@@ -63,14 +66,26 @@ impl Shell {
         self.seated
     }
 
-    /// Whether the game should be running its clock.
+    /// Whether the window is on screen rather than minimized.
+    #[must_use]
+    pub const fn shown(&self) -> bool {
+        self.shown
+    }
+
+    /// Whether the game should be running its clock and drawing frames.
     ///
-    /// A window without a seat is not on any screen, so simulating for it
-    /// would spend a core on a picture nobody is looking at — and, worse,
-    /// would advance past the moment the player left.
+    /// A window without a seat, or minimized off the screen, is a picture
+    /// nobody is looking at: drawing it would spend a core for nothing, and
+    /// simulating for it would advance past the moment the player left.
     #[must_use]
     pub const fn running(&self) -> bool {
-        self.seated
+        self.seated && self.shown
+    }
+
+    /// Record the window being minimized: off the screen until the
+    /// compositor gives it focus or a size again.
+    pub fn minimized(&mut self) {
+        self.shown = false;
     }
 
     /// Adopt the extent and state the compositor answered with.
@@ -87,6 +102,7 @@ impl Shell {
         }
         self.extent = Some((width, height));
         self.state = state;
+        self.shown = true;
         moved
     }
 
@@ -97,6 +113,9 @@ impl Shell {
     pub fn focus(&mut self, focused: bool) -> bool {
         let lost = self.focused && !focused;
         self.focused = focused;
+        if focused {
+            self.shown = true;
+        }
         lost
     }
 

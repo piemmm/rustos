@@ -25,8 +25,9 @@
 //!
 //! # One stage
 //!
-//! Every figure stands on the same stage — level ground, one light, one
-//! breath, and one framing in a square cell — and the designer's preview
+//! Every figure stands on the same stage — level ground, the one sun the
+//! game lights its ground by too, one breath, and each motion's framing in a
+//! square cell, never tighter than locomotion's — and the designer's preview
 //! stands on it as well, so the figure a player is shown while designing is
 //! drawn exactly as the harness measures it.
 //!
@@ -87,9 +88,18 @@ pub const FACINGS: [Facing; 4] = [
 /// separately by the digest.
 pub const LEVEL: [f64; 2] = [0.0, 0.0];
 
-/// Where the light comes from: across the ground, into the scene, and how
-/// far above the horizon, in radians.
-pub const LIGHT: (f64, f64, f64) = (-0.6, 0.8, 0.55);
+/// The way `WinterSun`'s low sun travels over the ground, east and south.
+///
+/// From the north-west, the side a relief map is lit from so that a hill
+/// reads as raised rather than sunk. One definition for the stage and the
+/// game's scene alike — the ground's relief shading takes its direction from
+/// here — so a figure is measured under the light it is drawn under, and a
+/// figure and the slope it stands on are never lit from two sides.
+pub const SUN_TOWARD: (i32, i32) = (3, 2);
+
+/// How far above the horizon the sun stands, in radians: low, so shadows
+/// are long and a rounded surface shades across its whole turn.
+pub const SUN_ELEVATION: f64 = 0.55;
 
 /// The contact shadow's footprint radius in figure-local units, and its tone
 /// at full contact.
@@ -115,36 +125,62 @@ pub const BREATH: (f64, f64, f64) = (4.5, 0.06, 0.37);
 /// biggest a figure is drawn, so the one a cost budget is taken at.
 pub const SIDES: [u32; 3] = [32, 64, 128];
 
-/// How far above its ground point a figure is drawn, in units of its rest
-/// reach: its crown, and what the depth axis lifts behind it.
+/// How far above and below its ground point a standing, walking or running
+/// figure is drawn, in units of its rest reach: its crown and what the depth
+/// axis lifts behind it, and the near foot of a stride, which the depth axis
+/// draws below the ground point the figure stands on.
+///
+/// One framing for the three, because they are one continuum a figure moves
+/// through, and the tightest any motion is framed at: no motion's cells draw
+/// a figure larger than these do.
+const STANDING: (f64, f64) = (1.02, 0.20);
+
+/// How far above and below its ground point a figure in `kind` is drawn, in
+/// units of its rest reach.
 ///
 /// Measured off the outline of every ring of every build corner of every
-/// species, in every shipped motion at the grid's phases, either extreme of
-/// the breath and every sixteenth of a turn, and rounded up to a hundredth;
-/// tests hold every corner inside it and every cell of the grid inside its
-/// square.
-const ABOVE: f64 = 1.02;
-
-/// How far below its ground point a figure is drawn, in units of its rest
-/// reach: the near foot of a stride, which the depth axis draws below the
-/// ground point the figure stands on.
-///
-/// Measured and held as [`ABOVE`] is.
-const BELOW: f64 = 0.20;
+/// species, at the grid's phases, either extreme of the breath and every
+/// sixteenth of a turn, and rounded up to a hundredth; never less than
+/// locomotion's, so a motion that reaches less far is framed as locomotion
+/// is. An arm raised in front of a figure facing away is drawn up the screen
+/// past its crown, which is why a motion that lifts the arms needs more room
+/// above than one that swings them.
+#[must_use]
+pub const fn allowance(kind: Kind) -> (f64, f64) {
+    match kind {
+        Kind::Idle | Kind::Walk | Kind::Run => STANDING,
+        Kind::Die => (1.05, STANDING.1),
+        Kind::Sit => (STANDING.0, 0.30),
+        Kind::Dodge => (1.10, STANDING.1),
+        Kind::Hit => (1.11, STANDING.1),
+        Kind::Cast => (1.12, STANDING.1),
+        Kind::MeleeLight => (1.14, STANDING.1),
+        Kind::Channel => (1.18, STANDING.1),
+        Kind::Swim => (1.19, STANDING.1),
+        Kind::MeleeHeavy => (1.22, STANDING.1),
+        Kind::Draw => (1.24, STANDING.1),
+        Kind::Climb => (1.27, STANDING.1),
+        Kind::Stagger => (1.29, STANDING.1),
+        Kind::Loose => (1.30, STANDING.1),
+        Kind::Fall => (1.36, STANDING.1),
+    }
+}
 
 /// The share of a cell's side left clear at its top and at its bottom.
 const MARGIN: f64 = 0.02;
 
-/// How much of a cell's side the figure's reach is drawn into: all of
-/// [`ABOVE`] and [`BELOW`] between the margins.
-const FIT: f64 = (1.0 - 2.0 * MARGIN) / (ABOVE + BELOW);
+/// How much of a cell's side a figure's reach is drawn into in `kind`, all
+/// of its allowance fitting between the margins, and where its ground
+/// contact sits down the cell.
+fn framing(kind: Kind) -> (f64, f64) {
+    let (above, below) = allowance(kind);
+    let fit = (1.0 - 2.0 * MARGIN) / (above + below);
+    (fit, MARGIN + above * fit)
+}
 
-/// Where the figure's ground contact sits down the cell.
-const GROUND: f64 = MARGIN + ABOVE * FIT;
-
-/// Where a figure reaching `reach` is drawn in a square cell of `side`
-/// pixels: the scale that fits the whole of what it draws, and the surface
-/// point its ground contact sits on.
+/// Where a figure reaching `reach` is drawn in `kind`, in a square cell of
+/// `side` pixels: the scale that fits the whole of what it draws, and the
+/// surface point its ground contact sits on.
 ///
 /// Taken from the figure's own reach rather than a height stated here, so a
 /// taller or broader figure fits the same cell with no second number.
@@ -153,13 +189,27 @@ const GROUND: f64 = MARGIN + ABOVE * FIT;
 ///
 /// [`FigureError::ScaleUnreal`] for a reach or a side no figure can be
 /// framed by.
-pub fn fit(reach: f64, side: u32) -> Result<(f64, (f64, f64)), FigureError> {
+pub fn fit(kind: Kind, reach: f64, side: u32) -> Result<(f64, (f64, f64)), FigureError> {
     let extent = f64::from(side);
-    let scale = extent * FIT / reach;
+    let (share, ground) = framing(kind);
+    let scale = extent * share / reach;
     if !scale.is_finite() || scale <= 0.0 {
         return Err(FigureError::ScaleUnreal);
     }
-    Ok((scale, (extent * 0.5, extent * GROUND)))
+    Ok((scale, (extent * 0.5, extent * ground)))
+}
+
+/// The side of the square cell a standing figure reaching `reach` fills when
+/// drawn at `scale` surface pixels a unit: the inverse of [`fit`], at the
+/// tightest framing any motion is drawn at.
+///
+/// What says which of the grid's [`SIDES`] a figure drawn anywhere else is
+/// being drawn at. The tightest framing is the conservative reading: every
+/// motion proven readable at a side in its own framing is drawn there at no
+/// larger a scale than this.
+#[must_use]
+pub fn side_at(reach: f64, scale: f64) -> f64 {
+    scale * reach / framing(Kind::Idle).0
 }
 
 /// One cell of a figure's grid: a motion, a phase of it, and a heading.
@@ -205,18 +255,18 @@ pub enum Sampling {
     Walk,
 }
 
-/// One figure of the grid.
+/// One figure of the grid, or a record measured to the grid's bounds.
 #[derive(Copy, Clone, Debug)]
-pub struct Figure {
+pub struct Figure<'a> {
     /// Its stable name, for a ledger row or a sheet's file name.
-    pub name: &'static str,
+    pub name: &'a str,
     /// The record it is built from.
     pub spec: Spec,
     /// Which motions it is drawn in.
     pub sampling: Sampling,
 }
 
-impl Figure {
+impl Figure<'_> {
     /// The checked record.
     ///
     /// # Errors
@@ -253,7 +303,7 @@ impl Figure {
 /// The grid's figures, in the order the digest folds them and the ledger
 /// lists them: the five species' references, then each species' least and
 /// most.
-pub const FIGURES: [Figure; 15] = [
+pub const FIGURES: [Figure<'static>; 15] = [
     reference("human", HUMAN),
     reference("elf", ELF),
     reference("dwarf", DWARF),
@@ -451,7 +501,7 @@ impl Sample {
     ///
     /// Whatever [`plausible::figure`] refuses, which is nothing: the crate's
     /// tests hold every draw to a record.
-    pub fn figure(&self) -> Result<Figure, IdentityError> {
+    pub fn figure(&self) -> Result<Figure<'static>, IdentityError> {
         let drawn = plausible::figure(self.species, &mut NonCryptoRng::seed_from_u64(self.seed))?;
         Ok(Figure {
             name: self.name,
@@ -485,8 +535,8 @@ const fn sample(name: &'static str, species: Species, seed: u64) -> Sample {
 
 /// Every figure of the grid, in the order the digest folds them and the
 /// ledger lists them: the authored figures, then the generated ones.
-pub fn grid() -> impl Iterator<Item = Result<Figure, IdentityError>> {
-    let (authored, drawn): (&'static [Figure], &'static [Sample]) = (&FIGURES, &SAMPLES);
+pub fn grid() -> impl Iterator<Item = Result<Figure<'static>, IdentityError>> {
+    let (authored, drawn): (&'static [Figure<'static>], &'static [Sample]) = (&FIGURES, &SAMPLES);
     authored
         .iter()
         .copied()
@@ -517,7 +567,7 @@ const fn palette(skin: u8, hair: u8, eyes: u8, markings: u8, accent: u8) -> Pale
     }
 }
 
-const fn reference(name: &'static str, spec: Spec) -> Figure {
+const fn reference(name: &'static str, spec: Spec) -> Figure<'static> {
     Figure {
         name,
         spec,
@@ -531,7 +581,7 @@ const fn walking(
     setting: Setting,
     features: Features,
     palette: Palette,
-) -> Figure {
+) -> Figure<'static> {
     Figure {
         name,
         spec: Spec {
@@ -640,6 +690,10 @@ impl Staged {
 
     pub(crate) const fn rig(&self) -> &Rig {
         &self.rig
+    }
+
+    pub(crate) const fn legs(&self) -> Legs {
+        self.legs
     }
 
     pub(crate) fn retint(&mut self, tints: Tints) {
@@ -803,19 +857,23 @@ impl Reference {
         Contact::new(SHADOW.0, SHADOW.1)?.cast(Self::light()?, lift, scale, at)
     }
 
-    /// The light the reference grid is lit by.
+    /// The light the reference grid is lit by: the sun.
     ///
     /// # Errors
     ///
     /// [`FigureError::LightUnreal`] never, for the stated constants.
     pub fn light() -> Result<Light, FigureError> {
-        Light::new(LIGHT.0, LIGHT.1, LIGHT.2)
+        Light::new(
+            f64::from(SUN_TOWARD.0),
+            f64::from(SUN_TOWARD.1),
+            SUN_ELEVATION,
+        )
     }
 
     /// The legs the planting solve runs along.
     #[must_use]
     pub const fn legs(&self) -> Legs {
-        self.staged.legs
+        self.staged.legs()
     }
 }
 

@@ -451,6 +451,9 @@ const NUM_FD_GRANT: u64 = SyscallNumber::FD_GRANT.as_u16() as u64;
 /// `fd_redeem` syscall number (as above).
 const NUM_FD_REDEEM: u64 = SyscallNumber::FD_REDEEM.as_u16() as u64;
 
+/// `fd_redeem_from` syscall number (as above).
+const NUM_FD_REDEEM_FROM: u64 = SyscallNumber::FD_REDEEM_FROM.as_u16() as u64;
+
 /// `thread_create` syscall number (as above).
 const NUM_THREAD_CREATE: u64 = SyscallNumber::THREAD_CREATE.as_u16() as u64;
 
@@ -4275,6 +4278,37 @@ pub fn fd_redeem(handle: u64) -> i64 {
     ret as i64
 }
 
+/// [`fd_redeem`], only if `grantor` minted the delegation
+/// (`SyscallNumber::FD_REDEEM_FROM`).
+///
+/// What a service redeeming a handle another process named to it calls, so
+/// it cannot be made to consume a delegation somebody else minted to it. A
+/// handle `grantor` did not mint fails closed with `-errno` (`NotFound`),
+/// like one that never existed, and stays pending for its own grantor.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 fd-or-errno encoding (fd ≥ 0, else -errno).
+pub fn fd_redeem_from(handle: u64, grantor: ProcId) -> i64 {
+    let instance = grantor.to_le_bytes();
+    // SAFETY: `raw_syscall` is always safe to invoke. The one pointer is to
+    // this frame's `instance` array, live across the call and exactly the
+    // length passed; the kernel resolves the handle owner-bound and
+    // grantor-bound before installing anything.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FD_REDEEM_FROM,
+            [
+                handle,
+                instance.as_ptr() as u64,
+                instance.len() as u64,
+                0,
+                0,
+                0,
+            ],
+        )
+    };
+    ret as i64
+}
+
 /// Ask whether the in-flight caller of served call endpoint `endpoint`
 /// (ticket `ticket`) holds seat `seat`'s live lease
 /// (`SyscallNumber::CALL_PEER_SEAT`, `plans/DISPLAY.md` D7a — the display
@@ -5500,6 +5534,18 @@ impl File {
         Self::from_open_result(fd_redeem(handle))
     }
 
+    /// [`Self::from_delegation`], only if `grantor` minted the delegation
+    /// ([`fd_redeem_from`]) — the redemption a service acting on another
+    /// process's behalf makes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_delegation`]; a handle `grantor` did not mint answers
+    /// `NotFound` and stays pending.
+    pub fn from_delegation_by(handle: u64, grantor: ProcId) -> Result<Self, i64> {
+        Self::from_open_result(fd_redeem_from(handle, grantor))
+    }
+
     /// Wrap an open-family syscall result (`fs_open` / `resource_open`) as an
     /// owned handle, passing a negative `-errno` through unchanged.
     ///
@@ -6667,6 +6713,31 @@ mod tests {
         let (_, _) = capture(neg, || {
             assert_eq!(pointer_read(0, &mut buf), want);
         });
+    }
+
+    #[test]
+    fn fd_redeem_from_names_the_grantor_as_a_whole_instance() {
+        let grantor = ProcId::from_raw([0xA5; tairix_abi::PROC_ID_LEN]);
+        let (number, args) = capture(7, || {
+            assert_eq!(fd_redeem_from(9, grantor), 7);
+        });
+        assert_eq!(number, NUM_FD_REDEEM_FROM);
+        assert_eq!(args[0], 9);
+        assert_ne!(args[1], 0, "the instance is passed by address");
+        assert_eq!(
+            args[2],
+            u64::try_from(tairix_abi::PROC_ID_LEN).expect("fits"),
+            "the whole instance, never a prefix"
+        );
+        assert_eq!(&args[3..], &[0, 0, 0]);
+
+        // A handle the named grantor did not mint is refused, and the File
+        // constructor passes the refusal through rather than wrapping it.
+        seam::arm(refusal(Errno::NotFound));
+        assert_eq!(
+            File::from_delegation_by(9, grantor).err(),
+            Some(-i64::from(Errno::NotFound.as_i32()))
+        );
     }
 
     #[test]

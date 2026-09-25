@@ -87,6 +87,11 @@ pub const GRANT_SYSCALL: &str = syscall_name(SyscallNumber::FD_GRANT);
 /// audit field renders it (see [`GRANT_SYSCALL`]).
 pub const REDEEM_SYSCALL: &str = syscall_name(SyscallNumber::FD_REDEEM);
 
+/// Name of the syscall a relay redeems a delegation with, bound to the grantor
+/// it relays for, as the syscall audit field renders it (see
+/// [`GRANT_SYSCALL`]). The sibling hand-over vertical's session step makes it.
+pub const BOUND_REDEEM_SYSCALL: &str = syscall_name(SyscallNumber::FD_REDEEM_FROM);
+
 /// The audited name of `number`, as the dispatcher's `sc` field renders it.
 ///
 /// An unassigned number has no name; the empty string matches no record, so
@@ -101,7 +106,7 @@ const fn syscall_name(number: SyscallNumber) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{syscall_name, GRANT_SYSCALL, REDEEM_SYSCALL};
+    use super::{syscall_name, BOUND_REDEEM_SYSCALL, GRANT_SYSCALL, REDEEM_SYSCALL};
     use tairix_abi::SyscallNumber;
 
     /// The witness names are the `abi-v1` table's own, so a renamed syscall
@@ -111,9 +116,14 @@ mod tests {
     fn the_witnesses_name_the_syscalls_the_dispatcher_audits() {
         assert_eq!(GRANT_SYSCALL, syscall_name(SyscallNumber::FD_GRANT));
         assert_eq!(REDEEM_SYSCALL, syscall_name(SyscallNumber::FD_REDEEM));
+        assert_eq!(
+            BOUND_REDEEM_SYSCALL,
+            syscall_name(SyscallNumber::FD_REDEEM_FROM)
+        );
         // An unassigned number renders as the empty string, which matches no
-        // record; both of these are assigned, so neither witness is inert.
+        // record; all of these are assigned, so no witness is inert.
         assert!(!GRANT_SYSCALL.is_empty());
         assert!(!REDEEM_SYSCALL.is_empty());
+        assert!(!BOUND_REDEEM_SYSCALL.is_empty());
     }
 }

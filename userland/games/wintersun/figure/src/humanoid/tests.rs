@@ -8,7 +8,8 @@ use alloc::vec::Vec;
 use tairix_raster::surface::SUBPIXEL;
 
 use super::{
-    feature, rig, Bone, BODY_PARTS, FOOT, JOINT_COUNT, MOST_PARTS, MOST_REACH, STANDING_HEIGHT,
+    feature, rig, Bone, BODY_PARTS, FOOT, JOINT_COUNT, LEAST_REACH, MOST_PARTS, MOST_REACH,
+    STANDING_HEIGHT,
 };
 use crate::error::FigureError;
 use crate::frame::{Rotation, FORESHORTEN};
@@ -616,13 +617,16 @@ fn every_admissible_figure_builds_within_the_part_bound() {
     assert_eq!(richest, MOST_PARTS, "the part bound is the richest figure");
 }
 
-/// No figure a record describes reaches past [`MOST_REACH`], at any build
-/// corner with any feature it may carry, at either end of its hair's
-/// volume — and the one that reaches furthest is within a unit of it, so the
-/// shared frame spends none of its square on a figure nobody can make.
+/// Every figure a record describes reaches between [`LEAST_REACH`] and
+/// [`MOST_REACH`], at any build corner with any feature it may carry, at
+/// either end of its hair's volume — and the extremes are each within a unit
+/// of their bound, so the shared frame spends none of its square on a figure
+/// nobody can make and the readability floor is taken at a figure somebody
+/// can.
 #[test]
-fn no_figure_reaches_past_the_most_reach() {
+fn every_figure_reaches_between_the_least_and_the_most_reach() {
     let mut furthest: f64 = 0.0;
+    let mut nearest = f64::MAX;
     for species in Species::ALL {
         for (features, markings) in admissible(species) {
             let volumes: &[Setting] = if features.hair.is_some() {
@@ -661,7 +665,9 @@ fn no_figure_reaches_past_the_most_reach() {
                     let identity = Identity::new(spec).expect("an admissible figure");
                     let reach = rig(&identity).expect("it builds").reach();
                     assert!(reach <= MOST_REACH, "{spec:?} reaches {reach}");
+                    assert!(reach >= LEAST_REACH, "{spec:?} reaches only {reach}");
                     furthest = mathf::fmax(furthest, reach);
+                    nearest = mathf::fmin(nearest, reach);
                 }
             }
         }
@@ -669,6 +675,10 @@ fn no_figure_reaches_past_the_most_reach() {
     assert!(
         furthest > MOST_REACH - 1.0,
         "the furthest reach is {furthest}"
+    );
+    assert!(
+        nearest < LEAST_REACH + 1.0,
+        "the nearest reach is {nearest}"
     );
 }
 

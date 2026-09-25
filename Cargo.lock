@@ -6984,6 +6984,7 @@ dependencies = [
  "tairix-util",
  "tairix-window",
  "tairix-wintersun-art",
+ "tairix-wintersun-figure",
  "tairix-wintersun-net",
  "tairix-wintersun-rules",
  "tairix-wintersun-world",

@@ -51,10 +51,11 @@ use crate::motion::{self, Kind};
 use crate::plant::{Legs, Planted};
 use crate::pose::Param;
 use crate::preview::{Frame, Preview, FADE};
-use crate::quality;
+use crate::quality::Measured;
 use crate::reference::{self, Reference, SIDES};
 use crate::rig::{Frames, Placement, Resolved, Strip};
 use crate::rigging::Rigging;
+use crate::shadow::Contact;
 use crate::socket::Side;
 use crate::species::Species;
 
@@ -68,7 +69,7 @@ use crate::species::Species;
 /// change that moves it changes every figure anybody will ever see, and the
 /// new value is written down deliberately rather than pasted out of a
 /// failure.
-pub const REFERENCE_DIGEST: u64 = 0x5E81_1CB6_1D68_80FB;
+pub const REFERENCE_DIGEST: u64 = 0x9A61_8EF9_E425_DD95;
 
 /// The stream the reference grid is folded into.
 pub const REFERENCE_SEED: u64 = 0x5749_4E54_4552_4647;
@@ -115,10 +116,12 @@ const GAIT_STEPS: [f64; 4] = [7.5, 23.25, 140.0, -11.75];
 ///
 /// Every clip gives way to another, and each is held past the fade into it,
 /// so frames inside a fade and after one are both folded.
-const PREVIEW_SCRIPT: [(Kind, u32); 4] = [
+const PREVIEW_SCRIPT: [(Kind, u32); 6] = [
     (Kind::Walk, 5),
     (Kind::Run, 5),
+    (Kind::Dodge, 9),
     (Kind::Idle, 4),
+    (Kind::Cast, 8),
     (Kind::Run, 4),
 ];
 
@@ -266,14 +269,13 @@ fn fold_quality(
 ) -> Result<(), FigureError> {
     hasher.write(kind.name().as_bytes());
     fold_real(hasher, clip.seconds());
-    fold_real(hasher, quality::limits(rigging, clip)?);
-    fold_real(hasher, quality::continuity(clip));
-    fold_real(hasher, quality::closure(clip));
-    fold_real(hasher, quality::grounding(rigging, clip, legs)?);
+    for (what, value, _) in Measured::of(kind, rigging, clip, legs)?.each() {
+        hasher.write(what.as_bytes());
+        fold_real(hasher, value);
+    }
     fold_root(hasher, clip);
     if let Some(authored) = kind.stride() {
         fold_real(hasher, authored);
-        fold_real(hasher, quality::skate(rigging, clip, legs, Side::Left)?);
     }
     Ok(())
 }
@@ -318,8 +320,13 @@ fn fold_slopes(
 /// The shadow solve: the ellipse a raking light throws under a figure at
 /// each probe height.
 fn fold_shadow(hasher: &mut FastHash) -> Result<(), FigureError> {
+    let (radius, tone) = reference::SHADOW;
+    let contact = Contact::new(radius, tone)?;
     for lift in LIFTS {
         fold_placed(hasher, Reference::shadow(lift, SCALE, AT)?);
+        for ring in contact.penumbra(Reference::light()?, lift, SCALE, AT)? {
+            fold_placed(hasher, ring);
+        }
     }
     Ok(())
 }

@@ -86,6 +86,15 @@ const _: () = assert!(MOST_PARTS == MAX_PARTS);
 /// it.
 pub const MOST_REACH: f64 = 120.0;
 
+/// How far from its ground point the smallest figure any record describes
+/// reaches at rest, rounded down to a whole unit.
+///
+/// The figure a readability floor is taken at: every figure drawn in one
+/// scene shares one scale, so the smallest is the first to fall below a size
+/// that can be read. A test holds every admissible figure outside it, and
+/// the smallest within a unit of it.
+pub const LEAST_REACH: f64 = 71.0;
+
 /// The humanoid's named joints.
 ///
 /// Named so a caller poses a knee without counting the table, and so a clip

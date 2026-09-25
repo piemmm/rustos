@@ -18,6 +18,7 @@
 //! forbids, and a paint that guessed would be worse.
 
 use alloc::vec::Vec;
+use core::ops::RangeInclusive;
 
 use tairix_raster::color::{Color, Pixel};
 use tairix_wintersun_art::cache::{MaterialCache, TileKey};
@@ -336,13 +337,34 @@ impl RoadDecals {
 /// sorted is cheaper than sorting it. `ChunkCoord` compares eastings
 /// before northings, so the walk is column-major to match.
 pub fn visible_chunks(visible: Bounds) -> impl Iterator<Item = ChunkCoord> {
+    let (eastings, northings) = chunk_span(visible);
+    eastings.flat_map(move |x| northings.clone().map(move |y| ChunkCoord { x, y }))
+}
+
+/// Whether the chunk at `coord` is worth holding for a view covering
+/// `visible`: one the view needs, or one within a chunk of those, so a view
+/// panning back and forth over an edge does not give away ground it is
+/// about to ask for again.
+///
+/// What bounds the ground a client holds to the view's working set, however
+/// far the player walks.
+#[must_use]
+pub fn worth_holding(coord: ChunkCoord, visible: Bounds) -> bool {
+    let (eastings, northings) = chunk_span(visible);
+    let near = |at: i32, span: &RangeInclusive<i32>| {
+        at >= span.start().saturating_sub(1) && at <= span.end().saturating_add(1)
+    };
+    near(coord.x, &eastings) && near(coord.y, &northings)
+}
+
+/// The chunk eastings and northings a view covering `visible` needs.
+fn chunk_span(visible: Bounds) -> (RangeInclusive<i32>, RangeInclusive<i32>) {
     // One cell past each edge, because the lattice the pass interpolates
     // over reaches a sample beyond the last pixel.
-    let first = chunk_of(lattice_of(visible.min_x) - 1);
-    let last = chunk_of(lattice_of(visible.max_x) + 2);
-    let top = chunk_of(lattice_of(visible.min_y) - 1);
-    let bottom = chunk_of(lattice_of(visible.max_y) + 2);
-    (first..=last).flat_map(move |x| (top..=bottom).map(move |y| ChunkCoord { x, y }))
+    (
+        chunk_of(lattice_of(visible.min_x) - 1)..=chunk_of(lattice_of(visible.max_x) + 2),
+        chunk_of(lattice_of(visible.min_y) - 1)..=chunk_of(lattice_of(visible.max_y) + 2),
+    )
 }
 
 /// The chunk a cell belongs to.

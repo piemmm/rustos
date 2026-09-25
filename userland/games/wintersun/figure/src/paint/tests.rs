@@ -5,7 +5,7 @@ use tairix_raster::surface::Surface;
 use tairix_raster::Color;
 use tairix_wintersun_net::value::Facing;
 
-use super::{cost, draw, Brush, MAX_FIGURE_POINTS};
+use super::{cost, draw, Brush, Veil, MAX_FIGURE_POINTS};
 use crate::humanoid;
 use crate::mesh::{self, LEVELS};
 use crate::pose::Pose;
@@ -49,9 +49,9 @@ fn the_shadow_is_painted_under_the_whole_figure() {
     };
 
     let mut over = Surface::new(SIDE, SIDE).expect("a surface");
-    draw(&mut over, Some(shadow), &placement, &mut brush);
+    draw(&mut over, &[shadow], &placement, &mut brush, Veil::NONE);
     let mut bare = Surface::new(SIDE, SIDE).expect("a surface");
-    draw(&mut bare, None, &placement, &mut brush);
+    draw(&mut bare, &[], &placement, &mut brush, Veil::NONE);
 
     let mut covered = 0;
     for y in 0..SIDE {
@@ -75,7 +75,7 @@ fn the_shadow_is_painted_under_the_whole_figure() {
 fn an_empty_placement_paints_nothing() {
     let mut surface = Surface::new(SIDE, SIDE).expect("a surface");
     let mut brush = Brush::new();
-    draw(&mut surface, None, &Placement::new(), &mut brush);
+    draw(&mut surface, &[], &Placement::new(), &mut brush, Veil::NONE);
     assert!(surface.pixels().iter().all(|pixel| pixel.a == 0));
 }
 
@@ -141,5 +141,57 @@ fn a_surface_is_lighter_where_it_faces_the_light() {
     assert!(
         lightest > darkest,
         "every strip came out at one tone, so nothing is shaded"
+    );
+}
+
+/// A veil mixes every stroke toward its tone by its amount and keeps each
+/// stroke's own alpha; clear air changes nothing.
+#[test]
+fn a_veil_mixes_every_stroke_toward_its_tone() {
+    let stroke = Color::rgba(200, 100, 0, 180);
+    assert_eq!(Veil::NONE.over(stroke), stroke);
+    let mist = Veil {
+        tone: Color::rgb(0, 100, 200),
+        amount: 255,
+    };
+    assert_eq!(mist.over(stroke), Color::rgba(0, 100, 200, 180));
+    let half = Veil {
+        tone: Color::rgb(0, 100, 200),
+        amount: 128,
+    };
+    let seen = half.over(stroke);
+    assert!(seen.r < 200 && seen.r > 0 && seen.b > 0 && seen.b < 200);
+    assert_eq!((seen.g, seen.a), (100, 180));
+
+    // Drawn through a veil, a figure's pixels move toward the tone.
+    let figure = Reference::new(
+        &crate::reference::identity(crate::species::Species::Human).expect("a record"),
+    )
+    .expect("builds");
+    let mut placement = Placement::new();
+    let cell = crate::reference::Cell {
+        kind: crate::motion::Kind::Idle,
+        step: 0,
+        facing: Facing(0x4000),
+    };
+    figure
+        .place(cell, 0.5, (32.0, 58.0), &mut placement)
+        .expect("places");
+    let mut clear = Surface::new(64, 64).expect("a surface");
+    let mut veiled = Surface::new(64, 64).expect("a surface");
+    let mut brush = Brush::new();
+    draw(&mut clear, &[], &placement, &mut brush, Veil::NONE);
+    draw(&mut veiled, &[], &placement, &mut brush, mist);
+    let toward = |surface: &Surface| {
+        surface
+            .pixels()
+            .iter()
+            .filter(|pixel| pixel.a == 255)
+            .map(|pixel| u64::from(pixel.b))
+            .sum::<u64>()
+    };
+    assert!(
+        toward(&veiled) > toward(&clear),
+        "the veil did not reach the figure"
     );
 }

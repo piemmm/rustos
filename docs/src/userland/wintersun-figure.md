@@ -372,6 +372,14 @@ identity and a figure on the level is drawn exactly as its clip authored it.
 That property is a test, and it is the one that stops the planter quietly
 redrawing every figure in the game.
 
+The ground a foot is raised by is the ground the view *draws*. WinterSun draws
+its world from directly above, with height shown by shading alone, so the plane
+a figure's feet meet on screen is level everywhere and the game's actor plants
+on the level; a view that draws relief as geometry — an elevated camera —
+plants each foot on the heights it draws. Standing water is the exception that
+shows from above: a figure wading stands on the bed, sunk by the depth, and
+nothing of it is drawn below the surface.
+
 ### The height the body is at is the clip's, not a reading of the fold
 
 Both legs folded is a deep crouch and a run's flight phase at once, so no
@@ -502,14 +510,70 @@ bearing but four. `shadow::Contact` composes the two maps and recovers the
 axes of what comes out, which is exact at every bearing for a handful of
 arithmetic. A rising figure's shadow stays on the ground and slides away from
 the light as it thins, which is the cue that reads as height rather than as
-the figure growing.
+the figure growing. Drawn soft, it is three nested rings, the light's raked
+footprint the innermost, each light enough that where all three overlap they
+compose to the hard shadow's own density; drawn hard, it is the one ellipse the
+art harness measures.
+
+## An actor plays a figure for the simulation
+
+`actor::Actor` turns what the simulation says — where a body is, which way it
+faces, what it is doing, how deep the water it stands in — into a pose, frame
+by frame. It never moves itself: every input is the simulation's, read between
+its ticks.
+
+The shipped motion set is seventeen clips in three families, each with the
+layer it plays on and what holds the figure up while it does:
+
+| Family | Clips | Layer |
+|---|---|---|
+| Locomotion | idle, walk, run | under everything |
+| Actions | dodge, melee heavy, stagger | the whole body |
+| | melee light, draw, loose, cast, channel, hit | the upper body |
+| States | fall, die, sit, swim, climb | the whole body |
+
+**Locomotion is chosen, not blended.** The walk and the run are authored with
+different stances, and their joint angles mixed at a weight set by speed put a
+foot where neither clip does — measured across the speeds between their paces,
+such a blend sank a planted foot half a unit into the floor and slid it by
+several. So one gait plays at a time, chosen by the body's speed with a margin
+either side of each change so a body at the edge does not flicker, and paced by
+the distance covered at that gait's own fitted stride. A change of gait fades
+between the two over a quarter of a second at the one phase their feet share.
+A test holds a planted foot still at every steady speed from a third of the
+walk's pace to over three times it.
+
+**An action's timing comes from outside.** An action is windup, active and
+recovery; its clip is authored across the three in phase, the phases they meet
+at are stated beside it, and `clip::Timing` stretches each segment to the
+seconds the action that owns it asks for. The durations shipped are each
+action's reference timing, which WinterSun's action documents replace, so the
+art and the rules cannot disagree about how long a blow takes to land.
+
+An action layer fades in as it takes a clip up and hands the body back by
+itself when the action has played through; a state lasts until the figure is
+settled. A figure standing still on dry ground for twenty seconds sits, and
+moving brings it up. Its shown heading swings toward the body's at a bounded
+rate, so an about-face reads as a turn rather than a flip.
+
+`WORLD_SCALE` is the one conversion between a rig's units and the world's: a
+reference figure a little over two cells tall, which is the scale at which the
+simulation's default pace runs at the run clip's own cadence. The body the
+rules collide is the figure's `footprint`, half its width across the arms at
+rest, so two bodies the simulation lets touch are drawn touching. `REACH` is how
+far any figure draws from its ground point, which a scene culls by, and
+`readable` answers whether a view's scale still draws the smallest figure a
+record describes at the harness's readability floor — what the game's detail
+ladder takes its floor from.
 
 ## The art is measured, and the measurements are gated
 
 `cargo xtask artsheet` walks a reference grid — each species' reference figure
 in every shipped motion, and each species' least, most and two plausible
 figures walking, at eight phases, facing four ways — renders each cell and
-holds every number against a bound. A reference figure is measured at the
+holds every number against a bound. Every preset the game ships is measured
+too, in every motion at the readability floor, with rows for its record and
+its motions and bounds only for its cells. A reference figure is measured at the
 three pixel sides the desktop draws a figure at; a walking one at the
 smallest, the readability floor, since what a figure costs is counted in
 outline points and fill area and neither depends on the side. It runs in
@@ -528,28 +592,36 @@ judges current rather than as-of-last-regeneration.
 
 | Measured | Where its bound lives | Shipped worst |
 |---|---|---|
-| Joint-limit use, verified through `Posture::set` | `figure::quality` | 0.79 of a joint's travel |
-| Foot skate, as a fraction of the fitted stride | `figure::quality` | 0.0027, the walk's |
+| Joint-limit use, verified through `Posture::set` | `figure::quality` | 0.86 of a joint's travel, the draw's |
+| Foot skate, as a fraction of the fitted stride — the walk and the run | `figure::quality` | 0.0027, the walk's |
 | Motion continuity, per unit of a parameter's or the root height's range | `figure::quality` | 0.041 |
-| Loop closure | `figure::quality` | exact |
-| Grounding: the cycle's lowest foot against the floor | `figure::quality` | 0.067 of a figure's units, the long-legged elf's run |
-| Coverage ratio, tonal regions, contrast against both themes | the harness | 0.061–0.155, ≥ 3 regions, ≥ 2.20 |
-| Outline points and fill area per cell | `figure::paint` + the harness | ≤ 1,096 points, ≤ 0.20 overdraw |
+| Loop closure — the looping clips | `figure::quality` | exact |
+| Grounding: the lowest foot against the floor, for a figure on its feet | `figure::quality` | 0.070 of a figure's units, a preset elf's run |
+| Penetration: no foot below the floor, for a figure the ground does not hold up | `figure::quality` | none |
+| Coverage ratio, tonal regions, contrast against both themes | the harness | 0.060–0.163, ≥ 4 regions, ≥ 2.19 |
+| Outline points and fill area per cell | `figure::paint` + the harness | ≤ 1,096 points, ≤ 0.21 overdraw |
+
+Which of these a motion is held to follows from what it is — `quality::Measured`
+reads it off the motion's kind and support — so a sit is not asked to close a
+loop it does not play, and a figure in mid-fall is not asked to touch the
+floor.
 
 A cell holds the whole figure. The depth axis draws what is nearer the viewer
 lower on the screen, so the near foot of a stride lands below the ground point
 the figure stands on — a fifth of its reach below it for the longest-legged
 build. A cell is framed by the figure's rest reach with two measured
-allowances, 1.02 of the reach above the ground point and 0.20 below it, between
-margins of a fiftieth of the side; every build corner of every species stays
-within them in every shipped motion at every sixteenth of a turn, and every
-cell of the grid inside its square. The worst cell for separable masses is the
-least beastkin — pale cloth on pale fur, seen from behind — at the floor,
-which resolves into exactly the three the bound asks for: head, trunk and
-legs. It wears the one dye of the sixteen that does. A palette is the
-player's to choose, so the harness also draws every dye on every species'
-palest and darkest build and holds each cell to the same bounds, without
-ledger rows, since the grid already carries the worst of them.
+allowances per motion, above the ground point and below it, between margins of
+a fiftieth of the side: 1.02 and 0.20 for locomotion, and never tighter for
+any other motion, so no motion's cells draw a figure larger than a stride's
+do. A fall reaches further above, an arm raised in front of a figure facing
+away is drawn up the screen past its crown, and a sit folds below. Every build
+corner of every species stays within its motion's allowances at every
+sixteenth of a turn, and every cell of the grid inside its square. Coverage is
+restated at locomotion's framing, so a motion framed looser is not read as
+the figure drawn thinner. A palette is the player's to choose, so the harness
+also draws every dye on every species' palest and darkest build and holds each
+cell to the same bounds, without ledger rows, since the grid already carries
+the worst of them.
 
 The pose-side measurements live in the crate rather than the harness, so
 `cargo test` runs them on every Tier-1 target and a later figure preset is
@@ -730,8 +802,9 @@ held to every bound an authored figure is.
 
 ## What comes next
 
-The engine's own items are done; what uses it next is `WinterSun`'s — figures
-on screen with the preset set (WS6) and the designer's surfaces (WS17). Two
+The engine's own items are done and its figures are on screen (WS6); what uses
+it next is `WinterSun`'s designer surfaces (WS17), and the action documents
+(WS9–WS11) that replace the actions' reference timings. Two
 decisions are recorded rather than taken (`plans/FIGURE.md`): the sheets draw
 eight phases, so no picture shows a figure mid-flight or at the bottom of a
 run's stance; and the run's stance meets its flight flat, since joining at

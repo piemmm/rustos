@@ -17,24 +17,36 @@
 //! [`tairix_wintersun_art::digest::REFERENCE_DIGEST`] is folded in, so
 //! this vertical is also the one that fails when the art moves — which
 //! is the coverage the art crate deliberately does not carry itself.
+//!
+//! The frames are drawn with figures standing in them, because the figure
+//! crate's own vertical proves a pose and its placement but not the client
+//! drawing it: the band-by-band fill, the depth order, the veil and the
+//! waterline are this crate's arithmetic.
 
 use core::hash::Hasher;
 
 use tairix_hash::FastHash;
 use tairix_log::{Event, Sink};
 use tairix_raster::color::Pixel;
+use tairix_raster::surface::Surface;
 use tairix_reclaim::{PressureBand, ReportedPressure};
 use tairix_wintersun_art::cache::MaterialCache;
 use tairix_wintersun_art::decal::Fray;
 use tairix_wintersun_art::digest as art;
 use tairix_wintersun_art::splat::Warp;
-use tairix_wintersun_net::value::{Facing, WorldPoint};
+use tairix_wintersun_figure::actor::Actor;
+use tairix_wintersun_figure::motion::{Clips, Kind, Set};
+use tairix_wintersun_figure::reference as figures;
+use tairix_wintersun_figure::species::Species;
+use tairix_wintersun_net::value::{EntityId, Facing, WorldPoint};
 use tairix_wintersun_world::chunk::{Chunk, ChunkBuild, ChunkWindow};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
 
+use crate::budget::FRAME_NS;
 use crate::camera::{realm_bounds, Camera, Zoom};
 use crate::error::ClientError;
+use crate::figures::Cast;
 use crate::frame::{Renderer, Scene, Stopped};
 use crate::light::{Sky, Sun};
 use crate::quality::Ladder;
@@ -44,10 +56,11 @@ use crate::view::Viewport;
 /// The digest of the reference frames, on every target.
 ///
 /// Changing the projection, the lattice sampling, the light model, the
-/// ladder's knobs, or anything in the art or the world generator beneath
-/// them changes this. It is the record of what the game looks like, not
-/// a number to be re-derived when a test fails.
-pub const REFERENCE_DIGEST: u64 = 0x5A87_9968_1809_0640;
+/// ladder's knobs, the figure pass, or anything in the art, the figure
+/// engine or the world generator beneath them changes this. It is the
+/// record of what the game looks like, not a number to be re-derived when a
+/// test fails.
+pub const REFERENCE_DIGEST: u64 = 0xD17F_8CA7_595A_FD82;
 
 /// The realm the reference frames are drawn in.
 pub const REFERENCE_SEED: u64 = 0x5749_4E54_4552_4652;
@@ -69,11 +82,73 @@ pub const FRAME_HEIGHT: u32 = 120;
 /// draw it at.
 ///
 /// Two, and deliberately at opposite corners of both knobs. The wide one
-/// at full quality covers many cells through the coarse mips; the close
-/// one with every rung shed covers the fine mips and the flat-material,
-/// shadowless, half-scale end of the ladder. Between them every knob
-/// moves the digest.
+/// at full quality covers many cells through the coarse mips and every soft
+/// shadow; the close one with every rung shed covers the fine mips and the
+/// flat, hard-shadowed, half-scale end of the ladder. Between them every
+/// knob moves the digest.
 const FRAMES: [(u8, Zoom); 2] = [(0, Zoom::FURTHEST), (Ladder::MAX_STEP, Zoom::DEFAULT)];
+
+/// One figure of the reference frames: who it is, where it starts from the
+/// view's centre and how far it moves each frame, in world sub-units, which
+/// way it faces, what it performs, and how deep the water it stands in is.
+struct Extra {
+    species: Species,
+    from: (i32, i32),
+    per_frame: (i32, i32),
+    toward: Facing,
+    performs: Option<Kind>,
+    submerged: i32,
+}
+
+/// Every species, and between them every part of the figure pass: a walk
+/// and a run, an upper-body action over a stride, a whole-body action in the
+/// air, and a figure wading.
+const EXTRAS: [Extra; 5] = [
+    Extra {
+        species: Species::Human,
+        from: (-1400, 200),
+        per_frame: (20, 0),
+        toward: Facing(0),
+        performs: None,
+        submerged: 0,
+    },
+    Extra {
+        species: Species::Elf,
+        from: (-500, -700),
+        per_frame: (0, 20),
+        toward: Facing(0x4000),
+        performs: Some(Kind::Cast),
+        submerged: 0,
+    },
+    Extra {
+        species: Species::Dwarf,
+        from: (500, 400),
+        per_frame: (0, 0),
+        toward: Facing(0xC000),
+        performs: None,
+        submerged: 48,
+    },
+    Extra {
+        species: Species::Beastkin,
+        from: (1300, -400),
+        per_frame: (-61, 0),
+        toward: Facing(0x8000),
+        performs: None,
+        submerged: 0,
+    },
+    Extra {
+        species: Species::Dragonkin,
+        from: (100, 1000),
+        per_frame: (0, 0),
+        toward: Facing(0x2000),
+        performs: Some(Kind::Dodge),
+        submerged: 0,
+    },
+];
+
+/// How many frames the extras play before a reference frame is drawn: into
+/// the middle of the dodge's flight and the cast's release.
+const FRAMES_PLAYED: u32 = 12;
 
 /// Memory the reference frames' material cache is sized from.
 ///
@@ -103,8 +178,8 @@ static PRESSURE: ReportedPressure = ReportedPressure::unknown();
 /// # Errors
 ///
 /// [`ClientError::World`] if the realm or a chunk could not be
-/// generated, and [`ClientError::OutOfMemory`] if a frame buffer does
-/// not fit.
+/// generated, [`ClientError::Figure`] if a figure could not be, and
+/// [`ClientError::OutOfMemory`] if a frame buffer does not fit.
 pub fn reference() -> Result<u64, ClientError> {
     PRESSURE.report(PressureBand::Normal);
     let params = reference_params()?;
@@ -120,24 +195,22 @@ pub fn reference() -> Result<u64, ClientError> {
         &PRESSURE,
         &SINK,
     );
+    let set = Set::new().map_err(|_| ClientError::Figure)?;
+    let clips = set.clips().map_err(|_| ClientError::Figure)?;
     let mut renderer = Renderer::new();
-    let mut target = alloc::vec::Vec::new();
     let mut hasher = FastHash::with_seed(REFERENCE_SEED);
 
     for (step, zoom) in FRAMES {
         let ladder = Ladder::new(step);
         let camera = Camera::new(WorldPoint { x: 0, y: 0 }, zoom, realm_bounds(params));
         let view = Viewport::new(FRAME_WIDTH, FRAME_HEIGHT, ladder.render_scale())?;
-        let (width, height) = view.render();
-        let held = generate(&field, camera.visible(width, height))?;
+        let held = generate(&field, camera.visible(&view))?;
         let borrowed = borrow(&held)?;
         let chunks = ChunkWindow::new(&borrowed).map_err(|_| ClientError::World)?;
+        let cast = extras(&clips, camera.centre(&view))?;
 
-        target.clear();
-        target
-            .try_reserve(view.render_pixels())
-            .map_err(|_| ClientError::OutOfMemory)?;
-        target.resize(view.render_pixels(), Pixel::TRANSPARENT);
+        let (width, height) = view.render();
+        let mut target = Surface::new(width, height).ok_or(ClientError::OutOfMemory)?;
         renderer.render(
             &mut target,
             &view,
@@ -150,12 +223,14 @@ pub fn reference() -> Result<u64, ClientError> {
                 sun: Sun::winter(),
                 sky: Sky::winter(),
                 ladder,
+                cast: &cast,
             },
             &mut cache,
             &tairix_parallel::SERIAL,
             &Stopped,
         )?;
-        fold_frame(&mut hasher, &target, renderer.grid().unmapped());
+        fold_frame(&mut hasher, target.pixels(), renderer.grid().unmapped());
+        hasher.write_u64(u64::try_from(renderer.figures()).unwrap_or(u64::MAX));
     }
     // The ground the frames are drawn from, so a change to the art moves
     // this number too — the coverage the art crate does not carry.
@@ -186,6 +261,33 @@ fn reference_params() -> Result<RealmParams, ClientError> {
         wind: Facing(0x0800),
     })
     .map_err(|_| ClientError::World)
+}
+
+/// The extras, standing around `centre` and played through
+/// [`FRAMES_PLAYED`] frames.
+fn extras<'a>(clips: &'a Clips<'a>, centre: WorldPoint) -> Result<Cast<'a>, ClientError> {
+    let mut cast = Cast::new();
+    for (index, extra) in (0u64..).zip(&EXTRAS) {
+        let identity = figures::identity(extra.species).map_err(|_| ClientError::Figure)?;
+        let mut actor =
+            Actor::new(&identity, clips, extra.toward).map_err(|_| ClientError::Figure)?;
+        if let Some(kind) = extra.performs {
+            actor.perform(kind).map_err(|_| ClientError::Figure)?;
+        }
+        let id = EntityId(index);
+        let mut at = WorldPoint {
+            x: centre.x + extra.from.0,
+            y: centre.y + extra.from.1,
+        };
+        cast.join(id, actor, at)?;
+        let figure = cast.get_mut(id).ok_or(ClientError::Figure)?;
+        for _ in 0..FRAMES_PLAYED {
+            at.x += extra.per_frame.0;
+            at.y += extra.per_frame.1;
+            figure.step(FRAME_NS, at, extra.toward, extra.submerged)?;
+        }
+    }
+    Ok(cast)
 }
 
 /// Generate every chunk the view needs, in coordinate order.

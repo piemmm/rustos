@@ -7040,12 +7040,12 @@ struct RecordingRelay {
 }
 
 impl DocumentRelay for RecordingRelay {
-    fn relay(&mut self, grant: u64, app: ProcId) -> Result<u64, Errno> {
+    fn relay(&mut self, grant: u64, _from: ProcId, app: ProcId) -> Result<u64, Errno> {
         self.relayed.push((grant, app));
         self.mints.ok_or(Errno::NotSupported)
     }
 
-    fn decline(&mut self, _grant: u64) {}
+    fn decline(&mut self, _grant: u64, _from: ProcId) {}
 }
 
 /// A reach that counts what it was asked and refuses everything: the

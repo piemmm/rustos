@@ -905,6 +905,28 @@ impl Placement {
         })
     }
 
+    /// The box every strip lies inside, in the scan converter's sub-pixel
+    /// units, as `(left, top, right, bottom)` inclusive — or `None` when
+    /// nothing is placed.
+    ///
+    /// What a scene sorts a figure into the pieces of a frame by, so a piece
+    /// draws only the figures that can reach it.
+    #[must_use]
+    pub fn extent(&self) -> Option<(i32, i32, i32, i32)> {
+        let mut bounds: Option<(i32, i32, i32, i32)> = None;
+        for strip in self.strips() {
+            for &(x, y) in strip.near.iter().chain(strip.far) {
+                bounds = Some(match bounds {
+                    None => (x, y, x, y),
+                    Some((left, top, right, bottom)) => {
+                        (left.min(x), top.min(y), right.max(x), bottom.max(y))
+                    }
+                });
+            }
+        }
+        bounds
+    }
+
     /// Carry one surface's rings through to the screen and store its strips.
     ///
     /// The caller has already checked the whole figure fits, so the slot

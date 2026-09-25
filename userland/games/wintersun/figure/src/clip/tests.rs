@@ -2,7 +2,7 @@
 
 use tairix_util::mathf;
 
-use super::{Clip, Curve, Easing, Event, Key, Lift, Loop, Travel};
+use super::{Clip, Curve, Easing, Event, Key, Lift, Loop, Segments, Timing, Travel};
 use crate::error::FigureError;
 use crate::pose::{Param, Pose};
 use crate::socket::Side;
@@ -725,4 +725,125 @@ fn a_cycling_root_height_wraps_with_its_clip() {
     // Mid-segment, between its two keys and nowhere outside them.
     let quarter = clip.root_at(0.25);
     assert!(quarter > -0.2 && quarter < 0.1, "{quarter} left its keys");
+}
+
+fn action() -> Clip<'static> {
+    const SEGMENTS: (f64, f64) = (0.4, 0.6);
+    let (active, recovery) = SEGMENTS;
+    Clip::new(1.0, Loop::Hold, &[], &[])
+        .expect("a real clip")
+        .acting(
+            Segments::new(active, recovery).expect("ascending inside the clip"),
+            Timing::new(0.3, 0.1, 0.6).expect("positive durations"),
+        )
+        .expect("a held clip may act")
+}
+
+#[test]
+fn segments_that_leave_no_phase_to_a_segment_are_refused() {
+    for (active, recovery) in [
+        (0.0, 0.5),
+        (0.5, 0.5),
+        (0.6, 0.4),
+        (0.5, 1.0),
+        (f64::NAN, 0.5),
+        (0.2, f64::INFINITY),
+    ] {
+        assert_eq!(
+            Segments::new(active, recovery).err(),
+            Some(FigureError::SegmentsUnreal),
+            "segments {active}..{recovery} were accepted"
+        );
+    }
+}
+
+#[test]
+fn a_segment_lasting_no_time_is_refused() {
+    for seconds in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+        for timing in [
+            Timing::new(seconds, 0.1, 0.1),
+            Timing::new(0.1, seconds, 0.1),
+            Timing::new(0.1, 0.1, seconds),
+        ] {
+            assert_eq!(timing.err(), Some(FigureError::TimingUnreal));
+        }
+    }
+}
+
+/// An action has an end; a cycle, played as one, would be asked to hold a
+/// pose it never reaches.
+#[test]
+fn only_a_clip_that_plays_once_may_act() {
+    let segments = Segments::new(0.3, 0.7).expect("real segments");
+    let timing = Timing::new(0.2, 0.2, 0.2).expect("real timing");
+    for repeat in [Loop::Wrap, Loop::PingPong] {
+        let clip = Clip::new(1.0, repeat, &[], &[]).expect("a real clip");
+        assert_eq!(
+            clip.acting(segments, timing).err(),
+            Some(FigureError::ActionNotHeld)
+        );
+    }
+}
+
+/// The action owns the duration: whatever the clip was built with, it lasts
+/// as long as its three segments do.
+#[test]
+fn an_action_lasts_as_long_as_its_segments_do() {
+    let clip = action();
+    assert!(close(clip.seconds(), 1.0));
+    let retimed = Clip::new(9.0, Loop::Hold, &[], &[])
+        .expect("a real clip")
+        .acting(
+            Segments::new(0.4, 0.6).expect("real segments"),
+            Timing::new(0.05, 0.05, 0.2).expect("real timing"),
+        )
+        .expect("it acts");
+    assert!(close(retimed.seconds(), 0.3));
+}
+
+/// Each boundary between segments lands on the phase it was authored at,
+/// which is what puts a hit frame on the instant the active segment opens.
+#[test]
+fn each_segment_boundary_lands_on_its_authored_phase() {
+    let clip = action();
+    let at = |seconds: f64| clip.phase_at(seconds).expect("finite");
+    assert!(close(at(0.0), 0.0));
+    assert!(close(at(0.3), 0.4));
+    assert!(close(at(0.4), 0.6));
+    assert!(close(at(1.0), 1.0));
+    // Inside a segment the phase runs at that segment's own rate.
+    assert!(close(at(0.15), 0.2));
+    assert!(close(at(0.35), 0.5));
+    assert!(close(at(0.7), 0.8));
+}
+
+/// A fast active segment is a quick phase, never a jump: the phase is
+/// continuous and never goes backwards however the durations differ.
+#[test]
+fn an_action_phase_is_continuous_and_never_goes_backwards() {
+    let clip = action();
+    let mut previous = clip.phase_at(-0.5).expect("finite");
+    for step in 0..=1200 {
+        let seconds = f64::from(step) / 1000.0;
+        let phase = clip.phase_at(seconds).expect("finite");
+        assert!(phase >= previous, "the phase ran backwards at {seconds}");
+        assert!(
+            phase - previous <= 0.002 + SLACK,
+            "the phase jumped at {seconds}"
+        );
+        assert!((0.0..=1.0).contains(&phase));
+        previous = phase;
+    }
+    assert!(
+        close(previous, 1.0),
+        "the action did not hold its last pose"
+    );
+}
+
+#[test]
+fn an_action_knows_the_segments_it_was_authored_across() {
+    let segments = action().segments().expect("an action has segments");
+    assert!(close(segments.active(), 0.4));
+    assert!(close(segments.recovery(), 0.6));
+    assert!(clip_of(&[], &[]).segments().is_none());
 }

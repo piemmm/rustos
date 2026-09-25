@@ -117,7 +117,7 @@ fn ground_the_client_does_not_hold_is_not_lit() {
     let shading = Shading {
         sun: sun(),
         shift: 1,
-        shadow: crate::quality::Shadow::Soft,
+        relief: Relief::Wide,
         step: 32,
         origin: WorldPoint { x: 0, y: 0 },
     };
@@ -129,8 +129,7 @@ fn ground_the_client_does_not_hold_is_not_lit() {
 }
 
 #[test]
-fn shedding_the_shadow_rung_widens_then_removes_the_stencil() {
-    // Off means no relief term at all, and the gradient reports flat.
+fn unmapped_ground_has_no_gradient_whatever_the_relief() {
     let mut grid = crate::terrain::TerrainGrid::new();
     let empty: [&tairix_wintersun_world::chunk::Chunk; 0] = [];
     let window = ChunkWindow::new(&empty).expect("sorted");
@@ -146,14 +145,59 @@ fn shedding_the_shadow_rung_widens_then_removes_the_stencil() {
         &tairix_wintersun_art::decal::Fray::new(1),
     )
     .expect("the grid fits");
+    for relief in [Relief::Wide, Relief::Narrow, Relief::Flat] {
+        assert_eq!(
+            gradient(&grid, relief, WorldPoint { x: 0, y: 0 }),
+            None,
+            "unmapped ground reported a gradient under {relief:?}"
+        );
+    }
+}
+
+#[test]
+fn the_figures_are_lit_by_the_sun_the_harness_measures_them_under() {
     assert_eq!(
-        gradient(
-            &grid,
-            crate::quality::Shadow::Off,
-            WorldPoint { x: 0, y: 0 }
-        ),
-        None,
-        "unmapped ground reports no gradient whatever the stencil"
+        Sun::winter().light(),
+        Ok(tairix_wintersun_figure::reference::Reference::light().expect("the harness sun")),
+        "the game draws its figures under a light the art harness never measured"
+    );
+    let overhead = Sun::new(0, 0, Color::rgb(0, 0, 0), Color::rgb(0, 0, 0), 0);
+    assert!(
+        overhead.light().is_ok(),
+        "an overhead sun left the figures unlit"
+    );
+}
+
+#[test]
+fn the_mist_a_figure_is_veiled_by_is_the_texel_at_its_feet() {
+    let view = crate::view::Viewport::new(32, 16, crate::quality::RenderScale::ONE)
+        .expect("a real window");
+    let mut buffer = LightBuffer::new();
+    buffer.resize(&view, 2).expect("the buffer fits");
+    let (width, _) = buffer.extent();
+    let at = |x: u32, y: u32| (y * width + x) as usize;
+    buffer.texels[at(2, 1)].mist = 255;
+    buffer.texels[at(0, 0)].mist = 128;
+    let sky = Sky::winter();
+    let full = mist_of(
+        Lit {
+            gain: Lit::NEUTRAL.gain,
+            mist: 255,
+        },
+        sky,
+    );
+    // A texel covers four pixels either way at this shift.
+    assert_eq!(buffer.mist_at(8, 4, sky), full);
+    assert_eq!(buffer.mist_at(11, 7, sky), full);
+    assert_eq!(buffer.mist_at(12, 4, sky), 0);
+    // Off the view, the nearest texel answers rather than none.
+    assert_eq!(buffer.mist_at(-40, -1, sky), buffer.mist_at(0, 0, sky));
+    assert!(buffer.mist_at(0, 0, sky) > 0);
+    assert_eq!(buffer.mist_at(i32::MAX, i32::MAX, sky), 0);
+    assert_eq!(
+        LightBuffer::new().mist_at(3, 3, sky),
+        0,
+        "no buffer is no mist"
     );
 }
 

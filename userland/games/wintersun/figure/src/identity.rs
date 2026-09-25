@@ -37,6 +37,10 @@ pub const RECORD_LEN: usize = 19;
 /// refused rather than misread.
 pub const RECORD_VERSION: u8 = 1;
 
+/// The extension a record is shipped under as a file of its own: the presets
+/// in the game's bundle, and every file the harness measures them from.
+pub const RECORD_EXTENSION: &str = "figure";
+
 /// A position within a documented interval: zero is its low end and
 /// [`Self::HIGH`] its high end.
 ///

@@ -14,6 +14,10 @@
 //! a diagnostic has to report.
 
 use tairix_wintersun_art::material::{Quality as MaterialQuality, MAX_OCTAVES};
+use tairix_wintersun_figure::actor::{readable, Shade};
+
+use crate::camera::Zoom;
+use crate::view::Viewport;
 
 /// Which knob is currently giving way.
 ///
@@ -29,21 +33,21 @@ pub enum Rung {
     LightResolution,
     /// Flatter detail on the materials.
     MaterialDetail,
-    /// Harder, then absent, contact shadows.
+    /// Harder contact shadows, then flat relief shading on the ground.
     ShadowSoftness,
     /// A smaller render target, upscaled to the window.
     RenderScale,
 }
 
-/// How a contact shadow is drawn.
+/// How the ground's relief shading is measured.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Shadow {
-    /// Penumbra, as authored.
-    Soft,
-    /// A hard edge, which costs one test rather than a kernel.
-    Hard,
-    /// None at all.
-    Off,
+pub enum Relief {
+    /// Across two cells: the penumbra, and the dearer stencil.
+    Wide,
+    /// Across one cell.
+    Narrow,
+    /// Not at all: the ground drawn in its materials' own colours.
+    Flat,
 }
 
 /// The size of the render target as a fraction of the window.
@@ -91,7 +95,60 @@ impl RenderScale {
         let scaled = u64::from(length) * u64::from(self.numerator) / u64::from(self.denominator);
         u32::try_from(scaled).unwrap_or(u32::MAX).max(1)
     }
+
+    /// This fraction of `other`: one scale taken after another.
+    #[must_use]
+    pub fn of(self, other: Self) -> Self {
+        Self {
+            numerator: self.numerator.saturating_mul(other.numerator),
+            denominator: self.denominator.saturating_mul(other.denominator),
+        }
+    }
+
+    /// `step` world sub-units a window pixel, as the render target's pixels
+    /// see it — each of which covers more of the world by exactly this
+    /// fraction's inverse — or `None` where that is not a whole number of
+    /// sub-units.
+    ///
+    /// The terrain pass steps a span by adding the step, so a render target
+    /// is only drawn at a fraction that keeps it whole; anything else would
+    /// cover a different piece of the world at a coarser resolution, which
+    /// is a zoom rather than a degradation.
+    #[must_use]
+    pub fn step(self, step: i32) -> Option<i32> {
+        let widened = i64::from(step).checked_mul(i64::from(self.denominator))?;
+        let numerator = i64::from(self.numerator);
+        if numerator == 0 || widened % numerator != 0 {
+            return None;
+        }
+        i32::try_from(widened / numerator).ok()
+    }
 }
+
+/// The fractions a window too large for the software path is rendered at,
+/// largest first: the first that brings it inside the cap is used.
+///
+/// Numerators of one or two, and the ladder's own of at most four, so the two
+/// together keep every zoom's step whole.
+pub(crate) const CAPS: [RenderScale; 5] = [
+    RenderScale::ONE,
+    RenderScale {
+        numerator: 2,
+        denominator: 3,
+    },
+    RenderScale {
+        numerator: 1,
+        denominator: 2,
+    },
+    RenderScale {
+        numerator: 1,
+        denominator: 3,
+    },
+    RenderScale {
+        numerator: 1,
+        denominator: 4,
+    },
+];
 
 /// One notch per octave the material synthesis can shed.
 const MATERIAL_NOTCHES: u8 = {
@@ -118,10 +175,16 @@ const NOTCHES: [(Rung, u8); 5] = [
 ];
 
 /// The render-scale fractions, coarsest last.
+///
+/// Each numerator a power of two no larger than four, so that together with
+/// the window's own cap every zoom's step stays a whole number of sub-units
+/// a render pixel: a fraction that did not would have the view cover a
+/// different piece of the world at a coarser resolution, which is a zoom
+/// rather than a degradation.
 const RENDER_SCALES: [RenderScale; 3] = [
     RenderScale {
-        numerator: 3,
-        denominator: 4,
+        numerator: 4,
+        denominator: 5,
     },
     RenderScale {
         numerator: 2,
@@ -270,14 +333,52 @@ impl Ladder {
         )
     }
 
-    /// How contact shadows are drawn.
+    /// How figures' contact shadows are drawn.
     #[must_use]
-    pub fn shadow(self) -> Shadow {
+    pub fn shadow(self) -> Shade {
         match self.shed_on(Rung::ShadowSoftness) {
-            0 => Shadow::Soft,
-            1 => Shadow::Hard,
-            _ => Shadow::Off,
+            0 => Shade::Soft,
+            _ => Shade::Hard,
         }
+    }
+
+    /// How the ground's relief shading is measured: narrowed as contact
+    /// shadows harden, and flat once they are hard.
+    #[must_use]
+    pub fn relief(self) -> Relief {
+        match self.shed_on(Rung::ShadowSoftness) {
+            0 => Relief::Wide,
+            1 => Relief::Narrow,
+            _ => Relief::Flat,
+        }
+    }
+
+    /// The deepest `auto` may shed in a `width` × `height` window at `zoom`:
+    /// the last step whose frame still draws every figure at a size the art
+    /// harness holds readable.
+    ///
+    /// Every rung but the render scale leaves a figure as legible as it was —
+    /// its contact shadow stops at hard and never goes — so the floor falls
+    /// in the render-scale rung, at the coarsest fraction that still draws
+    /// the smallest figure a record describes at the harness's floor. Where
+    /// the window's own resolution already draws it smaller, the zoom the
+    /// player chose has made that call, and the floor is the last step before
+    /// the render scale moves at all.
+    #[must_use]
+    pub fn floor(width: u32, height: u32, zoom: Zoom) -> Self {
+        let mut floor = Self::FULL;
+        let mut ladder = Self::FULL;
+        while let Some(next) = ladder.shed() {
+            let native = next.render_scale().is_native();
+            let legible = Viewport::new(width, height, next.render_scale())
+                .is_ok_and(|view| readable(view.step(zoom)));
+            if !native && !legible {
+                break;
+            }
+            floor = next;
+            ladder = next;
+        }
+        floor
     }
 
     /// The render target's size as a fraction of the window.

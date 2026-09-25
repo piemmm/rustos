@@ -118,6 +118,13 @@ pub enum FigureError {
     /// A looping clip whose root-height curve ends somewhere other than it
     /// began, so the figure would hitch vertically on every lap.
     LiftNotClosing,
+    /// Action segments that do not ascend strictly inside a clip, so one of
+    /// windup, active and recovery would be authored across no phase at all.
+    SegmentsUnreal,
+    /// An action segment lasting no time, or a time that is not finite.
+    TimingUnreal,
+    /// A clip played as an action that does not play once and hold.
+    ActionNotHeld,
     /// A light that is not a real bearing and elevation above the horizon.
     LightUnreal,
     /// Too few samples to measure a cycle over.
@@ -175,6 +182,9 @@ impl fmt::Display for FigureError {
             Self::LiftOutsideRange => "root height outside the legs' fold range",
             Self::LiftNotSpanning => "root-height curve does not span the cycle",
             Self::LiftNotClosing => "root-height curve does not close on itself",
+            Self::SegmentsUnreal => "action segments not ascending strictly inside the clip",
+            Self::TimingUnreal => "action segment not a finite positive number of seconds",
+            Self::ActionNotHeld => "an action clip must play once and hold",
             Self::LightUnreal => "light not a real bearing and elevation",
             Self::SamplesTooFew => "too few samples to measure a cycle over",
             Self::Identity(refused) => return refused.fmt(f),

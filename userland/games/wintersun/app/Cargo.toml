@@ -1,6 +1,6 @@
 [package]
 name = "tairix-wintersun-app"
-description = "WinterSun's client shell (plans/WINTERSUN.md WS5): the camera, the tiled software frame, the terrain splat and its light composite, the fixed-tick pacing the render interpolates over, the input drain, the three window size states, and the degradation ladder a blown frame budget turns. The host-tested behaviour is the crate's [lib]; the freestanding `Run` binary is the on-disk WinterSun.app bundle's entry point composing it over lib/window."
+description = "WinterSun's client (plans/WINTERSUN.md WS5, WS6): the camera, the tiled software frame, the terrain splat and its light composite, the figures standing on it and the presets they are built from, the fixed-tick pacing the render interpolates over, the input drain, the three window size states, and the degradation ladder a blown frame budget turns, floored where figures stop being readable. The host-tested behaviour is the crate's [lib]; the freestanding `Run` binary is the on-disk WinterSun.app bundle's entry point composing it over lib/window."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -42,6 +42,11 @@ tairix-wintersun-rules = { path = "../rules", version = "=0.0.0" }
 # The coordinate and intent vocabulary the camera projects and the input maps
 # into. A second `WorldPoint` would be two to keep in step.
 tairix-wintersun-net = { path = "../net", version = "=0.0.0" }
+# The figures standing on the ground: the actor a character is played as,
+# the painter that draws one, the sun they and the ground are lit by, and the
+# size below which the art harness has said nothing about a figure's
+# readability, which the degradation ladder's floor is taken from.
+tairix-wintersun-figure = { path = "../figure", version = "=0.0.0" }
 # The one colour, pixel and surface vocabulary, and the one blend arithmetic.
 tairix-raster = { path = "../../../../lib/raster", version = "=0.0.0" }
 # Logical lengths and the one logical-to-physical conversion, so the client is

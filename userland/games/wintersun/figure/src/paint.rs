@@ -13,7 +13,8 @@
 
 use tairix_inline::ArrayVec;
 use tairix_raster::shape::{fill, Placed, Scratch};
-use tairix_raster::surface::{Surface, SUBPIXEL};
+use tairix_raster::surface::{Canvas, SUBPIXEL};
+use tairix_raster::{Color, ScanScratch};
 use tairix_util::mathf;
 
 use crate::mesh::MAX_RINGS;
@@ -43,13 +44,15 @@ pub struct Cost {
     pub fill_area: f64,
 }
 
-/// The buffer a strip's outline is walked through.
+/// The buffers a strip's outline is walked and scan-converted through, and a
+/// shadow's shapes traced through.
 ///
 /// Held by the caller across figures, so drawing a scene of them costs no
-/// allocation at all.
+/// allocation at all once the buffers have grown to the largest part.
 #[derive(Debug, Default)]
 pub struct Brush {
     outline: ArrayVec<(i32, i32), OUTLINE>,
+    scan: ScanScratch,
     shape: Scratch,
 }
 
@@ -61,19 +64,89 @@ impl Brush {
     }
 }
 
-/// Draw `placement` onto `surface`, `shadow` first.
-pub fn draw(
-    surface: &mut Surface,
-    shadow: Option<Placed>,
+/// A tone every stroke of a figure is mixed toward, and how far, out of 255:
+/// the air between the figure and whoever is looking at it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Veil {
+    /// The tone mixed toward.
+    pub tone: Color,
+    /// How far, out of 255.
+    pub amount: u8,
+}
+
+impl Veil {
+    /// Clear air: every stroke drawn as it was placed.
+    pub const NONE: Self = Self {
+        tone: Color::rgb(0, 0, 0),
+        amount: 0,
+    };
+
+    /// `color` seen through this veil, its own alpha kept.
+    #[must_use]
+    pub fn over(self, color: Color) -> Color {
+        if self.amount == 0 {
+            return color;
+        }
+        let mix = |from: u8, to: u8| {
+            let (from, to) = (i32::from(from), i32::from(to));
+            let moved = from + (to - from) * i32::from(self.amount) / 255;
+            u8::try_from(moved.clamp(0, 255)).unwrap_or(u8::MAX)
+        };
+        Color::rgba(
+            mix(color.r, self.tone.r),
+            mix(color.g, self.tone.g),
+            mix(color.b, self.tone.b),
+            color.a,
+        )
+    }
+}
+
+/// Draw `placement` onto `canvas` through `veil`, the rings of its contact
+/// `shadow` first and outermost first.
+///
+/// A canvas is a whole surface or one band of one, so a figure drawn band by
+/// band on several cores is exactly the figure drawn whole.
+pub fn draw<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    shadow: &[Placed],
     placement: &Placement,
     brush: &mut Brush,
+    veil: Veil,
 ) {
-    if let Some(shadow) = shadow {
-        fill(surface, &shadow, &mut brush.shape);
+    ground(canvas, shadow, brush, veil);
+    figure(canvas, placement, brush, veil);
+}
+
+/// The first half of [`draw`]: the contact shadow's rings, outermost first.
+///
+/// Apart from the figure for a canvas that has to hold the two to different
+/// rows — a figure wading is cut at the waterline, and its shadow on the
+/// surface is not.
+pub fn ground<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    shadow: &[Placed],
+    brush: &mut Brush,
+    veil: Veil,
+) {
+    for ring in shadow {
+        let seen = Placed {
+            color: veil.over(ring.color),
+            ..*ring
+        };
+        fill(canvas, &seen, &mut brush.shape);
     }
+}
+
+/// The second half of [`draw`]: the figure's own strips, far-first.
+pub fn figure<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    placement: &Placement,
+    brush: &mut Brush,
+    veil: Veil,
+) {
     for strip in placement.strips() {
         walk(&strip, &mut brush.outline);
-        surface.fill_polygon_subpixel(&brush.outline, strip.color);
+        canvas.fill_polygon_subpixel(&brush.outline, veil.over(strip.color), &mut brush.scan);
     }
 }
 

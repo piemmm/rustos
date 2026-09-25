@@ -41,7 +41,7 @@ pub const SEATMGR_ENDPOINT: u64 = 0x5354_1001;
 pub const SEAT_PRIMARY: u64 = 0;
 
 /// One granted seat hold, as the client-visible handle: which seat, the
-/// kernel-attested owning task, and the per-seat monotonic generation the
+/// kernel-attested owning process, and the per-seat monotonic generation the
 /// grant was minted under (`display_acquire` returns it).
 ///
 /// The generation is what makes the handle *revocation-proof in the right
@@ -57,7 +57,9 @@ pub struct SeatLease {
     /// The seat the lease was granted on ([`SEAT_PRIMARY`], or a
     /// discovery-minted seat id from `SEAT_LIST`).
     pub seat_id: u64,
-    /// The kernel-attested task id the seat recorded as its owner.
+    /// The kernel-attested process number (its leader task's id) the seat
+    /// recorded as its owner: a seat is held by a process, whichever of its
+    /// threads acquired it.
     pub owner_task: u64,
     /// The seat's monotonic grant counter at mint time; starts at 1 and
     /// never repeats for a given seat.

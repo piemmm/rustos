@@ -78,6 +78,10 @@ pub enum LaunchTarget<'a> {
         /// The grant the *asking* process minted to the session, which the
         /// relay redeems and hands on to the instance.
         grant: u64,
+        /// The asking process, attested: the relay redeems only a grant it
+        /// minted, so no caller can name another process's delegation to the
+        /// session and have it handed on.
+        from: ProcId,
     },
     /// A place inside the application. One it does not recognise leaves it
     /// showing what it already showed.
@@ -134,21 +138,23 @@ pub trait LaunchHost {
 /// from a descriptor it opened itself — so the session lends none of its own,
 /// larger filesystem reach.
 pub trait DocumentRelay {
-    /// Redeem `grant`, minted to this process, and hand the same authority
-    /// on to `app` as a fresh one-shot read-only delegation, answering the
-    /// handle `app` redeems. The session's own descriptor is closed either
-    /// way.
+    /// Redeem `grant`, minted to this process by `from`, and hand the same
+    /// authority on to `app` as a fresh one-shot read-only delegation,
+    /// answering the handle `app` redeems. The session's own descriptor is
+    /// closed either way.
     ///
     /// # Errors
     ///
-    /// Whatever the kernel refused. Nothing is delegated on a refusal, so a
-    /// caller reads it as "the instance did not get it".
-    fn relay(&mut self, grant: u64, app: ProcId) -> Result<u64, Errno>;
+    /// Whatever the kernel refused — among it a grant `from` did not mint.
+    /// Nothing is delegated on a refusal, so a caller reads it as "the
+    /// instance did not get it".
+    fn relay(&mut self, grant: u64, from: ProcId, app: ProcId) -> Result<u64, Errno>;
 
-    /// Redeem `grant` and close it unread: a hand-over nothing took leaves no
-    /// delegation pending in this process's table for its asker's life. A
-    /// grant already consumed makes this a no-op.
-    fn decline(&mut self, grant: u64);
+    /// Redeem `grant`, minted to this process by `from`, and close it
+    /// unread: a hand-over nothing took leaves no delegation pending in this
+    /// process's table for its asker's life. A grant already consumed, or
+    /// one `from` did not mint, is left alone.
+    fn decline(&mut self, grant: u64, from: ProcId);
 }
 
 /// The bundle *directory* an entry-point `Run` path names.
@@ -442,7 +448,7 @@ mod tests {
         fn queue_open_target(&mut self, app: ProcId, target: LaunchTarget<'_>) -> bool {
             let named = match target {
                 LaunchTarget::Path(path) => String::from(path),
-                LaunchTarget::Document { name, grant } => alloc::format!("{name}#{grant}"),
+                LaunchTarget::Document { name, grant, .. } => alloc::format!("{name}#{grant}"),
                 LaunchTarget::Pane(pane) => alloc::format!("pane:{pane}"),
             };
             self.queued.push((app, named));
@@ -507,6 +513,7 @@ mod tests {
                 Some(LaunchTarget::Document {
                     name: "holiday.png",
                     grant: 9,
+                    from: APP,
                 })
             ),
             Launch::Reused {

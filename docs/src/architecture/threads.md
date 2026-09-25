@@ -223,8 +223,11 @@ A thread's id outlives its task too. A kill removes a parked victim from the
 scheduler before any of this runs, and the leader's id is the process's number
 for as long as the group lives, so every id is held against the id draw from
 admission until the state it keys is gone: a non-leader's is returned by its
-own `retire`, the leader's by the process teardown's last step. No admission
-can be issued a number whose previous holder's records still stand.
+own `retire`, the leader's by the last step of the process's death, after its
+exit is recorded — or, when a parent is owed a reap, by that reap, since the
+parent's row is keyed by the number too (a parent that dies unreaped drops the
+row and returns it). No admission can be issued a number whose previous
+holder's records still stand.
 
 `wait` therefore reports a child only when its whole thread group is gone —
 and **any** thread of the parent may be the one that reaps it. The child rows

@@ -1089,7 +1089,7 @@ device. Probed both ways — restoring the drivers' old inline decode fails it o
 the abort, and restoring just the `NotFound` fallback fails it on the
 misattribution.
 
-### Open — three duplications too large for the change that found them
+### Open — four duplications too large for the change that found them
 
 The first two were noticed while landing `plans/NEW-SWITCHBOARD.md` Q3 and the
 third while landing `plans/NEW-TASKBAR.md` T19; all are recorded here rather
@@ -1129,6 +1129,17 @@ whose fix touches far more than the change that found them.
   so it is not a duplicate. Finishing it is two small mechanical diffs; it was
   left out of T19 because that change had no other reason to touch either
   crate's tests.
+- **Fifty x86_64 verticals spell the shared layout's link step themselves.**
+  `tairix_itest_harness::x86_64_guest_build` — and its sibling
+  `x86_64_guest_build_with_virt_boot_stack`, for an image whose workload runs
+  on the boot stack the `virt` layouts give every image — is the one
+  definition of "link `kernel/arch/x86_64/linker.ld` on the freestanding target
+  only", yet only four build scripts call either. Ten of the fifty others are
+  exact copies of it; forty wrap their own copy around fixture work (an
+  embedded program, driver or app image), so the helper's link step is what
+  they share, not the whole script. Fifty small build-script diffs, each
+  needing its vertical rebuilt and rerun; left out of WinterSun WS6, which had
+  no other reason to touch those crates.
 
 ### Note for the next context — a text sweep needs its own audit
 

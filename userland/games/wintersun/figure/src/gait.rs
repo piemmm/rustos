@@ -271,6 +271,23 @@ impl Gait {
         self.stride
     }
 
+    /// The same cycle at the same phase, paced by `stride` from here on.
+    ///
+    /// A blend of two gaits keeps one phase — the walk's left foot is the
+    /// run's left foot — and paces it by the blend's own stride, so the
+    /// feet stay in step while the blend moves between them.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::StrideUnreal`] for a stride that is not finite and
+    /// positive.
+    pub fn restrided(self, stride: f64) -> Result<Self, FigureError> {
+        Ok(Self {
+            phase: self.phase,
+            ..Self::new(stride)?
+        })
+    }
+
     /// Where in the cycle it is, in `0..1`.
     #[must_use]
     pub const fn phase(self) -> f64 {

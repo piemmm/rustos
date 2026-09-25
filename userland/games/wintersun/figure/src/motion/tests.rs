@@ -2,19 +2,28 @@
 
 use tairix_util::mathf;
 
-use super::{
-    opposite, rooted, Kind, Motion, Set, IDLE_ANKLE, IDLE_CROUCH, IDLE_HIP, IDLE_KNEE, LEG_LENGTH,
-    RUN_ANKLE_LEFT, RUN_CROUCH, RUN_FLIGHT_RISE, RUN_HALF_STEP, RUN_HIP_LEFT, RUN_KNEE_LEFT,
-    RUN_STANCE, RUN_STANCE_DIP, WALK_ANKLE_LEFT, WALK_CROUCH, WALK_HALF_STEP, WALK_HIP_LEFT,
-    WALK_KNEE_LEFT, WALK_STANCE,
+use super::action::{
+    DODGE, DODGE_ANKLE, DODGE_HIP, DODGE_KNEE, HEAVY_ANKLE, HEAVY_HIP, HEAVY_KNEE, STAGGER,
+    STAGGER_ANKLE_LEFT, STAGGER_ANKLE_RIGHT, STAGGER_CATCH, STAGGER_HIP_LEFT, STAGGER_HIP_RIGHT,
+    STAGGER_KNEE_LEFT, STAGGER_KNEE_RIGHT,
 };
+use super::locomotion::{
+    IDLE_ANKLE, IDLE_CROUCH, IDLE_HIP, IDLE_KNEE, RUN_ANKLE_LEFT, RUN_CROUCH, RUN_FLIGHT_RISE,
+    RUN_HALF_STEP, RUN_HIP_LEFT, RUN_KNEE_LEFT, RUN_STANCE, RUN_STANCE_DIP, WALK_ANKLE_LEFT,
+    WALK_CROUCH, WALK_HALF_STEP, WALK_HIP_LEFT, WALK_KNEE_LEFT, WALK_STANCE,
+};
+use super::state::{
+    DIE_ANKLE, DIE_HIP, DIE_KNEE, SIT_ANKLE, SIT_DEPTH, SIT_HIP, SIT_KNEE, SIT_SPLAY,
+};
+use super::{opposite, rooted, smooth, Kind, Layer, Motion, Set, Sink, Support, LEG_LENGTH};
 use crate::clip::{Clip, Key, Loop};
 use crate::frame::Body;
 use crate::gait::Gait;
-use crate::humanoid::{self, Bone, DRIVES, SHANK_LENGTH, THIGH_LENGTH};
+use crate::humanoid::{self, Bone, DRIVES, SHANK_LENGTH, THIGH_LENGTH, UPPER_BODY};
 use crate::plant::{solve, Legs};
 use crate::pose::Param;
 use crate::reference;
+use crate::rig::{Frames, Resolved};
 use crate::rigging::Rigging;
 use crate::socket::Side;
 use crate::testing::human;
@@ -70,9 +79,7 @@ const RUN_PATH: Path = Path {
 impl Path {
     /// Where the foot is against the hip at `phase` of `clip`.
     fn foot(&self, clip: Clip<'_>, phase: f64) -> Body {
-        // A foot on the floor is a leg's length below the hip, less however
-        // far the clip holds the body into its legs.
-        let floor = |at: f64| -LEG_LENGTH * (1.0 + clip.root_at(at));
+        let floor = |at: f64| floor(clip, at);
         if phase < self.stance {
             let u = phase / self.stance;
             return Body::new(self.half_step * (1.0 - 2.0 * u), 0.0, floor(phase));
@@ -89,15 +96,222 @@ impl Path {
     }
 }
 
+/// A foot on the floor is a leg's length below the hip, less however far the
+/// clip holds the body into its legs.
+fn floor(clip: Clip<'_>, phase: f64) -> f64 {
+    -LEG_LENGTH * (1.0 + clip.root_at(phase))
+}
+
+/// How far a squatting heel lets the ankle turn it: the heel lifts as the
+/// squat deepens rather than pinning the ankle at its limit.
+const DIE_LEVEL: f64 = 0.6;
+
+/// How much a crouched dodge or chop levels its feet by.
+const CROUCHED_LEVEL: f64 = 0.8;
+
+/// How much the stagger's stepping foot is levelled by: it hangs through its
+/// swing, as a walking foot does.
+const STEPPING_LEVEL: f64 = 0.7;
+
+/// How far behind the hip the stagger's catching foot comes down.
+const STAGGER_STEP: f64 = -12.0;
+
+/// When the stagger's catching foot steps back in, and how high each of its
+/// two steps clears the floor.
+const STAGGER_RETURN: (f64, f64) = (0.70, 0.85);
+const STAGGER_CLEARANCE: (f64, f64) = (5.0, 4.0);
+
+/// How far in front of its hip, and how far out from it, a seated foot rests.
+const SIT_FOOT: (f64, f64) = (32.0, 3.0);
+
+/// Where the stagger's right foot is against its hip at `phase`: under it,
+/// stepping back to catch the body, down behind it, and in again.
+fn stagger_step(floor: f64, phase: f64) -> Body {
+    let arc = |u: f64, from: f64, to: f64, clearance: f64| {
+        let lifted = mathf::sin(core::f64::consts::PI * u);
+        Body::new(
+            from + (to - from) * smooth(u),
+            0.0,
+            floor + clearance * lifted * lifted,
+        )
+    };
+    let (back, home) = STAGGER_RETURN;
+    if phase <= STAGGER.active {
+        Body::new(0.0, 0.0, floor)
+    } else if phase <= STAGGER_CATCH {
+        let u = (phase - STAGGER.active) / (STAGGER_CATCH - STAGGER.active);
+        arc(u, 0.0, STAGGER_STEP, STAGGER_CLEARANCE.0)
+    } else if phase <= back {
+        Body::new(STAGGER_STEP, 0.0, floor)
+    } else if phase <= home {
+        arc(
+            (phase - back) / (home - back),
+            STAGGER_STEP,
+            0.0,
+            STAGGER_CLEARANCE.1,
+        )
+    } else {
+        Body::new(0.0, 0.0, floor)
+    }
+}
+
+/// Where `kind`'s `side` foot was stated to be at `phase`, and how much of the
+/// leg's turn its ankle levels it by — or `None` where the foot is in the air
+/// and its keys are authored rather than solved.
+fn footing(kind: Kind, side: Side, clip: Clip<'_>, phase: f64) -> Option<(Body, f64)> {
+    let floor = floor(clip, phase);
+    let under = Body::new(0.0, 0.0, floor);
+    match kind {
+        Kind::Idle => Some((IDLE_PATH.foot(clip, phase), IDLE_PATH.level)),
+        Kind::Walk => Some((WALK_PATH.foot(clip, phase), WALK_PATH.level)),
+        Kind::Run => Some((RUN_PATH.foot(clip, phase), RUN_PATH.level)),
+        Kind::Die => Some((under, DIE_LEVEL)),
+        Kind::MeleeHeavy => Some((under, CROUCHED_LEVEL)),
+        Kind::Dodge => {
+            (phase <= DODGE.active || phase >= DODGE.recovery).then_some((under, CROUCHED_LEVEL))
+        }
+        Kind::Stagger => Some(match side {
+            Side::Left => (under, 1.0),
+            Side::Right => (stagger_step(floor, phase), STEPPING_LEVEL),
+        }),
+        Kind::Sit => {
+            let outward = match side {
+                Side::Left => SIT_FOOT.1,
+                Side::Right => -SIT_FOOT.1,
+            };
+            Some((Body::new(SIT_FOOT.0, outward, floor), 1.0))
+        }
+        _ => None,
+    }
+}
+
+/// One solved leg of a shipped clip: its hip, knee and ankle tables, and its
+/// splay's where the foot is not under the hip.
+struct Solved {
+    kind: Kind,
+    side: Side,
+    hip: &'static [Key],
+    knee: &'static [Key],
+    ankle: &'static [Key],
+    splay: Option<&'static [Key]>,
+}
+
+const fn solved(
+    kind: Kind,
+    side: Side,
+    [hip, knee, ankle]: [&'static [Key]; 3],
+    splay: Option<&'static [Key]>,
+) -> Solved {
+    Solved {
+        kind,
+        side,
+        hip,
+        knee,
+        ankle,
+        splay,
+    }
+}
+
+/// Every leg table solved from a foot path. A side a clip mirrors — the
+/// locomotion cycles' right legs — is held by the half-turn test instead.
+const SOLVED: [Solved; 11] = [
+    solved(
+        Kind::Idle,
+        Side::Left,
+        [&IDLE_HIP, &IDLE_KNEE, &IDLE_ANKLE],
+        None,
+    ),
+    solved(
+        Kind::Walk,
+        Side::Left,
+        [&WALK_HIP_LEFT, &WALK_KNEE_LEFT, &WALK_ANKLE_LEFT],
+        None,
+    ),
+    solved(
+        Kind::Run,
+        Side::Left,
+        [&RUN_HIP_LEFT, &RUN_KNEE_LEFT, &RUN_ANKLE_LEFT],
+        None,
+    ),
+    solved(
+        Kind::Dodge,
+        Side::Left,
+        [&DODGE_HIP, &DODGE_KNEE, &DODGE_ANKLE],
+        None,
+    ),
+    solved(
+        Kind::MeleeHeavy,
+        Side::Left,
+        [&HEAVY_HIP, &HEAVY_KNEE, &HEAVY_ANKLE],
+        None,
+    ),
+    solved(
+        Kind::Stagger,
+        Side::Left,
+        [&STAGGER_HIP_LEFT, &STAGGER_KNEE_LEFT, &STAGGER_ANKLE_LEFT],
+        None,
+    ),
+    solved(
+        Kind::Stagger,
+        Side::Right,
+        [
+            &STAGGER_HIP_RIGHT,
+            &STAGGER_KNEE_RIGHT,
+            &STAGGER_ANKLE_RIGHT,
+        ],
+        None,
+    ),
+    solved(
+        Kind::Die,
+        Side::Left,
+        [&DIE_HIP, &DIE_KNEE, &DIE_ANKLE],
+        None,
+    ),
+    solved(
+        Kind::Sit,
+        Side::Left,
+        [&SIT_HIP, &SIT_KNEE, &SIT_ANKLE],
+        Some(&SIT_SPLAY),
+    ),
+    solved(
+        Kind::Sit,
+        Side::Right,
+        [&SIT_HIP, &SIT_KNEE, &SIT_ANKLE],
+        Some(&SIT_SPLAY),
+    ),
+    solved(
+        Kind::Idle,
+        Side::Right,
+        [&IDLE_HIP, &IDLE_KNEE, &IDLE_ANKLE],
+        None,
+    ),
+];
+
 #[test]
 fn every_shipped_motion_assembles_and_clips() {
     for kind in Kind::ALL {
         let motion = Motion::new(kind).expect("a shipped motion");
         assert_eq!(motion.kind(), kind);
         let clip = motion.clip().expect("its clip");
-        assert_eq!(clip.repeat(), Loop::Wrap, "{}", kind.name());
-        assert!(clip.seconds() > 0.0);
-        assert_eq!(clip.curves().len(), 12, "{}", kind.name());
+        let name = kind.name();
+        assert!(clip.seconds() > 0.0, "{name}");
+        assert!(!clip.curves().is_empty(), "{name}");
+        let cycles = matches!(
+            kind,
+            Kind::Idle
+                | Kind::Walk
+                | Kind::Run
+                | Kind::Channel
+                | Kind::Fall
+                | Kind::Sit
+                | Kind::Swim
+                | Kind::Climb
+        );
+        let expected = if cycles { Loop::Wrap } else { Loop::Hold };
+        assert_eq!(clip.repeat(), expected, "{name}");
+        if kind.layer() == Layer::Locomotion {
+            assert_eq!(clip.curves().len(), 12, "{name}");
+        }
     }
 }
 
@@ -120,10 +334,10 @@ fn every_table_of_motions_is_held_in_the_order_kind_lists() {
 }
 
 /// The measurement that makes the foot paths the source of the leg tables
-/// rather than a description of them: every key of every shipped leg curve
-/// is its path put through the planting layer's own two-bone solve, to the
-/// six places it is written to. A table edited by hand, or a path whose
-/// numbers drift from the keys, fails here.
+/// rather than a description of them: every key of every leg a foot path
+/// was solved for is that path put through the planting layer's own two-bone
+/// solve, to the six places it is written to. A table edited by hand, or a
+/// path whose numbers drift from the keys, fails here.
 #[test]
 fn every_leg_key_is_its_foot_path_solved() {
     let rig = human();
@@ -131,37 +345,36 @@ fn every_leg_key_is_its_foot_path_solved() {
     let folded = rigging
         .angle_for(Param::KneeBend(Side::Left), 1.0)
         .expect("the humanoid has knees");
-    let motions: [(Kind, Path, [&[Key]; 3]); 3] = [
-        (Kind::Idle, IDLE_PATH, [&IDLE_HIP, &IDLE_KNEE, &IDLE_ANKLE]),
-        (
-            Kind::Walk,
-            WALK_PATH,
-            [&WALK_HIP_LEFT, &WALK_KNEE_LEFT, &WALK_ANKLE_LEFT],
-        ),
-        (
-            Kind::Run,
-            RUN_PATH,
-            [&RUN_HIP_LEFT, &RUN_KNEE_LEFT, &RUN_ANKLE_LEFT],
-        ),
-    ];
-    for (kind, path, tables) in motions {
-        let motion = Motion::new(kind).expect("a shipped motion");
+    for leg in &SOLVED {
+        let motion = Motion::new(leg.kind).expect("a shipped motion");
         let clip = motion.clip().expect("its clip");
-        for index in 0..tables[0].len() {
-            let phase = tables[0][index].phase;
-            let solved = solve(THIGH_LENGTH, SHANK_LENGTH, folded, path.foot(clip, phase));
-            assert!(
-                mathf::fabs(solved.roll) < 1e-12,
-                "{} splays its hip at {phase}",
-                kind.name()
-            );
+        let name = leg.kind.name();
+        let side = leg.side;
+        for index in 0..leg.hip.len() {
+            let phase = leg.hip[index].phase;
+            let Some((target, level)) = footing(leg.kind, side, clip, phase) else {
+                // Only a foot in the air is authored rather than solved.
+                assert!(
+                    leg.kind == Kind::Dodge && phase > DODGE.active && phase < DODGE.recovery,
+                    "{name} {side:?} has no stated path at {phase}"
+                );
+                continue;
+            };
+            let solved = solve(THIGH_LENGTH, SHANK_LENGTH, folded, target);
             let turn = solved.pitch + solved.fold;
-            let wanted = [
-                (Param::HipSwing(Side::Left), solved.pitch),
-                (Param::KneeBend(Side::Left), solved.fold),
-                (Param::AnkleAngle(Side::Left), -path.level * turn),
+            let mut wanted = alloc::vec![
+                (leg.hip, Param::HipSwing(side), solved.pitch),
+                (leg.knee, Param::KneeBend(side), solved.fold),
+                (leg.ankle, Param::AnkleAngle(side), -level * turn),
             ];
-            for (table, (param, angle)) in tables.iter().zip(wanted) {
+            match leg.splay {
+                Some(splay) => wanted.push((splay, Param::HipSplay(side), solved.roll)),
+                None => assert!(
+                    mathf::fabs(solved.roll) < 1e-12,
+                    "{name} {side:?} splays its hip at {phase}"
+                ),
+            }
+            for (table, param, angle) in wanted {
                 let key = table[index];
                 let value = rigging
                     .value_for(param, angle)
@@ -169,17 +382,213 @@ fn every_leg_key_is_its_foot_path_solved() {
                 assert_eq!(
                     key.phase.to_bits(),
                     phase.to_bits(),
-                    "{} {param:?} keys apart",
-                    kind.name()
+                    "{name} {param:?} keys apart"
                 );
                 assert!(
                     mathf::fabs(key.value - value) <= ROUNDED,
-                    "{} {param:?} at {phase} is keyed {} but its path solves to {value}",
-                    kind.name(),
+                    "{name} {param:?} at {phase} is keyed {} but its path solves to {value}",
                     key.value
                 );
             }
         }
+    }
+}
+
+/// An action lasts as long as its three segments, plays once and holds, and
+/// fires each of its events on a segment boundary: the frame a hitbox opens
+/// or an arrow leaves is the frame the art shows it.
+#[test]
+fn every_action_is_timed_across_its_segments() {
+    let actions = [
+        Kind::Dodge,
+        Kind::MeleeLight,
+        Kind::MeleeHeavy,
+        Kind::Draw,
+        Kind::Loose,
+        Kind::Cast,
+        Kind::Hit,
+        Kind::Stagger,
+    ];
+    for kind in Kind::ALL {
+        let motion = Motion::new(kind).expect("a shipped motion");
+        let clip = motion.clip().expect("its clip");
+        let name = kind.name();
+        let Some(segments) = clip.segments() else {
+            assert!(
+                !actions.contains(&kind),
+                "{name} is not played as an action"
+            );
+            continue;
+        };
+        assert!(actions.contains(&kind), "{name} is played as an action");
+        assert_eq!(clip.repeat(), Loop::Hold, "{name}");
+        let action = motion
+            .authored
+            .action
+            .expect("an action is authored as one");
+        let [windup, active, recovery] = action.seconds;
+        assert!(mathf::fabs(clip.seconds() - (windup + active + recovery)) < 1e-12);
+        assert_eq!(
+            segments.active().to_bits(),
+            action.active.to_bits(),
+            "{name}"
+        );
+        assert_eq!(
+            segments.recovery().to_bits(),
+            action.recovery.to_bits(),
+            "{name}"
+        );
+        // The segment boundaries land where the reference timing puts them.
+        let at_active = clip.phase_at(windup).expect("finite");
+        let at_recovery = clip.phase_at(windup + active).expect("finite");
+        assert!(mathf::fabs(at_active - segments.active()) < 1e-12, "{name}");
+        assert!(
+            mathf::fabs(at_recovery - segments.recovery()) < 1e-12,
+            "{name}"
+        );
+        for event in clip.events_between(0.0, 1.0).expect("a real range") {
+            let on_boundary = [segments.active(), segments.recovery()]
+                .iter()
+                .any(|phase| phase.to_bits() == event.phase.to_bits());
+            let caught = kind == Kind::Stagger && event.phase.to_bits() == STAGGER_CATCH.to_bits();
+            assert!(
+                on_boundary || caught,
+                "{name} fires {} off a segment boundary",
+                event.name
+            );
+        }
+    }
+}
+
+/// An upper-body clip plays over whatever the legs are doing, so it may key
+/// nothing below the waist and carries no height or displacement of its own.
+#[test]
+fn every_upper_body_clip_keys_only_the_upper_body() {
+    for kind in Kind::ALL
+        .into_iter()
+        .filter(|kind| kind.layer() == Layer::Upper)
+    {
+        let motion = Motion::new(kind).expect("a shipped motion");
+        let clip = motion.clip().expect("its clip");
+        for param in Param::ALL {
+            if clip.mask().holds(param) {
+                assert!(
+                    UPPER_BODY.holds(param),
+                    "{} keys {param:?}, below the waist",
+                    kind.name()
+                );
+            }
+        }
+        assert!(clip.travel().is_none(), "{}", kind.name());
+        for step in 0..=16 {
+            let phase = real(step) / 16.0;
+            assert!(mathf::fabs(clip.root_at(phase)) < 1e-12, "{}", kind.name());
+        }
+    }
+}
+
+/// A figure with nothing under it stands at no height of its own: where its
+/// body is belongs to whatever is holding it up.
+#[test]
+fn a_clip_with_nothing_underfoot_holds_no_height_of_its_own() {
+    for kind in Kind::ALL
+        .into_iter()
+        .filter(|kind| kind.support() != Support::Ground)
+    {
+        let motion = Motion::new(kind).expect("a shipped motion");
+        let clip = motion.clip().expect("its clip");
+        for step in 0..=16 {
+            let phase = real(step) / 16.0;
+            assert!(mathf::fabs(clip.root_at(phase)) < 1e-12, "{}", kind.name());
+        }
+    }
+}
+
+/// Each clip that sinks into its legs begins where a standing figure stands
+/// and, unless it is a death, ends there too — so it fades in from, and out
+/// to, the idle with nothing to cross.
+#[test]
+fn every_sinking_clip_begins_standing() {
+    for sink in [Sink::Dodge, Sink::Heavy, Sink::Stagger, Sink::Die] {
+        assert!(
+            mathf::fabs(sink.depth(0.0) - IDLE_CROUCH) < 1e-12,
+            "{sink:?} starts at {}",
+            sink.depth(0.0)
+        );
+        if sink != Sink::Die {
+            assert!(
+                mathf::fabs(sink.depth(1.0) - IDLE_CROUCH) < 1e-12,
+                "{sink:?} ends at {}",
+                sink.depth(1.0)
+            );
+        }
+    }
+    // A dead figure stays down.
+    assert!(mathf::fabs(Sink::Die.depth(0.8) - Sink::Die.depth(1.0)) < 1e-12);
+    let motion = Motion::new(Kind::Sit).expect("the shipped sit");
+    let clip = motion.clip().expect("its clip");
+    assert!(mathf::fabs(clip.root_at(0.5) - rooted(-SIT_DEPTH)) < 1e-12);
+}
+
+/// The dodge lets the simulation move it any distance without a foot
+/// sliding: its travel is flat wherever a foot is down, and both feet are
+/// off the floor everywhere it is not.
+#[test]
+fn the_dodge_travels_only_while_both_feet_are_in_the_air() {
+    let rig = human();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+    let motion = Motion::new(Kind::Dodge).expect("the shipped dodge");
+    let clip = motion.clip().expect("its clip");
+    let travel = clip.travel().expect("a dodge is paced by its clip");
+    let mut frames = Frames::new();
+    for step in 0..=400 {
+        let phase = real(step) / 400.0;
+        let spent = travel.at(phase);
+        if phase <= DODGE.active {
+            assert!(
+                mathf::fabs(spent) < 1e-12,
+                "moved {spent} before the dash at {phase}"
+            );
+        } else if phase >= DODGE.recovery {
+            assert!(
+                mathf::fabs(spent - 1.0) < 1e-12,
+                "moved {spent} after the dash at {phase}"
+            );
+        } else {
+            let pose = clip.sample(phase).expect("a pose");
+            rigging
+                .posture(&pose)
+                .expect("posturable")
+                .resolve(Resolved::REST, &mut frames);
+            let feet = legs
+                .standing(&frames, clip.root_at(phase))
+                .expect("two feet");
+            for foot in feet {
+                assert!(
+                    foot.up > legs.sole(),
+                    "a foot is down at {phase} while the dodge travels"
+                );
+            }
+        }
+    }
+}
+
+/// The loose begins exactly where the draw holds, so the release follows the
+/// draw with nothing to fade across.
+#[test]
+fn the_loose_begins_where_the_draw_holds() {
+    let draw = Motion::new(Kind::Draw).expect("the shipped draw");
+    let loose = Motion::new(Kind::Loose).expect("the shipped loose");
+    let held = draw.clip().expect("its clip").sample(1.0).expect("a pose");
+    let released = loose.clip().expect("its clip").sample(0.0).expect("a pose");
+    for param in Param::ALL {
+        assert!(
+            mathf::fabs(held.get(param) - released.get(param)) < 1e-12,
+            "{param:?} jumps from {} to {}",
+            held.get(param),
+            released.get(param)
+        );
     }
 }
 
@@ -190,6 +599,9 @@ fn every_looping_curve_closes_on_itself() {
     for kind in Kind::ALL {
         let motion = Motion::new(kind).expect("a shipped motion");
         let clip = motion.clip().expect("its clip");
+        if clip.repeat() != Loop::Wrap {
+            continue;
+        }
         for curve in clip.curves() {
             let keys = curve.keys();
             let (first, last) = (keys[0], keys[keys.len() - 1]);
@@ -217,7 +629,10 @@ fn a_mirrored_cycle_rotated_twice_is_itself() {
         Key::new(0.75, 0.9),
         Key::new(1.0, 0.1),
     ];
-    for kind in Kind::ALL {
+    for kind in Kind::ALL
+        .into_iter()
+        .filter(|kind| kind.layer() == Layer::Locomotion)
+    {
         let motion = Motion::new(kind).expect("a shipped motion");
         let clip = motion.clip().expect("its clip");
         for curve in clip.curves() {

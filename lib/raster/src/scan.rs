@@ -219,6 +219,7 @@ impl SampleSpace {
 ///
 /// A horizontal edge encloses no area and crosses no row, so it is never
 /// built.
+#[derive(Debug)]
 struct Edge {
     /// The y of the edge's upper endpoint.
     top: i64,
@@ -401,12 +402,40 @@ impl Cells<'_> {
     }
 }
 
-/// A scan-converted shape: its edges, its extent, the rule that decides which
-/// of the regions they enclose is inside, and the row accumulators it reuses.
-pub(crate) struct ScanFill {
+/// The memory a scan conversion works in: its edge table, one row of
+/// accumulators, and that row's alphas.
+///
+/// Held by a caller that fills many shapes — a scene of figures, a frame of
+/// glyphs — so its fills allocate nothing once the buffers have grown to the
+/// largest of them. What it holds between fills means nothing.
+#[derive(Debug, Default)]
+pub struct ScanScratch {
     edges: Vec<Edge>,
     cover: Vec<i64>,
     area: Vec<i64>,
+    alphas: Vec<u8>,
+}
+
+impl ScanScratch {
+    /// Empty buffers.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            edges: Vec::new(),
+            cover: Vec::new(),
+            area: Vec::new(),
+            alphas: Vec::new(),
+        }
+    }
+}
+
+/// A scan-converted shape: its edges, its extent, the rule that decides which
+/// of the regions they enclose is inside, and the row buffers it works in.
+pub(crate) struct ScanFill<'s> {
+    edges: &'s [Edge],
+    cover: &'s mut Vec<i64>,
+    area: &'s mut Vec<i64>,
+    alphas: &'s mut Vec<u8>,
     rule: FillRule,
     /// The sub-unit bounding box of every vertex.
     extent: Extent,
@@ -420,9 +449,9 @@ struct Extent {
     max_y: i64,
 }
 
-impl ScanFill {
-    /// Build the converter for `contours`, or `None` when they enclose no area
-    /// at all.
+impl<'s> ScanFill<'s> {
+    /// Build the converter for `contours` in `scratch`, or `None` when they
+    /// enclose no area at all or the edge table does not fit.
     ///
     /// A contour is implicitly closed, and one with fewer than three points
     /// bounds nothing and is skipped; a list whose every contour is skipped —
@@ -432,8 +461,19 @@ impl ScanFill {
         contours: &[C],
         space: SampleSpace,
         rule: FillRule,
+        scratch: &'s mut ScanScratch,
     ) -> Option<Self> {
-        let mut edges = Vec::new();
+        let ScanScratch {
+            edges,
+            cover,
+            area,
+            alphas,
+        } = scratch;
+        edges.clear();
+        let points = contours.iter().fold(0usize, |count, contour| {
+            count.saturating_add(contour.as_ref().len())
+        });
+        edges.try_reserve(points).ok()?;
         let mut extent = Extent {
             min_x: i64::MAX,
             max_x: i64::MIN,
@@ -467,13 +507,37 @@ impl ScanFill {
         // Sorted by upper endpoint so a row's scan can stop at the first edge
         // that starts below it instead of testing the whole list.
         edges.sort_unstable_by_key(|edge| edge.top);
+        let edges: &'s Vec<Edge> = edges;
         Some(Self {
             edges,
-            cover: Vec::new(),
-            area: Vec::new(),
+            cover,
+            area,
+            alphas,
             rule,
             extent,
         })
+    }
+
+    /// Size the row buffers for rows `pixels` wide, answering whether they fit.
+    ///
+    /// A fill whose row the allocator refuses paints nothing rather than
+    /// aborting: an undrawn shape beats a dead process.
+    pub(crate) fn prepare(&mut self, pixels: usize) -> bool {
+        if !(emptied(self.cover, pixels)
+            && emptied(self.area, pixels)
+            && emptied(self.alphas, pixels))
+        {
+            return false;
+        }
+        self.cover.resize(pixels, 0);
+        self.area.resize(pixels, 0);
+        self.alphas.resize(pixels, 0);
+        true
+    }
+
+    /// The alphas the last [`Self::coverage_row`] wrote.
+    pub(crate) fn alphas(&self) -> &[u8] {
+        self.alphas
     }
 
     /// The pixel box `(x0, x1, y0, y1)` — half open on both axes — that can
@@ -506,37 +570,36 @@ impl ScanFill {
         ))
     }
 
-    /// Write the alpha of each pixel of row `row` into `alphas`, whose first
-    /// entry is pixel `first_pixel`.
+    /// Write the alpha of each pixel of row `row` into [`Self::alphas`], whose
+    /// first entry is pixel `first_pixel`, across the width [`Self::prepare`]
+    /// sized the row for.
     ///
-    /// Every entry is written, so the caller need not clear the buffer between
-    /// rows — it owns it only to keep one allocation for a whole fill.
-    pub(crate) fn coverage_row(&mut self, row: u32, first_pixel: u32, alphas: &mut [u8]) {
+    /// Every entry is written, so nothing needs clearing between rows.
+    pub(crate) fn coverage_row(&mut self, row: u32, first_pixel: u32) {
         let Self {
             edges,
             cover,
             area,
+            alphas,
             rule,
             ..
         } = self;
         let Ok(count) = i64::try_from(alphas.len()) else {
             return;
         };
-        cover.clear();
-        cover.resize(alphas.len(), 0);
-        area.clear();
-        area.resize(alphas.len(), 0);
+        cover.fill(0);
+        area.fill(0);
 
         let top = i64::from(row) * UNIT;
         let bottom = top + UNIT;
         let origin = i64::from(first_pixel) * UNIT;
         let mut cells = Cells {
-            cover,
-            area,
+            cover: cover.as_mut_slice(),
+            area: area.as_mut_slice(),
             carry: 0,
             right: count * UNIT,
         };
-        for edge in edges.iter() {
+        for edge in *edges {
             if edge.top >= bottom {
                 break;
             }
@@ -562,6 +625,13 @@ impl ScanFill {
             *alpha = rule.alpha(running - area);
         }
     }
+}
+
+/// Empty `buffer`, answering whether it can then hold `len` entries without
+/// another allocation.
+fn emptied<T>(buffer: &mut Vec<T>, len: usize) -> bool {
+    buffer.clear();
+    buffer.try_reserve(len).is_ok()
 }
 
 /// The left edge of `cell`, in window-relative sub-units.

@@ -3,14 +3,22 @@
 
 use super::*;
 
+/// Every knob the ladder turns: particles, light, materials, shadows, and
+/// the render scale.
+type Knobs = (Option<u32>, u32, u32, (Shade, Relief), (u32, u32));
+
 /// Every knob the ladder turns, as one comparable tuple.
-fn knobs(ladder: Ladder) -> (Option<u32>, u32, u32, Shadow, (u32, u32)) {
+///
+/// A figure's contact shadow and the ground's relief penumbra are one knob:
+/// the shadow-softness rung's first notch hardens every shadow edge in the
+/// frame at once, and its second flattens the relief.
+fn knobs(ladder: Ladder) -> Knobs {
     let scale = ladder.render_scale();
     (
         ladder.particle_shift(),
         ladder.light_shift(),
         ladder.material_quality().octaves(),
-        ladder.shadow(),
+        (ladder.shadow(), ladder.relief()),
         (scale.numerator(), scale.denominator()),
     )
 }
@@ -22,7 +30,8 @@ fn a_full_ladder_turns_nothing() {
     assert_eq!(full.rung(), Rung::Full);
     assert_eq!(full.particle_shift(), Some(0));
     assert_eq!(full.material_quality().octaves(), MAX_OCTAVES);
-    assert_eq!(full.shadow(), Shadow::Soft);
+    assert_eq!(full.shadow(), Shade::Soft);
+    assert_eq!(full.relief(), Relief::Wide);
     assert!(full.render_scale().is_native());
     assert_eq!(full.restore(), None, "there is nothing above full");
     assert_eq!(Ladder::default(), full);
@@ -93,9 +102,9 @@ fn the_rungs_give_way_in_the_stated_order() {
 
 #[test]
 fn a_rung_is_fully_shed_before_the_next_is_touched() {
-    // The first render-scale notch may only appear once shadows are off,
-    // materials are flat and particles are gone. Anything else means a
-    // later rung was reached early.
+    // The first render-scale notch may only appear once shadows are hard,
+    // the relief is flat, materials are flat and particles are gone.
+    // Anything else means a later rung was reached early.
     let mut ladder = Ladder::FULL;
     while ladder.render_scale().is_native() {
         match ladder.shed() {
@@ -105,7 +114,8 @@ fn a_rung_is_fully_shed_before_the_next_is_touched() {
     }
     assert_eq!(ladder.particle_shift(), None);
     assert_eq!(ladder.material_quality().octaves(), 0);
-    assert_eq!(ladder.shadow(), Shadow::Off);
+    assert_eq!(ladder.shadow(), Shade::Hard);
+    assert_eq!(ladder.relief(), Relief::Flat);
     assert!(ladder.light_shift() > 1);
 }
 
@@ -165,7 +175,7 @@ fn render_scale_never_scales_a_length_to_nothing() {
 }
 
 #[test]
-fn shadow_hardens_before_it_disappears() {
+fn a_contact_shadow_hardens_and_never_goes() {
     let mut seen = alloc::vec::Vec::new();
     for step in 0..=Ladder::MAX_STEP {
         let shadow = Ladder::new(step).shadow();
@@ -173,5 +183,94 @@ fn shadow_hardens_before_it_disappears() {
             seen.push(shadow);
         }
     }
-    assert_eq!(seen, alloc::vec![Shadow::Soft, Shadow::Hard, Shadow::Off]);
+    assert_eq!(seen, alloc::vec![Shade::Soft, Shade::Hard]);
+}
+
+#[test]
+fn the_relief_narrows_then_flattens() {
+    let mut seen = alloc::vec::Vec::new();
+    for step in 0..=Ladder::MAX_STEP {
+        let relief = Ladder::new(step).relief();
+        if seen.last() != Some(&relief) {
+            seen.push(relief);
+        }
+    }
+    assert_eq!(
+        seen,
+        alloc::vec![Relief::Wide, Relief::Narrow, Relief::Flat]
+    );
+}
+
+#[test]
+fn every_render_scale_keeps_every_zoom_whole() {
+    let mut zooms = alloc::vec![Zoom::NEAREST];
+    while let Some(next) = zooms.last().and_then(|zoom| zoom.further()) {
+        zooms.push(next);
+    }
+    for cap in CAPS {
+        for step in 0..=Ladder::MAX_STEP {
+            let scale = cap.of(Ladder::new(step).render_scale());
+            for zoom in &zooms {
+                let base = zoom.sub_units_per_pixel();
+                let whole = scale.step(base).expect("a whole step");
+                assert_eq!(
+                    i64::from(whole) * i64::from(scale.numerator()),
+                    i64::from(base) * i64::from(scale.denominator()),
+                    "{scale:?} at {zoom:?} is not the zoom's own step widened"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_fraction_that_splits_a_sub_unit_is_refused() {
+    let three_quarters = RenderScale {
+        numerator: 3,
+        denominator: 4,
+    };
+    assert_eq!(
+        three_quarters.step(8),
+        None,
+        "eight sub-units widened by a third split one"
+    );
+    assert_eq!(three_quarters.step(12), Some(16));
+    assert_eq!(RenderScale::ONE.step(8), Some(8));
+}
+
+/// The floor falls where the smallest figure a record describes is drawn at
+/// the art harness's own floor, and a view the player's zoom has already
+/// drawn smaller than that leaves the render scale alone.
+#[test]
+fn the_floor_holds_the_smallest_figure_at_the_readable_size() {
+    let notches = u8::try_from(RENDER_SCALES.len()).expect("a handful of fractions");
+    let native_floor = Ladder::new(Ladder::MAX_STEP - notches);
+    for zoom in [Zoom::NEAREST, Zoom::DEFAULT, Zoom::FURTHEST] {
+        let floor = Ladder::floor(1280, 720, zoom);
+        let view = Viewport::new(1280, 720, floor.render_scale()).expect("a real window");
+        if floor.render_scale().is_native() {
+            assert_eq!(floor, native_floor, "{zoom:?} shed past the native scale");
+        } else {
+            assert!(
+                readable(view.step(zoom)),
+                "{zoom:?}'s floor draws figures unreadably"
+            );
+        }
+        if let Some(deeper) = floor.shed() {
+            let past = Viewport::new(1280, 720, deeper.render_scale()).expect("a real window");
+            assert!(
+                !readable(past.step(zoom)),
+                "{zoom:?} stopped short of a readable notch"
+            );
+        }
+    }
+    assert_eq!(
+        Ladder::floor(1280, 720, Zoom::DEFAULT),
+        Ladder::new(Ladder::MAX_STEP),
+        "the view the game is authored at stays readable down the whole ladder"
+    );
+    assert!(
+        Ladder::floor(1280, 720, Zoom::FURTHEST) < Ladder::floor(1280, 720, Zoom::DEFAULT),
+        "a further view did not stop the render scale sooner"
+    );
 }

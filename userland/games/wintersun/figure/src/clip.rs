@@ -392,6 +392,139 @@ fn between(from: Key, to: Key, start: f64, end: f64, phase: f64) -> f64 {
     from.value + (to.value - from.value) * from.easing.apply(t)
 }
 
+/// Where an action clip's three segments meet, in phase.
+///
+/// An action is windup, active and recovery, and its clip is authored across
+/// all three in phase: these are the phases the active segment begins and
+/// ends at. Any three durations then stretch the clip onto real time without
+/// its shape changing, which is what lets the action — not the clip — own
+/// the timing.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Segments {
+    active: f64,
+    recovery: f64,
+}
+
+impl Segments {
+    /// An action whose active segment runs from `active` to `recovery`.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::SegmentsUnreal`] unless
+    /// `0 < active < recovery < 1`: every segment of an action has a shape,
+    /// so none of them can be authored across no phase at all.
+    pub fn new(active: f64, recovery: f64) -> Result<Self, FigureError> {
+        let inside = active.is_finite() && recovery.is_finite();
+        if !inside || active <= 0.0 || recovery <= active || recovery >= 1.0 {
+            return Err(FigureError::SegmentsUnreal);
+        }
+        Ok(Self { active, recovery })
+    }
+
+    /// The phase the windup gives way to the active segment at.
+    #[must_use]
+    pub const fn active(self) -> f64 {
+        self.active
+    }
+
+    /// The phase the active segment gives way to the recovery at.
+    #[must_use]
+    pub const fn recovery(self) -> f64 {
+        self.recovery
+    }
+}
+
+/// How long each segment of an action lasts, in seconds.
+///
+/// What an action document states and the clip is stretched to, so tuning
+/// a number changes the feel and the picture together.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Timing {
+    windup: f64,
+    active: f64,
+    recovery: f64,
+}
+
+impl Timing {
+    /// An action of `windup`, then `active`, then `recovery` seconds.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::TimingUnreal`] for a duration that is not a finite
+    /// positive number of seconds.
+    pub fn new(windup: f64, active: f64, recovery: f64) -> Result<Self, FigureError> {
+        for seconds in [windup, active, recovery] {
+            if !seconds.is_finite() || seconds <= 0.0 {
+                return Err(FigureError::TimingUnreal);
+            }
+        }
+        Ok(Self {
+            windup,
+            active,
+            recovery,
+        })
+    }
+
+    /// How long the windup lasts.
+    #[must_use]
+    pub const fn windup(self) -> f64 {
+        self.windup
+    }
+
+    /// How long the active segment lasts.
+    #[must_use]
+    pub const fn active(self) -> f64 {
+        self.active
+    }
+
+    /// How long the recovery lasts.
+    #[must_use]
+    pub const fn recovery(self) -> f64 {
+        self.recovery
+    }
+
+    /// How long the whole action lasts.
+    #[must_use]
+    pub fn seconds(self) -> f64 {
+        self.windup + self.active + self.recovery
+    }
+}
+
+/// An action clip's segments and the durations stretching them.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct Act {
+    segments: Segments,
+    timing: Timing,
+}
+
+impl Act {
+    /// The phase `elapsed` seconds in: each segment runs through its own
+    /// share of the clip at its own rate, then the last pose holds.
+    fn phase_at(self, elapsed: f64) -> f64 {
+        let Timing {
+            windup,
+            active,
+            recovery,
+        } = self.timing;
+        let Segments {
+            active: begin,
+            recovery: end,
+        } = self.segments;
+        let phase = if elapsed <= 0.0 {
+            0.0
+        } else if elapsed < windup {
+            begin * elapsed / windup
+        } else if elapsed < windup + active {
+            begin + (end - begin) * (elapsed - windup) / active
+        } else if elapsed < windup + active + recovery {
+            end + (1.0 - end) * (elapsed - windup - active) / recovery
+        } else {
+            1.0
+        };
+        mathf::clamp(phase, 0.0, 1.0)
+    }
+}
+
 /// A keyed animation: curves, events, a duration and a loop mode.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Clip<'a> {
@@ -399,6 +532,7 @@ pub struct Clip<'a> {
     events: &'a [Event],
     travel: Option<Travel<'a>>,
     lift: Option<Lift<'a>>,
+    act: Option<Act>,
     seconds: f64,
     repeat: Loop,
     mask: Mask,
@@ -451,10 +585,36 @@ impl<'a> Clip<'a> {
             events,
             travel: None,
             lift: None,
+            act: None,
             seconds,
             repeat,
             mask,
         })
+    }
+
+    /// The same clip played as an action: authored across `segments`,
+    /// lasting as long as `timing` says each segment does.
+    ///
+    /// The clip's own duration is replaced by the timing's, so an action
+    /// and the clip showing it cannot disagree about how long it takes.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::ActionNotHeld`] for a clip that does not play once and
+    /// hold: an action has an end, and a cycle does not.
+    pub fn acting(mut self, segments: Segments, timing: Timing) -> Result<Self, FigureError> {
+        if self.repeat != Loop::Hold {
+            return Err(FigureError::ActionNotHeld);
+        }
+        self.act = Some(Act { segments, timing });
+        self.seconds = timing.seconds();
+        Ok(self)
+    }
+
+    /// The segments it was authored across, for a clip played as an action.
+    #[must_use]
+    pub fn segments(self) -> Option<Segments> {
+        self.act.map(|act| act.segments)
     }
 
     /// The same clip carrying the root-motion curve `travel`.
@@ -535,6 +695,9 @@ impl<'a> Clip<'a> {
     pub fn phase_at(self, elapsed: f64) -> Result<f64, FigureError> {
         if !elapsed.is_finite() {
             return Err(FigureError::ElapsedUnreal);
+        }
+        if let Some(act) = self.act {
+            return Ok(act.phase_at(elapsed));
         }
         let plays = elapsed / self.seconds;
         Ok(match self.repeat {

@@ -3,14 +3,16 @@
 //!
 //! ## What this proves that a host test cannot
 //!
-//! Three crates meet in a frame. The world generator works in `f64`; the
-//! ground art is integer throughout and carries no vertical of its own
-//! because bit-identity follows from the language there; this client's
-//! projection, lattice sampling and shading are integer too. Each part
-//! agreeing separately does not say the composition does.
+//! Four crates meet in a frame. The world generator and the figure engine
+//! work in `f64`; the ground art is integer throughout and carries no
+//! vertical of its own because bit-identity follows from the language
+//! there; this client's projection, lattice sampling, shading and figure
+//! pass are integer too. Each part agreeing separately does not say the
+//! composition does.
 //!
-//! So two whole frames are drawn here — one wide at full quality, one
-//! close with every degradation rung shed — and every pixel is folded,
+//! So two whole frames are drawn here, with figures standing in them —
+//! one wide at full quality, one close with every degradation rung shed —
+//! and every pixel is folded,
 //! with `tairix_wintersun_art::digest::REFERENCE_DIGEST` folded in after
 //! them, into a single number that must equal
 //! `tairix_wintersun_app::digest::REFERENCE_DIGEST`. That is the
@@ -18,7 +20,8 @@
 //! agreement between targets follows from each agreeing with it and no
 //! target can pass by having never run.
 //!
-//! It is also what first builds the ground art for this target at all.
+//! It is also what first builds the ground art and the figures for this
+//! target at all.
 //!
 //! Any other outcome is a closed failure reported to QEMU.
 #![cfg_attr(itest_x86_64, no_std)]

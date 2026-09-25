@@ -20,6 +20,7 @@ use crate::clip::{Clip, Lift, Loop};
 use crate::error::FigureError;
 use crate::gait::{Gait, SAMPLES};
 use crate::joint::{JointId, Limit};
+use crate::motion::{Kind, Support};
 use crate::plant::Legs;
 use crate::pose::Range;
 use crate::rig::{Frames, Posture, Resolved};
@@ -88,6 +89,90 @@ pub const MAX_SKATE: f64 = 0.01;
 /// the tallest, longest-legged elf a record can describe, all well inside a
 /// pixel at every size the desktop draws one.
 pub const MAX_GROUNDING: f64 = 0.08;
+
+/// What a shipped motion measured, against the bounds it is held to.
+///
+/// One definition of which measurements a motion is held to, shared by the
+/// crate's own tests and the art harness: every motion is held to its joint
+/// limits and its continuity; a cycle to its closure; a gait to its skate;
+/// and a figure standing on the ground to landing its feet on the floor,
+/// where one with nothing underfoot is held only to keeping them out of it.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Measured {
+    /// [`limits`].
+    pub limits: f64,
+    /// [`continuity`].
+    pub continuity: f64,
+    /// [`closure`], for a motion that cycles.
+    pub closure: Option<f64>,
+    /// [`grounding`], for a motion standing on the ground.
+    pub grounding: Option<f64>,
+    /// [`penetration`], for a motion with nothing underfoot.
+    pub penetration: Option<f64>,
+    /// [`skate`], for a motion the gait paces.
+    pub skate: Option<f64>,
+}
+
+impl Measured {
+    /// Measure `kind`'s `clip` on `rigging` and `legs`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the individual measurements refuse, which for a shipped
+    /// motion on a checked rig is nothing.
+    pub fn of(
+        kind: Kind,
+        rigging: &Rigging<'_>,
+        clip: Clip<'_>,
+        legs: &Legs,
+    ) -> Result<Self, FigureError> {
+        let grounded = kind.support() == Support::Ground;
+        Ok(Self {
+            limits: limits(rigging, clip)?,
+            continuity: continuity(clip),
+            closure: (clip.repeat() == Loop::Wrap).then(|| closure(clip)),
+            grounding: if grounded {
+                Some(grounding(rigging, clip, legs)?)
+            } else {
+                None
+            },
+            penetration: if grounded {
+                None
+            } else {
+                Some(penetration(rigging, clip, legs)?)
+            },
+            skate: match kind.stride() {
+                Some(_) => Some(skate(rigging, clip, legs, Side::Left)?),
+                None => None,
+            },
+        })
+    }
+
+    /// Each measurement taken, its name and its bound, in the order a ledger
+    /// row lists them.
+    pub fn each(&self) -> impl Iterator<Item = (&'static str, f64, f64)> {
+        [
+            Some(("limits", self.limits, MAX_LIMIT_USE)),
+            Some(("continuity", self.continuity, MAX_CONTINUITY)),
+            self.closure.map(|value| ("closure", value, MAX_CLOSURE)),
+            self.grounding
+                .map(|value| ("grounding", value, MAX_GROUNDING)),
+            self.penetration
+                .map(|value| ("penetration", value, MAX_GROUNDING)),
+            self.skate.map(|value| ("skate", value, MAX_SKATE)),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// The first measurement past its bound, and what it came to.
+    #[must_use]
+    pub fn breach(&self) -> Option<(&'static str, f64)> {
+        self.each()
+            .find(|(_, value, bound)| value > bound)
+            .map(|(name, value, _)| (name, value))
+    }
+}
 
 /// The worst fraction of a joint's own travel any pose of `clip` uses.
 ///
@@ -210,6 +295,26 @@ pub fn skate(
 /// [`FigureError::PhaseOutsideClip`] never, for a grid inside the cycle;
 /// otherwise as the posture and the resolve, for a rig missing a leg.
 pub fn grounding(rigging: &Rigging<'_>, clip: Clip<'_>, legs: &Legs) -> Result<f64, FigureError> {
+    Ok(mathf::fabs(lowest(rigging, clip, legs)? - legs.sole()))
+}
+
+/// How far below the floor the lowest point either foot of `clip` reaches,
+/// in figure-local units; zero for a clip that keeps both feet above it.
+///
+/// What a clip with nothing underfoot — a fall, a swim, a climb — is held to
+/// instead of [`grounding`]: its feet are not meant to reach the floor, only
+/// never to go through it. Measured on the same grid, from the same resolve,
+/// against the same floor.
+///
+/// # Errors
+///
+/// As [`grounding`].
+pub fn penetration(rigging: &Rigging<'_>, clip: Clip<'_>, legs: &Legs) -> Result<f64, FigureError> {
+    Ok(mathf::fmax(0.0, legs.sole() - lowest(rigging, clip, legs)?))
+}
+
+/// The lowest point either foot of `clip` reaches over its cycle.
+fn lowest(rigging: &Rigging<'_>, clip: Clip<'_>, legs: &Legs) -> Result<f64, FigureError> {
     let mut frames = Frames::new();
     let mut deepest = f64::MAX;
     for index in 0..SAMPLES {
@@ -219,7 +324,7 @@ pub fn grounding(rigging: &Rigging<'_>, clip: Clip<'_>, legs: &Legs) -> Result<f
         let standing = legs.standing(&frames, clip.root_at(phase))?;
         deepest = mathf::fmin(deepest, mathf::fmin(standing[0].up, standing[1].up));
     }
-    Ok(mathf::fabs(deepest - legs.sole()))
+    Ok(deepest)
 }
 
 /// The phase of sample `index` on the measurement grid.

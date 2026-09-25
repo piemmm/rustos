@@ -2729,14 +2729,14 @@ impl HardwareTreeRequest {
 }
 
 /// [`SeatRecord::flags`] bit: the seat is currently held under a lease and
-/// [`SeatRecord::owner_task`] names the owning task.
+/// [`SeatRecord::owner_task`] names the owning process.
 pub const SEAT_FLAG_OWNED: u32 = 1 << 0;
 
 /// One seat's state inside a [`SysinfoQueryId::SEAT_LIST`] response
 /// (`plans/DISPLAY.md` D3).
 ///
 /// Every field is filled from the kernel's seat registry — the
-/// kernel-attested owner task, never a caller claim. An unowned seat (which
+/// kernel-attested owner process, never a caller claim. An unowned seat (which
 /// includes one whose lease was just revoked) carries no owner: the
 /// [`SEAT_FLAG_OWNED`] bit is clear and `owner_task` is zero.
 #[repr(C)]
@@ -2745,8 +2745,8 @@ pub struct SeatRecord {
     /// The seat this record describes (the boot seat is id 0; further
     /// seats are minted per discovered display node).
     pub seat_id: u64,
-    /// The task holding the seat's lease; valid only when
-    /// [`SEAT_FLAG_OWNED`] is set, zero otherwise.
+    /// The process number (its leader task's id) holding the seat's lease;
+    /// valid only when [`SEAT_FLAG_OWNED`] is set, zero otherwise.
     pub owner_task: u64,
     /// The seat's monotonic lease-grant counter: the generation of the most
     /// recently minted lease, `0` if the seat has never been acquired.

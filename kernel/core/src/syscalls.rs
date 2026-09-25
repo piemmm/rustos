@@ -2881,14 +2881,11 @@ where
         if crate::threads::retire(self.caps, self.aspaces, self.peer_watch, thread) != 0 {
             return false;
         }
-        // Nothing of the process runs any more. Its lines, endpoints and
-        // regions go first, then its node, so a successor loaded the moment
-        // the exit is observed finds none of them still held.
+        // Nothing of the process runs any more. Its lines, endpoints,
+        // regions and node go first, so a successor loaded the moment the exit
+        // is observed finds none of them still held; its number goes last.
         self.reclaim_process_resources(process);
-        self.aspaces.write().release_node(process);
-        if let Some(status) = status {
-            self.process_wait.record_exit(process, status);
-        }
+        retire_number(self.process_wait, process, status);
         true
     }
 
@@ -10827,23 +10824,26 @@ where
             None => return Err(Errno::BadAddress),
         }
         let instance = ProcId::from_raw(instance_bytes);
-        // Resolve the instance to the number the per-process tables are
-        // keyed by. The kernel sentinel and an instance no live record names
-        // both resolve to nothing, so a delegation can be aimed neither at a
-        // kernel thread nor at a process that has already gone.
-        let Some(recipient) = self.caps.read().process_of_instance(instance) else {
-            return Err(Errno::NotFound);
-        };
-        // Confirm the recipient is a live task and mint under the same
-        // write lock, so the grant cannot land on a task that exited
-        // between check and mint. An unknown recipient is the same
-        // `NotFound` as an unopened descriptor, so the reply shape confirms
-        // nothing about foreign task ids.
-        let mut registry = self.aspaces.write();
-        if !registry.contains(recipient) {
-            return Err(Errno::NotFound);
-        }
-        registry.mint_fd_delegation(recipient, instance, caller.process(), file, access)
+        // Resolved and minted under one hold of the instance, so the grant
+        // cannot land in the table of a successor that drew the recipient's
+        // number between the two. The kernel sentinel and an instance no
+        // live record names both resolve to nothing, and an unknown recipient
+        // is the same `NotFound` as an unopened descriptor, so the reply
+        // shape confirms nothing about foreign task ids.
+        self.for_instance(instance, |recipient| {
+            let mut registry = self.aspaces.write();
+            if !registry.contains(recipient) {
+                return Err(Errno::NotFound);
+            }
+            registry.mint_fd_delegation(
+                recipient,
+                instance,
+                caller.process(),
+                caller.caps.proc_id(),
+                file,
+                access,
+            )
+        })
     }
 
     fn fd_redeem(&self, caller: &CallerContext<'_>, handle: u64) -> SyscallResult {
@@ -10862,6 +10862,32 @@ where
             caller.process(),
             caller.caps.proc_id(),
             handle,
+            None,
+        )?;
+        Ok(u64::from(fd))
+    }
+
+    fn fd_redeem_from(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        grantor: u64,
+        grantor_len: usize,
+    ) -> SyscallResult {
+        // `fd_redeem` bound to the grantor the caller names: a deputy
+        // redeeming a handle another process named to it cannot be made to
+        // consume a delegation somebody else minted. A short buffer fails
+        // closed rather than decoding part of an identity.
+        if grantor_len < PROC_ID_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut bytes = [0u8; PROC_ID_LEN];
+        self.copy_in_user(caller, grantor, &mut bytes)?;
+        let fd = self.aspaces.write().redeem_fd_delegation(
+            caller.process(),
+            caller.caps.proc_id(),
+            handle,
+            Some(ProcId::from_raw(bytes)),
         )?;
         Ok(u64::from(fd))
     }
@@ -11600,10 +11626,11 @@ where
 /// loading child that failed before entering user mode provably never
 /// acquired.
 ///
-/// The registry mutations take separate write locks. The process's number is
-/// returned to the id draw only after the last of them, so no admission can be
-/// issued it while any record keyed by it survives, and there is no cross-lock
-/// invariant to hold.
+/// The registry mutations take separate write locks, with no cross-lock
+/// invariant to hold. The process's number is not returned here: each death
+/// path does that last ([`retire_number`]), once its own trailing steps are
+/// done too, so no admission can be issued it while any record keyed by it
+/// survives.
 fn reclaim_process_bookkeeping(
     caps: &RwLock<CapTable>,
     aspaces: &RwLock<AddressSpaceRegistry>,
@@ -11650,7 +11677,20 @@ fn reclaim_process_bookkeeping(
     // and any frozen space snapshot all go together, so no stale entry
     // outlives the process.
     aspaces.write().withdraw(process);
-    tairix_kernel_sched_api::release_task_id(process.leader_task().0);
+}
+
+/// Record `status` for the parent's `wait`, then return `process`'s number
+/// to the draw — at once, unless a parent's unreaped row now holds it, in
+/// which case the reap returns it. The last step of every death path.
+fn retire_number(
+    process_wait: &(dyn ProcessWait + 'static),
+    process: ProcessId,
+    status: Option<i32>,
+) {
+    let awaiting_reap = status.is_some_and(|status| process_wait.record_exit(process, status));
+    if !awaiting_reap {
+        tairix_kernel_sched_api::release_task_id(process.leader_task().0);
+    }
 }
 
 /// The kernel-attested identity a freshly spawned child is admitted under:
@@ -12483,9 +12523,6 @@ fn retire_loading_child(
     // A loading child never reached user mode, so it never drove its device:
     // its node takes a successor before the exit can be observed.
     services.aspaces().write().release_node(sec_id);
-    if let Some(status) = status {
-        services.process_wait().record_exit(sec_id, status);
-    }
     reclaim_process_bookkeeping(
         services.caps(),
         services.aspaces(),
@@ -12493,6 +12530,7 @@ fn retire_loading_child(
         Some(services.peer_watch()),
         sec_id,
     );
+    retire_number(services.process_wait(), sec_id, status);
 }
 
 /// Audit a deferred load refusal, attributed to the failing child `sec_id`.
@@ -12826,6 +12864,8 @@ where
             Some(peers),
             sec_id,
         );
+        // No parent was told of the child, so no row holds its number.
+        retire_number(self.process_wait, sec_id, None);
         let _ = self.sched.exit(task_id);
     }
 }
@@ -19870,8 +19910,9 @@ mod tests {
             }
         }
 
-        fn record_exit(&self, process: ProcessId, code: i32) {
+        fn record_exit(&self, process: ProcessId, code: i32) -> bool {
             self.exits.lock().push((process.0, code));
+            false
         }
     }
 
@@ -19971,12 +20012,13 @@ mod tests {
             Err(Errno::NotImplemented)
         }
 
-        fn record_exit(&self, _process: ProcessId, _code: i32) {
+        fn record_exit(&self, _process: ProcessId, _code: i32) -> bool {
             let admitted = self
                 .aspaces
                 .write()
                 .admit_driver(ProcessId(0xD00D), self.node);
             self.admissions.lock().push(admitted);
+            false
         }
     }
 
@@ -20222,6 +20264,14 @@ mod tests {
         reclaim_process_bookkeeping(&table, &aspaces, &NULL_PROCESS_WAIT, None, process);
         assert!(table.read().caps_of_process(process).is_none());
         assert_eq!(aspaces.read().stale_task_entry(process), None);
+        // The records are gone, but the death path's own last steps are not
+        // done: the number is returned only by the step that ends it.
+        assert_eq!(
+            choose_task_id(Some(pid), |_| false),
+            Err(SchedError::TaskIdInUse),
+            "the teardown returned the number before its caller had finished"
+        );
+        retire_number(&NULL_PROCESS_WAIT, process, Some(0));
         assert_eq!(choose_task_id(Some(pid), |_| false), Ok(pid));
     }
 
@@ -29635,8 +29685,9 @@ mod tests {
             *self.last_flags.lock() = Some(flags);
             self.result
         }
-        fn record_exit(&self, task: ProcessId, code: i32) {
+        fn record_exit(&self, task: ProcessId, code: i32) -> bool {
             *self.last_exit.lock() = Some((task.0, code));
+            false
         }
         fn register_child(&self, parent: ProcessId, child: ProcessId) {
             *self.last_register.lock() = Some((parent.0, child.0));
@@ -33424,7 +33475,7 @@ mod tests {
         ) -> Result<crate::procwait::WaitedChild, Errno> {
             Err(Errno::NotImplemented)
         }
-        fn record_exit(&self, _process: ProcessId, _code: i32) {
+        fn record_exit(&self, _process: ProcessId, _code: i32) -> bool {
             let successor = ProcessId(0x7_7002);
             let admitted = self.aspaces.write().admit_driver(successor, 5).is_ok();
             let bound = self.irq.bind(40, successor).is_ok();
@@ -33432,6 +33483,7 @@ mod tests {
                 u8::from(admitted) | (u8::from(bound) << 1),
                 core::sync::atomic::Ordering::Relaxed,
             );
+            false
         }
     }
 
@@ -36610,27 +36662,85 @@ mod tests {
         page
     }
 
-    /// Register `holder` for an `fd_grant` test: an address space under its
-    /// number and the capability record that binds that number to its
-    /// instance, which is what the handler resolves a request's instance
-    /// through.
-    fn register_grant_holder(
-        holder: &GrantHolder,
-        table: &RwLock<CapTable>,
-        aspaces: &RwLock<AddressSpaceRegistry>,
-        space: Box<dyn UserAddressSpace + Send + Sync>,
-        physmap: Box<dyn PhysMap + Send + Sync>,
-        sink: &'static (dyn Sink + Sync),
-    ) -> TaskCapabilities {
-        aspaces
-            .write()
-            .register(holder.process, space, physmap)
-            .expect("holder registers");
-        let granted = caps_with(holder.granted);
-        let caps = TaskCapabilities::derive(holder.process, UserId(2000), granted, granted, sink)
-            .with_proc_id(holder.instance);
-        table.write().insert(caps.clone());
-        caps
+    /// The kernel an `fd_grant` test runs in, and its grantor: `ProcessId(2)`
+    /// holding `CAP_FS_ACCESS`, its memory a [`grant_page`] naming `path`.
+    struct GrantRig {
+        sink: &'static TestSink,
+        arch: Arc<TestArch>,
+        sched: Scheduler<TestArch>,
+        table: RwLock<CapTable>,
+        ipc: RwLock<PortRegistry>,
+        aspaces: RwLock<AddressSpaceRegistry>,
+        rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        irq: IrqTable,
+        ctl: UnsupportedController,
+        grantor_caps: TaskCapabilities,
+    }
+
+    impl GrantRig {
+        fn new(path: &[u8]) -> Self {
+            install_trace_filter();
+            let sink = make_sink();
+            let arch = Arc::new(TestArch::with_cpus(1));
+            let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(path));
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            aspaces
+                .write()
+                .register(ProcessId(2), space, physmap)
+                .expect("the grantor registers");
+            Self {
+                sink,
+                sched: make_sched(arch.clone()),
+                arch,
+                table: RwLock::new(CapTable::new()),
+                ipc: RwLock::new(PortRegistry::new()),
+                aspaces,
+                rng: unseeded_rng(),
+                irq: IrqTable::new(31),
+                ctl: UnsupportedController,
+                grantor_caps: make_caps_record(2, &[CapabilityId::FS_ACCESS], sink),
+            }
+        }
+
+        fn handlers(&self, fs: &'static RecordingFs) -> KernelSyscallHandlers<'_, TestArch> {
+            KernelSyscallHandlers::new(
+                &self.sched,
+                &self.table,
+                &self.arch,
+                self.sink,
+                &self.irq,
+                &self.ctl,
+                &self.ipc,
+                &self.aspaces,
+                &self.rng,
+            )
+            .with_filesystem(fs)
+        }
+
+        fn grantor(&self) -> CallerContext<'_> {
+            CallerContext {
+                task_id: SecTaskId(2),
+                caps: &self.grantor_caps,
+            }
+        }
+
+        /// Register `holder` with `page` mapped as its memory: an address
+        /// space under its number and the capability record binding that
+        /// number to its instance, which is what a request's instance
+        /// resolves through.
+        fn holder(&self, holder: &GrantHolder, flags: MapFlags, page: &[u8]) -> TaskCapabilities {
+            let (space, physmap) = send_aspace(flags, page);
+            self.aspaces
+                .write()
+                .register(holder.process, space, physmap)
+                .expect("holder registers");
+            let granted = caps_with(holder.granted);
+            let caps =
+                TaskCapabilities::derive(holder.process, UserId(2000), granted, granted, self.sink)
+                    .with_proc_id(holder.instance);
+            self.table.write().insert(caps.clone());
+            caps
+        }
     }
 
     /// `peer_watch` reads the instance it watches from the caller's memory,
@@ -36750,31 +36860,10 @@ mod tests {
     /// `plans/APPDATA.md` §3.8).
     #[test]
     fn fd_grant_delegates_only_a_held_bounded_path_descriptor() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/f"));
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(ProcessId(2), space, physmap)
-            .expect("registration succeeds");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &caps,
-        };
+        let rig = GrantRig::new(b"/f");
+        let ctx = rig.grantor();
         let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_filesystem(fs);
+        let h = rig.handlers(fs);
         let to_recipient = |fd: u32, ceiling: u64| {
             h.fd_grant(
                 &ctx,
@@ -36801,7 +36890,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(to_recipient(dir, 0), Err(Errno::OutOfRange));
-        let (pipe_read, _pipe_write) = aspaces
+        let (pipe_read, _pipe_write) = rig
+            .aspaces
             .write()
             .open_pipe(ProcessId(2))
             .expect("pipe allocates");
@@ -36844,9 +36934,7 @@ mod tests {
             h.fd_grant(&ctx, fd, 0, 0xDEAD_0000, PROC_ID_LEN),
             Err(Errno::BadAddress)
         );
-        let (rspace, rphysmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"");
-        let _recipient =
-            register_grant_holder(&GRANT_RECIPIENT, &table, &aspaces, rspace, rphysmap, sink);
+        let _recipient = rig.holder(&GRANT_RECIPIENT, MapFlags::READ | MapFlags::USER, b"");
         // A read-only delegation has no extent to bound, so naming one is a
         // frame that does not mean what it says.
         assert_eq!(to_recipient(fd, 4096), Err(Errno::OutOfRange));
@@ -36879,34 +36967,11 @@ mod tests {
     /// running under the same number.
     #[test]
     fn fd_redeem_is_owner_bound_and_one_shot() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/f"));
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(ProcessId(2), space, physmap)
-            .expect("registration succeeds");
-        let (rspace, rphysmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &caps,
-        };
+        let rig = GrantRig::new(b"/f");
+        let ctx = rig.grantor();
         let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_filesystem(fs);
-        let recipient_caps =
-            register_grant_holder(&GRANT_RECIPIENT, &table, &aspaces, rspace, rphysmap, sink);
+        let h = rig.handlers(fs);
+        let recipient_caps = rig.holder(&GRANT_RECIPIENT, MapFlags::READ | MapFlags::USER, b"");
 
         let fd = u32::try_from(
             h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
@@ -36930,7 +36995,7 @@ mod tests {
             UserId(2000),
             caps_with(&[]),
             caps_with(&[]),
-            sink,
+            rig.sink,
         )
         .with_proc_id(ProcId::from_raw([0xC3; PROC_ID_LEN]));
         assert_eq!(
@@ -36954,7 +37019,8 @@ mod tests {
             caps: &recipient_caps,
         };
         let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
-        let entry = aspaces
+        let entry = rig
+            .aspaces
             .read()
             .open_file_entry(ProcessId(3), rfd)
             .expect("descriptor recorded");
@@ -36976,34 +37042,15 @@ mod tests {
     /// and can never write through the delegated descriptor.
     #[test]
     fn delegated_read_runs_under_the_grantors_identity() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/f"));
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(ProcessId(2), space, physmap)
-            .expect("registration succeeds");
-        // The recipient's own memory must be writable for the read's
-        // copy-out; its page also holds a path for the contrast open below.
-        let (rspace, rphysmap) =
-            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/f");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let grantor_caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
-        let gctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &grantor_caps,
-        };
+        let rig = GrantRig::new(b"/f");
+        let gctx = rig.grantor();
         // The recipient runs as a different user and holds **no**
-        // capability at all.
-        let recipient_caps =
-            register_grant_holder(&GRANT_RECIPIENT, &table, &aspaces, rspace, rphysmap, sink);
+        // capability at all. Its memory is writable for the read's copy-out.
+        let recipient_caps = rig.holder(
+            &GRANT_RECIPIENT,
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            b"",
+        );
         let rctx = CallerContext {
             task_id: SecTaskId(3),
             caps: &recipient_caps,
@@ -37011,10 +37058,7 @@ mod tests {
         let mut mock = RecordingFs::new();
         mock.read_data = b"hello".to_vec();
         let fs: &'static RecordingFs = Box::leak(Box::new(mock));
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_filesystem(fs);
+        let h = rig.handlers(fs);
 
         let fd = u32::try_from(
             h.fs_open(&gctx, 0x1000, "/f".len(), OpenFlags::READ)
@@ -37044,7 +37088,7 @@ mod tests {
         // activity, so they land on the holder's counters and never on the
         // grantor's.
         assert_eq!(recipient_caps.io_bytes_read(), 5);
-        assert_eq!(grantor_caps.io_bytes_read(), 0);
+        assert_eq!(rig.grantor_caps.io_bytes_read(), 0);
 
         // The delegation is read-only: a write through it is refused by
         // the descriptor's own flags before the filesystem is touched
@@ -37063,11 +37107,14 @@ mod tests {
         let second = h
             .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
             .expect("second grant mints");
-        aspaces.write().withdraw(ProcessId(3));
+        rig.aspaces.write().withdraw(ProcessId(3));
         assert_eq!(
-            aspaces
-                .write()
-                .redeem_fd_delegation(ProcessId(3), GRANT_RECIPIENT.instance, second),
+            rig.aspaces.write().redeem_fd_delegation(
+                ProcessId(3),
+                GRANT_RECIPIENT.instance,
+                second,
+                None
+            ),
             Err(Errno::NotFound),
             "withdraw reclaimed the pending delegation"
         );
@@ -37084,33 +37131,12 @@ mod tests {
     /// (`plans/CAPABILITY_USE.md` CU6).
     #[test]
     fn a_held_delegation_is_handed_on_without_widening_it() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/f"));
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(ProcessId(2), space, physmap)
-            .expect("registration succeeds");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let grantor_caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
-        let gctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &grantor_caps,
-        };
+        let rig = GrantRig::new(b"/f");
+        let gctx = rig.grantor();
         let mut mock = RecordingFs::new();
         mock.read_data = b"hello".to_vec();
         let fs: &'static RecordingFs = Box::leak(Box::new(mock));
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_filesystem(fs);
+        let h = rig.handlers(fs);
 
         // The relay holds `CAP_FS_ACCESS` — delegating is gated exactly as
         // acquiring is — and its page carries the identities it names. The
@@ -37119,17 +37145,21 @@ mod tests {
             granted: &[CapabilityId::FS_ACCESS],
             ..GRANT_RECIPIENT
         };
-        let (rspace, rphysmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/f"));
-        let relay_caps = register_grant_holder(&relay, &table, &aspaces, rspace, rphysmap, sink);
+        // The relay also names the grantor it relays for.
+        let mut relay_page = grant_page(b"/f");
+        relay_page.extend_from_slice(rig.grantor_caps.proc_id().as_bytes());
+        let grantor_at = grant_addr(relay_page.len() - PROC_ID_LEN);
+        let relay_caps = rig.holder(&relay, MapFlags::READ | MapFlags::USER, &relay_page);
         let rctx = CallerContext {
             task_id: SecTaskId(3),
             caps: &relay_caps,
         };
         // Writable, so the onward read below has somewhere to copy out to.
-        let (ospace, ophysmap) =
-            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"");
-        let onward_caps =
-            register_grant_holder(&GRANT_ONWARD, &table, &aspaces, ospace, ophysmap, sink);
+        let onward_caps = rig.holder(
+            &GRANT_ONWARD,
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            b"",
+        );
         let octx = CallerContext {
             task_id: SecTaskId(4),
             caps: &onward_caps,
@@ -37143,7 +37173,12 @@ mod tests {
         let first = h
             .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
             .expect("grant mints a handle");
-        let held = u32::try_from(h.fd_redeem(&rctx, first).expect("relay redeems")).unwrap();
+        // Redeemed as the relay does: bound to the process it relays for.
+        let held = u32::try_from(
+            h.fd_redeem_from(&rctx, first, grantor_at, PROC_ID_LEN)
+                .expect("relay redeems"),
+        )
+        .unwrap();
 
         // A read-only delegation still has no extent to bound, so the relay
         // may not invent one — and the relayed record is the one it holds.
@@ -37156,7 +37191,8 @@ mod tests {
             .fd_grant(&rctx, held, 0, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN)
             .expect("the relay hands the delegation on");
         let ofd = u32::try_from(h.fd_redeem(&octx, onward).expect("onward redeems")).unwrap();
-        let entry = aspaces
+        let entry = rig
+            .aspaces
             .read()
             .open_file_entry(GRANT_ONWARD.process, ofd)
             .expect("descriptor recorded");
@@ -37186,6 +37222,57 @@ mod tests {
         );
     }
 
+    /// A redemption bound to a grantor takes only that grantor's delegation:
+    /// a stranger named as the grantor finds nothing and leaves it pending,
+    /// and an identity it cannot read whole fails closed.
+    ///
+    /// Regression cover for a deputy redeeming whatever handle a caller named,
+    /// which let a caller have it consume a delegation somebody else minted.
+    #[test]
+    fn fd_redeem_from_takes_only_the_named_grantors_delegation() {
+        let rig = GrantRig::new(b"/f");
+        let gctx = rig.grantor();
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = rig.handlers(fs);
+        let mut page = grant_page(b"");
+        page.extend_from_slice(rig.grantor_caps.proc_id().as_bytes());
+        let grantor_at = grant_addr(page.len() - PROC_ID_LEN);
+        let recipient_caps = rig.holder(&GRANT_RECIPIENT, MapFlags::READ | MapFlags::USER, &page);
+        let rctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &recipient_caps,
+        };
+        let fd = u32::try_from(
+            h.fs_open(&gctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("grantor opens"),
+        )
+        .unwrap();
+        let handle = h
+            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .expect("grant mints a handle");
+
+        assert_eq!(
+            h.fd_redeem_from(&rctx, handle, grant_addr(GRANT_STRANGER_AT), PROC_ID_LEN),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            h.fd_redeem_from(&rctx, handle, grantor_at, PROC_ID_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            h.fd_redeem_from(&rctx, handle, 0xDEAD_0000, PROC_ID_LEN),
+            Err(Errno::BadAddress)
+        );
+        assert!(h
+            .fd_redeem_from(&rctx, handle, grantor_at, PROC_ID_LEN)
+            .is_ok());
+        assert_eq!(
+            h.fd_redeem_from(&rctx, handle, grantor_at, PROC_ID_LEN),
+            Err(Errno::NotFound),
+            "a bound redemption is one-shot too"
+        );
+    }
+
     /// The extent ceiling a writable delegation carries is a hard bound on
     /// the file length its holder can produce, whether by writing or by
     /// truncating (`plans/APPDATA.md` §3.8).
@@ -37193,43 +37280,21 @@ mod tests {
     fn delegated_write_is_bounded_by_the_grants_extent() {
         const CEILING: u64 = 64;
 
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/blob"));
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(ProcessId(2), space, physmap)
-            .expect("registration succeeds");
-        let (rspace, rphysmap) = send_aspace(
+        let rig = GrantRig::new(b"/blob");
+        let gctx = rig.grantor();
+        // The holder runs as a different user and holds no capability at
+        // all: the delegation is its whole filesystem authority.
+        let recipient_caps = rig.holder(
+            &GRANT_RECIPIENT,
             MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
             &grant_page(b"/blob"),
         );
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let grantor_caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
-        let gctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &grantor_caps,
-        };
-        // The holder runs as a different user and holds no capability at
-        // all: the delegation is its whole filesystem authority.
-        let recipient_caps =
-            register_grant_holder(&GRANT_RECIPIENT, &table, &aspaces, rspace, rphysmap, sink);
         let rctx = CallerContext {
             task_id: SecTaskId(3),
             caps: &recipient_caps,
         };
         let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_filesystem(fs);
+        let h = rig.handlers(fs);
 
         let fd = u32::try_from(
             h.fs_open(
@@ -37268,7 +37333,7 @@ mod tests {
         // Accounting follows the process that issued the syscall, not the
         // authority it borrowed.
         assert_eq!(recipient_caps.io_bytes_written(), 8);
-        assert_eq!(grantor_caps.io_bytes_written(), 0);
+        assert_eq!(rig.grantor_caps.io_bytes_written(), 0);
 
         // A write that would carry the file past the ceiling is refused —
         // and so is a *sparse* one whose length is tiny but whose offset is
@@ -37301,45 +37366,22 @@ mod tests {
     fn delegated_descriptor_serves_stat_sync_and_map_under_the_grantor() {
         const CEILING: u64 = 64;
 
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/blob"));
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(ProcessId(2), space, physmap)
-            .expect("registration succeeds");
-        let (rspace, rphysmap) = send_aspace(
+        let rig = GrantRig::new(b"/blob");
+        let gctx = rig.grantor();
+        // The holder runs as a different user and holds no capability at
+        // all: the delegation is its whole filesystem authority.
+        let recipient_caps = rig.holder(
+            &GRANT_RECIPIENT,
             MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
             &grant_page(b"/blob"),
         );
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let grantor_caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
-        let gctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &grantor_caps,
-        };
-        // The holder runs as a different user and holds no capability at
-        // all: the delegation is its whole filesystem authority.
-        let recipient_caps =
-            register_grant_holder(&GRANT_RECIPIENT, &table, &aspaces, rspace, rphysmap, sink);
         let rctx = CallerContext {
             task_id: SecTaskId(3),
             caps: &recipient_caps,
         };
         let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
         let fm: &'static RecordingFileMap = Box::leak(Box::new(RecordingFileMap::new()));
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_filesystem(fs)
-        .with_file_map(fm);
+        let h = rig.handlers(fs).with_file_map(fm);
 
         let fd = u32::try_from(
             h.fs_open(
@@ -37363,7 +37405,7 @@ mod tests {
         let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
 
         assert_eq!(
-            aspaces
+            rig.aspaces
                 .read()
                 .open_file_entry(ProcessId(3), rfd)
                 .expect("descriptor recorded")
@@ -37390,7 +37432,8 @@ mod tests {
         let base = h
             .file_map(&rctx, rfd, 0, u64::try_from(PAGE_SIZE).unwrap())
             .expect("delegated mapping reserves");
-        let (_, region) = aspaces
+        let (_, region) = rig
+            .aspaces
             .read()
             .file_page_source(ProcessId(3), base)
             .expect("region recorded");
@@ -38681,8 +38724,8 @@ mod tests {
             self.0.lock().register(parent, child);
         }
 
-        fn record_exit(&self, task: ProcessId, code: i32) {
-            self.0.lock().record_exit(task, code);
+        fn record_exit(&self, task: ProcessId, code: i32) -> bool {
+            self.0.lock().record_exit(task, code)
         }
 
         fn child_state(&self, parent: ProcessId, pid: i64) -> ChildPeek {

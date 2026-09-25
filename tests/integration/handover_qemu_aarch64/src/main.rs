@@ -36,7 +36,8 @@
 //! attributed by the kernel to the principal that made it:
 //!
 //! 1. the manager mints (`fd_grant` from `files`),
-//! 2. the session redeems it (`fd_redeem` from `desktop`),
+//! 2. the session redeems it, bound to the manager (`fd_redeem_from` from
+//!    `desktop`),
 //! 3. the session mints the same authority on (`fd_grant` from `desktop`),
 //! 4. the viewer redeems it (`fd_redeem` from `view`).
 //!

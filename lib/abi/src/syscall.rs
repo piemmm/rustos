@@ -2642,6 +2642,19 @@ impl SyscallNumber {
     /// log.
     pub const CALL_PEER_NODE: Self = Self(131);
 
+    /// Redeem a [`Self::FD_GRANT`] handle minted to the calling task, **only
+    /// if** the process instance the caller names minted it.
+    ///
+    /// Arguments: `handle`, then a user pointer to and the length of the
+    /// expected grantor's 16-byte attested `ProcId`. What a deputy redeems
+    /// with: a service redeeming a handle another process named to it binds
+    /// the redemption to that process, so a caller cannot have the service
+    /// consume a delegation someone else minted to it. A handle the named
+    /// instance did not mint answers [`Errno::NotFound`], exactly like one
+    /// that does not exist, and stays pending for its own grantor.
+    /// Otherwise as [`Self::FD_REDEEM`]: one-shot, ungated, audited.
+    pub const FD_REDEEM_FROM: Self = Self(132);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

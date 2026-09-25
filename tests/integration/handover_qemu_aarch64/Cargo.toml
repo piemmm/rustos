@@ -12,14 +12,14 @@ publish = false
 workspace = true
 
 # The vertical's shared contract (src/lib.rs): the principals the hand-over
-# crosses, the two syscall names it is recognised by, and how many complete
+# crosses, the syscall names it is recognised by, and how many complete
 # relays the gate wants — read by both the freestanding PASS gate and the host
 # runner's pointer script, so the gesture the host injects and the witness the
 # guest latches can never drift apart. `no_std` consts only, host-buildable.
 [lib]
 path = "src/lib.rs"
 
-# Every value the contract states is derived rather than restated: the two
+# Every value the contract states is derived rather than restated: the
 # syscall names and the session's and viewer's process names from the sibling
 # delegation vertical that already derives them, and the file manager's from
 # the icon-bar contract that already names its bundle.

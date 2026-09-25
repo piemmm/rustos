@@ -12,7 +12,10 @@
 //!   the window a picture and cannot wait on a realm being solved;
 //! * the frame drawn straight into the window's own surface where the
 //!   render scale is native, and through a resample only when the
-//!   degradation ladder has shrunk the target.
+//!   degradation ladder has shrunk the target;
+//! * the player's figure: the default preset read once, before the window
+//!   opens, from the bundle's own `Resources/`, and posed each frame at the
+//!   moment that frame shows.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
@@ -30,6 +33,7 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::driver::display::DamageRect;
+    use tairix_abi::fs::OpenFlags;
     use tairix_abi::window_ipc::{WindowEvent, WindowSizing};
     use tairix_abi::{Errno, WaitSetOp, WaitSourceKind};
     use tairix_log::{Event, Sink};
@@ -37,26 +41,34 @@ mod program {
     use tairix_raster::surface::Surface;
     use tairix_reclaim::{PressureBand, ReportedPressure};
     use tairix_rt::io::{Stderr, Write};
+    use tairix_rt::File;
     use tairix_util::defer::JobDesk;
     use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{EventDrain, EventError, EventMailbox, EventSource, Parked, WindowEvents};
     use tairix_wintersun_app::budget::{FrameTimes, Governor, BASELINE_HEIGHT, BASELINE_WIDTH};
     use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
     use tairix_wintersun_app::error::ClientError;
+    use tairix_wintersun_app::figures::{submerged, Cast};
     use tairix_wintersun_app::frame::{Clock, Renderer, Scene};
     use tairix_wintersun_app::input::{Command, Controls, Zoom as ZoomWay};
     use tairix_wintersun_app::light::{Sky, Sun};
     use tairix_wintersun_app::pacing::{Motion, Pacer};
-    use tairix_wintersun_app::quality::RenderScale;
+    use tairix_wintersun_app::presets;
+    use tairix_wintersun_app::quality::{Ladder, RenderScale};
     use tairix_wintersun_app::shell::Shell;
-    use tairix_wintersun_app::terrain::{visible_chunks, RoadDecals};
+    use tairix_wintersun_app::terrain::{visible_chunks, worth_holding, RoadDecals};
     use tairix_wintersun_app::view::Viewport;
     use tairix_wintersun_art::cache::MaterialCache;
-    use tairix_wintersun_art::decal::Fray;
+    use tairix_wintersun_art::decal::{Bounds, Fray};
     use tairix_wintersun_art::splat::Warp;
+    use tairix_wintersun_figure::actor::Actor;
+    use tairix_wintersun_figure::identity::{Identity, RECORD_LEN};
+    use tairix_wintersun_figure::motion::{Clips, Set};
+    use tairix_wintersun_figure::reference;
+    use tairix_wintersun_figure::species::Species;
     use tairix_wintersun_net::client::{Intent, IntentKind};
     use tairix_wintersun_net::value::{
-        ChunkCoord, EntityId, EntityKind, TickInstant, TickPhase, WorldPoint,
+        ChunkCoord, EntityId, EntityKind, Facing, TickInstant, TickPhase, WorldPoint,
     };
     use tairix_wintersun_rules::clock::TickRate;
     use tairix_wintersun_rules::entity::SpawnSpec;
@@ -73,6 +85,9 @@ mod program {
     /// Exit code for a realm that would not generate.
     const EXIT_NO_REALM: i32 = 85;
 
+    /// Exit code for a player whose figure could not be built.
+    const EXIT_NO_FIGURE: i32 = 86;
+
     /// Memory the material cache is sized from when the system does not
     /// say. Replaced by the discovered figure once the client asks the
     /// System Information API for it.
@@ -87,8 +102,6 @@ mod program {
     /// The body the camera follows: an ordinary entity of the local zone,
     /// so it walks around hills rather than through them.
     const PLAYER_KIND: EntityKind = EntityKind(1);
-    /// The player's footprint, in world sub-units.
-    const PLAYER_RADIUS: u16 = 320;
 
     /// How long the client waits for the next frame when it is running.
     ///
@@ -326,6 +339,14 @@ mod program {
             self.held.binary_search_by_key(&coord, Chunk::coord).is_ok()
         }
 
+        /// Give back the ground a view covering `visible` no longer needs,
+        /// so what is held is the view's working set however far the
+        /// player walks.
+        fn release_distant(&mut self, visible: Bounds) {
+            self.held
+                .retain(|chunk| worth_holding(chunk.coord(), visible));
+        }
+
         /// Ask the quarry for the nearest chunk the view needs and has
         /// not got.
         ///
@@ -340,9 +361,8 @@ mod program {
             quarry: &Quarry,
             armed: bool,
         ) {
-            let (w, h) = view.render();
-            let centre = camera.centre(w, h);
-            let nearest = visible_chunks(camera.visible(w, h))
+            let centre = camera.centre(view);
+            let nearest = visible_chunks(camera.visible(view))
                 .filter(|coord| {
                     self.params.holds_chunk(coord.x, coord.y)
                         && !self.holds(*coord)
@@ -387,11 +407,13 @@ mod program {
     }
 
     /// Everything the loop owns between frames.
-    struct Session {
+    struct Session<'a> {
         window: AppWindow,
         shell: Shell,
         camera: Camera,
         follow: Motion,
+        /// The way the player's body faced at the last tick.
+        facing: Facing,
         pacer: Pacer,
         controls: Controls,
         governor: Governor,
@@ -399,6 +421,9 @@ mod program {
         cache: MaterialCache,
         scaled: Option<Surface>,
         times: FrameTimes,
+        cast: Cast<'a>,
+        /// When the player's figure was last posed.
+        posed_ns: Option<u64>,
     }
 
     /// Advance the simulation by `ticks` and record where the player got
@@ -407,20 +432,16 @@ mod program {
         zone: &mut Zone,
         player: EntityId,
         world: &World,
-        session: &mut Session,
+        session: &mut Session<'_>,
         ticks: u32,
     ) {
         if ticks == 0 {
             return;
         }
         let borrowed = world.borrow();
-        let Ok(window) = ChunkWindow::new(&borrowed) else {
-            return;
-        };
         let Ok(terrain) = ChunkTerrain::new(&borrowed) else {
             return;
         };
-        let _ = window;
         for _ in 0..ticks {
             let intent = Intent {
                 sequence: zone.tick() + 1,
@@ -436,15 +457,49 @@ mod program {
             }
             if let Some(entity) = zone.entity(player) {
                 session.follow.observe(entity.at());
+                session.facing = entity.facing();
             }
         }
     }
 
-    /// Draw and present one frame.
-    fn draw(session: &mut Session, world: &World, runner: &dyn JobRunner) -> Result<(), Errno> {
+    /// Move the player's figure to where this frame shows its body, over the
+    /// real time since it was last posed, in the water it stands in there.
+    fn pose_player(session: &mut Session<'_>, chunks: &[&Chunk], player: EntityId, now: u64) {
+        let at = session.follow.at(session.pacer.alpha());
+        // A paused game shows the moment it paused at, so no time passes for
+        // its figure either.
+        let nanos = match session.posed_ns {
+            Some(then) if !session.pacer.paused() => now.saturating_sub(then),
+            _ => 0,
+        };
+        session.posed_ns = Some(now);
+        let depth = ChunkTerrain::new(chunks).map_or(0, |terrain| submerged(&terrain, at));
+        let facing = session.facing;
+        if let Some(figure) = session.cast.get_mut(player) {
+            if let Err(err) = figure.step(nanos, at, facing, depth) {
+                report(&alloc::format!("the player's figure could not move: {err}"));
+            }
+        }
+    }
+
+    /// Pose the player's figure for the moment this frame shows, then draw
+    /// and present the frame, no deeper down the ladder than the window and
+    /// the zoom let figures stay readable.
+    fn draw(
+        session: &mut Session<'_>,
+        world: &World,
+        player: EntityId,
+        runner: &dyn JobRunner,
+        now: u64,
+    ) -> Result<(), Errno> {
         let Some(mode) = session.window.mode().copied() else {
             return Ok(());
         };
+        session.governor.hold(Ladder::floor(
+            mode.width_px,
+            mode.height_px,
+            session.camera.zoom(),
+        ));
         let scale = session.governor.ladder().render_scale();
         let Ok(view) = Viewport::new(mode.width_px, mode.height_px, scale) else {
             return Ok(());
@@ -456,6 +511,7 @@ mod program {
         let Ok(decals) = world.roads.decals() else {
             return Ok(());
         };
+        pose_player(session, &borrowed, player, now);
         let scene = Scene {
             camera: session.camera,
             chunks,
@@ -465,6 +521,7 @@ mod program {
             sun: Sun::winter(),
             sky: Sky::winter(),
             ladder: session.governor.ladder(),
+            cast: &session.cast,
         };
 
         // Native scale writes the window's own pixels; a shrunk target
@@ -483,7 +540,7 @@ mod program {
                 return Ok(());
             };
             let times = match session.renderer.render(
-                small.pixels_mut(),
+                small,
                 &view,
                 &scene,
                 &mut session.cache,
@@ -515,14 +572,7 @@ mod program {
             let cache = &mut session.cache;
             let outcome =
                 session.window.present(DamageRect::full(&mode), |surface| {
-                    match renderer.render(
-                        surface.pixels_mut(),
-                        &view,
-                        &scene,
-                        cache,
-                        runner,
-                        &Monotonic,
-                    ) {
+                    match renderer.render(surface, &view, &scene, cache, runner, &Monotonic) {
                         Ok(measured) => times = measured,
                         Err(err) => report(&alloc::format!("frame refused: {err}")),
                     }
@@ -532,9 +582,38 @@ mod program {
         }
     }
 
+    /// What one read of the event stream came to.
+    enum Served {
+        /// An event was read, and applied or refused.
+        Applied,
+        /// Nothing was waiting.
+        Empty,
+        /// The client stops, with this exit code.
+        Stop(i32),
+    }
+
+    /// Apply one read of the event stream.
+    fn serve(session: &mut Session<'_>, read: Result<Option<WindowEvent>, EventError>) -> Served {
+        match read {
+            Ok(Some(event)) => {
+                if apply(session, &event) {
+                    let _ = session.window.close();
+                    return Served::Stop(0);
+                }
+                Served::Applied
+            }
+            // A malformed frame is consumed and refused; the stream goes on.
+            Err(EventError::Undecodable(_)) => Served::Applied,
+            Ok(None) => Served::Empty,
+            Err(EventError::Mailbox(_)) => {
+                Served::Stop(fail(EXIT_CHANNEL_LOST, "event channel lost"))
+            }
+        }
+    }
+
     /// Apply one delivered window event, answering whether the client
     /// should stop.
-    fn apply(session: &mut Session, event: &WindowEvent) -> bool {
+    fn apply(session: &mut Session<'_>, event: &WindowEvent) -> bool {
         match *event {
             WindowEvent::Resized {
                 width_px,
@@ -558,6 +637,7 @@ mod program {
             WindowEvent::Pointer { x, y, action, .. } => {
                 session.controls.apply_pointer(x, y, action);
             }
+            WindowEvent::Minimized { .. } => session.shell.minimized(),
             WindowEvent::CloseRequested { .. } => return true,
             WindowEvent::ContentReleased { .. } => session.window.release_frames(),
             _ => {}
@@ -566,7 +646,7 @@ mod program {
     }
 
     /// Act on a client command, answering whether the client should stop.
-    fn command_applied(session: &mut Session, command: Command) -> bool {
+    fn command_applied(session: &mut Session<'_>, command: Command) -> bool {
         match command {
             Command::Quit => return true,
             Command::Zoom(way) => {
@@ -618,17 +698,25 @@ mod program {
         let quarry = Arc::new(Quarry::new(field));
         let armed = start_quarry(&quarry, binding.set());
 
-        let Ok(stats) = Stats::new(40, 40, 40, 20, 20) else {
-            return fail(EXIT_NO_REALM, "the player's stats are out of range");
+        let Ok(set) = Set::new() else {
+            return fail(EXIT_NO_FIGURE, "the motion set could not be built");
+        };
+        let Ok(clips) = set.clips() else {
+            return fail(EXIT_NO_FIGURE, "the motion set's clips could not be built");
         };
         let mut zone = Zone::new(TickRate::default_rate());
-        let start = tairix_wintersun_net::value::WorldPoint { x: 0, y: 0 };
-        let Ok(spec) = SpawnSpec::new(PLAYER_KIND, start, stats, 0, PLAYER_RADIUS) else {
-            return fail(EXIT_NO_REALM, "the player could not be described");
+        let start = WorldPoint { x: 0, y: 0 };
+        let (player, actor) = match spawn_player(&clips, &mut zone, start) {
+            Ok(spawned) => spawned,
+            Err((code, reason)) => return fail(code, reason),
         };
-        let Ok(player) = zone.spawn(spec) else {
-            return fail(EXIT_NO_REALM, "the player could not be spawned");
-        };
+        let mut cast = Cast::new();
+        if cast.join(player, actor, start).is_err() {
+            return fail(
+                EXIT_NO_FIGURE,
+                "the player's figure could not join the scene",
+            );
+        }
 
         PRESSURE.report(PressureBand::Normal);
         let mut session = Session {
@@ -636,6 +724,7 @@ mod program {
             shell: Shell::new(),
             camera: Camera::new(start, Zoom::DEFAULT, realm_bounds(params)),
             follow: Motion::still(start),
+            facing: Facing(0),
             pacer: Pacer::new(TickRate::default_rate()),
             controls: Controls::new(),
             governor: Governor::new(),
@@ -643,6 +732,8 @@ mod program {
             cache: MaterialCache::new("wintersun", CACHE_BACKING_BYTES, &PRESSURE, &SINK),
             scaled: None,
             times: FrameTimes::new(),
+            cast,
+            posed_ns: None,
         };
 
         let mode = app::mode_for(
@@ -687,6 +778,54 @@ mod program {
             &deadline,
             &pressure_moved,
         )
+    }
+
+    /// The player: its figure, built from the preset it walks as, and its
+    /// body in `zone` at `start`, as wide as the figure it is drawn as.
+    ///
+    /// # Errors
+    ///
+    /// The exit code and reason for whichever of the two could not be made.
+    fn spawn_player<'a>(
+        clips: &'a Clips<'a>,
+        zone: &mut Zone,
+        start: WorldPoint,
+    ) -> Result<(EntityId, Actor<'a>), (i32, &'static str)> {
+        let identity = player_identity()
+            .ok_or((EXIT_NO_FIGURE, "the player's figure could not be described"))?;
+        let actor = Actor::new(&identity, clips, Facing(0))
+            .map_err(|_| (EXIT_NO_FIGURE, "the player's figure could not be built"))?;
+        let stats = Stats::new(40, 40, 40, 20, 20)
+            .map_err(|_| (EXIT_NO_REALM, "the player's stats are out of range"))?;
+        let spec = SpawnSpec::new(PLAYER_KIND, start, stats, 0, actor.footprint())
+            .map_err(|_| (EXIT_NO_REALM, "the player could not be described"))?;
+        let player = zone
+            .spawn(spec)
+            .map_err(|_| (EXIT_NO_REALM, "the player could not be spawned"))?;
+        Ok((player, actor))
+    }
+
+    /// The figure the player walks as: the default preset the bundle ships,
+    /// or, where that cannot be read, the reference figure the art harness
+    /// measures every other against.
+    fn player_identity() -> Option<Identity> {
+        let path = presets::installed(presets::DEFAULT);
+        match read_preset(&path) {
+            Ok(identity) => Some(identity),
+            Err(reason) => {
+                report(&alloc::format!("{reason}; walking as the reference figure"));
+                reference::identity(Species::Human).ok()
+            }
+        }
+    }
+
+    /// The preset record at `path`, refused unless the file is exactly one.
+    fn read_preset(path: &str) -> Result<Identity, alloc::string::String> {
+        let file = File::open(path.as_bytes(), OpenFlags::READ)
+            .map_err(|ret| alloc::format!("cannot open {path}: {}", Errno::from_syscall(ret)))?;
+        let bytes = tairix_rt::read_fd_to_end(file.fd(), RECORD_LEN)
+            .map_err(|ret| alloc::format!("cannot read {path}: {}", Errno::from_syscall(ret)))?;
+        Identity::decode(&bytes).map_err(|err| alloc::format!("{path} is refused: {err}"))
     }
 
     /// Stops the chunk worker on every way out, so it is not left mid-
@@ -745,7 +884,7 @@ mod program {
                   that would exist only to shorten this signature"
     )]
     fn run_loop(
-        session: &mut Session,
+        session: &mut Session<'_>,
         world: &mut World,
         zone: &mut Zone,
         player: EntityId,
@@ -773,16 +912,17 @@ mod program {
             while let Some(answer) = quarry.collect() {
                 world.take(answer);
             }
-            match waited {
-                Ok(Some(event)) => {
-                    if apply(session, &event) {
-                        let _ = session.window.close();
-                        return 0;
-                    }
-                }
-                Ok(None) | Err(EventError::Undecodable(_)) => {}
-                Err(EventError::Mailbox(_)) => {
-                    return fail(EXIT_CHANNEL_LOST, "event channel lost")
+            if let Served::Stop(code) = serve(session, waited) {
+                return code;
+            }
+            // Everything already queued is applied before the frame is drawn
+            // from the state it leaves, so a burst of input is one paint.
+            loop {
+                let read = events.try_wait(session.window.client());
+                match serve(session, read) {
+                    Served::Stop(code) => return code,
+                    Served::Empty => break,
+                    Served::Applied => {}
                 }
             }
             let now = tairix_rt::clock_get();
@@ -800,14 +940,22 @@ mod program {
             session.camera.look_at(session.follow.at(alpha));
             if let Some(mode) = session.window.mode().copied() {
                 if let Ok(view) = Viewport::new(mode.width_px, mode.height_px, RenderScale::ONE) {
+                    world.release_distant(session.camera.visible(&view));
                     world.request_visible(&session.camera, &view, quarry, armed);
                 }
             }
 
-            if draw(session, world, pool).is_err() {
+            if draw(session, world, player, pool, now).is_err() {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }
+            let floored = session.governor.floored();
             session.governor.observe(&session.times);
+            if session.governor.floored() && !floored {
+                report(
+                    "frames overrun at the least detail that keeps figures readable; \
+                     the frame rate is giving way",
+                );
+            }
         }
     }
 

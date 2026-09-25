@@ -2515,3 +2515,147 @@ fn resample_into_matches_the_allocating_resample() {
         "writing into a held destination differed from allocating one"
     );
 }
+
+/// Polygons filled into every band of a surface draw exactly what filling
+/// them onto the whole surface draws, whatever the band size: a shape that
+/// straddles a band edge is two halves that meet with no seam and no double
+/// cover, because each band scans the shape's own coverage for the rows it
+/// owns.
+#[test]
+fn a_polygon_filled_band_by_band_is_the_polygon_filled_whole() {
+    use crate::surface::Canvas;
+    let unit = SUBPIXEL;
+    let shapes: [(&[(i32, i32)], Color); 3] = [
+        (
+            &[
+                (3 * unit, unit),
+                (27 * unit + 5, 4 * unit),
+                (14 * unit, 23 * unit + 3),
+            ],
+            Color::rgba(200, 40, 10, 180),
+        ),
+        (
+            &[
+                (unit, 12 * unit),
+                (30 * unit, 11 * unit),
+                (29 * unit, 13 * unit),
+                (2 * unit, 14 * unit),
+            ],
+            Color::rgba(10, 90, 220, 255),
+        ),
+        (
+            &[
+                (-4 * unit, -3 * unit),
+                (9 * unit, -2 * unit),
+                (8 * unit + 3, 40 * unit),
+            ],
+            Color::rgba(0, 0, 0, 90),
+        ),
+    ];
+    let mut whole =
+        Surface::filled(32, 24, Color::rgb(60, 70, 80).premultiply()).expect("allocates");
+    for (polygon, color) in shapes {
+        whole.fill_polygon_subpixel(polygon, color);
+    }
+    // One scratch across every fill of every band: what it held from the
+    // last fill must not reach the next.
+    let mut scratch = crate::ScanScratch::new();
+    for rows_per_band in [1, 2, 5, 7, 24] {
+        let mut banded =
+            Surface::filled(32, 24, Color::rgb(60, 70, 80).premultiply()).expect("allocates");
+        for mut band in banded.row_bands_mut(0..24, rows_per_band) {
+            for (polygon, color) in shapes {
+                Canvas::fill_polygon_subpixel(&mut band, polygon, color, &mut scratch);
+            }
+        }
+        assert_eq!(
+            banded, whole,
+            "bands of {rows_per_band} rows drew a different picture"
+        );
+    }
+}
+
+/// A scratch that has grown for a large fill scan-converts a small one
+/// exactly as a fresh scratch does, and a shape that encloses nothing leaves
+/// it usable.
+#[test]
+fn a_reused_scan_scratch_fills_exactly_as_a_fresh_one() {
+    use crate::surface::Canvas;
+    let unit = SUBPIXEL;
+    let large = [
+        (0, 0),
+        (40 * unit, unit),
+        (39 * unit, 30 * unit),
+        (unit, 29 * unit),
+    ];
+    let small = [
+        (5 * unit + 3, 4 * unit),
+        (9 * unit, 6 * unit + 5),
+        (6 * unit, 11 * unit),
+    ];
+    let degenerate = [(0, 0), (unit, unit)];
+    let color = Color::rgba(90, 200, 30, 210);
+    let mut fresh = Surface::new(40, 32).expect("allocates");
+    Canvas::fill_polygon_subpixel(&mut fresh, &small, color, &mut crate::ScanScratch::new());
+
+    let mut scratch = crate::ScanScratch::new();
+    let mut reused = Surface::new(40, 32).expect("allocates");
+    let mut scrap = Surface::new(40, 32).expect("allocates");
+    Canvas::fill_polygon_subpixel(&mut scrap, &large, color, &mut scratch);
+    Canvas::fill_polygon_subpixel(&mut scrap, &degenerate, color, &mut scratch);
+    Canvas::fill_polygon_subpixel(&mut reused, &small, color, &mut scratch);
+    assert_eq!(reused, fresh);
+}
+
+/// A band carries the surface's clip window into a fill, so a clipped
+/// parallel fill withholds what a clipped whole one does.
+#[test]
+fn a_band_fill_honours_the_surface_clip() {
+    use crate::surface::Canvas;
+    let unit = SUBPIXEL;
+    let square = [
+        (0, 0),
+        (16 * unit, 0),
+        (16 * unit, 16 * unit),
+        (0, 16 * unit),
+    ];
+    let color = Color::rgb(250, 250, 250);
+    let mut whole = Surface::new(16, 16).expect("allocates");
+    whole.with_clip(4, 3, 6, 9, |clipped| {
+        clipped.fill_polygon_subpixel(&square, color);
+    });
+    let mut banded = Surface::new(16, 16).expect("allocates");
+    let mut scratch = crate::ScanScratch::new();
+    banded.with_clip(4, 3, 6, 9, |clipped| {
+        for mut band in clipped.row_bands_mut(0..16, 3) {
+            Canvas::fill_polygon_subpixel(&mut band, &square, color, &mut scratch);
+        }
+    });
+    assert_eq!(banded, whole);
+}
+
+/// A narrowed band writes only the rows it was narrowed to and never past
+/// the band it was taken from.
+#[test]
+fn a_narrowed_band_confines_a_fill_to_its_rows() {
+    use crate::surface::Canvas;
+    let unit = SUBPIXEL;
+    let square = [(0, 0), (8 * unit, 0), (8 * unit, 12 * unit), (0, 12 * unit)];
+    let color = Color::rgb(255, 0, 0);
+    let mut surface = Surface::new(8, 12).expect("allocates");
+    for mut band in surface.row_bands_mut(0..12, 4) {
+        let rows = band.rows();
+        let mut above = band.narrowed(0..6);
+        let admitted = above.rows();
+        assert!(admitted.start >= rows.start && admitted.end <= rows.end);
+        Canvas::fill_polygon_subpixel(&mut above, &square, color, &mut crate::ScanScratch::new());
+    }
+    for y in 0..12 {
+        let painted = surface.get(3, y).expect("inside").a == 255;
+        assert_eq!(painted, y < 6, "row {y}");
+    }
+    // Rows the band does not hold narrow to nothing.
+    let mut bands = surface.row_bands_mut(0..12, 4);
+    let mut first = bands.next().expect("a band");
+    assert!(first.narrowed(8..12).rows().is_empty());
+}

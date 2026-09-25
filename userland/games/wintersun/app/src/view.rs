@@ -19,8 +19,9 @@
 
 use tairix_parallel::{bands, JobRunner};
 
+use crate::camera::Zoom;
 use crate::error::ClientError;
-use crate::quality::RenderScale;
+use crate::quality::{RenderScale, CAPS};
 
 /// The widest the software path renders before it upscales.
 ///
@@ -41,12 +42,18 @@ pub const MAX_RENDER_HEIGHT: u32 = 1440;
 const MIN_BAND_PIXELS: usize = 1 << 14;
 
 /// Where a frame is drawn, and at what size.
+///
+/// The render target covers the same piece of the world as the window at
+/// every scale: each of its pixels covers the world the window's would,
+/// widened by the inverse of the fraction it is drawn at, so shedding
+/// resolution never changes what the player sees, only how finely.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Viewport {
     window_width: u32,
     window_height: u32,
     render_width: u32,
     render_height: u32,
+    scale: RenderScale,
 }
 
 impl Viewport {
@@ -57,7 +64,7 @@ impl Viewport {
     ///
     /// [`ClientError::Viewport`] for a window with no pixels, which is not
     /// a frame to be drawn smaller but a window there is nothing to draw
-    /// in.
+    /// in, and for a scale no zoom's step stays whole at.
     pub fn new(
         window_width: u32,
         window_height: u32,
@@ -66,13 +73,35 @@ impl Viewport {
         if window_width == 0 || window_height == 0 {
             return Err(ClientError::Viewport);
         }
-        let (capped_w, capped_h) = cap(window_width, window_height);
+        let scale = cap(window_width, window_height).of(scale);
+        // The nearest zoom's step is the smallest and every other is a power
+        // of two times it, so a fraction that keeps it whole keeps them all.
+        if scale.step(Zoom::NEAREST.sub_units_per_pixel()).is_none() {
+            return Err(ClientError::Viewport);
+        }
         Ok(Self {
             window_width,
             window_height,
-            render_width: scale.apply(capped_w),
-            render_height: scale.apply(capped_h),
+            render_width: scale.apply(window_width),
+            render_height: scale.apply(window_height),
+            scale,
         })
+    }
+
+    /// The world sub-units one render pixel spans at `zoom`.
+    ///
+    /// Whole by construction: [`Self::new`] refuses a scale that is not.
+    #[must_use]
+    pub fn step(&self, zoom: Zoom) -> i32 {
+        let base = zoom.sub_units_per_pixel();
+        self.scale.step(base).unwrap_or(base)
+    }
+
+    /// The fraction of the window the render target is drawn at, the
+    /// software path's cap and the ladder's own together.
+    #[must_use]
+    pub const fn scale(&self) -> RenderScale {
+        self.scale
     }
 
     /// The window's own pixel extent.
@@ -112,65 +141,23 @@ impl Viewport {
         bands(runner, rows, grain).max(1)
     }
 
-    /// The rows each of `count` bands covers, longest first.
-    ///
-    /// The remainder is spread one row at a time over the leading bands
-    /// rather than piled onto the last, so no band is a whole extra row
-    /// behind the others.
+    /// How many rows each of [`Self::band_count`]'s bands holds, the last
+    /// short where they do not divide evenly: the size the target's rows are
+    /// cut by.
     #[must_use]
-    pub fn band_rows(&self, count: usize) -> BandRows {
-        BandRows {
-            rows: self.render_height as usize,
-            count: count.max(1),
-        }
+    pub fn band_rows(&self, runner: &dyn JobRunner) -> u32 {
+        let count = u32::try_from(self.band_count(runner)).unwrap_or(u32::MAX);
+        self.render_height.div_ceil(count.max(1)).max(1)
     }
 }
 
-/// How a target's rows divide between bands.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct BandRows {
-    rows: usize,
-    count: usize,
-}
-
-impl BandRows {
-    /// The half-open row range band `index` covers, or `None` past the
-    /// last band.
-    #[must_use]
-    pub fn range(&self, index: usize) -> Option<(usize, usize)> {
-        if index >= self.count {
-            return None;
-        }
-        let base = self.rows / self.count;
-        let extra = self.rows % self.count;
-        let start = base * index + index.min(extra);
-        let len = base + usize::from(index < extra);
-        Some((start, start + len))
-    }
-
-    /// How many bands there are.
-    #[must_use]
-    pub const fn count(&self) -> usize {
-        self.count
-    }
-}
-
-/// A window extent brought within the software path's cap, keeping its
-/// proportions.
-fn cap(width: u32, height: u32) -> (u32, u32) {
-    if width <= MAX_RENDER_WIDTH && height <= MAX_RENDER_HEIGHT {
-        return (width, height);
-    }
-    let (w, h) = (u64::from(width), u64::from(height));
-    // Whichever axis is further over its cap decides the factor, so the
-    // other lands inside its own.
-    if w * u64::from(MAX_RENDER_HEIGHT) >= h * u64::from(MAX_RENDER_WIDTH) {
-        let scaled = h * u64::from(MAX_RENDER_WIDTH) / w;
-        (MAX_RENDER_WIDTH, u32::try_from(scaled).unwrap_or(1).max(1))
-    } else {
-        let scaled = w * u64::from(MAX_RENDER_HEIGHT) / h;
-        (u32::try_from(scaled).unwrap_or(1).max(1), MAX_RENDER_HEIGHT)
-    }
+/// The fraction a window must be drawn at to fit the software path's cap:
+/// the largest of [`CAPS`] that brings both axes inside it, which keeps the
+/// window's proportions.
+fn cap(width: u32, height: u32) -> RenderScale {
+    CAPS.into_iter()
+        .find(|cap| cap.apply(width) <= MAX_RENDER_WIDTH && cap.apply(height) <= MAX_RENDER_HEIGHT)
+        .unwrap_or(CAPS[CAPS.len() - 1])
 }
 
 #[cfg(test)]

@@ -13,6 +13,9 @@ pub enum ClientError {
     /// The world generator refused, or could not fit what it was asked
     /// for.
     World,
+    /// A figure could not be built, moved or placed, or one entity was
+    /// brought into the scene twice.
+    Figure,
 }
 
 impl fmt::Display for ClientError {
@@ -21,6 +24,7 @@ impl fmt::Display for ClientError {
             Self::OutOfMemory => "out of memory",
             Self::Viewport => "viewport out of range",
             Self::World => "the world could not be generated",
+            Self::Figure => "a figure could not be drawn",
         })
     }
 }

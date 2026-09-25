@@ -49,7 +49,7 @@ fn clock<'a>(preview: &Preview<'a>) -> (Animator<'a>, Breath, Facing) {
 /// How far a placement reaches up its square, in sub-pixels above the
 /// ground point.
 fn tallest(placement: &Placement, side: u32, reach: f64) -> f64 {
-    let (_, at) = reference::fit(reach, side).expect("a real cell");
+    let (_, at) = reference::fit(Kind::Idle, reach, side).expect("a real cell");
     let ground = at.1 * f64::from(SUBPIXEL);
     placement
         .strips()
@@ -74,7 +74,8 @@ fn a_new_preview_draws_exactly_what_the_harness_measures() {
         for facing in FACINGS {
             preview.face(facing);
             for side in SIDES {
-                let (scale, at) = reference::fit(grid.rig().reach(), side).expect("a real cell");
+                let (scale, at) =
+                    reference::fit(Kind::Idle, grid.rig().reach(), side).expect("a real cell");
                 let cell = Cell {
                     kind: Kind::Idle,
                     step: 0,
@@ -322,7 +323,7 @@ fn every_view_of_one_moment_is_one_figure_at_its_size() {
 
     let reach = Staged::new(&human()).expect("it builds").rig().reach();
     let origin = |side: u32| {
-        let (_, at) = reference::fit(reach, side).expect("a real cell");
+        let (_, at) = reference::fit(Kind::Idle, reach, side).expect("a real cell");
         (at.0 * f64::from(SUBPIXEL), at.1 * f64::from(SUBPIXEL))
     };
     let (from, to) = (origin(small), origin(large));

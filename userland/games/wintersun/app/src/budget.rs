@@ -40,12 +40,13 @@ pub const BASELINE_HEIGHT: u32 = 720;
 pub enum Pass {
     /// Material blend and detail: the ground itself.
     Terrain,
-    /// Decals, ground scenery, entities and figures.
+    /// Light, fog and atmosphere composite over the ground.
+    Light,
+    /// Ground scenery, entities and figures, each shaded by its own
+    /// surfaces and veiled by the air at its feet.
     Scenery,
     /// Particles and weather.
     Particles,
-    /// Light, fog and atmosphere composite.
-    Light,
     /// Overlays the player reads rather than plays in.
     Ui,
 }
@@ -54,9 +55,9 @@ impl Pass {
     /// Every pass, in the order a frame runs them.
     pub const ALL: [Self; 5] = [
         Self::Terrain,
+        Self::Light,
         Self::Scenery,
         Self::Particles,
-        Self::Light,
         Self::Ui,
     ];
 
@@ -153,12 +154,15 @@ const RESTORE_AFTER: u8 = 60;
 /// exactly where it overran.
 const RESTORE_HEADROOM_PERCENT: u64 = 70;
 
-/// Turns the degradation ladder from what frames actually cost.
+/// Turns the degradation ladder from what frames actually cost, no deeper
+/// than the floor the view allows.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Governor {
     ladder: Ladder,
+    floor: Ladder,
     over: u8,
     under: u8,
+    floored: bool,
 }
 
 impl Default for Governor {
@@ -168,13 +172,16 @@ impl Default for Governor {
 }
 
 impl Governor {
-    /// A governor at full quality.
+    /// A governor at full quality, free to shed the whole ladder until it is
+    /// told a floor.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             ladder: Ladder::FULL,
+            floor: Ladder::new(Ladder::MAX_STEP),
             over: 0,
             under: 0,
+            floored: false,
         }
     }
 
@@ -184,11 +191,40 @@ impl Governor {
         self.ladder
     }
 
+    /// Whether frames went on overrunning with the ladder at its floor, and
+    /// nothing has moved since: the frame rate is what is giving way,
+    /// because the next notch would shed a detail the player needs to read.
+    #[must_use]
+    pub const fn floored(&self) -> bool {
+        self.floored
+    }
+
+    /// Go no deeper than `floor` — the deepest the window's size and the
+    /// zoom let the ladder go without shedding a detail the player needs —
+    /// returning whether the ladder moved.
+    ///
+    /// Called before a frame is drawn, so no frame is drawn past its own
+    /// floor. A floor that has come up past the ladder takes it back at once
+    /// rather than after a comfortable run, since what it is shedding is now
+    /// something the player needs to read.
+    pub fn hold(&mut self, floor: Ladder) -> bool {
+        self.floor = floor;
+        if self.ladder > floor {
+            self.moved_to(floor);
+            return true;
+        }
+        if self.ladder < floor {
+            self.floored = false;
+        }
+        false
+    }
+
     /// Account for a finished frame, returning whether the ladder moved.
     ///
-    /// Frame rate is never what gives way: this only ever turns a ladder
-    /// notch, and when the ladder is spent it leaves the renderer where
-    /// it is rather than dropping frames on purpose.
+    /// Frame rate is never what gives way while there is a notch to shed:
+    /// this only ever turns a ladder notch. At the floor, and at the
+    /// ladder's end, nothing more is shed; the frame rate gives way, and
+    /// [`Self::floored`] says so.
     pub fn observe(&mut self, times: &FrameTimes) -> bool {
         let drawing = FRAME_NS.saturating_sub(headroom_ns());
         let total = times.total();
@@ -197,9 +233,12 @@ impl Governor {
             self.over = self.over.saturating_add(1);
             if self.over >= SHED_AFTER {
                 self.over = 0;
-                if let Some(next) = self.ladder.shed() {
-                    self.ladder = next;
-                    return true;
+                match self.ladder.shed().filter(|next| *next <= self.floor) {
+                    Some(next) => {
+                        self.moved_to(next);
+                        return true;
+                    }
+                    None => self.floored = true,
                 }
             }
             return false;
@@ -208,16 +247,23 @@ impl Governor {
         if total * 100 <= drawing.saturating_mul(RESTORE_HEADROOM_PERCENT) {
             self.under = self.under.saturating_add(1);
             if self.under >= RESTORE_AFTER {
-                self.under = 0;
                 if let Some(next) = self.ladder.restore() {
-                    self.ladder = next;
+                    self.moved_to(next);
                     return true;
                 }
+                self.under = 0;
             }
         } else {
             self.under = 0;
         }
         false
+    }
+
+    fn moved_to(&mut self, ladder: Ladder) {
+        self.ladder = ladder;
+        self.over = 0;
+        self.under = 0;
+        self.floored = false;
     }
 }
 

@@ -24,7 +24,8 @@ use tairix_inline::ArrayVec;
 use tairix_util::mathf;
 
 use crate::color::Color;
-use crate::surface::{Surface, SUBPIXEL};
+use crate::scan::ScanScratch;
+use crate::surface::{Canvas, SUBPIXEL};
 
 /// The most vertices any one shape's outline needs.
 ///
@@ -448,15 +449,18 @@ pub struct Placed {
     pub seed: u16,
 }
 
-/// The buffers an outline is traced and transformed through.
+/// The buffers an outline is traced, transformed and scan-converted
+/// through.
 ///
-/// Fixed arrays rather than growable ones: every shape's vertex count is
-/// bounded and asserted at build time, so the whole outline path touches no
-/// allocator at all.
+/// The outline's are fixed arrays, since every shape's vertex count is bounded
+/// and asserted at build time; the scan converter's grow to the largest shape
+/// filled and are then reused, so a caller holding one allocates nothing per
+/// fill.
 #[derive(Debug, Default)]
 pub struct Scratch {
     local: Outline,
     device: ArrayVec<(i32, i32), MAX_VERTICES>,
+    scan: ScanScratch,
 }
 
 impl Scratch {
@@ -467,8 +471,8 @@ impl Scratch {
     }
 }
 
-/// Fill `placed`'s outline onto `surface`, tracing it through `scratch`.
-pub fn fill(surface: &mut Surface, placed: &Placed, scratch: &mut Scratch) {
+/// Fill `placed`'s outline onto `canvas`, tracing it through `scratch`.
+pub fn fill<C: Canvas + ?Sized>(canvas: &mut C, placed: &Placed, scratch: &mut Scratch) {
     if placed.color.a == 0 {
         return;
     }
@@ -488,7 +492,7 @@ pub fn fill(surface: &mut Surface, placed: &Placed, scratch: &mut Scratch) {
             .device
             .try_push((to_subpixel(placed.x + rx), to_subpixel(placed.y - ry)));
     }
-    surface.fill_polygon_subpixel(&scratch.device, placed.color);
+    canvas.fill_polygon_subpixel(&scratch.device, placed.color, &mut scratch.scan);
 }
 
 /// A surface coordinate in the scan converter's sub-pixel units.

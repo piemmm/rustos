@@ -6,7 +6,7 @@ use tairix_raster::shape::Shape;
 use tairix_raster::Color;
 use tairix_util::mathf;
 
-use super::{Contact, Light};
+use super::{ring_alpha, Contact, Light, PENUMBRA};
 use crate::error::FigureError;
 use crate::frame::FORESHORTEN;
 
@@ -248,4 +248,64 @@ fn scale_takes_the_whole_shadow_with_it() {
     let (half_wide, half_tall) = extent(half.shape, half.turn);
     assert!(close(half_wide, unit_wide * 0.5) && close(half_tall, unit_tall * 0.5));
     assert_eq!(half.color, unit.color, "scale is size, not opacity");
+}
+
+/// A softened shadow is the hard one with its edge feathered: the innermost
+/// ring is the hard shadow's own ellipse, each ring out from it is larger,
+/// and all of them share its centre, its turn and its tone.
+#[test]
+fn a_softened_shadow_is_the_hard_one_feathered() {
+    let light = Light::new(0.6, 0.8, 0.5).expect("a real light");
+    for lift in [0.0, 4.0, 30.0] {
+        let hard = contact()
+            .cast(light, lift, 1.5, (20.0, 40.0))
+            .expect("a shadow");
+        let rings = contact()
+            .penumbra(light, lift, 1.5, (20.0, 40.0))
+            .expect("a softened shadow");
+        let inner = rings[PENUMBRA - 1];
+        assert_eq!(
+            inner.shape, hard.shape,
+            "the innermost ring is not the shadow"
+        );
+        let mut outer = f64::MAX;
+        for ring in rings {
+            assert!(close(ring.x, hard.x) && close(ring.y, hard.y));
+            assert!(close(ring.turn, hard.turn));
+            assert_eq!(
+                (ring.color.r, ring.color.g, ring.color.b),
+                (hard.color.r, hard.color.g, hard.color.b)
+            );
+            let Shape::Superellipse { rx, .. } = ring.shape else {
+                panic!("a ring is an ellipse");
+            };
+            assert!(rx < outer, "a ring is painted before one larger than it");
+            outer = rx;
+        }
+    }
+}
+
+/// Where every ring overlaps, the stack reaches the hard shadow's own
+/// density and no more than one step past it, whatever that density is.
+#[test]
+fn the_rings_compose_to_the_hard_shadows_density() {
+    const _: () = assert!(PENUMBRA == 3, "the check below composes three rings");
+    for alpha in 0..=u8::MAX {
+        let each = ring_alpha(alpha);
+        let through = |ring: u8| {
+            let clear = 1.0 - f64::from(ring) / 255.0;
+            1.0 - clear * clear * clear
+        };
+        let wanted = f64::from(alpha) / 255.0;
+        assert!(
+            through(each) >= wanted - SLACK,
+            "{alpha} is not reached by {each}"
+        );
+        if each > 0 {
+            assert!(
+                through(each - 1) < wanted,
+                "{alpha} is reached by a ring lighter than {each}"
+            );
+        }
+    }
 }

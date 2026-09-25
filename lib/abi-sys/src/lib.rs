@@ -217,6 +217,7 @@ const NUM_PTY_CREATE: u64 = SyscallNumber::PTY_CREATE.as_u16() as u64;
 const NUM_PTY_SET_SIZE: u64 = SyscallNumber::PTY_SET_SIZE.as_u16() as u64;
 const NUM_FD_GRANT: u64 = SyscallNumber::FD_GRANT.as_u16() as u64;
 const NUM_FD_REDEEM: u64 = SyscallNumber::FD_REDEEM.as_u16() as u64;
+const NUM_FD_REDEEM_FROM: u64 = SyscallNumber::FD_REDEEM_FROM.as_u16() as u64;
 const NUM_BOOT_SESSION_GET: u64 = SyscallNumber::BOOT_SESSION_GET.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
@@ -3361,6 +3362,29 @@ pub extern "C" fn sys_fd_redeem(handle: u64) -> u64 {
     unsafe { raw_syscall(NUM_FD_REDEEM, [handle, 0, 0, 0, 0, 0]) }
 }
 
+/// `fd_redeem_from`: [`sys_fd_redeem`], only if the process instance at
+/// `(grantor, grantor_len)` — an attested `tairix_proc_id_t` — minted the
+/// delegation (`SyscallNumber::FD_REDEEM_FROM`).
+///
+/// What a service redeeming a handle another process named to it calls, so
+/// it cannot be made to consume a delegation somebody else minted to it. A
+/// handle the instance did not mint fails closed with `TAIRIX_E_NOT_FOUND`
+/// and stays pending; a short buffer answers `TAIRIX_E_BUFFER_TOO_SMALL`.
+/// Audited.
+#[must_use]
+#[export_name = "tairix_sys_fd_redeem_from"]
+pub extern "C" fn sys_fd_redeem_from(handle: u64, grantor: *mut c_void, grantor_len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(grantor,
+    // grantor_len)` against the caller's address space and resolves the
+    // handle owner-bound and grantor-bound before installing anything.
+    unsafe {
+        raw_syscall(
+            NUM_FD_REDEEM_FROM,
+            [handle, ptr_arg(grantor), grantor_len as u64, 0, 0, 0],
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3488,6 +3512,7 @@ mod tests {
         (NUM_POINTER_READ, "pointer_read", 3),
         (NUM_FD_GRANT, "fd_grant", 4),
         (NUM_FD_REDEEM, "fd_redeem", 1),
+        (NUM_FD_REDEEM_FROM, "fd_redeem_from", 3),
         (NUM_MEM_PIN, "mem_pin", 0),
         (NUM_MEM_UNPIN, "mem_unpin", 0),
         (NUM_SIGNAL_INTAKE, "signal_intake", 1),
@@ -4326,6 +4351,20 @@ mod tests {
         assert_eq!(args[2], ptr as usize as u64);
         assert_eq!(args[3], tairix_abi::PROC_ID_LEN as u64);
         assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fd_redeem_from_marshals_the_handle_and_the_grantor_instance() {
+        let mut instance = [0x5Bu8; tairix_abi::PROC_ID_LEN];
+        let ptr = instance.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(6, || {
+            assert_eq!(sys_fd_redeem_from(9, ptr, instance.len()), 6);
+        });
+        assert_eq!(number, NUM_FD_REDEEM_FROM);
+        assert_eq!(args[0], 9);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], tairix_abi::PROC_ID_LEN as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

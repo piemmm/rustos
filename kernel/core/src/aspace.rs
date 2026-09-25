@@ -1055,6 +1055,8 @@ struct PendingFdDelegation {
     recipient: ProcId,
     /// The process that minted it, which the delegation is charged to.
     grantor: ProcessId,
+    /// That process's instance, which a deputy's redemption must name.
+    grantor_instance: ProcId,
 }
 
 /// Most unredeemed delegations one grantor may have pending to one recipient.
@@ -1391,6 +1393,13 @@ impl AddressSpaceRegistry {
         }
         if self.fd_delegations.contains_key(&task) {
             return Some("fd_delegations");
+        }
+        if self
+            .fd_delegations
+            .values()
+            .any(|pending| pending.by_handle.values().any(|held| held.grantor == task))
+        {
+            return Some("fd_delegations (as grantor)");
         }
         None
     }
@@ -2551,7 +2560,9 @@ impl AddressSpaceRegistry {
     ///
     /// `instance` is the process instance the grantor named, recorded so
     /// redemption admits that process and no later holder of `recipient`.
-    /// `grantor` is the kernel-trusted caller the delegation is charged to.
+    /// `grantor` is the kernel-trusted caller the delegation is charged to,
+    /// and `grantor_instance` its instance, which a redemption bound to its
+    /// grantor must name.
     ///
     /// # Errors
     ///
@@ -2563,6 +2574,7 @@ impl AddressSpaceRegistry {
         recipient: ProcessId,
         instance: ProcId,
         grantor: ProcessId,
+        grantor_instance: ProcId,
         file: DelegatedFile,
         flags: OpenFlags,
     ) -> Result<u64, Errno> {
@@ -2572,6 +2584,7 @@ impl AddressSpaceRegistry {
             flags,
             recipient: instance,
             grantor,
+            grantor_instance,
         };
         // A delegation still pending conveys exactly one right: "open this
         // path under this captured authority". Re-granting it while the
@@ -2617,12 +2630,18 @@ impl AddressSpaceRegistry {
     /// redeemer holding the recorded number is admitted only when it is
     /// also the recorded instance.
     ///
+    /// `from`, where given, is the grantor instance the redeemer requires:
+    /// a deputy redeeming a handle another process named to it binds the
+    /// redemption to that process, so it cannot be made to consume a
+    /// delegation somebody else minted to it.
+    ///
     /// # Errors
     ///
     /// * [`Errno::NotFound`] — no such handle minted to `task` (unknown,
-    ///   already redeemed, minted to a different task, or minted to an
-    ///   earlier instance of `task`'s number — forgery and staleness both
-    ///   answer exactly like absence, so the handle space leaks nothing).
+    ///   already redeemed, minted to a different task, minted to an earlier
+    ///   instance of `task`'s number, or minted by other than `from` —
+    ///   forgery and staleness both answer exactly like absence, so the
+    ///   handle space leaks nothing, and the delegation stays pending).
     /// * [`Errno::OutOfRange`] — descriptor-space exhaustion; the grant
     ///   stays pending.
     pub fn redeem_fd_delegation(
@@ -2630,12 +2649,16 @@ impl AddressSpaceRegistry {
         task: ProcessId,
         instance: ProcId,
         handle: u64,
+        from: Option<ProcId>,
     ) -> Result<u32, Errno> {
         let pending = self
             .fd_delegations
             .get(&task)
             .and_then(|entry| entry.by_handle.get(&handle))
-            .filter(|pending| pending.recipient == instance)
+            .filter(|pending| {
+                pending.recipient == instance
+                    && from.is_none_or(|grantor| pending.grantor_instance == grantor)
+            })
             .cloned()
             .ok_or(Errno::NotFound)?;
         let fd = self.open_backed(task, OpenBacking::Delegated(pending.file), pending.flags)?;
@@ -4055,6 +4078,55 @@ mod tests {
         assert_eq!(reg.grant(ProcessId(2), revoked), None);
     }
 
+    /// A distinct instance for each process number, as a grantor's own.
+    fn instance_of(process: ProcessId) -> ProcId {
+        let mut raw = [0x60u8; tairix_abi::PROC_ID_LEN];
+        raw[..8].copy_from_slice(&process.0.to_le_bytes());
+        ProcId::from_raw(raw)
+    }
+
+    /// A delegation bound redemption takes only from the grantor it names:
+    /// another instance naming the handle is refused like a handle that does
+    /// not exist, and the delegation stays pending for its own grantor.
+    ///
+    /// A deputy redeemed whatever handle a caller named, so a caller could
+    /// have it consume a delegation somebody else had minted to it — and,
+    /// handles being dealt in sequence, predict the number.
+    #[test]
+    fn a_bound_redemption_takes_only_the_named_grantors_delegation() {
+        let mut reg = AddressSpaceRegistry::new();
+        let file = DelegatedFile {
+            path: String::from("/Users/ada/Documents/report.txt"),
+            uid: 1000,
+            caps: CapabilitySet::empty(),
+            write_ceiling: Some(0),
+        };
+        let deputy = ProcId::from_raw([0xD0u8; tairix_abi::PROC_ID_LEN]);
+        let (owner, stranger) = (ProcessId(12), ProcessId(13));
+        let handle = reg
+            .mint_fd_delegation(
+                ProcessId(11),
+                deputy,
+                owner,
+                instance_of(owner),
+                file,
+                OpenFlags::READ,
+            )
+            .expect("mints");
+        assert_eq!(
+            reg.redeem_fd_delegation(ProcessId(11), deputy, handle, Some(instance_of(stranger))),
+            Err(Errno::NotFound)
+        );
+        assert!(reg
+            .redeem_fd_delegation(ProcessId(11), deputy, handle, Some(instance_of(owner)))
+            .is_ok());
+        assert_eq!(
+            reg.redeem_fd_delegation(ProcessId(11), deputy, handle, Some(instance_of(owner))),
+            Err(Errno::NotFound),
+            "a bound redemption is one-shot too"
+        );
+    }
+
     /// Regression: re-granting a file delegation that is still pending
     /// returns the pending handle instead of appending a duplicate.
     ///
@@ -4076,11 +4148,25 @@ mod tests {
         let who = ProcId::from_raw([0x2Au8; tairix_abi::PROC_ID_LEN]);
         let grantor = ProcessId(3);
         let first = reg
-            .mint_fd_delegation(ProcessId(2), who, grantor, file.clone(), OpenFlags::READ)
+            .mint_fd_delegation(
+                ProcessId(2),
+                who,
+                grantor,
+                instance_of(grantor),
+                file.clone(),
+                OpenFlags::READ,
+            )
             .expect("mints");
         for _ in 0..1_000 {
             assert_eq!(
-                reg.mint_fd_delegation(ProcessId(2), who, grantor, file.clone(), OpenFlags::READ),
+                reg.mint_fd_delegation(
+                    ProcessId(2),
+                    who,
+                    grantor,
+                    instance_of(grantor),
+                    file.clone(),
+                    OpenFlags::READ
+                ),
                 Ok(first),
                 "repetition must not append a second pending delegation"
             );
@@ -4093,19 +4179,35 @@ mod tests {
             write_ceiling: Some(0),
         };
         assert_ne!(
-            reg.mint_fd_delegation(ProcessId(2), who, grantor, other, OpenFlags::READ),
+            reg.mint_fd_delegation(
+                ProcessId(2),
+                who,
+                grantor,
+                instance_of(grantor),
+                other,
+                OpenFlags::READ
+            ),
             Ok(first)
         );
         // One redemption consumes the one pending right; the duplicate
         // suppression never turned two grants into one *redeemable*
         // descriptor that outlives its consumption.
-        assert!(reg.redeem_fd_delegation(ProcessId(2), who, first).is_ok());
+        assert!(reg
+            .redeem_fd_delegation(ProcessId(2), who, first, None)
+            .is_ok());
         assert_eq!(
-            reg.redeem_fd_delegation(ProcessId(2), who, first),
+            reg.redeem_fd_delegation(ProcessId(2), who, first, None),
             Err(Errno::NotFound)
         );
         // With nothing pending, granting the same file again mints anew.
-        let renewed = reg.mint_fd_delegation(ProcessId(2), who, grantor, file, OpenFlags::READ);
+        let renewed = reg.mint_fd_delegation(
+            ProcessId(2),
+            who,
+            grantor,
+            instance_of(grantor),
+            file,
+            OpenFlags::READ,
+        );
         assert_ne!(renewed, Ok(first));
     }
 
@@ -4129,24 +4231,31 @@ mod tests {
         let chosen = ProcId::from_raw([0xA1u8; tairix_abi::PROC_ID_LEN]);
         let newcomer = ProcId::from_raw([0xB2u8; tairix_abi::PROC_ID_LEN]);
         let handle = reg
-            .mint_fd_delegation(ProcessId(7), chosen, ProcessId(8), file, OpenFlags::READ)
+            .mint_fd_delegation(
+                ProcessId(7),
+                chosen,
+                ProcessId(8),
+                instance_of(ProcessId(8)),
+                file,
+                OpenFlags::READ,
+            )
             .expect("mints");
 
         // The newcomer holds the recorded *number* and presents the handle:
         // refused exactly like a handle that never existed, so the number
         // space leaks nothing either.
         assert_eq!(
-            reg.redeem_fd_delegation(ProcessId(7), newcomer, handle),
+            reg.redeem_fd_delegation(ProcessId(7), newcomer, handle, None),
             Err(Errno::NotFound)
         );
         // The refusal consumed nothing: the process the grantor chose can
         // still redeem.
         assert!(reg
-            .redeem_fd_delegation(ProcessId(7), chosen, handle)
+            .redeem_fd_delegation(ProcessId(7), chosen, handle, None)
             .is_ok());
         // And one-shot still holds.
         assert_eq!(
-            reg.redeem_fd_delegation(ProcessId(7), chosen, handle),
+            reg.redeem_fd_delegation(ProcessId(7), chosen, handle, None),
             Err(Errno::NotFound)
         );
     }
@@ -4167,30 +4276,74 @@ mod tests {
         };
         let (flood, honest) = (ProcessId(3), ProcessId(4));
         let first = reg
-            .mint_fd_delegation(recipient, who, flood, file(0), OpenFlags::READ)
+            .mint_fd_delegation(
+                recipient,
+                who,
+                flood,
+                instance_of(flood),
+                file(0),
+                OpenFlags::READ,
+            )
             .expect("mints");
         for n in 1..FD_DELEGATIONS_PENDING_PER_GRANTOR {
-            reg.mint_fd_delegation(recipient, who, flood, file(n), OpenFlags::READ)
-                .expect("within the bound");
+            reg.mint_fd_delegation(
+                recipient,
+                who,
+                flood,
+                instance_of(flood),
+                file(n),
+                OpenFlags::READ,
+            )
+            .expect("within the bound");
         }
         let past = FD_DELEGATIONS_PENDING_PER_GRANTOR;
         assert_eq!(
-            reg.mint_fd_delegation(recipient, who, flood, file(past), OpenFlags::READ),
+            reg.mint_fd_delegation(
+                recipient,
+                who,
+                flood,
+                instance_of(flood),
+                file(past),
+                OpenFlags::READ
+            ),
             Err(Errno::LimitExceeded)
         );
         // Repeating one still pending is no new delegation, so it is answered.
         assert_eq!(
-            reg.mint_fd_delegation(recipient, who, flood, file(0), OpenFlags::READ),
+            reg.mint_fd_delegation(
+                recipient,
+                who,
+                flood,
+                instance_of(flood),
+                file(0),
+                OpenFlags::READ
+            ),
             Ok(first)
         );
         assert!(reg
-            .mint_fd_delegation(recipient, who, honest, file(0), OpenFlags::READ)
+            .mint_fd_delegation(
+                recipient,
+                who,
+                honest,
+                instance_of(honest),
+                file(0),
+                OpenFlags::READ
+            )
             .is_ok());
         // The refused mint cost the earlier ones nothing, and redeeming one
         // makes room for another.
-        assert!(reg.redeem_fd_delegation(recipient, who, first).is_ok());
         assert!(reg
-            .mint_fd_delegation(recipient, who, flood, file(past), OpenFlags::READ)
+            .redeem_fd_delegation(recipient, who, first, None)
+            .is_ok());
+        assert!(reg
+            .mint_fd_delegation(
+                recipient,
+                who,
+                flood,
+                instance_of(flood),
+                file(past),
+                OpenFlags::READ
+            )
             .is_ok());
     }
 
@@ -4209,20 +4362,48 @@ mod tests {
         };
         let (gone, staying) = (ProcessId(3), ProcessId(4));
         let dropped = reg
-            .mint_fd_delegation(recipient, who, gone, file("/a"), OpenFlags::READ)
+            .mint_fd_delegation(
+                recipient,
+                who,
+                gone,
+                instance_of(gone),
+                file("/a"),
+                OpenFlags::READ,
+            )
             .expect("mints");
         let kept = reg
-            .mint_fd_delegation(recipient, who, staying, file("/b"), OpenFlags::READ)
+            .mint_fd_delegation(
+                recipient,
+                who,
+                staying,
+                instance_of(staying),
+                file("/b"),
+                OpenFlags::READ,
+            )
             .expect("mints");
-        reg.withdraw(gone);
+        // A pending delegation is state keyed by its grantor, so the reclaim
+        // post-condition sees it as the grantor's until the withdraw.
         assert_eq!(
-            reg.redeem_fd_delegation(recipient, who, dropped),
+            reg.stale_task_entry(gone),
+            Some("fd_delegations (as grantor)")
+        );
+        reg.withdraw(gone);
+        assert_eq!(reg.stale_task_entry(gone), None);
+        assert_eq!(
+            reg.redeem_fd_delegation(recipient, who, dropped, None),
             Err(Errno::NotFound)
         );
-        assert!(reg.redeem_fd_delegation(recipient, who, kept).is_ok());
+        assert!(reg.redeem_fd_delegation(recipient, who, kept, None).is_ok());
         // The recipient's handles still never repeat.
         let fresh = reg
-            .mint_fd_delegation(recipient, who, staying, file("/c"), OpenFlags::READ)
+            .mint_fd_delegation(
+                recipient,
+                who,
+                staying,
+                instance_of(staying),
+                file("/c"),
+                OpenFlags::READ,
+            )
             .expect("mints");
         assert!(fresh > kept);
     }

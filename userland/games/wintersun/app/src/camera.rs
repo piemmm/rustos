@@ -25,6 +25,8 @@ use tairix_wintersun_net::value::WorldPoint;
 use tairix_wintersun_world::geom::{CELL_SUB_UNITS, CHUNK_CELLS};
 use tairix_wintersun_world::params::RealmParams;
 
+use crate::view::Viewport;
+
 /// How many world sub-units one pixel spans, as a power of two.
 ///
 /// A power of two rather than a free number because the terrain pass steps
@@ -167,14 +169,21 @@ impl Camera {
         self.target = target;
     }
 
-    /// Where a `width` × `height` view is actually centred.
+    /// The world sub-units one of `view`'s render pixels spans.
+    #[must_use]
+    pub fn step(&self, view: &Viewport) -> i32 {
+        view.step(self.zoom)
+    }
+
+    /// Where `view` is actually centred.
     ///
     /// A realm narrower than the view is centred rather than clamped to
     /// an edge it does not reach, so a small realm is drawn in the middle
     /// of the window instead of pinned to a corner.
     #[must_use]
-    pub fn centre(&self, width: u32, height: u32) -> WorldPoint {
-        let span = i64::from(self.zoom.sub_units_per_pixel());
+    pub fn centre(&self, view: &Viewport) -> WorldPoint {
+        let (width, height) = view.render();
+        let span = i64::from(self.step(view));
         let half_w = i64::from(width) * span / 2;
         let half_h = i64::from(height) * span / 2;
         WorldPoint {
@@ -204,15 +213,15 @@ impl Camera {
         self.zoom = zoom;
     }
 
-    /// The world point the top-left pixel of a `width` × `height` viewport
-    /// samples.
+    /// The world point the top-left pixel of `view` samples.
     ///
     /// Everything else in the projection is this plus a multiple of the
     /// pixel span, so it is computed once per frame and stepped.
     #[must_use]
-    pub fn origin(&self, width: u32, height: u32) -> WorldPoint {
-        let span = i64::from(self.zoom.sub_units_per_pixel());
-        let centre = self.centre(width, height);
+    pub fn origin(&self, view: &Viewport) -> WorldPoint {
+        let (width, height) = view.render();
+        let span = i64::from(self.step(view));
+        let centre = self.centre(view);
         let x = i64::from(centre.x) - i64::from(width) * span / 2;
         let y = i64::from(centre.y) - i64::from(height) * span / 2;
         WorldPoint {
@@ -221,14 +230,15 @@ impl Camera {
         }
     }
 
-    /// The world extent a `width` × `height` viewport covers.
+    /// The world extent `view` covers.
     ///
     /// The edges are inclusive of the last pixel's sample, which is what
     /// the chunk and decal bucketing either side of this expects.
     #[must_use]
-    pub fn visible(&self, width: u32, height: u32) -> Bounds {
-        let span = i64::from(self.zoom.sub_units_per_pixel());
-        let origin = self.origin(width, height);
+    pub fn visible(&self, view: &Viewport) -> Bounds {
+        let (width, height) = view.render();
+        let span = i64::from(self.step(view));
+        let origin = self.origin(view);
         Bounds {
             min_x: origin.x,
             min_y: origin.y,
@@ -237,31 +247,37 @@ impl Camera {
         }
     }
 
-    /// The world point a viewport pixel samples.
+    /// The world point a render pixel of `view` samples.
     #[must_use]
-    pub fn world_at(&self, width: u32, height: u32, px: i32, py: i32) -> WorldPoint {
-        let span = i64::from(self.zoom.sub_units_per_pixel());
-        let origin = self.origin(width, height);
+    pub fn world_at(&self, view: &Viewport, px: i32, py: i32) -> WorldPoint {
+        let span = i64::from(self.step(view));
+        let origin = self.origin(view);
         WorldPoint {
             x: saturate(i64::from(origin.x) + i64::from(px) * span),
             y: saturate(i64::from(origin.y) + i64::from(py) * span),
         }
     }
 
-    /// The viewport pixel a world point falls in, whether or not that pixel
-    /// is on screen.
+    /// The render pixel of `view` a world point falls in, whether or not
+    /// that pixel is on screen.
     ///
     /// Off-screen answers are the point: a sprite straddling the edge is
     /// drawn clipped, not dropped, so the caller wants the coordinate and
     /// decides the clip itself.
     #[must_use]
-    pub fn screen_at(&self, width: u32, height: u32, at: WorldPoint) -> (i32, i32) {
-        let span = i64::from(self.zoom.sub_units_per_pixel());
-        let origin = self.origin(width, height);
-        let sx = (i64::from(at.x) - i64::from(origin.x)).div_euclid(span);
-        let sy = (i64::from(at.y) - i64::from(origin.y)).div_euclid(span);
-        (saturate(sx), saturate(sy))
+    pub fn screen_at(&self, view: &Viewport, at: WorldPoint) -> (i32, i32) {
+        pixel_of(self.origin(view), self.step(view), at)
     }
+}
+
+/// The render pixel `at` falls in, for a view whose top-left pixel samples
+/// `origin` at `step` world sub-units a pixel: floored, so a point west or
+/// north of the origin lands in the pixel before it rather than in it.
+pub(crate) fn pixel_of(origin: WorldPoint, step: i32, at: WorldPoint) -> (i32, i32) {
+    let span = i64::from(step.max(1));
+    let sx = (i64::from(at.x) - i64::from(origin.x)).div_euclid(span);
+    let sy = (i64::from(at.y) - i64::from(origin.y)).div_euclid(span);
+    (saturate(sx), saturate(sy))
 }
 
 /// Keep `want` such that `want ± half` stays within `[min, max]`, centring

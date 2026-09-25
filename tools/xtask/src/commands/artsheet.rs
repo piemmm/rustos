@@ -37,16 +37,16 @@ use tairix_raster::Color;
 use tairix_theme::Theme;
 use tairix_wintersun_figure::digest as figure_digest;
 use tairix_wintersun_figure::humanoid;
+use tairix_wintersun_figure::identity::{Identity, RECORD_EXTENSION, RECORD_LEN};
 use tairix_wintersun_figure::mesh::{self, LEVELS};
 use tairix_wintersun_figure::motion::Kind;
-use tairix_wintersun_figure::paint::{self, Brush, MAX_FIGURE_POINTS};
-use tairix_wintersun_figure::quality;
+use tairix_wintersun_figure::paint::{self, Brush, Veil, MAX_FIGURE_POINTS};
+use tairix_wintersun_figure::quality::Measured;
 use tairix_wintersun_figure::reference::{
     self, Cell, Figure, Reference, Sampling, FACINGS, PHASES, SIDES,
 };
 use tairix_wintersun_figure::rig::{Placement, Rig};
 use tairix_wintersun_figure::rigging::Rigging;
-use tairix_wintersun_figure::socket::Side;
 use tairix_wintersun_figure::species::{DYES, TROUSERS};
 use tairix_wintersun_figure::tint::Tint;
 
@@ -54,6 +54,11 @@ mod png;
 
 /// The committed ledger, workspace-relative.
 pub const LEDGER_PATH: &str = "userland/games/wintersun/figure/artsheet.ledger";
+
+/// Where the game ships its figure presets, workspace-relative: every file
+/// there carrying the record extension is one record, and every one is
+/// measured.
+const PRESETS_DIR: &str = "userland/games/wintersun/app/Resources";
 
 /// Where `--sheets` writes the contact sheets, workspace-relative.
 ///
@@ -65,6 +70,10 @@ const SHEETS_DIR: &str = "images/artsheet";
 /// A figure that fills its box reads as a blob and one that barely marks it
 /// reads as nothing. The grid runs from about a sixteenth to about a sixth,
 /// so the band is wide either way rather than fitted to it.
+///
+/// Taken at the scale a standing figure is drawn in the cell: a motion whose
+/// raised arms need more room is framed smaller, and its figure is restated
+/// at the standing scale rather than read as marking less of its box.
 const COVERAGE: (f64, f64) = (0.05, 0.30);
 
 /// The fewest distinct tonal regions a cell must resolve into.
@@ -149,7 +158,7 @@ const MAX_MISS: f64 = 1e-6;
 /// A measurement that breaches its bound, or a ledger that cannot be
 /// written.
 pub fn write(root: &Path) -> Result<(), String> {
-    let ledger = measure()?;
+    let ledger = measure(root)?;
     std::fs::write(root.join(LEDGER_PATH), &ledger)
         .map_err(|e| format!("artsheet: cannot write {LEDGER_PATH}: {e}"))
 }
@@ -162,7 +171,7 @@ pub fn write(root: &Path) -> Result<(), String> {
 /// A measurement that breaches its bound, a ledger that has drifted, or one
 /// that cannot be read.
 pub fn check(root: &Path) -> Result<(), String> {
-    let produced = measure()?;
+    let produced = measure(root)?;
     let path = root.join(LEDGER_PATH);
     let committed = std::fs::read_to_string(&path)
         .map_err(|e| format!("artsheet: cannot read {LEDGER_PATH}: {e}"))?;
@@ -191,9 +200,16 @@ pub fn sheets(root: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&out)
         .map_err(|e| format!("artsheet: cannot create {SHEETS_DIR}: {e}"))?;
     let mut written = Vec::new();
+    let shipped = presets(root)?;
+    let mut entries = Vec::new();
     for entry in reference::grid() {
-        let entry = drawn(entry)?;
-        let figure = build(&entry)?;
+        entries.push(drawn(entry)?);
+    }
+    for (name, identity) in &shipped {
+        entries.push(preset_figure(name, identity));
+    }
+    for entry in &entries {
+        let figure = build(entry)?;
         for kind in entry.kinds() {
             for side in SIDES {
                 let path = out.join(format!("{}-{}-{side}.png", entry.name, kind.name()));
@@ -207,8 +223,9 @@ pub fn sheets(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Walk the grid, measure every cell, and render the ledger.
-fn measure() -> Result<String, String> {
+/// Walk the grid and every shipped preset, measure every cell, and render
+/// the ledger.
+fn measure(root: &Path) -> Result<String, String> {
     undyed_cloth_is_readable()?;
     let mut placement = Placement::new();
     let mut brush = Brush::new();
@@ -259,7 +276,89 @@ fn measure() -> Result<String, String> {
         }
     }
     every_dye_stays_readable(&mut placement, &mut brush)?;
+
+    // The presets a player is offered are bundle content, and each is held
+    // to the grid's bounds in every motion at the readability floor. Its
+    // record and its motions carry rows; its cells are bounds only, as the
+    // dyes' are, since a change to one shows in its record already.
+    for (name, identity) in presets(root)? {
+        let entry = preset_figure(&name, &identity);
+        let figure = build(&entry)?;
+        let rig = figure.rig();
+        let rigging = humanoid::rigging(rig).map_err(refused)?;
+        let tones = declared(rig);
+        let shaded = shades(&tones);
+        ledger.push('\n');
+        let _ = writeln!(
+            ledger,
+            "preset {} record {} parts {} tones {} reach {:.6}",
+            entry.name,
+            hex(&identity),
+            rig.parts().len(),
+            tones.len(),
+            rig.reach()
+        );
+        for kind in entry.kinds() {
+            motion_row(&mut ledger, &entry, &figure, &rigging, *kind)?;
+        }
+        for cell in entry.cells() {
+            cell_row(
+                &entry,
+                &figure,
+                (&tones, &shaded),
+                cell,
+                SIDES[0],
+                &mut placement,
+                &mut brush,
+            )?;
+        }
+    }
     Ok(ledger)
+}
+
+/// Every shipped preset, by name, in name order: each file under
+/// [`PRESETS_DIR`] carrying [`RECORD_EXTENSION`], decoded as the record the
+/// game will build a figure from.
+///
+/// Fails closed on a file that is not a record: a preset nobody can build is
+/// a packaging defect, not something to skip.
+fn presets(root: &Path) -> Result<Vec<(String, Identity)>, String> {
+    let dir = root.join(PRESETS_DIR);
+    let listing =
+        std::fs::read_dir(&dir).map_err(|e| format!("artsheet: cannot list {PRESETS_DIR}: {e}"))?;
+    let mut found = Vec::new();
+    for item in listing {
+        let path = item
+            .map_err(|e| format!("artsheet: cannot list {PRESETS_DIR}: {e}"))?
+            .path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some(RECORD_EXTENSION) {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| format!("artsheet: {} is not a named preset", path.display()))?
+            .to_owned();
+        let bytes = std::fs::read(&path)
+            .map_err(|e| format!("artsheet: cannot read {}: {e}", path.display()))?;
+        let identity = Identity::decode(&bytes)
+            .map_err(|e| format!("artsheet: preset {name} is refused: {e}"))?;
+        found.push((name, identity));
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    if found.is_empty() {
+        return Err(format!("artsheet: no presets under {PRESETS_DIR}"));
+    }
+    Ok(found)
+}
+
+/// A preset as a grid entry: every motion, like a species' reference.
+fn preset_figure<'a>(name: &'a str, identity: &Identity) -> Figure<'a> {
+    Figure {
+        name,
+        spec: identity.spec(),
+        sampling: Sampling::Every,
+    }
 }
 
 /// Every dye a record can ask for, on each species' palest and darkest
@@ -317,13 +416,13 @@ fn undyed_cloth_is_readable() -> Result<(), String> {
 
 /// A grid entry, or the generator's refusal to draw one.
 fn drawn(
-    entry: Result<Figure, tairix_wintersun_figure::identity::IdentityError>,
-) -> Result<Figure, String> {
+    entry: Result<Figure<'static>, tairix_wintersun_figure::identity::IdentityError>,
+) -> Result<Figure<'static>, String> {
     entry.map_err(|e| format!("artsheet: a generated figure is refused: {e}"))
 }
 
 /// `entry`'s figure, built from its checked record.
-fn build(entry: &Figure) -> Result<Reference, String> {
+fn build(entry: &Figure<'_>) -> Result<Reference, String> {
     let identity = entry
         .identity()
         .map_err(|e| format!("artsheet: {} is refused: {e}", entry.name))?;
@@ -331,21 +430,26 @@ fn build(entry: &Figure) -> Result<Reference, String> {
 }
 
 /// `entry`'s record, as the hex a ledger row carries.
-fn record(entry: &Figure) -> Result<String, String> {
+fn record(entry: &Figure<'_>) -> Result<String, String> {
     let identity = entry
         .identity()
         .map_err(|e| format!("artsheet: {} is refused: {e}", entry.name))?;
-    Ok(identity
+    Ok(hex(&identity))
+}
+
+/// A record's bytes as lowercase hex.
+fn hex(identity: &Identity) -> String {
+    identity
         .encode()
         .iter()
-        .fold(String::with_capacity(38), |mut out, byte| {
+        .fold(String::with_capacity(2 * RECORD_LEN), |mut out, byte| {
             let _ = write!(out, "{byte:02x}");
             out
-        }))
+        })
 }
 
 /// The sides `entry` is measured at.
-fn sides(entry: &Figure) -> &'static [u32] {
+fn sides(entry: &Figure<'_>) -> &'static [u32] {
     match entry.sampling {
         Sampling::Every => &SIDES,
         Sampling::Walk => &SIDES[..1],
@@ -353,34 +457,30 @@ fn sides(entry: &Figure) -> &'static [u32] {
 }
 
 /// Measure one motion of one figure, and render its ledger row.
+///
+/// Which measurements a motion is held to, and their bounds, are the figure
+/// crate's own ([`Measured`]), so the harness and the crate's tests cannot
+/// disagree about either.
 fn motion_row(
     ledger: &mut String,
-    entry: &Figure,
+    entry: &Figure<'_>,
     figure: &Reference,
     rigging: &Rigging<'_>,
     kind: Kind,
 ) -> Result<(), String> {
     let name = format!("{} {}", entry.name, kind.name());
     let clip = figure.clip(kind).map_err(refused)?;
-    let used = quality::limits(rigging, clip).map_err(refused)?;
-    let bend = quality::continuity(clip);
-    let gap = quality::closure(clip);
-    bound(&name, "limits", used, used <= quality::MAX_LIMIT_USE)?;
-    bound(&name, "continuity", bend, bend <= quality::MAX_CONTINUITY)?;
-    bound(&name, "closure", gap, gap <= quality::MAX_CLOSURE)?;
     let legs = figure.legs();
-    let sunk = quality::grounding(rigging, clip, &legs).map_err(refused)?;
-    bound(&name, "grounding", sunk, sunk <= quality::MAX_GROUNDING)?;
-    let _ = write!(
-        ledger,
-        "motion {name} seconds {:.6} limits {used:.6} continuity {bend:.6} \
-         closure {gap:.6} grounding {sunk:.6}",
-        clip.seconds(),
-    );
+    let measured = Measured::of(kind, rigging, clip, &legs).map_err(refused)?;
+    if let Some((what, value)) = measured.breach() {
+        bound(&name, what, value, false)?;
+    }
+    let _ = write!(ledger, "motion {name} seconds {:.6}", clip.seconds());
+    for (what, value, _) in measured.each() {
+        let _ = write!(ledger, " {what} {value:.6}");
+    }
     if let Some(authored) = kind.stride() {
-        let slide = quality::skate(rigging, clip, &legs, Side::Left).map_err(refused)?;
-        bound(&name, "skate", slide, slide <= quality::MAX_SKATE)?;
-        let _ = write!(ledger, " stride {authored:.6} skate {slide:.6}");
+        let _ = write!(ledger, " stride {authored:.6}");
     }
     ledger.push('\n');
     Ok(())
@@ -391,7 +491,7 @@ fn motion_row(
 /// `palette` is the figure's declared tones and every shade of them, in the
 /// order [`shades`] lists them.
 fn cell_row(
-    entry: &Figure,
+    entry: &Figure<'_>,
     figure: &Reference,
     palette: (&[Color], &[Color]),
     cell: Cell,
@@ -399,7 +499,7 @@ fn cell_row(
     placement: &mut Placement,
     brush: &mut Brush,
 ) -> Result<String, String> {
-    let (scale, at) = fit(figure, side)?;
+    let (scale, at) = fit(figure, cell.kind, side)?;
     let planted = figure.place(cell, scale, at, placement).map_err(refused)?;
     let miss = planted.worst_miss();
     let name = format!(
@@ -422,13 +522,16 @@ fn cell_row(
     }
 
     let mut bare = surface(side)?;
-    paint::draw(&mut bare, None, placement, brush);
+    paint::draw(&mut bare, &[], placement, brush, Veil::NONE);
     let mut whole = surface(side)?;
     let shadow = Reference::shadow(0.0, scale, at).map_err(refused)?;
-    paint::draw(&mut whole, Some(shadow), placement, brush);
+    paint::draw(&mut whole, &[shadow], placement, brush, Veil::NONE);
 
     let tone = classify(&bare, shaded);
-    let cover = coverage(&bare);
+    // Restated at the scale a standing figure is drawn in this cell, so the
+    // band reads the same for a motion framed smaller to fit raised arms.
+    let (standing, _) = fit(figure, Kind::Idle, side)?;
+    let cover = coverage(&bare) * (standing / scale) * (standing / scale);
     let regions = regions(&bare, &tone);
     let shares = shares(&tone, tones.len());
     let (dark, light) = (
@@ -468,10 +571,10 @@ fn cell_row(
     ))
 }
 
-/// Where a figure is drawn in a square cell of `side` pixels: the stage's
-/// own framing, which the designer's preview shares.
-fn fit(figure: &Reference, side: u32) -> Result<(f64, (f64, f64)), String> {
-    reference::fit(figure.rig().reach(), side).map_err(refused)
+/// Where a figure is drawn in `kind` in a square cell of `side` pixels: the
+/// stage's own framing for that motion, which the designer's preview shares.
+fn fit(figure: &Reference, kind: Kind, side: u32) -> Result<(f64, (f64, f64)), String> {
+    reference::fit(kind, figure.rig().reach(), side).map_err(refused)
 }
 
 /// One contact sheet: a motion at one size, phases across and headings down.
@@ -492,7 +595,7 @@ fn sheet(figure: &Reference, kind: Kind, side: u32) -> Result<Vec<u8>, String> {
     )
     .ok_or("artsheet: a sheet that size could not be allocated")?;
 
-    let (scale, at) = fit(figure, side)?;
+    let (scale, at) = fit(figure, kind, side)?;
     let mut placement = Placement::new();
     let mut brush = Brush::new();
     for (row, facing) in FACINGS.into_iter().enumerate() {
@@ -507,7 +610,7 @@ fn sheet(figure: &Reference, kind: Kind, side: u32) -> Result<Vec<u8>, String> {
                 .map_err(refused)?;
             let mut drawn = surface(side)?;
             let shadow = Reference::shadow(0.0, scale, at).map_err(refused)?;
-            paint::draw(&mut drawn, Some(shadow), &placement, &mut brush);
+            paint::draw(&mut drawn, &[shadow], &placement, &mut brush, Veil::NONE);
             let x =
                 i32::try_from(u32::try_from(step_index).unwrap_or(0) * step + GUTTER).unwrap_or(0);
             let y = i32::try_from(u32::try_from(row).unwrap_or(0) * step + GUTTER).unwrap_or(0);
@@ -798,10 +901,14 @@ const HEADER: &str = "\
 # admit a change; a number that moves is a change to what a figure does.
 #
 # A `figure` row is one figure of the grid: its name, its record, and how
-# many surfaces and tones it is drawn from. A `motion` row is one shipped
-# clip played by it. A `cell` row is one rendered frame: its figure, its
-# motion, which of the eight phases, the heading it faces, the pixel side it
-# was drawn at, a digest of its pixels, and its measurements.
+# many surfaces and tones it is drawn from. A `preset` row is one figure the
+# game ships as a preset, measured in every motion at the readability floor
+# and held to every bound there; its cells carry no rows of their own.
+# A `motion` row is one shipped clip played by it, with each measurement the
+# clip is held to by name, and a gait's authored stride. A `cell` row is one
+# rendered frame: its figure, its motion, which of the eight phases, the
+# heading it faces, the pixel side it was drawn at, a digest of its pixels,
+# and its measurements.
 #
 # The contact sheets themselves are rendered on demand by
 # `cargo xtask artsheet --sheets` into the gitignored `images/artsheet/`,

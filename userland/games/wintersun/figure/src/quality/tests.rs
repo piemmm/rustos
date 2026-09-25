@@ -3,13 +3,13 @@
 use tairix_util::mathf;
 
 use super::{
-    closure, continuity, grounding, limits, skate, MAX_CLOSURE, MAX_CONTINUITY, MAX_GROUNDING,
-    MAX_LIMIT_USE, MAX_SKATE,
+    closure, continuity, grounding, limits, penetration, skate, Measured, MAX_CLOSURE,
+    MAX_CONTINUITY, MAX_GROUNDING, MAX_LIMIT_USE, MAX_SKATE,
 };
 use crate::clip::{Clip, Curve, Easing, Key, Lift, Loop};
 use crate::gait::Gait;
 use crate::humanoid::{self, DRIVES};
-use crate::motion::{Kind, Motion};
+use crate::motion::{Kind, Motion, Support};
 use crate::plant::Legs;
 use crate::pose::Param;
 use crate::rigging::Rigging;
@@ -28,25 +28,114 @@ fn every_shipped_motion_clears_every_bound() {
     for kind in Kind::ALL {
         let motion = Motion::new(kind).expect("a shipped motion");
         let clip = motion.clip().expect("its clip");
-        let name = kind.name();
-
-        let used = limits(&rigging, clip).expect("every pose is posturable");
-        assert!(used <= MAX_LIMIT_USE, "{name} uses {used} of a joint");
-
-        let bend = continuity(clip);
-        assert!(bend <= MAX_CONTINUITY, "{name} bends by {bend}");
-
-        let gap = closure(clip);
-        assert!(gap <= MAX_CLOSURE, "{name} closes {gap} short");
-
-        if kind.stride().is_some() {
-            let slide = skate(&rigging, clip, &legs, Side::Left).expect("a fitted gait");
-            assert!(slide <= MAX_SKATE, "{name} skates {slide} of its stride");
-        }
-
-        let sunk = grounding(&rigging, clip, &legs).expect("it resolves");
-        assert!(sunk <= MAX_GROUNDING, "{name} grounds {sunk} off the floor");
+        let measured = Measured::of(kind, &rigging, clip, &legs).expect("it measures");
+        assert_eq!(
+            measured.breach(),
+            None,
+            "{} breaches a bound: {measured:?}",
+            kind.name()
+        );
     }
+}
+
+/// Which measurements a motion is held to follows from what it is, and each
+/// is held to its own bound.
+#[test]
+fn a_motion_is_held_to_what_it_is() {
+    let rig = human();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+
+    for kind in Kind::ALL {
+        let motion = Motion::new(kind).expect("a shipped motion");
+        let clip = motion.clip().expect("its clip");
+        let measured = Measured::of(kind, &rigging, clip, &legs).expect("it measures");
+        let name = kind.name();
+        assert_eq!(
+            measured.closure.is_some(),
+            clip.repeat() == Loop::Wrap,
+            "{name}"
+        );
+        assert_eq!(measured.skate.is_some(), kind.stride().is_some(), "{name}");
+        let grounded = kind.support() == Support::Ground;
+        assert_eq!(measured.grounding.is_some(), grounded, "{name}");
+        assert_eq!(measured.penetration.is_some(), !grounded, "{name}");
+        for (what, value, bound) in measured.each() {
+            let expected = match what {
+                "limits" => MAX_LIMIT_USE,
+                "continuity" => MAX_CONTINUITY,
+                "closure" => MAX_CLOSURE,
+                "grounding" | "penetration" => MAX_GROUNDING,
+                "skate" => MAX_SKATE,
+                other => panic!("{name} measured an unknown {other}"),
+            };
+            assert!(
+                mathf::fabs(bound - expected) < f64::EPSILON,
+                "{name} {what}"
+            );
+            assert!(value.is_finite(), "{name} {what}");
+        }
+    }
+    // The single measurements the record is made from are the ones the
+    // module exports.
+    let walk = Motion::new(Kind::Walk).expect("the shipped walk");
+    let clip = walk.clip().expect("its clip");
+    let measured = Measured::of(Kind::Walk, &rigging, clip, &legs).expect("it measures");
+    let bits = |value: Option<f64>| value.map(f64::to_bits);
+    assert_eq!(
+        measured.limits.to_bits(),
+        limits(&rigging, clip).expect("it measures").to_bits()
+    );
+    assert_eq!(measured.continuity.to_bits(), continuity(clip).to_bits());
+    assert_eq!(bits(measured.closure), bits(Some(closure(clip))));
+    assert_eq!(
+        bits(measured.grounding),
+        bits(Some(grounding(&rigging, clip, &legs).expect("it measures")))
+    );
+    assert_eq!(
+        bits(measured.skate),
+        bits(Some(
+            skate(&rigging, clip, &legs, Side::Left).expect("it measures")
+        ))
+    );
+}
+
+/// A figure with nothing under it may not put a foot through the floor, and
+/// the measurement sees one that does.
+#[test]
+fn penetration_sees_a_foot_through_the_floor() {
+    const STRAIGHT: [Key; 1] = [Key::new(0.0, 0.0)];
+    const DOWN: [Key; 2] = [Key::new(0.0, -0.2), Key::new(1.0, -0.2)];
+    const UP: [Key; 2] = [Key::new(0.0, 0.2), Key::new(1.0, 0.2)];
+    let rig = human();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+    let curves = [Curve::new(Param::KneeBend(Side::Left), &STRAIGHT).expect("a curve")];
+
+    let standing = Clip::new(1.0, Loop::Wrap, &curves, &[]).expect("a clip");
+    let at_rest = penetration(&rigging, standing, &legs).expect("it measures");
+    assert!(
+        mathf::fabs(at_rest) < 1e-9,
+        "a straight leg at rest penetrates {at_rest}"
+    );
+
+    let sunk = standing
+        .lifting(Lift::new(&DOWN).expect("a lift"))
+        .expect("it closes");
+    let depth = penetration(&rigging, sunk, &legs).expect("it measures");
+    assert!(
+        mathf::fabs(depth - 0.2 * legs.straight()) < 1e-9,
+        "a body sunk a fifth of a leg penetrates {depth}"
+    );
+
+    let raised = standing
+        .lifting(Lift::new(&UP).expect("a lift"))
+        .expect("it closes");
+    let clear = penetration(&rigging, raised, &legs).expect("it measures");
+    assert!(
+        mathf::fabs(clear) < 1e-12,
+        "a body off the ground penetrates {clear}"
+    );
 }
 
 /// Grounding is two defects in one number, and it must catch both: a clip
@@ -206,22 +295,15 @@ fn every_shipped_motion_clears_its_bounds_on_every_build() {
             let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
             for motion in &motions {
                 let clip = motion.clip().expect("its clip");
-                let sunk = grounding(&rigging, clip, &legs).expect("measurable");
-                assert!(
-                    sunk <= MAX_GROUNDING,
-                    "{species:?} {} sinks {sunk} at {:?}",
+                let measured =
+                    Measured::of(motion.kind(), &rigging, clip, &legs).expect("measurable");
+                assert_eq!(
+                    measured.breach(),
+                    None,
+                    "{species:?} {} at {:?}: {measured:?}",
                     motion.kind().name(),
                     identity.spec().build
                 );
-                if motion.kind().stride().is_some() {
-                    let slide = skate(&rigging, clip, &legs, Side::Left).expect("measurable");
-                    assert!(
-                        slide <= MAX_SKATE,
-                        "{species:?} {} skates {slide} at {:?}",
-                        motion.kind().name(),
-                        identity.spec().build
-                    );
-                }
             }
         }
     }

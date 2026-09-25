@@ -21,16 +21,19 @@
 //! scratch row, and the pixels step along it.
 
 use alloc::vec::Vec;
+use core::f64::consts::FRAC_PI_2;
 
 use tairix_parallel::{bands, for_each, JobRunner};
 use tairix_raster::color::{Color, Pixel};
 use tairix_wintersun_art::palette;
+use tairix_wintersun_figure::reference::{SUN_ELEVATION, SUN_TOWARD};
+use tairix_wintersun_figure::shadow::Light;
 use tairix_wintersun_net::value::WorldPoint;
 use tairix_wintersun_rules::terrain::MAX_STEP_RISE_SUB_UNITS;
 use tairix_wintersun_world::geom::ELEVATION_SUB_UNITS;
 
 use crate::error::ClientError;
-use crate::quality::Shadow;
+use crate::quality::Relief;
 use crate::terrain::TerrainGrid;
 use crate::view::Viewport;
 
@@ -54,6 +57,9 @@ const MIST_CEILING: i32 = 60 * ELEVATION_SUB_UNITS;
 /// A direction and two colours: everything the ground is lit by.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Sun {
+    /// The in-plane direction as given, which the figures' light is built
+    /// from exactly.
+    toward: (i32, i32),
     /// Eastward component of the in-plane direction, as a 1/256 fraction.
     dx: i32,
     /// Southward component, likewise.
@@ -92,6 +98,7 @@ impl Sun {
             }
         };
         Self {
+            toward: (dx, dy),
             dx: scale(dx),
             dy: scale(dy),
             warm,
@@ -99,6 +106,24 @@ impl Sun {
             relief,
             neutral: palette::lerp(cool, warm, UNSHADED),
         }
+    }
+
+    /// The light the figures under this sun are shaded by: its direction, at
+    /// the height the art harness measures them under, so a figure and the
+    /// slope it stands on are lit from one side. An overhead sun lights them
+    /// from overhead.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Figure`] never, for a sun this type can hold.
+    pub fn light(&self) -> Result<Light, ClientError> {
+        let (across, into) = self.toward;
+        let light = if across == 0 && into == 0 {
+            Light::new(1.0, 0.0, FRAC_PI_2)
+        } else {
+            Light::new(f64::from(across), f64::from(into), SUN_ELEVATION)
+        };
+        light.map_err(|_| ClientError::Figure)
     }
 
     /// The gain a slope at `level` applies to each channel.
@@ -117,12 +142,14 @@ impl Sun {
     }
 
     /// `WinterSun`'s own light: a low sun from the north-west, warm on
-    /// the faces it reaches and cold on the ones it does not.
+    /// the faces it reaches and cold on the ones it does not — the sun the
+    /// art harness measures every figure under.
     #[must_use]
     pub fn winter() -> Self {
+        let (dx, dy) = SUN_TOWARD;
         Self::new(
-            3,
-            2,
+            dx,
+            dy,
             Color::rgb(255, 228, 186),
             Color::rgb(118, 136, 172),
             200,
@@ -306,6 +333,24 @@ impl LightBuffer {
         }
     }
 
+    /// How far toward `sky`'s mist the ground under render pixel `(x, y)` is
+    /// mixed, out of 255: what a figure standing there is veiled by.
+    ///
+    /// Read off the texel the point falls in rather than interpolated: a
+    /// figure takes one veil over its whole body, and a texel is already the
+    /// low-frequency average the veil is.
+    #[must_use]
+    pub fn mist_at(&self, x: i32, y: i32, sky: Sky) -> u8 {
+        let texel = |at: i32, extent: u32| {
+            u32::try_from(at.max(0)).map_or(0, |at| {
+                (at >> self.shift.min(16)).min(extent.saturating_sub(1))
+            })
+        };
+        let (tx, ty) = (texel(x, self.width), texel(y, self.height));
+        let index = (ty as usize) * (self.width as usize) + (tx as usize);
+        self.texels.get(index).map_or(0, |lit| mist_of(*lit, sky))
+    }
+
     /// Apply the light to one row of already-painted ground.
     pub fn composite_row(&self, dst: &mut [Pixel], scratch: &mut [Lit], sky: Sky, row: u32) {
         if self.texels.is_empty() || scratch.len() < self.scratch_len() {
@@ -369,7 +414,7 @@ pub struct Shading {
     /// Log2 of the render pixels one buffer texel covers.
     pub shift: u32,
     /// How the relief term is measured.
-    pub shadow: Shadow,
+    pub relief: Relief,
     /// World sub-units per render pixel.
     pub step: i32,
     /// The world position of the render target's top-left pixel.
@@ -378,7 +423,7 @@ pub struct Shading {
 
 /// The light at one world position.
 fn shade_at(grid: &TerrainGrid, pass: &Shading, at: WorldPoint) -> Lit {
-    let Some((gx, gy, ground)) = gradient(grid, pass.shadow, at) else {
+    let Some((gx, gy, ground)) = gradient(grid, pass.relief, at) else {
         return Lit::NEUTRAL;
     };
     let level = pass.sun.level(gx, gy);
@@ -395,17 +440,16 @@ fn shade_at(grid: &TerrainGrid, pass: &Shading, at: WorldPoint) -> Lit {
 ///
 /// `None` where the ground is not resident: unmapped ground is drawn as
 /// what it is and must not be lit as though it were a plain.
-fn gradient(grid: &TerrainGrid, shadow: Shadow, at: WorldPoint) -> Option<(i32, i32, i16)> {
+fn gradient(grid: &TerrainGrid, relief: Relief, at: WorldPoint) -> Option<(i32, i32, i16)> {
     let (col, row) = grid.lattice_at(at)?;
     let here = grid.ground(col, row)?;
-    if shadow == Shadow::Off {
-        return Some((0, 0, here));
-    }
-    // A soft term measures across two cells and a hard one across one:
-    // the wider stencil is the penumbra, and it is also the more
-    // expensive, which is why the ladder narrows it before it gives up
-    // the term entirely.
-    let reach = if shadow == Shadow::Soft { 2 } else { 1 };
+    // The wider stencil is the penumbra, and it is also the more expensive,
+    // which is why the ladder narrows it before it gives up the term.
+    let reach = match relief {
+        Relief::Flat => return Some((0, 0, here)),
+        Relief::Wide => 2,
+        Relief::Narrow => 1,
+    };
     let east = grid.ground(col + reach, row).unwrap_or(here);
     let south = grid.ground(col, row + reach).unwrap_or(here);
     let scale = i32::from(here);

@@ -38,10 +38,12 @@ fn the_frames_are_not_blank() {
     );
     let view = Viewport::new(FRAME_WIDTH, FRAME_HEIGHT, crate::quality::RenderScale::ONE)
         .expect("a real window");
-    let (width, height) = view.render();
-    let held = generate(&field, camera.visible(width, height)).expect("the chunks generate");
+    let held = generate(&field, camera.visible(&view)).expect("the chunks generate");
     let borrowed = borrow(&held).expect("the window fits");
     let chunks = ChunkWindow::new(&borrowed).expect("generated in coordinate order");
+    let set = Set::new().expect("the shipped set");
+    let clips = set.clips().expect("the shipped clips");
+    let cast = extras(&clips, camera.centre(&view)).expect("the extras play");
 
     PRESSURE.report(PressureBand::Normal);
     let mut cache = MaterialCache::new(
@@ -51,7 +53,8 @@ fn the_frames_are_not_blank() {
         &SINK,
     );
     let mut renderer = Renderer::new();
-    let mut target = alloc::vec![Pixel::TRANSPARENT; view.render_pixels()];
+    let (width, height) = view.render();
+    let mut target = Surface::new(width, height).expect("a frame fits");
     renderer
         .render(
             &mut target,
@@ -65,6 +68,7 @@ fn the_frames_are_not_blank() {
                 sun: Sun::winter(),
                 sky: Sky::winter(),
                 ladder: Ladder::FULL,
+                cast: &cast,
             },
             &mut cache,
             &tairix_parallel::SERIAL,
@@ -72,8 +76,9 @@ fn the_frames_are_not_blank() {
         )
         .expect("the frame draws");
 
+    let pixels = target.pixels();
     assert!(
-        target.iter().all(|p| p.a == 255),
+        pixels.iter().all(|p| p.a == 255),
         "the ground pass left transparent pixels"
     );
     assert_eq!(
@@ -81,7 +86,8 @@ fn the_frames_are_not_blank() {
         0,
         "every visible chunk was generated"
     );
-    let distinct = target
+    assert_eq!(renderer.figures(), EXTRAS.len(), "an extra was not drawn");
+    let distinct = pixels
         .iter()
         .map(|p| (p.r, p.g, p.b))
         .collect::<alloc::collections::BTreeSet<_>>();

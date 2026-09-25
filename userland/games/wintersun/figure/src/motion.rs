@@ -1,60 +1,51 @@
-//! The shipped motion set: the clips a figure is actually animated by.
+//! The shipped motion set: every clip a `WinterSun` figure is animated by.
 //!
-//! Three, and each is here because a quality measurement needs it: an idle
-//! for the always-on layers and for loop closure, and a walk and a run for
-//! the gait, the stride and the foot slide. Combat, hit and death clips are
-//! `WinterSun`'s content rather than the engine's, and are authored with the
-//! game.
+//! Seventeen, in three families. Locomotion — idle, walk, run — is paced by
+//! the gait. Actions and the reactions to them — a dodge, the light and heavy
+//! melee blows, the bow's draw and loose, a cast and its channel, a flinch
+//! and a stagger — are windup, active and recovery, authored across all three
+//! in phase and stretched onto time by whoever owns the action. States —
+//! falling, dying, sitting, swimming, climbing — last as long as the state
+//! does.
 //!
 //! # How the leg curves were arrived at
 //!
-//! Not by eye. Each clip states a **foot path** — how far in front of the
-//! hip the foot strikes, what fraction of the cycle it is down for, how high
-//! the swing foot clears, and how much of the leg's turn the ankle levels the
-//! foot by — and while the foot is down the path is the floor, wherever the
-//! clip holds the body. The hip, knee and ankle keys below are that path put
-//! through the planting layer's own two-bone solve and rounded to six
-//! places. The crate's tests solve every key again from the path and hold
-//! the tables to it, and measure the stride back out of each clip against
-//! the number its path was authored to give.
+//! Not by eye. A clip whose feet are on the floor states a **foot path** —
+//! where each foot is against its hip, and how much of the leg's turn the
+//! ankle levels it by — and wherever a foot is down the path is the floor,
+//! wherever the clip holds the body. The hip, knee and ankle keys are that
+//! path put through the planting layer's own two-bone solve and rounded to
+//! six places, and this module's tests solve every key again from its path.
 //!
-//! The pelvis sits at a fixed height, so a foot cannot travel fore and aft
-//! along level ground with a straight leg: every locomotion path is authored
-//! with the figure standing a stated depth into its own legs. That is why
-//! the walk has a crouch at all, and why it is a number here rather than a
-//! feel.
+//! The pelvis sits at a fixed height, so a clip states how deep into its own
+//! legs the body stands, phase by phase, and keys its root height from that
+//! depth where its legs are keyed. Between two keys the body and a planted
+//! foot are then interpolated along one line, and `quality::grounding`
+//! measures the two halves against each other.
 //!
-//! Each clip therefore states the height it holds the body at, because the
-//! articulation cannot be asked: both legs tucked is a run's flight phase
-//! and a deep crouch at once. The idle and the walk hold their crouch
-//! throughout. The run sinks into each stance and rises out of it — the leg
-//! taking the landing and giving it back — then follows a parabola across the
-//! flight. Its height is keyed where its legs are, so between two keys the
-//! body and a planted foot are interpolated along one line and the foot stays
-//! on the floor. `quality::grounding` measures the two halves against each
-//! other, so a depth here that its keys do not produce is a failure rather
-//! than a figure quietly sunk into the floor.
-//!
-//! The ankle levels the foot against the ground by a fixed fraction of the
-//! leg's own turn rather than all of it, because a heel lifts at toe-off and
-//! a knee-high swing foot hangs — neither is level, and countering the whole
-//! turn would pin the ankle at its limit through half the cycle.
+//! A falling, swimming or climbing figure has no floor under its feet, and
+//! its legs are authored directly; `quality::penetration` holds them above
+//! the floor instead.
 //!
 //! # One cycle, two sides
 //!
-//! A left and a right limb do the same thing half a turn apart, so only one
-//! side is authored and the other is that cycle rotated half a turn. Two
-//! tables that must stay each other's mirror image are two things to keep in
-//! step, and a walk whose sides disagreed would read as a limp nobody
-//! animated.
+//! A left and a right limb do the same thing half a turn apart in a gait, so
+//! only one side of a locomotion cycle is authored and the other is that cycle
+//! rotated half a turn. Two tables that must stay each other's mirror image
+//! are two things to keep in step.
 
 use tairix_inline::ArrayVec;
 
-use crate::clip::{Clip, Curve, Event, Key, Lift, Loop};
+use crate::clip::{Clip, Curve, Event, Key, Lift, Loop, Segments, Timing, Travel};
 use crate::error::FigureError;
 use crate::humanoid::{SHANK_LENGTH, THIGH_LENGTH};
 use crate::pose::Param;
-use crate::socket::Side;
+
+mod action;
+mod locomotion;
+mod state;
+
+use locomotion::{RUN_HALF_STEP, RUN_STANCE, WALK_HALF_STEP, WALK_STANCE};
 
 /// How many curves one motion drives.
 ///
@@ -77,11 +68,57 @@ pub enum Kind {
     /// Running: a longer step, a deeper crouch, a higher knee, and a cycle
     /// short enough that both feet leave the ground.
     Run,
+    /// A crouch, a dash with both feet off the ground, and a landing.
+    Dodge,
+    /// A one-handed horizontal slash.
+    MeleeLight,
+    /// A two-handed overhead chop.
+    MeleeHeavy,
+    /// Raising the bow and drawing it to the face.
+    Draw,
+    /// Releasing the string from full draw.
+    Loose,
+    /// Gathering power and thrusting it forward.
+    Cast,
+    /// Holding a sustained spell out in front.
+    Channel,
+    /// A flinch from a blow.
+    Hit,
+    /// Knocked back a step.
+    Stagger,
+    /// Nothing underfoot.
+    Fall,
+    /// Collapsing into a squat and slumping over.
+    Die,
+    /// Seated low, knees up.
+    Sit,
+    /// Treading water.
+    Swim,
+    /// Hand over hand up a face.
+    Climb,
 }
 
 impl Kind {
     /// Every shipped motion.
-    pub const ALL: [Self; 3] = [Self::Idle, Self::Walk, Self::Run];
+    pub const ALL: [Self; 17] = [
+        Self::Idle,
+        Self::Walk,
+        Self::Run,
+        Self::Dodge,
+        Self::MeleeLight,
+        Self::MeleeHeavy,
+        Self::Draw,
+        Self::Loose,
+        Self::Cast,
+        Self::Channel,
+        Self::Hit,
+        Self::Stagger,
+        Self::Fall,
+        Self::Die,
+        Self::Sit,
+        Self::Swim,
+        Self::Climb,
+    ];
 
     /// Its position in [`Self::ALL`].
     #[must_use]
@@ -96,14 +133,28 @@ impl Kind {
             Self::Idle => "idle",
             Self::Walk => "walk",
             Self::Run => "run",
+            Self::Dodge => "dodge",
+            Self::MeleeLight => "melee-light",
+            Self::MeleeHeavy => "melee-heavy",
+            Self::Draw => "draw",
+            Self::Loose => "loose",
+            Self::Cast => "cast",
+            Self::Channel => "channel",
+            Self::Hit => "hit",
+            Self::Stagger => "stagger",
+            Self::Fall => "fall",
+            Self::Die => "die",
+            Self::Sit => "sit",
+            Self::Swim => "swim",
+            Self::Climb => "climb",
         }
     }
 
     /// How far one cycle was authored to carry the figure, or `None` for a
-    /// motion that stays where it is.
+    /// motion the gait does not pace.
     ///
     /// The authoring intent rather than a measurement: what the foot path
-    /// below was built to give. [`Gait::fitted`] measures the clip's *actual*
+    /// was built to give. [`Gait::fitted`] measures the clip's *actual*
     /// stride, and a test holds the two together — which is what stops the
     /// path's documentation drifting from the keys it produced.
     ///
@@ -111,10 +162,221 @@ impl Kind {
     #[must_use]
     pub const fn stride(self) -> Option<f64> {
         match self {
-            Self::Idle => None,
             Self::Walk => Some(2.0 * WALK_HALF_STEP / WALK_STANCE),
             Self::Run => Some(2.0 * RUN_HALF_STEP / RUN_STANCE),
+            _ => None,
         }
+    }
+
+    /// Which part of a performance it plays on.
+    #[must_use]
+    pub const fn layer(self) -> Layer {
+        match self {
+            Self::Idle | Self::Walk | Self::Run => Layer::Locomotion,
+            Self::MeleeLight
+            | Self::Draw
+            | Self::Loose
+            | Self::Cast
+            | Self::Channel
+            | Self::Hit => Layer::Upper,
+            Self::Dodge
+            | Self::MeleeHeavy
+            | Self::Stagger
+            | Self::Fall
+            | Self::Die
+            | Self::Sit
+            | Self::Swim
+            | Self::Climb => Layer::Body,
+        }
+    }
+
+    /// What the figure's feet are on while it plays.
+    #[must_use]
+    pub const fn support(self) -> Support {
+        match self {
+            Self::Fall => Support::Air,
+            Self::Swim => Support::Water,
+            Self::Climb => Support::Wall,
+            _ => Support::Ground,
+        }
+    }
+
+    /// Everything its clip is assembled from.
+    const fn authored(self) -> Authored {
+        match self {
+            Self::Idle => Authored::cycle(
+                locomotion::IDLE_SECONDS,
+                &locomotion::IDLE_CURVES,
+                &NO_EVENTS,
+            )
+            .lifted(&locomotion::IDLE_LIFT),
+            Self::Walk => Authored::cycle(
+                locomotion::WALK_SECONDS,
+                &locomotion::WALK_CURVES,
+                &locomotion::FOOTSTEPS,
+            )
+            .lifted(&locomotion::WALK_LIFT),
+            Self::Run => Authored::cycle(
+                locomotion::RUN_SECONDS,
+                &locomotion::RUN_CURVES,
+                &locomotion::FOOTSTEPS,
+            )
+            .lifted(&locomotion::RUN_LIFT),
+            Self::Dodge => {
+                Authored::action(action::DODGE, &action::DODGE_CURVES, &action::DODGE_EVENTS)
+                    .lifted(&action::DODGE_LIFT)
+                    .travelling(&action::DODGE_TRAVEL)
+            }
+            Self::MeleeLight => Authored::action(
+                action::MELEE_LIGHT,
+                &action::MELEE_LIGHT_CURVES,
+                &action::MELEE_LIGHT_EVENTS,
+            ),
+            Self::MeleeHeavy => Authored::action(
+                action::MELEE_HEAVY,
+                &action::MELEE_HEAVY_CURVES,
+                &action::MELEE_HEAVY_EVENTS,
+            )
+            .lifted(&action::HEAVY_LIFT),
+            Self::Draw => Authored::action(action::DRAW, &action::DRAW_CURVES, &NO_EVENTS),
+            Self::Loose => {
+                Authored::action(action::LOOSE, &action::LOOSE_CURVES, &action::LOOSE_EVENTS)
+            }
+            Self::Cast => {
+                Authored::action(action::CAST, &action::CAST_CURVES, &action::CAST_EVENTS)
+            }
+            Self::Channel => {
+                Authored::cycle(action::CHANNEL_SECONDS, &action::CHANNEL_CURVES, &NO_EVENTS)
+            }
+            Self::Hit => Authored::action(action::HIT, &action::HIT_CURVES, &NO_EVENTS),
+            Self::Stagger => Authored::action(
+                action::STAGGER,
+                &action::STAGGER_CURVES,
+                &action::STAGGER_EVENTS,
+            )
+            .lifted(&action::STAGGER_LIFT),
+            Self::Fall => Authored::cycle(state::FALL_SECONDS, &state::FALL_CURVES, &NO_EVENTS),
+            Self::Die => {
+                Authored::once(state::DIE_SECONDS, &state::DIE_CURVES).lifted(&state::DIE_LIFT)
+            }
+            Self::Sit => Authored::cycle(state::SIT_SECONDS, &state::SIT_CURVES, &NO_EVENTS)
+                .lifted(&state::SIT_LIFT),
+            Self::Swim => Authored::cycle(state::SWIM_SECONDS, &state::SWIM_CURVES, &NO_EVENTS),
+            Self::Climb => Authored::cycle(state::CLIMB_SECONDS, &state::CLIMB_CURVES, &NO_EVENTS),
+        }
+    }
+}
+
+/// Which part of a performance a clip plays on.
+///
+/// A performance is locomotion under everything, with an action over it: one
+/// that takes the whole body, or one that takes only the trunk, head and
+/// arms and leaves the legs to whatever the figure is doing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Layer {
+    /// Standing, walking and running, paced by the gait.
+    Locomotion,
+    /// The whole body, over locomotion.
+    Body,
+    /// The trunk, head and arms, over whatever the legs are doing.
+    Upper,
+}
+
+/// What a figure's feet are on while a clip plays.
+///
+/// Decides what the clip is held to: a figure standing on the ground has to
+/// land its feet on the floor, and one with nothing under it only has to keep
+/// them out of it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Support {
+    /// The floor.
+    Ground,
+    /// Nothing at all.
+    Air,
+    /// Deep water.
+    Water,
+    /// A face in front of the figure.
+    Wall,
+}
+
+/// An action clip's authored segments and the reference durations it is
+/// played at until the action that owns it states its own.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct Action {
+    /// The phase the windup gives way to the active segment at.
+    active: f64,
+    /// The phase the active segment gives way to the recovery at.
+    recovery: f64,
+    /// How long windup, active and recovery last, in seconds.
+    seconds: [f64; 3],
+}
+
+impl Action {
+    const fn new(active: f64, recovery: f64, seconds: [f64; 3]) -> Self {
+        Self {
+            active,
+            recovery,
+            seconds,
+        }
+    }
+}
+
+/// Everything a shipped clip is assembled from.
+#[derive(Copy, Clone, Debug)]
+struct Authored {
+    seconds: f64,
+    repeat: Loop,
+    curves: &'static [Keyed],
+    events: &'static [Event],
+    lift: Option<&'static [Key]>,
+    travel: Option<&'static [Key]>,
+    action: Option<Action>,
+}
+
+impl Authored {
+    /// A clip that cycles.
+    const fn cycle(seconds: f64, curves: &'static [Keyed], events: &'static [Event]) -> Self {
+        Self {
+            seconds,
+            repeat: Loop::Wrap,
+            curves,
+            events,
+            lift: None,
+            travel: None,
+            action: None,
+        }
+    }
+
+    /// A clip that plays once and holds its last pose.
+    const fn once(seconds: f64, curves: &'static [Keyed]) -> Self {
+        Self {
+            repeat: Loop::Hold,
+            ..Self::cycle(seconds, curves, &NO_EVENTS)
+        }
+    }
+
+    /// An action, played once at its reference timing.
+    const fn action(action: Action, curves: &'static [Keyed], events: &'static [Event]) -> Self {
+        let [windup, active, recovery] = action.seconds;
+        Self {
+            seconds: windup + active + recovery,
+            repeat: Loop::Hold,
+            curves,
+            events,
+            lift: None,
+            travel: None,
+            action: Some(action),
+        }
+    }
+
+    const fn lifted(mut self, keys: &'static [Key]) -> Self {
+        self.lift = Some(keys);
+        self
+    }
+
+    const fn travelling(mut self, keys: &'static [Key]) -> Self {
+        self.travel = Some(keys);
+        self
     }
 }
 
@@ -127,10 +389,7 @@ impl Kind {
 pub struct Motion {
     kind: Kind,
     curves: ArrayVec<Curve<'static>, MAX_CURVES>,
-    seconds: f64,
-    repeat: Loop,
-    events: &'static [Event],
-    lift: &'static [Key],
+    authored: Authored,
 }
 
 impl Motion {
@@ -138,22 +397,13 @@ impl Motion {
     ///
     /// # Errors
     ///
-    /// Whatever [`Curve::new`] refuses about the tables below — only
-    /// reachable if one is edited into something a parameter's range does
-    /// not hold, which is the point of checking it here.
+    /// Whatever [`Curve::new`] refuses about the tables — only reachable if
+    /// one is edited into something a parameter's range does not hold, which
+    /// is the point of checking it here.
     pub fn new(kind: Kind) -> Result<Self, FigureError> {
-        let (seconds, events, keyed, lift): (
-            f64,
-            &'static [Event],
-            &'static [Keyed],
-            &'static [Key],
-        ) = match kind {
-            Kind::Idle => (IDLE_SECONDS, &NO_EVENTS, &IDLE_CURVES, &IDLE_LIFT),
-            Kind::Walk => (WALK_SECONDS, &FOOTSTEPS, &WALK_CURVES, &WALK_LIFT),
-            Kind::Run => (RUN_SECONDS, &FOOTSTEPS, &RUN_CURVES, &RUN_LIFT),
-        };
+        let authored = kind.authored();
         let mut curves = ArrayVec::new();
-        for (param, keys) in keyed {
+        for (param, keys) in authored.curves {
             curves
                 .try_push(Curve::new(*param, keys)?)
                 .map_err(|_| FigureError::DuplicateCurve)?;
@@ -161,10 +411,7 @@ impl Motion {
         Ok(Self {
             kind,
             curves,
-            seconds,
-            repeat: Loop::Wrap,
-            events,
-            lift,
+            authored,
         })
     }
 
@@ -174,21 +421,43 @@ impl Motion {
         self.kind
     }
 
-    /// The clip, borrowing this motion's curves.
+    /// The clip, borrowing this motion's curves, played at its reference
+    /// timing where it is an action.
     ///
     /// # Errors
     ///
-    /// Whatever [`Clip::new`] refuses, which for these tables is nothing.
+    /// Whatever [`Clip::new`], [`Lift::new`], [`Travel::new`],
+    /// [`Segments::new`], [`Timing::new`] or [`Clip::acting`] refuse, which
+    /// for the shipped tables is nothing.
     pub fn clip(&self) -> Result<Clip<'_>, FigureError> {
-        Clip::new(self.seconds, self.repeat, &self.curves, self.events)?
-            .lifting(Lift::new(self.lift)?)
+        let authored = self.authored;
+        let mut clip = Clip::new(
+            authored.seconds,
+            authored.repeat,
+            &self.curves,
+            authored.events,
+        )?;
+        if let Some(keys) = authored.lift {
+            clip = clip.lifting(Lift::new(keys)?)?;
+        }
+        if let Some(keys) = authored.travel {
+            clip = clip.travelling(Travel::new(keys)?);
+        }
+        if let Some(action) = authored.action {
+            let [windup, active, recovery] = action.seconds;
+            clip = clip.acting(
+                Segments::new(action.active, action.recovery)?,
+                Timing::new(windup, active, recovery)?,
+            )?;
+        }
+        Ok(clip)
     }
 }
 
 /// Every shipped motion, held so the clips can borrow their curves.
 #[derive(Clone, Debug)]
 pub struct Set {
-    motions: [Motion; Kind::ALL.len()],
+    motions: ArrayVec<Motion, { Kind::ALL.len() }>,
 }
 
 impl Set {
@@ -198,10 +467,13 @@ impl Set {
     ///
     /// As [`Motion::new`].
     pub fn new() -> Result<Self, FigureError> {
-        let [first, second, third] = Kind::ALL.map(Motion::new);
-        Ok(Self {
-            motions: [first?, second?, third?],
-        })
+        let mut motions = ArrayVec::new();
+        for kind in Kind::ALL {
+            motions
+                .try_push(Motion::new(kind)?)
+                .map_err(|_| FigureError::TooManyStates)?;
+        }
+        Ok(Self { motions })
     }
 
     /// `kind`'s clip.
@@ -210,7 +482,10 @@ impl Set {
     ///
     /// As [`Motion::clip`].
     pub(crate) fn clip(&self, kind: Kind) -> Result<Clip<'_>, FigureError> {
-        self.motions[kind.index()].clip()
+        self.motions
+            .get(kind.index())
+            .ok_or(FigureError::NoSuchClip)?
+            .clip()
     }
 
     /// Every clip, where [`Kind::index`] puts it.
@@ -219,8 +494,13 @@ impl Set {
     ///
     /// As [`Motion::clip`].
     pub fn clips(&self) -> Result<Clips<'_>, FigureError> {
-        let [first, second, third] = self.motions.each_ref().map(Motion::clip);
-        Ok(Clips([first?, second?, third?]))
+        let mut clips = ArrayVec::new();
+        for motion in &self.motions {
+            clips
+                .try_push(motion.clip()?)
+                .map_err(|_| FigureError::TooManyStates)?;
+        }
+        Ok(Clips(clips))
     }
 }
 
@@ -228,18 +508,21 @@ impl Set {
 ///
 /// Only [`Set::clips`] makes one, so a machine borrowing the table cannot be
 /// handed the clips in an order that plays a walk when a run was asked for.
-#[derive(Copy, Clone, Debug)]
-pub struct Clips<'a>([Clip<'a>; Kind::ALL.len()]);
+#[derive(Clone, Debug)]
+pub struct Clips<'a>(ArrayVec<Clip<'a>, { Kind::ALL.len() }>);
 
 impl<'a> Clips<'a> {
     /// The table, for a machine to borrow.
-    pub(crate) const fn table(&self) -> &[Clip<'a>] {
+    pub(crate) fn table(&self) -> &[Clip<'a>] {
         &self.0
     }
 }
 
 /// One parameter's shipped curve.
 type Keyed = (Param, &'static [Key]);
+
+/// A clip with nothing to announce.
+const NO_EVENTS: [Event; 0] = [];
 
 /// The same cycle half a turn on, which is what the other side is doing.
 ///
@@ -263,76 +546,6 @@ const fn opposite<const N: usize>(keys: &[Key; N]) -> [Key; N] {
     out
 }
 
-/// A clip with nothing to announce.
-const NO_EVENTS: [Event; 0] = [];
-
-/// Each foot meeting the ground, at the head of its own stance.
-const FOOTSTEPS: [Event; 2] = [
-    Event::new("footstep_left", 0.0),
-    Event::new("footstep_right", 0.5),
-];
-
-/// How long one idle cycle lasts, in seconds.
-const IDLE_SECONDS: f64 = 4.0;
-
-/// How long one walk cycle — two steps — lasts, in seconds.
-const WALK_SECONDS: f64 = 1.1;
-
-/// How long one run cycle lasts, in seconds.
-const RUN_SECONDS: f64 = 0.62;
-
-/// How far in front of the hip the walking foot strikes, in figure-local
-/// units.
-const WALK_HALF_STEP: f64 = 14.0;
-
-/// What fraction of the walk cycle each foot is on the ground for.
-///
-/// Exactly half, so the figure is always on one foot and never on none: a
-/// walk is the gait with no flight phase.
-const WALK_STANCE: f64 = 0.5;
-
-/// How far in front of the hip the running foot strikes.
-const RUN_HALF_STEP: f64 = 18.0;
-
-/// What fraction of the run cycle each foot is on the ground for.
-///
-/// Under a half, so there is a moment with neither foot down — which is
-/// what makes it a run rather than a fast walk.
-const RUN_STANCE: f64 = 0.375;
-
-/// How deep each path stands into its own legs as a foot strikes, in
-/// figure-local units.
-///
-/// The idle and the walk hold it throughout, and the run sinks further from
-/// it into each stance: the root sinks by exactly this so the planted foot
-/// reaches the floor. `quality::grounding` measures the two against each
-/// other rather than either being trusted.
-const IDLE_CROUCH: f64 = 1.2;
-const WALK_CROUCH: f64 = 3.5;
-const RUN_CROUCH: f64 = 6.0;
-
-/// How far the running body rises between toe-off and mid-flight.
-///
-/// A run has a moment with neither foot down, and where the body is then is
-/// not in its articulation — both legs tucked reads identically to a deep
-/// crouch — so the rise is stated here: a fortieth of the figure's height,
-/// two or three pixels of lift at the largest size the desktop draws one.
-/// Enough to read as a bound rather than a glide, and far inside the stride
-/// the feet are pacing.
-const RUN_FLIGHT_RISE: f64 = 2.5;
-
-/// How far the running body sinks from a strike to midstance, rising again
-/// to toe-off: the stance leg folding into the landing and straightening out
-/// of it into the flight.
-///
-/// As deep as the flight rises, so the body's bob is centred on the height it
-/// lands at and spans a twentieth of the figure, five pixels at the largest
-/// size. Its ends are flat rather than at the flight's own slope: that join
-/// would have the leg shortening at the landing's full speed as it strikes,
-/// which keys a thirty-second of a cycle apart cannot follow without the
-/// planted foot sinking past the grounding bound.
-const RUN_STANCE_DIP: f64 = RUN_FLIGHT_RISE;
-
 /// The leg a root height is measured against: straight, hip to ankle.
 ///
 /// Taken from the same bone lengths the rig is built from, so a root height
@@ -345,520 +558,66 @@ const fn rooted(height: f64) -> f64 {
     height / LEG_LENGTH
 }
 
-/// The run's root height `t` of the way through a flight window, `t` running
-/// from `-1` at toe-off through `0` at mid-flight to `1` at the next strike.
+/// A smoothstep across `0..=1`, clamped outside it: still at both ends.
 ///
-/// A parabola, which is the arc a body with nothing holding it up follows;
-/// it meets the stance height at both ends, so the height never steps where
-/// a foot takes over.
-const fn flight(t: f64) -> f64 {
-    rooted(-RUN_CROUCH + RUN_FLIGHT_RISE * (1.0 - t * t))
-}
-
-/// The run's root height `u` of the way through a stance, strike to toe-off.
-const fn stance(u: f64) -> f64 {
-    rooted(-RUN_CROUCH - RUN_STANCE_DIP * swell(u))
-}
-
-/// A swell across `0..=1`: none at either end, where it is flat, and all of
-/// it at the middle.
-///
-/// A polynomial, so a height keyed from it is exact at compile time.
-const fn swell(u: f64) -> f64 {
-    let arch = 4.0 * u * (1.0 - u);
-    arch * arch
-}
-
-/// The run's root height at `phase`: each half of the cycle is one step, a
-/// stance and then a flight.
-const fn run_root(phase: f64) -> f64 {
-    let step = if phase < 0.5 { phase } else { phase - 0.5 };
-    if step < RUN_STANCE {
-        stance(step / RUN_STANCE)
+/// A polynomial, so a depth profile built from it is exact at compile time.
+const fn smooth(t: f64) -> f64 {
+    let t = if t < 0.0 {
+        0.0
+    } else if t > 1.0 {
+        1.0
     } else {
-        flight(2.0 * (step - RUN_STANCE) / (0.5 - RUN_STANCE) - 1.0)
+        t
+    };
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// A body standing a stated depth into its own legs, phase by phase.
+///
+/// The profile a clip's root height is keyed from, and the one its planted
+/// legs were solved at, so the two halves are one statement.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Sink {
+    Dodge,
+    Heavy,
+    Stagger,
+    Die,
+}
+
+impl Sink {
+    /// How deep into its legs the body stands at `phase`, in figure-local
+    /// units.
+    const fn depth(self, phase: f64) -> f64 {
+        match self {
+            Self::Dodge => action::dodge_depth(phase),
+            Self::Heavy => action::heavy_depth(phase),
+            Self::Stagger => action::stagger_depth(phase),
+            Self::Die => state::die_depth(phase),
+        }
     }
 }
 
-/// [`run_root`] keyed at the phases `legs` are keyed at.
-const fn keyed_like<const N: usize>(legs: &[Key; N]) -> [Key; N] {
-    let mut keys = *legs;
+/// The phases `keys` are keyed at.
+const fn phases<const N: usize>(keys: &[Key; N]) -> [f64; N] {
+    let mut out = [0.0; N];
     let mut index = 0;
     while index < N {
-        keys[index] = Key::new(legs[index].phase, run_root(legs[index].phase));
+        out[index] = keys[index].phase;
+        index += 1;
+    }
+    out
+}
+
+/// `sink`'s depth keyed at `phases` as root heights.
+const fn sunk<const N: usize>(phases: [f64; N], sink: Sink) -> [Key; N] {
+    let mut keys = [Key::new(0.0, 0.0); N];
+    let mut index = 0;
+    while index < N {
+        keys[index] = Key::new(phases[index], rooted(-sink.depth(phases[index])));
         index += 1;
     }
     keys
 }
-
-/// The idle and walk hold one height throughout: both keep a foot down for
-/// every phase of the cycle, so the body never leaves it.
-const IDLE_LIFT: [Key; 2] = [
-    Key::new(0.0, rooted(-IDLE_CROUCH)),
-    Key::new(1.0, rooted(-IDLE_CROUCH)),
-];
-
-const WALK_LIFT: [Key; 2] = [
-    Key::new(0.0, rooted(-WALK_CROUCH)),
-    Key::new(1.0, rooted(-WALK_CROUCH)),
-];
-
-/// The run's height, keyed where its legs are.
-const RUN_LIFT: [Key; RUN_HIP_LEFT.len()] = keyed_like(&RUN_HIP_LEFT);
-
-/// The authored leg cycles, left side, solved from each clip's foot path —
-/// stated whole, and every key solved again from it, by this module's tests.
-const WALK_HIP_LEFT: [Key; 33] = [
-    Key::new(0.000_000, 0.276_264),
-    Key::new(0.031_250, 0.279_460),
-    Key::new(0.062_500, 0.277_239),
-    Key::new(0.093_750, 0.271_023),
-    Key::new(0.125_000, 0.261_568),
-    Key::new(0.156_250, 0.249_338),
-    Key::new(0.187_500, 0.234_634),
-    Key::new(0.218_750, 0.217_667),
-    Key::new(0.250_000, 0.198_579),
-    Key::new(0.281_250, 0.177_459),
-    Key::new(0.312_500, 0.154_348),
-    Key::new(0.343_750, 0.129_229),
-    Key::new(0.375_000, 0.102_017),
-    Key::new(0.406_250, 0.072_522),
-    Key::new(0.437_500, 0.040_390),
-    Key::new(0.468_750, 0.004_959),
-    Key::new(0.500_000, -0.117_023),
-    Key::new(0.531_250, -0.175_336),
-    Key::new(0.562_500, -0.080_078),
-    Key::new(0.593_750, 0.029_406),
-    Key::new(0.625_000, 0.093_555),
-    Key::new(0.656_250, 0.161_984),
-    Key::new(0.687_500, 0.230_536),
-    Key::new(0.718_750, 0.294_827),
-    Key::new(0.750_000, 0.349_500),
-    Key::new(0.781_250, 0.389_000),
-    Key::new(0.812_500, 0.409_319),
-    Key::new(0.843_750, 0.409_312),
-    Key::new(0.875_000, 0.390_736),
-    Key::new(0.906_250, 0.357_722),
-    Key::new(0.937_500, 0.317_416),
-    Key::new(0.968_750, 0.283_854),
-    Key::new(1.000_000, 0.276_264),
-];
-
-const WALK_KNEE_LEFT: [Key; 33] = [
-    Key::new(0.000_000, 0.196_699),
-    Key::new(0.031_250, 0.231_949),
-    Key::new(0.062_500, 0.258_996),
-    Key::new(0.093_750, 0.280_093),
-    Key::new(0.125_000, 0.296_401),
-    Key::new(0.156_250, 0.308_589),
-    Key::new(0.187_500, 0.317_060),
-    Key::new(0.218_750, 0.322_057),
-    Key::new(0.250_000, 0.323_709),
-    Key::new(0.281_250, 0.322_057),
-    Key::new(0.312_500, 0.317_060),
-    Key::new(0.343_750, 0.308_589),
-    Key::new(0.375_000, 0.296_401),
-    Key::new(0.406_250, 0.280_093),
-    Key::new(0.437_500, 0.258_996),
-    Key::new(0.468_750, 0.231_949),
-    Key::new(0.500_000, 0.196_699),
-    Key::new(0.531_250, 0.188_628),
-    Key::new(0.562_500, 0.239_258),
-    Key::new(0.593_750, 0.315_553),
-    Key::new(0.625_000, 0.394_493),
-    Key::new(0.656_250, 0.465_013),
-    Key::new(0.687_500, 0.520_434),
-    Key::new(0.718_750, 0.555_895),
-    Key::new(0.750_000, 0.568_113),
-    Key::new(0.781_250, 0.555_895),
-    Key::new(0.812_500, 0.520_434),
-    Key::new(0.843_750, 0.465_013),
-    Key::new(0.875_000, 0.394_493),
-    Key::new(0.906_250, 0.315_553),
-    Key::new(0.937_500, 0.239_258),
-    Key::new(0.968_750, 0.188_628),
-    Key::new(1.000_000, 0.196_699),
-];
-
-const WALK_ANKLE_LEFT: [Key; 33] = [
-    Key::new(0.000_000, 0.080_448),
-    Key::new(0.031_250, 0.002_241),
-    Key::new(0.062_500, -0.067_113),
-    Key::new(0.093_750, -0.130_178),
-    Key::new(0.125_000, -0.188_226),
-    Key::new(0.156_250, -0.241_938),
-    Key::new(0.187_500, -0.291_676),
-    Key::new(0.218_750, -0.337_603),
-    Key::new(0.250_000, -0.379_744),
-    Key::new(0.281_250, -0.418_019),
-    Key::new(0.312_500, -0.452_250),
-    Key::new(0.343_750, -0.482_156),
-    Key::new(0.375_000, -0.507_329),
-    Key::new(0.406_250, -0.527_179),
-    Key::new(0.437_500, -0.540_810),
-    Key::new(0.468_750, -0.546_760),
-    Key::new(0.500_000, -0.542_292),
-    Key::new(0.531_250, -0.557_909),
-    Key::new(0.562_500, -0.622_267),
-    Key::new(0.593_750, -0.698_515),
-    Key::new(0.625_000, -0.759_675),
-    Key::new(0.656_250, -0.792_064),
-    Key::new(0.687_500, -0.787_969),
-    Key::new(0.718_750, -0.744_492),
-    Key::new(0.750_000, -0.664_471),
-    Key::new(0.781_250, -0.556_147),
-    Key::new(0.812_500, -0.430_404),
-    Key::new(0.843_750, -0.297_407),
-    Key::new(0.875_000, -0.165_313),
-    Key::new(0.906_250, -0.041_883),
-    Key::new(0.937_500, 0.060_611),
-    Key::new(0.968_750, 0.115_001),
-    Key::new(1.000_000, 0.080_448),
-];
-
-const RUN_HIP_LEFT: [Key; 33] = [
-    Key::new(0.000_000, 0.364_662),
-    Key::new(0.031_250, 0.376_626),
-    Key::new(0.062_500, 0.383_561),
-    Key::new(0.093_750, 0.381_932),
-    Key::new(0.125_000, 0.369_915),
-    Key::new(0.156_250, 0.346_831),
-    Key::new(0.187_500, 0.312_966),
-    Key::new(0.218_750, 0.269_341),
-    Key::new(0.250_000, 0.217_360),
-    Key::new(0.281_250, 0.158_422),
-    Key::new(0.312_500, 0.093_668),
-    Key::new(0.343_750, 0.024_052),
-    Key::new(0.375_000, -0.163_425),
-    Key::new(0.406_250, -0.340_846),
-    Key::new(0.437_500, -0.354_357),
-    Key::new(0.468_750, -0.236_043),
-    Key::new(0.500_000, -0.048_890),
-    Key::new(0.531_250, 0.052_488),
-    Key::new(0.562_500, 0.127_020),
-    Key::new(0.593_750, 0.207_321),
-    Key::new(0.625_000, 0.291_509),
-    Key::new(0.656_250, 0.375_545),
-    Key::new(0.687_500, 0.452_226),
-    Key::new(0.718_750, 0.512_642),
-    Key::new(0.750_000, 0.549_942),
-    Key::new(0.781_250, 0.562_059),
-    Key::new(0.812_500, 0.551_197),
-    Key::new(0.843_750, 0.521_753),
-    Key::new(0.875_000, 0.478_971),
-    Key::new(0.906_250, 0.429_349),
-    Key::new(0.937_500, 0.383_758),
-    Key::new(0.968_750, 0.360_187),
-    Key::new(1.000_000, 0.364_662),
-];
-
-const RUN_KNEE_LEFT: [Key; 33] = [
-    Key::new(0.000_000, 0.257_372),
-    Key::new(0.031_250, 0.326_571),
-    Key::new(0.062_500, 0.388_763),
-    Key::new(0.093_750, 0.439_956),
-    Key::new(0.125_000, 0.477_943),
-    Key::new(0.156_250, 0.501_306),
-    Key::new(0.187_500, 0.509_191),
-    Key::new(0.218_750, 0.501_306),
-    Key::new(0.250_000, 0.477_943),
-    Key::new(0.281_250, 0.439_956),
-    Key::new(0.312_500, 0.388_763),
-    Key::new(0.343_750, 0.326_571),
-    Key::new(0.375_000, 0.257_372),
-    Key::new(0.406_250, 0.210_371),
-    Key::new(0.437_500, 0.226_273),
-    Key::new(0.468_750, 0.292_293),
-    Key::new(0.500_000, 0.378_270),
-    Key::new(0.531_250, 0.467_397),
-    Key::new(0.562_500, 0.551_374),
-    Key::new(0.593_750, 0.624_649),
-    Key::new(0.625_000, 0.682_259),
-    Key::new(0.656_250, 0.719_426),
-    Key::new(0.687_500, 0.732_320),
-    Key::new(0.718_750, 0.719_426),
-    Key::new(0.750_000, 0.682_259),
-    Key::new(0.781_250, 0.624_649),
-    Key::new(0.812_500, 0.551_374),
-    Key::new(0.843_750, 0.467_397),
-    Key::new(0.875_000, 0.378_270),
-    Key::new(0.906_250, 0.292_293),
-    Key::new(0.937_500, 0.226_273),
-    Key::new(0.968_750, 0.210_371),
-    Key::new(1.000_000, 0.257_372),
-];
-
-const RUN_ANKLE_LEFT: [Key; 33] = [
-    Key::new(0.000_000, 0.079_737),
-    Key::new(0.031_250, -0.021_799),
-    Key::new(0.062_500, -0.118_505),
-    Key::new(0.093_750, -0.208_592),
-    Key::new(0.125_000, -0.290_882),
-    Key::new(0.156_250, -0.363_909),
-    Key::new(0.187_500, -0.425_805),
-    Key::new(0.218_750, -0.474_610),
-    Key::new(0.250_000, -0.508_817),
-    Key::new(0.281_250, -0.527_893),
-    Key::new(0.312_500, -0.532_639),
-    Key::new(0.343_750, -0.525_477),
-    Key::new(0.375_000, -0.511_248),
-    Key::new(0.406_250, -0.506_713),
-    Key::new(0.437_500, -0.539_764),
-    Key::new(0.468_750, -0.602_235),
-    Key::new(0.500_000, -0.669_415),
-    Key::new(0.531_250, -0.726_270),
-    Key::new(0.562_500, -0.763_756),
-    Key::new(0.593_750, -0.774_654),
-    Key::new(0.625_000, -0.753_146),
-    Key::new(0.656_250, -0.696_809),
-    Key::new(0.687_500, -0.609_369),
-    Key::new(0.718_750, -0.500_957),
-    Key::new(0.750_000, -0.383_956),
-    Key::new(0.781_250, -0.267_885),
-    Key::new(0.812_500, -0.157_789),
-    Key::new(0.843_750, -0.055_891),
-    Key::new(0.875_000, 0.035_782),
-    Key::new(0.906_250, 0.112_282),
-    Key::new(0.937_500, 0.160_329),
-    Key::new(0.968_750, 0.153_917),
-    Key::new(1.000_000, 0.079_737),
-];
-
-const WALK_ARM_LEFT: [Key; 17] = [
-    Key::new(0.000_000, -0.220_000),
-    Key::new(0.062_500, -0.203_253),
-    Key::new(0.125_000, -0.155_563),
-    Key::new(0.187_500, -0.084_190),
-    Key::new(0.250_000, 0.000_000),
-    Key::new(0.312_500, 0.084_190),
-    Key::new(0.375_000, 0.155_563),
-    Key::new(0.437_500, 0.203_253),
-    Key::new(0.500_000, 0.220_000),
-    Key::new(0.562_500, 0.203_253),
-    Key::new(0.625_000, 0.155_563),
-    Key::new(0.687_500, 0.084_190),
-    Key::new(0.750_000, 0.000_000),
-    Key::new(0.812_500, -0.084_190),
-    Key::new(0.875_000, -0.155_563),
-    Key::new(0.937_500, -0.203_253),
-    Key::new(1.000_000, -0.220_000),
-];
-const WALK_ELBOW_LEFT: [Key; 17] = [
-    Key::new(0.000_000, 0.120_000),
-    Key::new(0.062_500, 0.123_045),
-    Key::new(0.125_000, 0.131_716),
-    Key::new(0.187_500, 0.144_693),
-    Key::new(0.250_000, 0.160_000),
-    Key::new(0.312_500, 0.175_307),
-    Key::new(0.375_000, 0.188_284),
-    Key::new(0.437_500, 0.196_955),
-    Key::new(0.500_000, 0.200_000),
-    Key::new(0.562_500, 0.196_955),
-    Key::new(0.625_000, 0.188_284),
-    Key::new(0.687_500, 0.175_307),
-    Key::new(0.750_000, 0.160_000),
-    Key::new(0.812_500, 0.144_693),
-    Key::new(0.875_000, 0.131_716),
-    Key::new(0.937_500, 0.123_045),
-    Key::new(1.000_000, 0.120_000),
-];
-const WALK_TWIST: [Key; 17] = [
-    Key::new(0.000_000, -0.100_000),
-    Key::new(0.062_500, -0.092_388),
-    Key::new(0.125_000, -0.070_711),
-    Key::new(0.187_500, -0.038_268),
-    Key::new(0.250_000, 0.000_000),
-    Key::new(0.312_500, 0.038_268),
-    Key::new(0.375_000, 0.070_711),
-    Key::new(0.437_500, 0.092_388),
-    Key::new(0.500_000, 0.100_000),
-    Key::new(0.562_500, 0.092_388),
-    Key::new(0.625_000, 0.070_711),
-    Key::new(0.687_500, 0.038_268),
-    Key::new(0.750_000, 0.000_000),
-    Key::new(0.812_500, -0.038_268),
-    Key::new(0.875_000, -0.070_711),
-    Key::new(0.937_500, -0.092_388),
-    Key::new(1.000_000, -0.100_000),
-];
-const RUN_ARM_LEFT: [Key; 17] = [
-    Key::new(0.000_000, -0.280_000),
-    Key::new(0.062_500, -0.258_686),
-    Key::new(0.125_000, -0.197_990),
-    Key::new(0.187_500, -0.107_151),
-    Key::new(0.250_000, 0.000_000),
-    Key::new(0.312_500, 0.107_151),
-    Key::new(0.375_000, 0.197_990),
-    Key::new(0.437_500, 0.258_686),
-    Key::new(0.500_000, 0.280_000),
-    Key::new(0.562_500, 0.258_686),
-    Key::new(0.625_000, 0.197_990),
-    Key::new(0.687_500, 0.107_151),
-    Key::new(0.750_000, 0.000_000),
-    Key::new(0.812_500, -0.107_151),
-    Key::new(0.875_000, -0.197_990),
-    Key::new(0.937_500, -0.258_686),
-    Key::new(1.000_000, -0.280_000),
-];
-const RUN_ELBOW_LEFT: [Key; 17] = [
-    Key::new(0.000_000, 0.450_000),
-    Key::new(0.062_500, 0.453_806),
-    Key::new(0.125_000, 0.464_645),
-    Key::new(0.187_500, 0.480_866),
-    Key::new(0.250_000, 0.500_000),
-    Key::new(0.312_500, 0.519_134),
-    Key::new(0.375_000, 0.535_355),
-    Key::new(0.437_500, 0.546_194),
-    Key::new(0.500_000, 0.550_000),
-    Key::new(0.562_500, 0.546_194),
-    Key::new(0.625_000, 0.535_355),
-    Key::new(0.687_500, 0.519_134),
-    Key::new(0.750_000, 0.500_000),
-    Key::new(0.812_500, 0.480_866),
-    Key::new(0.875_000, 0.464_645),
-    Key::new(0.937_500, 0.453_806),
-    Key::new(1.000_000, 0.450_000),
-];
-const RUN_TWIST: [Key; 17] = [
-    Key::new(0.000_000, -0.180_000),
-    Key::new(0.062_500, -0.166_298),
-    Key::new(0.125_000, -0.127_279),
-    Key::new(0.187_500, -0.068_883),
-    Key::new(0.250_000, 0.000_000),
-    Key::new(0.312_500, 0.068_883),
-    Key::new(0.375_000, 0.127_279),
-    Key::new(0.437_500, 0.166_298),
-    Key::new(0.500_000, 0.180_000),
-    Key::new(0.562_500, 0.166_298),
-    Key::new(0.625_000, 0.127_279),
-    Key::new(0.687_500, 0.068_883),
-    Key::new(0.750_000, 0.000_000),
-    Key::new(0.812_500, -0.068_883),
-    Key::new(0.875_000, -0.127_279),
-    Key::new(0.937_500, -0.166_298),
-    Key::new(1.000_000, -0.180_000),
-];
-const IDLE_TILT: [Key; 17] = [
-    Key::new(0.000_000, 0.000_000),
-    Key::new(0.062_500, 0.019_134),
-    Key::new(0.125_000, 0.035_355),
-    Key::new(0.187_500, 0.046_194),
-    Key::new(0.250_000, 0.050_000),
-    Key::new(0.312_500, 0.046_194),
-    Key::new(0.375_000, 0.035_355),
-    Key::new(0.437_500, 0.019_134),
-    Key::new(0.500_000, 0.000_000),
-    Key::new(0.562_500, -0.019_134),
-    Key::new(0.625_000, -0.035_355),
-    Key::new(0.687_500, -0.046_194),
-    Key::new(0.750_000, -0.050_000),
-    Key::new(0.812_500, -0.046_194),
-    Key::new(0.875_000, -0.035_355),
-    Key::new(0.937_500, -0.019_134),
-    Key::new(1.000_000, 0.000_000),
-];
-const IDLE_HEAD: [Key; 17] = [
-    Key::new(0.000_000, 0.060_000),
-    Key::new(0.062_500, 0.055_433),
-    Key::new(0.125_000, 0.042_426),
-    Key::new(0.187_500, 0.022_961),
-    Key::new(0.250_000, 0.000_000),
-    Key::new(0.312_500, -0.022_961),
-    Key::new(0.375_000, -0.042_426),
-    Key::new(0.437_500, -0.055_433),
-    Key::new(0.500_000, -0.060_000),
-    Key::new(0.562_500, -0.055_433),
-    Key::new(0.625_000, -0.042_426),
-    Key::new(0.687_500, -0.022_961),
-    Key::new(0.750_000, 0.000_000),
-    Key::new(0.812_500, 0.022_961),
-    Key::new(0.875_000, 0.042_426),
-    Key::new(0.937_500, 0.055_433),
-    Key::new(1.000_000, 0.060_000),
-];
-
-/// The relaxed stance the idle legs hold, solved once for a figure standing
-/// a little into its own knees.
-const IDLE_HIP_KEY: Key = Key::new(0.000_000, 0.115_706);
-const IDLE_KNEE_KEY: Key = Key::new(0.000_000, 0.188_757);
-const IDLE_ANKLE_KEY: Key = Key::new(0.000_000, -0.316_579);
-
-/// The right leg, half a cycle behind the left.
-const WALK_HIP_RIGHT: [Key; 33] = opposite(&WALK_HIP_LEFT);
-const WALK_KNEE_RIGHT: [Key; 33] = opposite(&WALK_KNEE_LEFT);
-const WALK_ANKLE_RIGHT: [Key; 33] = opposite(&WALK_ANKLE_LEFT);
-const RUN_HIP_RIGHT: [Key; 33] = opposite(&RUN_HIP_LEFT);
-const RUN_KNEE_RIGHT: [Key; 33] = opposite(&RUN_KNEE_LEFT);
-const RUN_ANKLE_RIGHT: [Key; 33] = opposite(&RUN_ANKLE_LEFT);
-
-/// The right arm, half a cycle behind the left — which is the same thing as
-/// saying it swings with the left leg.
-const WALK_ARM_RIGHT: [Key; 17] = opposite(&WALK_ARM_LEFT);
-const WALK_ELBOW_RIGHT: [Key; 17] = opposite(&WALK_ELBOW_LEFT);
-const RUN_ARM_RIGHT: [Key; 17] = opposite(&RUN_ARM_LEFT);
-const RUN_ELBOW_RIGHT: [Key; 17] = opposite(&RUN_ELBOW_LEFT);
-
-/// Standing: the legs solved once for a relaxed, slightly-sunk stance, so
-/// both sides read the same table.
-const IDLE_HIP: [Key; 1] = [IDLE_HIP_KEY];
-const IDLE_KNEE: [Key; 1] = [IDLE_KNEE_KEY];
-const IDLE_ANKLE: [Key; 1] = [IDLE_ANKLE_KEY];
-
-/// Arms hanging clear of the trunk rather than through it.
-const IDLE_SPLAY: [Key; 1] = [Key::new(0.0, 0.05)];
-
-/// A trace of bend, because a hanging arm is not a plank.
-const IDLE_ELBOW: [Key; 1] = [Key::new(0.0, 0.07)];
-
-/// Walking leans in a little; running leans in a lot.
-const WALK_LEAN: [Key; 1] = [Key::new(0.0, 0.06)];
-const RUN_LEAN: [Key; 1] = [Key::new(0.0, 0.20)];
-
-/// The trunk counter-rotating against the pelvis, in phase with the arms.
-const IDLE_CURVES: [Keyed; 12] = [
-    (Param::SpineTilt, &IDLE_TILT),
-    (Param::HeadTurn, &IDLE_HEAD),
-    (Param::ShoulderSplay(Side::Left), &IDLE_SPLAY),
-    (Param::ShoulderSplay(Side::Right), &IDLE_SPLAY),
-    (Param::ElbowBend(Side::Left), &IDLE_ELBOW),
-    (Param::ElbowBend(Side::Right), &IDLE_ELBOW),
-    (Param::HipSwing(Side::Left), &IDLE_HIP),
-    (Param::HipSwing(Side::Right), &IDLE_HIP),
-    (Param::KneeBend(Side::Left), &IDLE_KNEE),
-    (Param::KneeBend(Side::Right), &IDLE_KNEE),
-    (Param::AnkleAngle(Side::Left), &IDLE_ANKLE),
-    (Param::AnkleAngle(Side::Right), &IDLE_ANKLE),
-];
-
-const WALK_CURVES: [Keyed; 12] = [
-    (Param::SpineBend, &WALK_LEAN),
-    (Param::SpineTwist, &WALK_TWIST),
-    (Param::ShoulderSwing(Side::Left), &WALK_ARM_LEFT),
-    (Param::ShoulderSwing(Side::Right), &WALK_ARM_RIGHT),
-    (Param::ElbowBend(Side::Left), &WALK_ELBOW_LEFT),
-    (Param::ElbowBend(Side::Right), &WALK_ELBOW_RIGHT),
-    (Param::HipSwing(Side::Left), &WALK_HIP_LEFT),
-    (Param::HipSwing(Side::Right), &WALK_HIP_RIGHT),
-    (Param::KneeBend(Side::Left), &WALK_KNEE_LEFT),
-    (Param::KneeBend(Side::Right), &WALK_KNEE_RIGHT),
-    (Param::AnkleAngle(Side::Left), &WALK_ANKLE_LEFT),
-    (Param::AnkleAngle(Side::Right), &WALK_ANKLE_RIGHT),
-];
-
-const RUN_CURVES: [Keyed; 12] = [
-    (Param::SpineBend, &RUN_LEAN),
-    (Param::SpineTwist, &RUN_TWIST),
-    (Param::ShoulderSwing(Side::Left), &RUN_ARM_LEFT),
-    (Param::ShoulderSwing(Side::Right), &RUN_ARM_RIGHT),
-    (Param::ElbowBend(Side::Left), &RUN_ELBOW_LEFT),
-    (Param::ElbowBend(Side::Right), &RUN_ELBOW_RIGHT),
-    (Param::HipSwing(Side::Left), &RUN_HIP_LEFT),
-    (Param::HipSwing(Side::Right), &RUN_HIP_RIGHT),
-    (Param::KneeBend(Side::Left), &RUN_KNEE_LEFT),
-    (Param::KneeBend(Side::Right), &RUN_KNEE_RIGHT),
-    (Param::AnkleAngle(Side::Left), &RUN_ANKLE_LEFT),
-    (Param::AnkleAngle(Side::Right), &RUN_ANKLE_RIGHT),
-];
 
 #[cfg(test)]
 #[path = "motion/tests.rs"]

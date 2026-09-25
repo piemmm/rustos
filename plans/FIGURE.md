@@ -341,8 +341,13 @@ keyframed:
   toward the lower foot and the supporting knee takes the bend, within the
   joint limits FG2 declares. A slope steeper than the reach allows tilts the
   whole figure rather than tearing the rig. **This is a correctness
-  requirement, not polish**: a top-down camera looks straight at the
-  ground-contact line, which is exactly where the error is most visible.
+  requirement, not polish**: a camera looks straight at the ground-contact
+  line, which is exactly where the error is most visible. The ground a foot
+  is planted on is the ground the view *draws*: WinterSun draws its world
+  from directly above with height shown by shading alone, so its feet meet a
+  level plane everywhere and its actor plants on the level, wading figures
+  standing on the bed below the drawn water; the per-foot solve is for a view
+  that draws relief as geometry.
 - **Root motion where a clip needs it.** A dodge, a lunge and a stagger
   displace the figure by an amount the *clip* owns, so the animation and the
   movement cannot disagree. The authoritative displacement stays the
@@ -435,12 +440,16 @@ alone would admit a change nobody noticed.
 viewer lower on the screen, so the near foot of a stride lands below the
 ground point the figure stands on — a fifth of its reach below it for the
 longest-legged build. A cell is framed by the figure's rest reach with two
-measured allowances, `ABOVE` (1.02 of the reach) and `BELOW` (0.20), between
-margins of a fiftieth of the side: every ring of every build corner of every
-species, in every shipped motion at every sixteenth of a turn, stays inside
-them, and every cell of the grid inside its square. A frame that left room
-only for the figure's height cut the feet off over half the cells, and the
-checks below measured what was left.
+measured allowances per motion (`reference::allowance`), above the ground
+point and below it, between margins of a fiftieth of the side — 1.02 and
+0.20 of the reach for locomotion, and never tighter for any other motion, so
+no motion's cells draw a figure larger than a stride's: every ring of every
+build corner of every species, in each shipped motion at every sixteenth of a
+turn, stays inside its motion's allowances, and every cell of the grid inside
+its square. A frame that left room only for the figure's height cut the feet
+off over half the cells, and the checks below measured what was left.
+Coverage is restated at locomotion's framing, so a motion framed looser is not
+read as its figure drawn thinner.
 
 ### Automated quality checks, per cell
 
@@ -452,7 +461,7 @@ widened to admit a change.
   refuses an out-of-limit rotation, and the excursion is read back off the
   rotations the posture actually holds. The bound is below one on purpose: a
   clip pinned at a limit reads as a rig fighting itself and leaves the overlay
-  layers nowhere to go. Shipped worst: 0.79.
+  layers nowhere to go. Shipped worst: 0.86, the draw.
 - **Foot slide.** Consumed from `Gait::fitted`/`Gait::slide` and divided by the
   stride, so the bound is dimensionless. The contact window is read over the
   ground, at the height the clip holds the body. Shipped worst: 0.0027 of a
@@ -467,16 +476,20 @@ widened to admit a change.
   shipped tables are authored to join exactly, so the bound is rounding.
 - **Grounding.** Over a cycle, how far the lowest point either foot reaches
   sits from the floor — penetration and hover being one quantity's two signs.
-  Worst: 0.067 units, the elf's run.
+  Worst: 0.070 units, a preset elf's run.
+- **Penetration**, for a figure the ground does not hold up — falling,
+  swimming, climbing: no foot may pass below the floor, though every foot may
+  leave it. Shipped worst: none.
+- Which of these a motion is held to is read off what it is
+  (`quality::Measured`): closure only for a looping clip, skate only for a
+  stride, grounding for a figure on its feet and penetration otherwise.
 - **Silhouette readability**, three measured numbers per cell: the
   alpha-weighted **coverage ratio** inside a band; the count of **connected
   tonal regions**; and the **contrast ratio** against both themes' desktops.
   A palette is the player's to choose, so beyond the grid the harness draws
   every dye on each species' palest and darkest build at the floor and holds
-  each cell to the same bounds, bounds only, with no ledger rows. The worst
-  cell anywhere is the grid's own least beastkin, pale cloth on pale fur seen
-  from behind, in the one dye of the sixteen that resolves into exactly the
-  three regions required.
+  each cell to the same bounds, bounds only, with no ledger rows. The bound is
+  three regions; the ledger's worst row resolves into four.
 - **Budget.** Outline points per figure and fill area per cell, so a rig
   cannot quietly become the frame's cost centre.
 
@@ -504,11 +517,13 @@ here as a deliberate gap rather than taken silently.
 
 The readability check has a second consumer: `plans/WINTERSUN.md` §3 fixes the
 renderer's degradation floor as the last detail level whose frames still clear
-these bounds. That consumption — reading the ledger into `app::quality::Ladder`
-— is WS6's change, because there is no detail ladder in the figure crate to
-floor. So a change that loosens these numbers does not merely admit a worse
-contact sheet; it lets the running game shed detail past the point a player can
-read it.
+these bounds. The bounds are proven at the smallest drawn side,
+`reference::SIDES[0]`, so the floor is the scale that still draws the smallest
+figure a record describes (`humanoid::LEAST_REACH`) at that side:
+`actor::readable` answers it for a view's scale and `app::quality::Ladder`
+stops the render scale there. No frame measures readability. So a change that
+loosens these numbers does not merely admit a worse contact sheet; it lets the
+running game shed detail past the point a player can read it.
 
 ### What FG5 settled, and where it diverges from this plan as written
 
@@ -520,23 +535,29 @@ read it.
   antialiasing tolerance that could hide real drift. The *pixel* side classifies
   each pixel by its nearest declared shade, which is what makes the region count
   a count of separable masses rather than a colour search.
-- **The shipped motions carry no `clip::Travel`.** The original text said walk
-  and run would. They must not: a walk's displacement is the simulation's own
-  and the *gait* paces it, so a travel curve would be a second pacing of one
-  thing, and for a constant-speed cycle it is the identity ramp. `Travel` is for
-  a move the animation paces — a dodge, a lunge, a stagger — and those are
-  WinterSun content.
-- **The shipped motion set is three clips**, authored here because §4 requires
-  the harness to sheet "every clip" and every walk in the tree was a test
-  fixture. Idle, walk and run are the honest minimum that exercises every check.
-  Their leg curves are not authored by eye: each states a **foot path** — strike
-  distance, stance fraction, swing clearance, and how much of the leg's turn the
-  ankle levels the foot by, with the foot on the floor wherever the clip holds
-  the body while it is down — put through the planting layer's own two-bone
-  solve (`plant::solve`). A test states each path whole and holds every key of
-  every shipped leg table to it, to the six places the tables are written to,
-  and another measures the stride back out of the keys against the number the
-  path was authored to give.
+- **The gaits carry no `clip::Travel`.** The original text said walk and run
+  would. They must not: a walk's displacement is the simulation's own and the
+  *gait* paces it, so a travel curve would be a second pacing of one thing, and
+  for a constant-speed cycle it is the identity ramp. `Travel` is for a move the
+  animation paces, and the one shipped is the dodge's.
+- **The shipped motion set is the seventeen clips WinterSun plays** (WS6):
+  locomotion, the actions, and the states, each with its layer and its support.
+  Their leg curves are not authored by eye: each states a **foot path** —
+  strike distance, stance fraction, swing clearance, and how much of the leg's
+  turn the ankle levels the foot by, with the foot on the floor wherever the
+  clip holds the body while it is down — put through the planting layer's own
+  two-bone solve (`plant::solve`), and an action's or a state's root height is
+  computed from the same depth profile its legs are solved to. A test states each path whole
+  and holds every key of every shipped leg table to it exactly; the only keys
+  with no stated path are the dodge's in flight, where no foot is on anything.
+  Another measures each gait's stride back out of its keys against the number
+  its path was authored to give.
+- **An action is timed from outside.** Its clip is authored across windup,
+  active and recovery in phase, with the phases they meet at stated
+  (`clip::Segments`); `clip::Timing` stretches each segment to the seconds the
+  action's owner asks for, and the shipped seconds are each action's reference
+  timing, which the game's action documents replace. Only a held clip can be
+  an action, since a looping one has no end to recover to.
 - **The figure gained a fourth cross-target digest.** `figure::digest` folds the
   complete placed-strip stream, the planting roots and misses, the gait's own
   phases and the quality numbers, over raw `f64::to_bits` with no quantisation.
