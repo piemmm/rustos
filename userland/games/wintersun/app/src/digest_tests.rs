@@ -20,6 +20,44 @@ fn the_digest_is_the_same_every_time() {
     assert_eq!(first, second, "two runs of one binary disagreed");
 }
 
+/// A digest over a blank frame would be perfectly stable and perfectly
+/// worthless, so each frame it folds is checked for real terrain: the window
+/// shot's own check covers neither of these, one at the furthest zoom and
+/// the other with every rung shed.
+#[test]
+fn the_frames_the_digest_folds_are_real_terrain_with_the_whole_cast() {
+    let mut drawn = 0;
+    draw_frames(|target, renderer| {
+        drawn += 1;
+        let pixels = target.pixels();
+        assert!(
+            pixels.iter().all(|p| p.a == 255),
+            "frame {drawn} left transparent pixels"
+        );
+        assert_eq!(
+            renderer.grid().unmapped(),
+            0,
+            "frame {drawn} drew ground it did not hold"
+        );
+        assert_eq!(
+            renderer.figures(),
+            reference::CAST_LEN,
+            "frame {drawn} lost a figure"
+        );
+        let colours = pixels
+            .iter()
+            .map(|p| (p.r, p.g, p.b))
+            .collect::<alloc::collections::BTreeSet<_>>();
+        assert!(
+            colours.len() > 16,
+            "frame {drawn} is a flat fill of {} colours",
+            colours.len()
+        );
+    })
+    .expect("the reference frames draw");
+    assert_eq!(drawn, FRAMES.len());
+}
+
 #[test]
 fn the_digest_folds_in_the_art_constant() {
     // Not a claim about the value, a claim about the dependency: the

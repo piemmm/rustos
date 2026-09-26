@@ -135,8 +135,9 @@ pub const TARGETS: &[Target] = &[
             skip: &[
                 "mathf::tests::the_transcendentals_track_a_correctly_rounded_libm",
                 "mathf::tests::angles_beside_a_quarter_turn_stay_accurate_to_the_last_bit",
+                "mathf::tests::angles_past_a_million_quarter_turns_track_a_correctly_rounded_libm",
             ],
-            reason: "both hold the first-party sine, cosine, tangent, arctangent and exponential \
+            reason: "each holds the first-party sine, cosine, tangent, arctangent and exponential \
                      to the host's libm within an ulp, and the interpreter perturbs each of \
                      those host operations by a few ulps on purpose, to model how libms \
                      differ, so what they would report is its injected error rather than \

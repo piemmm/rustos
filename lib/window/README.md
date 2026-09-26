@@ -87,8 +87,9 @@ server and every app's client can never drift apart.
   rectangle presents the whole window: over-covering costs pixels, while
   under-covering would leave a stale frame on screen, because the session
   copies only what a present declares. The
-  endpoint's *name* (`event_endpoint_for`) and its *depth*
-  (`EVENT_MAILBOX_CAPACITY`) are both defined here, once, because both
+  endpoint's *depth* (`EVENT_MAILBOX_CAPACITY`) is defined here, and its
+  *name* beside the other pid-derived endpoints
+  (`tairix_abi::window_ipc::event_endpoint_for`), once each, because both
   ends depend on them agreeing: the session reads a refused delivery as
   evidence that the owner has stopped draining, which would mean
   different things per app if each chose its own slack.
@@ -199,7 +200,14 @@ server and every app's client can never drift apart.
   session has released its copy, since a released region holds none of the
   pixels a partial present would leave standing (`content_released` exposes the
   same fact to a caller that must resolve a reported damage set before
-  presenting). Its `resize` allocates the fresh surface before asking the
+  presenting). `try_present` is the same for a paint that can refuse: a refused
+  paint presents nothing and the window keeps its last frame. Either way, a
+  rectangle a refused paint or a failed present left torn is re-sent with the
+  next present, whose paint is clipped to cover it. `retained_damage` is that
+  decision, host-tested: every rectangle is clipped to the window before it is
+  painted or recorded, so one named past the surface is sent as the part inside
+  it and can never widen later presents into rectangles the frame codec
+  refuses. Its `resize` allocates the fresh surface before asking the
   session, so a window the app could not draw into is never left on screen.
 
   A **multi-window** app (the terminal emulator, the file manager) holds its

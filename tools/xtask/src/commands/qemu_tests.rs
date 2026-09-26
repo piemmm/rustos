@@ -29,7 +29,7 @@ use std::time::Duration;
 use tairix_desktop_session::SizedRecord;
 use tairix_itest_harness::pie::PieArch;
 use tairix_qemu::screendump::Rgb;
-use tairix_qemu::{Outcome, ReservedSocket, Runner, Spec};
+use tairix_qemu::{NamedKey, Outcome, ReservedSocket, Runner, Spec};
 
 use super::image_apps::AppStoreFile;
 use super::parallel::{self, Job};
@@ -50,8 +50,8 @@ struct TypedStep {
 enum Keys {
     /// Text, character by character.
     Text(&'static str),
-    /// Keys no character reaches, by QEMU key name (`tairix_qemu::NAMED_KEYS`).
-    Named(&'static [&'static str]),
+    /// Keys no character reaches.
+    Named(&'static [NamedKey]),
 }
 
 impl TypedStep {
@@ -65,7 +65,7 @@ impl TypedStep {
     }
 
     /// Press `keys` once `marker` has appeared `occurrences` times.
-    const fn named(marker: &'static str, occurrences: u32, keys: &'static [&'static str]) -> Self {
+    const fn named(marker: &'static str, occurrences: u32, keys: &'static [NamedKey]) -> Self {
         Self {
             marker,
             occurrences,
@@ -232,8 +232,8 @@ struct ScreendumpPlan {
     marker: &'static str,
     /// How many times the marker must appear before the dump is taken.
     occurrences: u32,
-    /// File-name suffix distinguishing this dump's `.ppm` beside the
-    /// kernel binary (`<binary>.<suffix>.screendump.ppm`).
+    /// File-name suffix distinguishing this dump's `.ppm` among its run's
+    /// sidecars ([`screendump_ext`]).
     suffix: &'static str,
     /// The pixel assertion applied to the dumped image after a PASS.
     assert: ScreendumpAssert,
@@ -8854,8 +8854,8 @@ static TESTS: &[QemuTest] = &[
             TypedStep::text(WINDOW_SHOWN_MARKER, 1, WINTERSUN_COMMAND_LINE),
             // Each key is held until the dump keyed on the same witness is on
             // disk, so every dump holds the state before the next change.
-            TypedStep::named(WINDOW_SHOWN_MARKER, 2, &["f11"]),
-            TypedStep::named(WINDOW_SIZED_MARKER, 1, &["esc"]),
+            TypedStep::named(WINDOW_SHOWN_MARKER, 2, &[NamedKey::F11]),
+            TypedStep::named(WINDOW_SIZED_MARKER, 1, &[NamedKey::Escape]),
         ],
         screendumps: &[
             ScreendumpPlan {
@@ -11685,17 +11685,28 @@ fn assert_wintersun_maximized_screendump(
     )
 }
 
-/// The dump `sibling` a plan took beside the one at `path`, whose own suffix
-/// is `suffix`: dumps are named `<binary>.<suffix>.screendump.ppm` beside
-/// the kernel binary.
+/// Where a run's dump with `suffix` is written: one of the run's sidecars
+/// ([`sidecar_path`]), so concurrent replicas and enrolments sharing a binary
+/// never delete or overwrite each other's dumps.
+fn screendump_path(kernel: &Path, t: &QemuTest, replica: usize, suffix: &str) -> PathBuf {
+    sidecar_path(kernel, t, replica, &screendump_ext(suffix))
+}
+
+/// The sidecar extension of a run's dump with `suffix`.
+fn screendump_ext(suffix: &str) -> String {
+    format!("{suffix}.screendump.ppm")
+}
+
+/// The dump `sibling` the same run took beside the one at `path`, whose own
+/// suffix is `suffix`: the two names differ in that suffix alone.
 fn sibling_screendump(path: &Path, suffix: &str, sibling: &str) -> Result<PathBuf, String> {
-    let own = format!(".{suffix}.screendump.ppm");
+    let own = format!(".{}", screendump_ext(suffix));
     let stem = path
         .file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_suffix(&own))
         .ok_or_else(|| format!("{} is not a {suffix} screendump", path.display()))?;
-    Ok(path.with_file_name(format!("{stem}.{sibling}.screendump.ppm")))
+    Ok(path.with_file_name(format!("{stem}.{}", screendump_ext(sibling))))
 }
 
 /// Read and fully decode a dumped scan-out image.
@@ -15740,7 +15751,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     // current dump is pending.
     let mut screendump_paths: Vec<(PathBuf, ScreendumpAssert)> = Vec::new();
     for plan in t.screendumps {
-        let path = kernel.with_extension(format!("{}.screendump.ppm", plan.suffix));
+        let path = screendump_path(kernel, t, replica, plan.suffix);
         remove_stale_sidecar(t.package, "screendump", &path)?;
         spec = spec.with_screendump(plan.marker, plan.occurrences, &path);
         screendump_paths.push((path, plan.assert));
@@ -15975,10 +15986,10 @@ mod tests {
         appbar_pointer_script, autoload_desktop_pointer_script, build_targets,
         desktop_hover_pointer_script, fatal_verdict, filepick_pointer_script, fold_peer_verdict,
         handover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
-        qemu_job_weight, row_holds_track, settings_pointer_script, sidecar_path, Expect, FsDisk,
-        PrimePlan, QemuTest, TypedStep, AARCH64_TARGET, AUDIOTONE_PASS_PREFIX,
-        AUTOLOAD_INPUT_ARMED_OCCURRENCES, AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER,
-        BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
+        qemu_job_weight, row_holds_track, screendump_ext, screendump_path, settings_pointer_script,
+        sidecar_path, Expect, FsDisk, PrimePlan, QemuTest, TypedStep, AARCH64_TARGET,
+        AUDIOTONE_PASS_PREFIX, AUTOLOAD_INPUT_ARMED_OCCURRENCES, AUTOLOAD_INPUT_KEY_MARKER,
+        BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
         DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, KEYBOARD_ONLY_ARMED_OCCURRENCES, MEMSOAK_PASS_PREFIX,
         RISCV64_TARGET, STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER,
         SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
@@ -16049,9 +16060,6 @@ mod tests {
         }
     }
 
-    /// The bundle the Settings guest attributes its launch to is the one the
-    /// capsule's *Settings…* row starts, so the guest cannot wait for a load
-    /// nothing in the run performs.
     /// The line the `WinterSun` vertical types, the keys it presses and the
     /// bundles its guest latches are the ones the game, its key map and the
     /// planted store actually understand, each read from its own definition.
@@ -16060,6 +16068,7 @@ mod tests {
         use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
         use tairix_abi::window_ipc::WindowSizeState;
         use tairix_abi::ProgramKind;
+        use tairix_qemu::NamedKey;
         use tairix_test_wintersun_client_qemu_aarch64::{
             COMMAND_LINE, GAME_APP_NAME, THEN_COMMAND,
         };
@@ -16072,23 +16081,40 @@ mod tests {
         );
         assert_eq!(cli::parse(&[REFERENCE_SCENE]), Ok(Launch::ReferenceScene));
 
-        let pressed = |key| {
-            Controls::new().apply_key(&KeyInput::Pressed {
-                key,
-                modifiers: Modifiers::default(),
+        let vertical = TESTS
+            .iter()
+            .find(|t| t.package == "tairix-test-wintersun-client-qemu-aarch64")
+            .expect("the vertical is enrolled");
+        let keys: Vec<NamedKey> = vertical
+            .typed_keys
+            .iter()
+            .filter_map(|step| match step.keys {
+                super::Keys::Named(keys) => Some(keys),
+                super::Keys::Text(_) => None,
             })
-        };
+            .flatten()
+            .copied()
+            .collect();
+        let commands: Vec<_> = keys
+            .iter()
+            .map(|&key| {
+                let key = match key {
+                    NamedKey::F11 => NamedKeyCode::F11,
+                    NamedKey::Escape => NamedKeyCode::Escape,
+                };
+                Controls::new().apply_key(&KeyInput::Pressed {
+                    key: KeyValue::Named(key),
+                    modifiers: Modifiers::default(),
+                })
+            })
+            .collect();
         assert_eq!(
-            pressed(KeyValue::Named(NamedKeyCode::F11)),
-            Some(Command::Resize(WindowSizeState::Fullscreen))
+            commands,
+            [
+                Some(Command::Resize(WindowSizeState::Fullscreen)),
+                Some(Command::Resize(WindowSizeState::Restored)),
+            ]
         );
-        assert_eq!(
-            pressed(KeyValue::Named(NamedKeyCode::Escape)),
-            Some(Command::Resize(WindowSizeState::Restored))
-        );
-        for name in ["f11", "esc"] {
-            assert!(tairix_qemu::NAMED_KEYS.contains(&name), "{name}");
-        }
 
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
@@ -16192,6 +16218,7 @@ mod tests {
         }
     }
 
+    /// A sibling dump is the same run's, so a replica's is its own replica's.
     #[test]
     fn a_sibling_dump_is_named_beside_its_own() {
         let restored = Path::new("/t/kernel.restored.screendump.ppm");
@@ -16200,8 +16227,25 @@ mod tests {
             Ok(Path::new("/t/kernel.open.screendump.ppm").to_path_buf())
         );
         assert!(super::sibling_screendump(restored, "open", "restored").is_err());
+        assert_eq!(
+            super::sibling_screendump(
+                Path::new("/t/kernel.s4.r2.restored.screendump.ppm"),
+                "restored",
+                "open"
+            ),
+            Ok(Path::new("/t/kernel.s4.r2.open.screendump.ppm").to_path_buf())
+        );
+        assert!(super::sibling_screendump(
+            Path::new("/t/kernel.reopen.screendump.ppm"),
+            "open",
+            "restored"
+        )
+        .is_err());
     }
 
+    /// The bundle the Settings guest attributes its launch to is the one the
+    /// capsule's *Settings…* row starts, so the guest cannot wait for a load
+    /// nothing in the run performs.
     #[test]
     fn the_settings_guest_waits_for_the_bundle_the_menu_row_starts() {
         let bundle = super::bundle_path(
@@ -17044,10 +17088,12 @@ mod tests {
     /// [`sidecar_path`] separates both: enrolments sharing one built binary
     /// (the pre-boot Supervisor verticals drive the byte-identical guest
     /// through different serial scripts), and the flake hunt's concurrent
-    /// replicas of a single enrolment. Both sidecar kinds are checked, because
-    /// both are per-run outputs. Replica zero of a singly-enrolled binary
-    /// keeps the plain `<binary>.<ext>` name, so the pull-request matrix's
-    /// paths are unchanged.
+    /// replicas of a single enrolment. Every sidecar kind is checked, each
+    /// screendump included, because each is a per-run output: a dump named per
+    /// enrolment let one replica's stale-file cleanup delete another's and its
+    /// QEMU overwrite them, so a run could judge a sibling's pixels. Replica
+    /// zero of a singly-enrolled binary keeps the plain `<binary>.<ext>` name,
+    /// so the pull-request matrix's paths are unchanged.
     #[test]
     fn sidecar_paths_never_collide_across_enrolments_or_replicas() {
         use std::collections::{HashMap, HashSet};
@@ -17061,24 +17107,39 @@ mod tests {
         for t in TESTS {
             by_binary.entry(t.binary).or_default().push(t);
         }
-        for ext in ["arxfs.img", "serial.log"] {
-            for (binary, group) in &by_binary {
-                let kernel = Path::new("target").join("dummy").join(binary);
-                let mut seen = HashSet::new();
-                for t in group {
-                    for replica in 0..REPLICAS {
-                        let path = sidecar_path(&kernel, t, replica, ext);
+        let sidecars = |kernel: &Path, t: &QemuTest, replica: usize| {
+            let dumps = t
+                .screendumps
+                .iter()
+                .map(move |plan| screendump_path(kernel, t, replica, plan.suffix));
+            ["arxfs.img", "serial.log"]
+                .map(|ext| sidecar_path(kernel, t, replica, ext))
+                .into_iter()
+                .chain(dumps)
+                .collect::<Vec<_>>()
+        };
+        for (binary, group) in &by_binary {
+            let kernel = Path::new("target").join("dummy").join(binary);
+            let mut seen = HashSet::new();
+            for t in group {
+                for replica in 0..REPLICAS {
+                    for path in sidecars(&kernel, t, replica) {
                         assert!(
                             seen.insert(path.clone()),
-                            "{ext} sidecar path {path:?} collides within binary {binary}"
+                            "sidecar path {path:?} collides within binary {binary}"
                         );
                     }
                 }
                 if group.len() == 1 {
-                    assert_eq!(
-                        sidecar_path(&kernel, group[0], 0, ext),
-                        kernel.with_extension(ext),
-                        "replica zero of a single-enrolment binary must keep its plain {ext} name",
+                    let plain = t.screendumps.iter().map(|plan| screendump_ext(plan.suffix));
+                    let plain = ["arxfs.img", "serial.log"]
+                        .map(String::from)
+                        .into_iter()
+                        .chain(plain)
+                        .map(|ext| kernel.with_extension(ext));
+                    assert!(
+                        sidecars(&kernel, t, 0).into_iter().eq(plain),
+                        "replica zero of a single-enrolment binary must keep its plain names",
                     );
                 }
             }

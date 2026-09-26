@@ -10,8 +10,8 @@ extern crate std;
 use core::f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI, SQRT_2};
 
 use super::{
-    acos, asin, atan, atan2, ceil, clamp, cos, exp, fabs, floor, fmax, fmin, hypot, round,
-    round_i32, sin, sqrt, tan,
+    acos, asin, atan, atan2, ceil, clamp, cos, exp, fabs, floor, fmax, fmin, hypot, reduce, round,
+    round_i32, sin, sqrt, tan, EXP_MAX_ARG, EXP_MIN_ARG, REDUCIBLE,
 };
 
 /// The accuracy every transcendental function is held to: far finer than the
@@ -275,7 +275,7 @@ fn the_transcendentals_track_a_correctly_rounded_libm() {
     tracks_the_host("cos", cos, f64::cos, (-40.0, 40.0, 0.000_97), 1);
     tracks_the_host("tan", tan, f64::tan, (-1.5, 1.5, 0.000_97), 3);
     tracks_the_host("atan", atan, f64::atan, (-60.0, 60.0, 0.000_97), 1);
-    tracks_the_host("exp", exp, f64::exp, (-700.0, 700.0, 0.013), 1);
+    tracks_the_host("exp", exp, f64::exp, (-708.39, 709.78, 0.013), 1);
 }
 
 /// Next to a multiple of `PI/2` the remainder is tiny, and only a reduction
@@ -296,6 +296,69 @@ fn angles_beside_a_quarter_turn_stay_accurate_to_the_last_bit() {
     }
 }
 
+/// Past 2^20 quarter turns the parts of `PI/2` no longer reduce exactly, and
+/// an angle there once answered the value at that bound: a sway driven by
+/// uptime froze after eleven days. Each reference is the correctly rounded
+/// value, worked out in exact rational arithmetic; the first angle is the
+/// double nearest a quarter turn of all, which leaves a remainder of 2^-61.
+#[test]
+fn angles_past_a_million_quarter_turns_reduce_exactly() {
+    let worst = 6_381_956_970_095_103.0 * f64::from_bits((1023 + 797) << 52);
+    let references = [
+        (worst, 1.0, -4.687_165_924_254_628e-19),
+        (
+            1_647_100.0,
+            0.621_640_037_921_421_2,
+            0.783_303_046_880_997_4,
+        ),
+        (2.0e6, -0.655_714_315_563_47, 0.755_009_096_875_746_4),
+        (3.0e9, 0.987_004_886_474_355_4, -0.160_690_242_627_687_05),
+        (5.0e15, -0.901_711_760_523_585, -0.432_337_716_297_638),
+        (1e22, -0.852_200_849_767_188_8, 0.523_214_785_395_139),
+        (-7.5e30, -0.965_150_598_936_113_2, 0.261_695_092_375_195_1),
+        (1e100, -0.380_637_731_005_028_7, 0.924_724_238_751_933_8),
+        (
+            f64::MAX,
+            0.004_961_954_789_184_062,
+            -0.999_987_689_426_559_9,
+        ),
+    ];
+    for (x, sine, cosine) in references {
+        assert!(ulps_apart(sin(x), sine) <= 1, "sin({x:e}) = {:e}", sin(x));
+        assert!(ulps_apart(cos(x), cosine) <= 1, "cos({x:e}) = {:e}", cos(x));
+    }
+    let (head, tail, quadrant) = reduce(worst);
+    assert_eq!(head.to_bits(), 4.687_165_924_254_628e-19_f64.to_bits());
+    assert!(fabs(tail) <= f64::EPSILON * head);
+    assert_eq!(quadrant, 1);
+}
+
+/// Every exponent a double can carry past the moderate reduction, several
+/// mantissas each, held to the host's libm: a wrong word of `2/PI` would
+/// throw every angle whose reduction reads it off by a whole remainder.
+#[test]
+fn angles_past_a_million_quarter_turns_track_a_correctly_rounded_libm() {
+    let stride = 0x0000_28f5_c28f_5c29_u64;
+    let mut bits = REDUCIBLE.to_bits() + 1;
+    while bits < f64::INFINITY.to_bits() {
+        for x in [f64::from_bits(bits), -f64::from_bits(bits)] {
+            assert!(ulps_apart(sin(x), f64::sin(x)) <= 1, "sin({x:e})");
+            assert!(ulps_apart(cos(x), f64::cos(x)) <= 1, "cos({x:e})");
+            assert!(ulps_apart(tan(x), f64::tan(x)) <= 3, "tan({x:e})");
+        }
+        bits += stride;
+    }
+}
+
+/// Sine is odd and cosine even however large the angle, to the last bit.
+#[test]
+fn a_large_angle_and_its_negation_share_a_reduction() {
+    for x in [REDUCIBLE.next_up(), 2.0e6, 7.3e19, 1e200, f64::MAX] {
+        assert_eq!(sin(-x).to_bits(), (-sin(x)).to_bits(), "sin(-{x:e})");
+        assert_eq!(cos(-x).to_bits(), cos(x).to_bits(), "cos(-{x:e})");
+    }
+}
+
 /// The oddness the kernels would lose on their own: the sign of a zero angle
 /// is kept, so a rotation by `-0` reflects nothing.
 #[test]
@@ -307,8 +370,16 @@ fn a_negative_zero_angle_keeps_its_sign() {
 
 /// A `NaN`, an infinity or an angle past any meaningful turn still answers a
 /// finite value: a degenerate transform draws, rather than erasing a shape.
+/// An infinite or `NaN` angle has no direction, so it turns nothing.
+#[allow(
+    clippy::float_cmp,
+    reason = "a direction-less angle answers exactly the zero angle's values"
+)]
 #[test]
 fn angles_are_total() {
+    for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!((sin(x), cos(x), tan(x)), (0.0, 1.0, 0.0), "angle {x}");
+    }
     for x in [
         f64::NAN,
         f64::INFINITY,
@@ -410,6 +481,33 @@ fn exponential_is_accurate_relative_to_its_own_magnitude() {
         );
         x += 7.3;
     }
+}
+
+/// The evaluated range is every argument whose exponential is a normal
+/// double: it once stopped short at 709 and -708, answering `f64::MAX` for
+/// `exp(709.5)` and zero for `exp(-708)`. The references are the correctly
+/// rounded values, worked out in exact rational arithmetic.
+#[allow(
+    clippy::float_cmp,
+    reason = "the saturation endpoints are exact values, which is what is pinned"
+)]
+#[test]
+fn exponential_reaches_both_ends_of_the_double_range() {
+    let references = [
+        (709.0, 8.218_407_461_554_972e307),
+        (709.5, 1.354_986_319_314_632_8e308),
+        (709.7, 1.654_984_027_680_264_4e308),
+        (EXP_MAX_ARG, 1.797_693_134_862_273_2e308),
+        (-708.0, 3.307_553_003_638_408e-308),
+        (-708.2, 2.707_995_361_514_091_3e-308),
+        (EXP_MIN_ARG, 2.225_073_858_507_262_6e-308),
+    ];
+    for (x, expected) in references {
+        assert!(ulps_apart(exp(x), expected) <= 1, "exp({x}) = {:e}", exp(x));
+    }
+    assert!(exp(EXP_MAX_ARG) < f64::MAX);
+    assert_eq!(exp(EXP_MAX_ARG.next_up()), f64::MAX);
+    assert_eq!(exp(EXP_MIN_ARG.next_down()), 0.0);
 }
 
 /// Total like the rest of the module: the answer saturates rather than

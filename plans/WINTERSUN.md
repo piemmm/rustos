@@ -931,7 +931,8 @@ target still agreeing to the bit. What a later item needs to know:
   the earlier ones cancel, so beside a quarter turn the tiny remainder is
   still exact to its own last bit, where one part alone is off by millions
   of ulps; a test holds sine and cosine bit-equal to a correctly rounded libm
-  there. Angles past 1.6 million radians are taken at that bound.
+  there. Past 2^20 quarter turns (1.6 million radians) Payne and Hanek's
+  reduction takes over, in integers, so every finite angle reduces exactly.
 - **`round` decides on the exact fraction.** `floor(x + 0.5)` rounds the sum
   first, which takes `0.49999999999999994`, and every odd integer past 2^52,
   up by one.

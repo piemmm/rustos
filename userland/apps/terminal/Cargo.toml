@@ -55,8 +55,7 @@ tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
 # profile registry's own test makes against every key it publishes.
 tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 # The app half of the window channel: `WindowClient` (create / present / close
-# over the `WindowTransport` seam), the shared app event-mailbox naming
-# rule (`event_endpoint_for`), and the desktop's one icon-bar menu convention
+# over the `WindowTransport` seam) and the desktop's one icon-bar menu convention
 # (`tairix_window::declaration` — the information row first, the app's own
 # rows next, then a rule and *Quit*). `src/appbar.rs` composes its *New
 # window* row through that convention and is host-tested, so this is a plain

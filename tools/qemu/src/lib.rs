@@ -422,14 +422,32 @@ pub enum TypedKeys {
     /// `\t` (sent as `tab`), or the `\u{3}` Ctrl-C chord. The runner fails
     /// the run on the first untypable character (fail closed, never skipped).
     Text(String),
-    /// Keys no character reaches, by QEMU key name, each one of
-    /// [`NAMED_KEYS`]; any other name fails the run rather than being sent to
-    /// a monitor that would ignore it.
-    Named(Vec<String>),
+    /// Keys no character reaches.
+    Named(Vec<NamedKey>),
 }
 
-/// The keys a [`TypedKeys::Named`] step may press.
-pub const NAMED_KEYS: &[&str] = &["esc", "f11"];
+/// A key no character reaches, which a [`TypedKeys::Named`] step presses.
+///
+/// A closed set, so a script cannot name a key the monitor would ignore and
+/// learn of it only when the step is reached, after the guest has booted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NamedKey {
+    /// Escape.
+    Escape,
+    /// F11.
+    F11,
+}
+
+impl NamedKey {
+    /// The name QEMU's `sendkey` knows the key by.
+    #[must_use]
+    pub const fn qemu_name(self) -> &'static str {
+        match self {
+            Self::Escape => "esc",
+            Self::F11 => "f11",
+        }
+    }
+}
 
 impl TypedKeys {
     /// How many keys the step presses.
@@ -445,13 +463,7 @@ impl TypedKeys {
     fn key(&self, index: usize) -> Option<Result<String, String>> {
         match self {
             Self::Text(text) => text.chars().nth(index).map(qkeycode_for),
-            Self::Named(keys) => keys.get(index).map(|name| {
-                if NAMED_KEYS.contains(&name.as_str()) {
-                    Ok(name.clone())
-                } else {
-                    Err(format!("`{name}` is not a named key the runner sends"))
-                }
-            }),
+            Self::Named(keys) => keys.get(index).map(|key| Ok(key.qemu_name().to_owned())),
         }
     }
 }
@@ -1367,19 +1379,19 @@ impl Spec {
         self
     }
 
-    /// Append one step pressing `keys`, each a [`NAMED_KEYS`] name, in the
-    /// same ordered, marker-gated sequence as [`Self::with_typed_keys`].
+    /// Append one step pressing `keys`, in the same ordered, marker-gated
+    /// sequence as [`Self::with_typed_keys`].
     #[must_use]
     pub fn with_named_keys(
         mut self,
         ready_marker: impl Into<String>,
         occurrences: u32,
-        keys: &[&str],
+        keys: &[NamedKey],
     ) -> Self {
         self.input_typing.push(KeyTyping {
             ready_marker: ready_marker.into(),
             ready_occurrences: occurrences.max(1),
-            keys: TypedKeys::Named(keys.iter().map(|key| (*key).to_string()).collect()),
+            keys: TypedKeys::Named(keys.to_vec()),
         });
         self
     }
@@ -1722,11 +1734,7 @@ fn supervise(
 
     let SerialDrain {
         captured,
-        marker_seen,
-        typing_markers_seen,
-        pointer_markers_seen,
-        screendump_markers_seen,
-        monitor_markers_seen,
+        flags,
         fatal,
         reader,
     } = spawn_serial_drain(&mut child, spec);
@@ -1767,13 +1775,7 @@ fn supervise(
         err_reader: &mut err_reader,
         serial_stdin: &mut serial_stdin,
         captured: &captured,
-        markers: InjectionMarkers {
-            key: &marker_seen,
-            typing: &typing_markers_seen,
-            pointer: &pointer_markers_seen,
-            screendump: &screendump_markers_seen,
-            monitor: &monitor_markers_seen,
-        },
+        markers: flags.markers(),
         injections: &mut injections,
         serial_script: &mut serial_script,
         heartbeat: &mut heartbeat,
@@ -2520,29 +2522,86 @@ impl Drop for ReservedSocket {
 struct SerialDrain {
     /// Everything the guest has printed on serial so far.
     captured: Arc<Mutex<String>>,
-    /// Set once the key injection's readiness marker has appeared the
-    /// required number of times.
-    marker_seen: Arc<AtomicBool>,
-    /// One flag per typed-text step, set once that step's readiness
-    /// marker has appeared the required number of times. Index-aligned
-    /// with [`Spec::input_typing`].
-    typing_markers_seen: Vec<Arc<AtomicBool>>,
-    /// One flag per pointer-script step, set once that step's readiness
-    /// marker has appeared the required number of times. Index-aligned
-    /// with [`Spec::pointer_script`].
-    pointer_markers_seen: Vec<Arc<AtomicBool>>,
-    /// One flag per screendump, set once that dump's readiness marker
-    /// has appeared the required number of times. Index-aligned with
-    /// [`Spec::screendumps`].
-    screendump_markers_seen: Vec<Arc<AtomicBool>>,
-    /// One flag per monitor command, set once that command's readiness
-    /// marker has appeared the required number of times. Index-aligned
-    /// with [`Spec::monitor_commands`].
-    monitor_markers_seen: Vec<Arc<AtomicBool>>,
+    /// The readiness flags the drain raises.
+    flags: ReadinessFlags,
     /// The first fatal record the guest wrote, if any.
     fatal: Arc<FatalWatch>,
     /// The drain thread, joined once the child has exited.
     reader: std::thread::JoinHandle<io::Result<()>>,
+}
+
+/// One readiness flag per requested injection, raised by the serial drain
+/// once that injection's marker has appeared the required number of times.
+/// Each list is index-aligned with its own in the [`Spec`].
+struct ReadinessFlags {
+    /// [`Spec::input_keyboard`]'s.
+    key: Arc<AtomicBool>,
+    /// [`Spec::input_typing`]'s.
+    typing: Vec<Arc<AtomicBool>>,
+    /// [`Spec::pointer_script`]'s.
+    pointer: Vec<Arc<AtomicBool>>,
+    /// [`Spec::screendumps`]'s.
+    screendump: Vec<Arc<AtomicBool>>,
+    /// [`Spec::monitor_commands`]'s.
+    monitor: Vec<Arc<AtomicBool>>,
+}
+
+impl ReadinessFlags {
+    fn new(spec: &Spec) -> Self {
+        let lowered = |count: usize| -> Vec<Arc<AtomicBool>> {
+            (0..count)
+                .map(|_| Arc::new(AtomicBool::new(false)))
+                .collect()
+        };
+        Self {
+            key: Arc::new(AtomicBool::new(false)),
+            typing: lowered(spec.input_typing.len()),
+            pointer: lowered(spec.pointer_script.len()),
+            screendump: lowered(spec.screendumps.len()),
+            monitor: lowered(spec.monitor_commands.len()),
+        }
+    }
+
+    /// Each marker the drain watches, the occurrences it needs and the flag
+    /// it raises, in the order one chunk's flags are raised: every dump's
+    /// before any input's.
+    ///
+    /// An input reads its own flag before the dump's
+    /// ([`InjectionState::input_ready`]), so once it reads as ready, a dump
+    /// keyed on the same marker reads as seen too. Raised the other way
+    /// round, a drain descheduled between the two let the input change the
+    /// frame the dump was keyed on.
+    fn watch_list(&self, spec: &Spec) -> Vec<(String, u32, Arc<AtomicBool>)> {
+        let watch = |marker: &str, occurrences: u32, seen: &Arc<AtomicBool>| {
+            (marker.to_owned(), occurrences.max(1), Arc::clone(seen))
+        };
+        let dumps = spec.screendumps.iter().zip(&self.screendump);
+        let typing = spec.input_typing.iter().zip(&self.typing);
+        let pointer = spec.pointer_script.iter().zip(&self.pointer);
+        let monitor = spec.monitor_commands.iter().zip(&self.monitor);
+        dumps
+            .map(|(d, seen)| watch(&d.ready_marker, d.ready_occurrences, seen))
+            .chain(
+                spec.input_keyboard
+                    .iter()
+                    .map(|k| watch(&k.ready_marker, k.ready_occurrences, &self.key)),
+            )
+            .chain(typing.map(|(t, seen)| watch(&t.ready_marker, t.ready_occurrences, seen)))
+            .chain(pointer.map(|(p, seen)| watch(&p.ready_marker, p.ready_occurrences, seen)))
+            .chain(monitor.map(|(m, seen)| watch(&m.ready_marker, m.ready_occurrences, seen)))
+            .collect()
+    }
+
+    /// The borrowed view [`InjectionState::drive`] consults.
+    fn markers(&self) -> InjectionMarkers<'_> {
+        InjectionMarkers {
+            key: &self.key,
+            typing: &self.typing,
+            pointer: &self.pointer,
+            screendump: &self.screendump,
+            monitor: &self.monitor,
+        }
+    }
 }
 
 /// Watches the serial stream for the record a fatal kernel report ends with
@@ -2594,77 +2653,18 @@ impl FatalWatch {
 /// previous step's match).
 fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
     let captured = Arc::new(Mutex::new(String::new()));
-    let marker_seen = Arc::new(AtomicBool::new(false));
-    let typing_markers_seen: Vec<Arc<AtomicBool>> = spec
-        .input_typing
-        .iter()
-        .map(|_| Arc::new(AtomicBool::new(false)))
-        .collect();
-    let pointer_markers_seen: Vec<Arc<AtomicBool>> = spec
-        .pointer_script
-        .iter()
-        .map(|_| Arc::new(AtomicBool::new(false)))
-        .collect();
-    let screendump_markers_seen: Vec<Arc<AtomicBool>> = spec
-        .screendumps
-        .iter()
-        .map(|_| Arc::new(AtomicBool::new(false)))
-        .collect();
-    let monitor_markers_seen: Vec<Arc<AtomicBool>> = spec
-        .monitor_commands
-        .iter()
-        .map(|_| Arc::new(AtomicBool::new(false)))
-        .collect();
+    let flags = ReadinessFlags::new(spec);
     let fatal = Arc::new(FatalWatch::new());
     let reader = {
         let captured = Arc::clone(&captured);
         let fatal = Arc::clone(&fatal);
         let stdout = child.stdout.take();
-        let mut markers: Vec<(String, u32, Arc<AtomicBool>)> = Vec::new();
-        if let Some(k) = &spec.input_keyboard {
-            markers.push((
-                k.ready_marker.clone(),
-                k.ready_occurrences.max(1),
-                Arc::clone(&marker_seen),
-            ));
-        }
-        for (t, seen) in spec.input_typing.iter().zip(&typing_markers_seen) {
-            markers.push((
-                t.ready_marker.clone(),
-                t.ready_occurrences.max(1),
-                Arc::clone(seen),
-            ));
-        }
-        for (p, seen) in spec.pointer_script.iter().zip(&pointer_markers_seen) {
-            markers.push((
-                p.ready_marker.clone(),
-                p.ready_occurrences.max(1),
-                Arc::clone(seen),
-            ));
-        }
-        for (d, seen) in spec.screendumps.iter().zip(&screendump_markers_seen) {
-            markers.push((
-                d.ready_marker.clone(),
-                d.ready_occurrences.max(1),
-                Arc::clone(seen),
-            ));
-        }
-        for (m, seen) in spec.monitor_commands.iter().zip(&monitor_markers_seen) {
-            markers.push((
-                m.ready_marker.clone(),
-                m.ready_occurrences.max(1),
-                Arc::clone(seen),
-            ));
-        }
+        let markers = flags.watch_list(spec);
         std::thread::spawn(move || drain_stream(stdout, &captured, &markers, Some(&fatal)))
     };
     SerialDrain {
         captured,
-        marker_seen,
-        typing_markers_seen,
-        pointer_markers_seen,
-        screendump_markers_seen,
-        monitor_markers_seen,
+        flags,
         fatal,
         reader,
     }
@@ -2672,7 +2672,9 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
 
 /// Read one of QEMU's output pipes to EOF, appending every chunk to
 /// `captured` and raising each marker's flag once its substring has
-/// appeared the required number of times in the stream so far.
+/// appeared the required number of times in the stream so far. A chunk's
+/// flags are raised in `markers`' order, which
+/// [`ReadinessFlags::watch_list`] relies on.
 /// An interrupted read is retried. Any other read error is returned to
 /// [`supervise`], which fails the run rather than silently losing the serial
 /// channel and waiting for an unrelated guest timeout.
@@ -3067,12 +3069,7 @@ impl InjectionState {
             // the keys are paced — at most one per call, and only once the
             // previous key's hold has fully elapsed — so repeated characters
             // arrive as distinct press/release edges.
-            let step_seen = markers
-                .typing
-                .get(self.typed_step)
-                .is_some_and(|seen| seen.load(Ordering::Acquire));
-            if step_seen
-                && !self.dump_pending(spec, markers)
+            if self.input_ready(markers.typing.get(self.typed_step), spec, markers)
                 && Instant::now() >= self.next_typed_key_at
             {
                 if let Some(key) = typing.keys.key(self.typed_in_step) {
@@ -3134,13 +3131,8 @@ impl InjectionState {
         // *step* per poll tick, so a motion is processed before whatever
         // follows it lands at the new position; a `Click` step sends both of
         // its mask changes in that one tick, because a click is one gesture.
-        let dump_pending = self.dump_pending(spec, markers);
         if let Some(step) = spec.pointer_script.get(self.pointer_step) {
-            let step_seen = markers
-                .pointer
-                .get(self.pointer_step)
-                .is_some_and(|seen| seen.load(Ordering::Acquire));
-            if step_seen && !dump_pending {
+            if self.input_ready(markers.pointer.get(self.pointer_step), spec, markers) {
                 match step.action {
                     PointerAction::Move { dx, dy } => {
                         self.send(monitor, "pointer", &format!("mouse_move {dx} {dy}"))?;
@@ -3164,6 +3156,22 @@ impl InjectionState {
             }
         }
         Ok(())
+    }
+
+    /// Whether an input step whose readiness flag is `own` may fire: its
+    /// marker seen, and no dump whose marker has appeared still pending.
+    ///
+    /// `own` is read first. The drain raises a chunk's dump flags before its
+    /// input flags ([`ReadinessFlags::watch_list`]), so an input read as ready
+    /// finds a dump keyed on the same marker seen as well; read the other way
+    /// round, the dump's flag could be raised between the two loads.
+    fn input_ready(
+        &self,
+        own: Option<&Arc<AtomicBool>>,
+        spec: &Spec,
+        markers: &InjectionMarkers<'_>,
+    ) -> bool {
+        own.is_some_and(|seen| seen.load(Ordering::Acquire)) && !self.dump_pending(spec, markers)
     }
 
     /// Whether a dump whose marker has appeared is still waiting to be taken
@@ -4318,33 +4326,29 @@ mod tests {
     fn named_keys_join_the_one_ordered_script() {
         let s = Spec::for_aarch64_kernel("/tmp/k")
             .with_typed_keys("prompt", 1, "go\n")
-            .with_named_keys("drawn", 0, &["f11", "esc"])
+            .with_named_keys("drawn", 0, &[NamedKey::F11, NamedKey::Escape])
             .with_typed_keys("restored", 1, "q");
         let keys: Vec<&TypedKeys> = s.input_typing.iter().map(|t| &t.keys).collect();
         assert_eq!(
             keys,
             [
                 &TypedKeys::Text("go\n".into()),
-                &TypedKeys::Named(vec!["f11".into(), "esc".into()]),
+                &TypedKeys::Named(vec![NamedKey::F11, NamedKey::Escape]),
                 &TypedKeys::Text("q".into()),
             ]
         );
         assert_eq!(s.input_typing[1].ready_occurrences, 1);
     }
 
-    /// A named key outside the set fails the run rather than reaching a
-    /// monitor that would ignore it; text maps as it always has.
+    /// Each named key is sent by the name QEMU's `sendkey` knows it by; text
+    /// maps as it always has.
     #[test]
-    fn only_the_named_keys_the_runner_knows_are_sent() {
-        let named = TypedKeys::Named(vec!["f11".into(), "esc".into(), "f13".into()]);
-        assert_eq!(named.len(), 3);
+    fn named_keys_are_sent_by_their_qemu_names() {
+        let named = TypedKeys::Named(vec![NamedKey::F11, NamedKey::Escape]);
+        assert_eq!(named.len(), 2);
         assert_eq!(named.key(0), Some(Ok("f11".into())));
         assert_eq!(named.key(1), Some(Ok("esc".into())));
-        assert!(
-            matches!(named.key(2), Some(Err(_))),
-            "f13 is not a named key"
-        );
-        assert_eq!(named.key(3), None);
+        assert_eq!(named.key(2), None);
         let text = TypedKeys::Text("q\n".into());
         assert_eq!(
             (text.key(0), text.key(1)),
@@ -4365,7 +4369,7 @@ mod tests {
         let _ = std::fs::remove_file(&dump);
         let spec = Spec::for_aarch64_kernel("/kernel")
             .with_screendump("shown", 1, &dump)
-            .with_named_keys("shown", 1, &["f11"]);
+            .with_named_keys("shown", 1, &[NamedKey::F11]);
         let socket = ReservedSocket::reserve("keydump").expect("a socket path");
         let listener = UnixListener::bind(socket.path()).expect("the monitor binds");
         let seen = || Arc::new(AtomicBool::new(true));
@@ -4411,6 +4415,33 @@ mod tests {
             "the key follows the dump: {then:?}"
         );
         let _ = std::fs::remove_file(&dump);
+    }
+
+    /// A key and a click read their own flag before the dump's, so the drain
+    /// must raise a dump's flag before theirs: raised after, a drain
+    /// descheduled between the two let either overtake the dump it waited on.
+    #[test]
+    fn the_drain_raises_every_dump_before_any_input_it_could_gate() {
+        let spec = Spec::for_aarch64_kernel("/kernel")
+            .with_named_keys("shown", 1, &[NamedKey::F11])
+            .with_pointer_step("shown", 1, PointerAction::Click(MouseButton::Primary))
+            .with_screendump("shown", 1, "/tmp/shown.ppm")
+            .with_screendump("later", 1, "/tmp/later.ppm");
+        let flags = ReadinessFlags::new(&spec);
+        let watched = flags.watch_list(&spec);
+        let at = |flag: &Arc<AtomicBool>| {
+            watched
+                .iter()
+                .position(|(_, _, seen)| Arc::ptr_eq(seen, flag))
+                .expect("every flag is watched")
+        };
+        let last_dump = flags.screendump.iter().map(at).max();
+        let first_input = [&flags.typing[0], &flags.pointer[0]]
+            .map(at)
+            .into_iter()
+            .min();
+        assert!(last_dump < first_input, "{last_dump:?} {first_input:?}");
+        assert_eq!(watched.len(), 4);
     }
 
     #[test]

@@ -95,7 +95,7 @@ and panic-free throughout.
   supervisor's elevation broker, and the masked text field in
   `lib/controls` — erases through this one implementation rather than its
   own. Its volatile stores are why `cargo xtask miri` interprets the crate's
-  suite, bar the two tests that hold `mathf` to the host's libm, whose results
+  suite, bar the three tests that hold `mathf` to the host's libm, whose results
   the interpreter perturbs on purpose.
 * `defer` — the one way an interactive surface hands a piece of slow work to
   a worker: `JobDesk<Req, Ans>` holds one request waiting, one in flight, and
@@ -132,8 +132,11 @@ and panic-free throughout.
   instruction on `aarch64`, `riscv64` and `wasm32`, the compiler runtime's
   routine on soft-float `x86_64` — so IEEE 754 fixes their answer; the
   transcendentals are fdlibm's range reductions and minimax kernels in one
-  fixed order with no fused multiply-add, within an ulp of the true value. Every function returns a finite
-  answer for every finite input, so no caller guards against a `NaN`.
+  fixed order with no fused multiply-add, within an ulp of the true value.
+  An angle past 2^20 quarter turns is reduced by Payne and Hanek's method in
+  integers, so every finite angle reduces exactly, however large. Every
+  function returns a finite answer for every finite input, so no caller guards
+  against a `NaN`.
 * `retry` — the two retry schedules. `RetryLadder` is for waiting on
   something that has not appeared yet and has no readiness event: a
   bounded, doubling one-shot ladder, so a boot on which the thing never

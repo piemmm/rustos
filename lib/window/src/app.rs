@@ -36,7 +36,7 @@ use tairix_display::{winframe, SERIAL};
 use tairix_raster::Surface;
 use tairix_theme::{Accessibility, ThemeRegistry};
 
-use crate::client::{WindowClient, WindowTransport};
+use crate::client::{retained_damage, WindowClient, WindowTransport};
 use crate::desktop::Desktop;
 use crate::frames::WindowFrames;
 use crate::server::{LayerSpec, PopupSpec};
@@ -779,19 +779,6 @@ struct Retained {
     torn: Option<DamageRect>,
 }
 
-impl Retained {
-    /// The rectangle a present of `damage` must repaint and send: the whole
-    /// window when the session released its copy, and otherwise `damage`
-    /// grown over any rectangle left torn, which this takes.
-    fn repaint(&mut self, damage: DamageRect) -> DamageRect {
-        let torn = self.torn.take();
-        if self.pane.content_released() {
-            return DamageRect::full(self.pane.mode());
-        }
-        torn.map_or(damage, |torn| damage.union(torn))
-    }
-}
-
 /// The live window channel an app owns, and the one window it may or may not
 /// have open.
 ///
@@ -899,12 +886,14 @@ impl AppWindow {
         Ok(server)
     }
 
-    /// Draw `damage` of the window through `paint` and present that rectangle.
+    /// Draw `damage` of the window through `paint` and present that rectangle,
+    /// clipped to the window, with whatever an earlier present left torn.
     ///
     /// A region the session released while the window was hidden is re-attached
     /// and presented whole, because it holds none of the pixels a partial
-    /// present would leave standing. With no window open this is a no-op, so a
-    /// loop need not sort its repaints by whether one is showing.
+    /// present would leave standing. With no window open, or nothing of the
+    /// rectangle inside it, this is a no-op, so a loop need not sort its
+    /// repaints by whether one is showing.
     ///
     /// # Errors
     ///
@@ -942,7 +931,11 @@ impl AppWindow {
         let Some(held) = self.retained.as_mut() else {
             return Ok(Ok(()));
         };
-        let damage = held.repaint(damage);
+        let released = held.pane.content_released();
+        let Some(damage) = retained_damage(held.pane.mode(), released, held.torn.take(), damage)
+        else {
+            return Ok(Ok(()));
+        };
         let mut painted = Ok(());
         held.surface.with_clip(
             damage.x,

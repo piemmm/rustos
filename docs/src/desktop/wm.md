@@ -750,11 +750,12 @@ repaints nothing. Replacement artwork (`set_cursor`) always repaints,
 even on an identical rectangle, because the pointer picking up a text or
 resize shape without moving changes the pixels there.
 
-`Compositor::has_damage` answers exactly what the next composite would
-produce: `true` if and only if at least one pixel would be recomposited,
-counting a pending cursor move or artwork change and discounting damage
-marked wholly off screen. A session driving a wake loop can therefore
-skip a frame outright when it is `false` without ever missing a repaint.
+`Compositor::has_damage` answers exactly what the next present would
+send: `true` if and only if at least one pixel would be recomposited or is
+still owed by a frame the display refused, counting a pending cursor move
+or artwork change and discounting damage marked wholly off screen. A
+session driving a wake loop can therefore skip a frame outright when it is
+`false` without ever missing a repaint.
 
 ## Presenting only what changed
 
@@ -784,6 +785,9 @@ number of bytes:
   box** — over-covering costs pixels, dropping a rectangle would leave
   stale ones on screen. It is still one present: the bound is what one
   message carries, not how often a frame may publish.
+- **A frame the display refused is still owed.** Its region is kept and
+  sent again with the next present, even when nothing changed in between,
+  and only that region — not the whole screen.
 
 ## Retained backdrops
 

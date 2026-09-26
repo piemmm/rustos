@@ -1002,7 +1002,8 @@ fn back_buffer_holds_premultiplied_pixels() {
 // ---- pending work: has_damage agrees with composite ------------------
 
 /// Composite `c`, first asserting [`Compositor::has_damage`] answered
-/// exactly what that composite produces, and return the region.
+/// exactly what that composite produces, as it does while no refused frame
+/// is owed, and return the region.
 ///
 /// A caller skips a frame entirely when `has_damage` is `false`, so a
 /// disagreement either drops a repaint the user is waiting for or burns a

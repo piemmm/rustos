@@ -260,11 +260,7 @@ impl AppManifestSource {
         check_len(ctx, "id", &self.id, BUNDLE_ID_MAX)?;
         check_len(ctx, "name", &self.name, BUNDLE_NAME_MAX)?;
         check_len(ctx, "version", &self.version, BUNDLE_VERSION_MAX)?;
-        if !self
-            .name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
+        if !tairix_syshelp::bundles::is_command_word(&self.name) {
             return Err(AppImageError::new(
                 ctx,
                 format!("`name` must be a plain command word, got {:?}", self.name),

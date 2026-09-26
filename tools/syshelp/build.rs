@@ -386,6 +386,11 @@ fn bundle_identity(crate_dir: &Path) -> (String, &'static str) {
         })
     };
     let name = value_of("name");
+    assert!(
+        bundles::is_command_word(name),
+        "{}: `name` must be a plain command word, got {name:?}",
+        manifest.display()
+    );
     let kind = value_of("kind");
     let store = tairix_abi::ProgramKind::from_key(kind)
         .unwrap_or_else(|| panic!("{}: unknown kind `{kind}`", manifest.display()))

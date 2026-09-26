@@ -2725,14 +2725,15 @@ impl Compositor {
     /// [`composite`](Self::composite), or a frame the display refused, which
     /// the next [`present`](Self::present) sends again.
     ///
-    /// This answers exactly the question the next
-    /// [`composite`](Self::composite) does: it is `true` if and only if that
-    /// composite would change at least one presented pixel — whether by
-    /// recomposing it or by encoding it afresh. A caller driving a wake loop
-    /// can therefore skip the frame entirely when it is `false`, and never
-    /// miss one when it is `true`. Damage marked wholly off screen is no
-    /// pending work: composite clips every rectangle to the screen, so this
-    /// clips them too rather than promising a frame that would change nothing.
+    /// This answers exactly the question the next [`present`](Self::present)
+    /// does: it is `true` if and only if that present would send at least one
+    /// pixel — one its composite changes, by recomposing it or by encoding it
+    /// afresh, or one a refused frame still owes the display. A caller driving
+    /// a wake loop can therefore skip the frame entirely when it is `false`,
+    /// and never miss one when it is `true`. Damage marked wholly off screen
+    /// is no pending work: composite clips every rectangle to the screen, so
+    /// this clips them too rather than promising a frame that would change
+    /// nothing.
     #[must_use]
     pub fn has_damage(&self) -> bool {
         let screen = self.screen_rect();

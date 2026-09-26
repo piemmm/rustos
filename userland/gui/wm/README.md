@@ -127,8 +127,8 @@ router**:
   read the whole backdrop beneath it.
   `Compositor::composite` returns the `Region` it actually
   recomposited (screen-clipped), and `has_damage` answers exactly what
-  that next composite would produce, so a wake loop can skip a frame
-  outright. An update that changes nothing marks nothing: a `move_window`
+  the next present would send — that composite's region, or a frame the
+  display refused — so a wake loop can skip a frame outright. An update that changes nothing marks nothing: a `move_window`
   to the origin the window already has, `set_corners`/`set_visible`/
   `set_opacity`/`set_backdrop_blur` to the current value, still return
   `true` (only an unknown id returns `false`) but repaint no pixel. A

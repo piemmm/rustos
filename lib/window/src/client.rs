@@ -144,6 +144,39 @@ pub fn damage_in(mode: &DisplayMode, rect: Rect) -> Option<DamageRect> {
     })
 }
 
+/// The rectangle a retained window's present must repaint and send, or `None`
+/// when nothing of it lies inside the window.
+///
+/// The whole window when the session has `released` its copy, which holds
+/// none of the pixels a partial present would leave standing; otherwise
+/// `damage` grown over whatever an earlier present left `torn`. Either is
+/// clipped to the window, so a rectangle named past the surface is sent as
+/// the part inside it: recorded as torn when its present fails, it can never
+/// widen every later present into a rectangle the frame codec refuses.
+#[must_use]
+pub fn retained_damage(
+    mode: &DisplayMode,
+    released: bool,
+    torn: Option<DamageRect>,
+    damage: DamageRect,
+) -> Option<DamageRect> {
+    if released {
+        return Some(DamageRect::full(mode));
+    }
+    let wanted = torn.map_or(damage, |torn| damage.union(torn));
+    let right = wanted.x.saturating_add(wanted.width_px).min(mode.width_px);
+    let bottom = wanted
+        .y
+        .saturating_add(wanted.height_px)
+        .min(mode.height_px);
+    (wanted.x < right && wanted.y < bottom).then(|| DamageRect {
+        x: wanted.x,
+        y: wanted.y,
+        width_px: right - wanted.x,
+        height_px: bottom - wanted.y,
+    })
+}
+
 /// The window-local [`Point`] a wire pointer event's `(x, y)` names.
 ///
 /// The protocol carries a pointer position as unsigned window-local

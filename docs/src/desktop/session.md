@@ -1866,7 +1866,7 @@ the loop composite and present once a deadline arrives.
   reading, and starting the period would put the next real frame behind a
   frame that changed no pixels.
 - **The compositor owns the damage; the pacer owns only the clock.**
-  `Compositor::has_damage` answers whether a composite would recompose a
+  `Compositor::has_damage` answers whether the next present would send a
   pixel, so the two cannot disagree about whether a frame is owed. A clock
   that jumped behind the last frame admits rather than freezing the screen for
   the length of the jump.

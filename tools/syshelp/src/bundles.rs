@@ -42,6 +42,18 @@ pub fn quoted_string(value: &str) -> Option<&str> {
     (!text.contains(['"', '\\'])).then_some(text)
 }
 
+/// Whether `name` may be a bundle's `name`: a plain command word of ASCII
+/// letters, digits, `-` and `_`. It names the word a shell resolves and the
+/// bundle's own directory in its store, where a `/` or a `..` would plant the
+/// bundle outside it.
+#[must_use]
+pub fn is_command_word(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// The string `manifest` gives `key`, from the entries above its first line
 /// that is not one; `None` where the first of them naming `key` exactly does
 /// not give it a quoted string, or none does.
@@ -104,7 +116,7 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    use super::{manifest_entries, quoted_string, string_entry};
+    use super::{is_command_word, manifest_entries, quoted_string, string_entry};
 
     /// Blank and comment lines are skipped, entries are numbered by their
     /// line and trimmed, and a line that is not `key = value` says so.
@@ -130,6 +142,18 @@ mod tests {
         assert_eq!(quoted_string("\"\""), Some(""));
         for refused in ["ls", "\"ls", "ls\"", "\"", "\"l\"s\"", "\"l\\s\"", "'ls'"] {
             assert_eq!(quoted_string(refused), None, "{refused}");
+        }
+    }
+
+    /// A quoted manifest string admits `/` and `..`, and the payload walk
+    /// once planted a bundle directory named from one unchecked.
+    #[test]
+    fn a_bundle_name_is_a_plain_command_word() {
+        for name in ["ls", "wintersun", "sys-info", "a_b", "X9"] {
+            assert!(is_command_word(name), "{name}");
+        }
+        for name in ["", "..", "a/b", "../etc", ".hidden", "a b", "a.app", "é"] {
+            assert!(!is_command_word(name), "{name:?}");
         }
     }
 

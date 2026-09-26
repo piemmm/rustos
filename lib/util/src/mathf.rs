@@ -24,9 +24,8 @@
 //!
 //! Every function is total: it returns a finite answer for every finite input
 //! and a defined one for the degenerate cases (a negative square root, a
-//! vertical `atan2`, an out-of-domain `acos`, an angle past the 1.6 million
-//! radians the reduction is exact to, a `NaN`), so no caller has to guard
-//! against a `NaN` it cannot render.
+//! vertical `atan2`, an out-of-domain `acos`, an infinite or `NaN` angle), so
+//! no caller has to guard against a `NaN` it cannot render.
 
 use core::f64::consts::{FRAC_2_PI, FRAC_PI_2, FRAC_PI_4, LOG2_E, PI};
 use core::f64::math;
@@ -155,17 +154,52 @@ const PIO2_2T: f64 = 2.022_266_248_795_950_6e-21;
 const PIO2_3: f64 = 2.022_266_248_711_166_5e-21;
 const PIO2_3T: f64 = 8.478_427_660_368_9e-32;
 
-/// The largest angle the parts of `PI/2` still reduce exactly; a larger one
-/// (or an infinity) is taken at this bound, a `NaN` as no angle at all.
+/// The largest angle the parts of `PI/2` still reduce exactly; past it
+/// [`reduce_large`] takes over.
 const REDUCIBLE: f64 = 1_048_576.0 * FRAC_PI_2;
+
+/// The first 1216 bits of `2/PI` after the binary point, most significant
+/// first, behind a zero word standing for its integer part: as far as the
+/// largest double's reduction reaches.
+const TWO_OVER_PI: [u64; 20] = [
+    0,
+    0xa2f9_836e_4e44_1529,
+    0xfc27_57d1_f534_ddc0,
+    0xdb62_9599_3c43_9041,
+    0xfe51_63ab_debb_c561,
+    0xb724_6e3a_424d_d2e0,
+    0x0649_2eea_09d1_921c,
+    0xfe1d_eb1c_b129_a73e,
+    0xe882_35f5_2ebb_4484,
+    0xe99c_7026_b45f_7e41,
+    0x3991_d639_8353_39f4,
+    0x9c84_5f8b_bdf9_283b,
+    0x1ff8_97ff_de05_980f,
+    0xef2f_118b_5a0a_6d1f,
+    0x6d36_7ecf_27cb_09b7,
+    0x4f46_3f66_9e5f_ea2d,
+    0x7527_bac7_ebe5_f17b,
+    0x3d07_39f7_8a52_92ea,
+    0x6bfb_5fb1_1f8d_5d08,
+    0x5603_3046_fc7b_6bab,
+];
+
+/// `PI/2` in fixed point with 126 fraction bits, rounded to nearest.
+const PIO2_FIXED: u128 = 0x6487_ed51_10b4_611a_6263_3145_c06e_0e69;
+
+/// `2^-128`, the weight of a fixed-point remainder's lowest bit.
+const REMAINDER_ULP: f64 = f64::from_bits((1023 - 128) << 52);
+
+/// The low 64 bits of a `u128`.
+const LOW_WORD: u128 = (1 << 64) - 1;
 
 /// The biased exponent of `x`: its magnitude, counted in bits.
 #[allow(
     clippy::cast_possible_truncation,
-    reason = "an eleven-bit field, which an i32 holds exactly"
+    reason = "an eleven-bit field, which a u16 holds exactly"
 )]
-fn exponent(x: f64) -> i32 {
-    ((x.to_bits() >> 52) & 0x7ff) as i32
+fn exponent(x: f64) -> u16 {
+    ((x.to_bits() >> 52) & 0x7ff) as u16
 }
 
 /// `rest` less `turns` more parts of `PI/2`: the new remainder, the tail its
@@ -179,25 +213,27 @@ fn subtract_part(rest: f64, turns: f64, part: f64, part_tail: f64) -> (f64, f64,
 
 /// `x` less its nearest whole number of quarter turns, as a remainder within
 /// about `PI/4` of zero — carried as a head and the tail its rounding lost —
-/// and that number of turns modulo four.
+/// and that number of turns modulo four. An infinite or `NaN` angle has no
+/// direction and reduces as zero.
 ///
 /// fdlibm's `__rem_pio2` for moderate angles: Cody and Waite's subtraction of
 /// `PI/2` in parts, taking a further part wherever the last cancelled so many
 /// bits that too few are left, which near a multiple of `PI/2` is what keeps
 /// the tiny remainder accurate to its own last bit.
 fn reduce(x: f64) -> (f64, f64, u8) {
-    let x = if x.is_nan() {
-        0.0
-    } else {
-        clamp(x, -REDUCIBLE, REDUCIBLE)
-    };
+    if !x.is_finite() {
+        return (0.0, 0.0, 0);
+    }
+    if fabs(x) > REDUCIBLE {
+        return reduce_large(x);
+    }
     let turns = (x * FRAC_2_PI + TO_INTEGER) - TO_INTEGER;
     let first = x - turns * PIO2_1;
     let first_lost = turns * PIO2_1T;
     let (mut rest, mut lost, mut head) = (first, first_lost, first - first_lost);
-    if exponent(x) - exponent(head) > 16 {
+    if exponent(x).saturating_sub(exponent(head)) > 16 {
         (rest, lost, head) = subtract_part(rest, turns, PIO2_2, PIO2_2T);
-        if exponent(x) - exponent(head) > 49 {
+        if exponent(x).saturating_sub(exponent(head)) > 49 {
             (rest, lost, head) = subtract_part(rest, turns, PIO2_3, PIO2_3T);
         }
     }
@@ -210,6 +246,87 @@ fn reduce(x: f64) -> (f64, f64, u8) {
     )]
     let quadrant = ((turns as i64) & 3) as u8;
     (head, tail, quadrant)
+}
+
+/// [`reduce`] for a finite angle past [`REDUCIBLE`]: Payne and Hanek's, in
+/// integers, so it is exact whatever the angle's size.
+///
+/// With `x = mantissa * 2^scale`, a bit of `2/PI` weighing `2^-i` adds
+/// `mantissa * 2^(scale - i)` quarter turns, a multiple of four once
+/// `i <= scale - 2`. So four words of `2/PI` from the one holding bit
+/// `scale - 1` on give the quadrant and a 128-bit fraction of a turn, short of
+/// the true one by under 2^-138 — against a double's nearest approach to a
+/// quarter turn, about 2^-62.
+fn reduce_large(x: f64) -> (f64, f64, u8) {
+    let mantissa = u128::from((x.to_bits() & ((1 << 52) - 1)) | (1 << 52));
+    // How far into the table bit `scale - 1` of `2/PI` sits.
+    let offset = exponent(x).saturating_sub(1013);
+    let first = usize::from(offset / 64);
+    let shift = 126 - offset % 64;
+    let mut limbs = [0_u128; 4];
+    let mut carry = 0;
+    for (limb, &word) in limbs
+        .iter_mut()
+        .zip(TWO_OVER_PI[first..first + 4].iter().rev())
+    {
+        let sum = mantissa * u128::from(word) + carry;
+        *limb = sum & LOW_WORD;
+        carry = sum >> 64;
+    }
+    let (low, high) = (limbs[0] | limbs[1] << 64, limbs[2] | limbs[3] << 64);
+    let fraction = (low >> shift) | (high << (128 - shift));
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "only the two low bits, the quarter turns modulo four, are kept"
+    )]
+    let turns = ((high >> shift) as u8) & 3;
+    let past_half = fraction >> 127 == 1;
+    let (distance, turns) = if past_half {
+        (fraction.wrapping_neg(), turns + 1)
+    } else {
+        (fraction, turns)
+    };
+    let (product_high, product_low) = widening_mul(distance, PIO2_FIXED);
+    let (head, tail) = fixed_to_pair((product_high << 2) | (product_low >> 126));
+    let (head, tail) = if past_half {
+        (-head, -tail)
+    } else {
+        (head, tail)
+    };
+    if x.is_sign_negative() {
+        (-head, -tail, turns.wrapping_neg() & 3)
+    } else {
+        (head, tail, turns & 3)
+    }
+}
+
+/// The high and low halves of the 256-bit product `a * b`.
+fn widening_mul(a: u128, b: u128) -> (u128, u128) {
+    let (a_high, a_low) = (a >> 64, a & LOW_WORD);
+    let (b_high, b_low) = (b >> 64, b & LOW_WORD);
+    let (middle, middle_carry) = (a_high * b_low).overflowing_add(a_low * b_high);
+    let (low, low_carry) = (a_low * b_low).overflowing_add(middle << 64);
+    let high =
+        a_high * b_high + (middle >> 64) + (u128::from(middle_carry) << 64) + u128::from(low_carry);
+    (high, low)
+}
+
+/// `fixed * 2^-128` as the nearest double and the part of it that rounding
+/// dropped.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    reason = "the head is `fixed` rounded to the nearest double, an integer \
+              below 2^128 that converts back exactly; the two differ by under \
+              2^75, which the wrapping difference read as an `i128` holds \
+              exactly, and whose own rounding is far below the head's last bit"
+)]
+fn fixed_to_pair(fixed: u128) -> (f64, f64) {
+    let head = fixed as f64;
+    let tail = fixed.wrapping_sub(head as u128) as i128 as f64;
+    (head * REMAINDER_ULP, tail * REMAINDER_ULP)
 }
 
 // fdlibm's `__kernel_sin`: `sin(x) ~ x + S1 x^3 + … + S6 x^13` over
@@ -401,13 +518,15 @@ pub fn asin(x: f64) -> f64 {
     atan2(c, sqrt(1.0 - c * c))
 }
 
-/// Largest argument [`exp`] evaluates; above it the true result exceeds a
-/// double and the answer saturates.
-const EXP_MAX_ARG: f64 = 709.0;
+/// Largest argument [`exp`] evaluates, the greatest double below
+/// `ln(f64::MAX)`; above it the true result exceeds a double and the answer
+/// saturates.
+const EXP_MAX_ARG: f64 = 709.782_712_893_384;
 
-/// Smallest argument [`exp`] evaluates; below it the true result is under the
-/// smallest normal double and the answer is zero.
-const EXP_MIN_ARG: f64 = -708.0;
+/// Smallest argument [`exp`] evaluates, the least double above
+/// `ln(f64::MIN_POSITIVE)`; below it the true result is under the smallest
+/// normal double and the answer is zero.
+const EXP_MIN_ARG: f64 = -708.396_418_532_264_1;
 
 /// `ln(2)`'s leading bits, chosen with a zero tail so `k * LN_2_HI` is exact.
 const LN_2_HI: f64 = 6.931_471_803_691_238e-1;
@@ -437,10 +556,10 @@ const P5: f64 = 4.138_136_797_057_238_5e-8;
 /// everything it is multiplied into.
 #[must_use]
 pub fn exp(x: f64) -> f64 {
-    if x.is_nan() || x <= EXP_MIN_ARG {
+    if x.is_nan() || x < EXP_MIN_ARG {
         return 0.0;
     }
-    if x >= EXP_MAX_ARG {
+    if x > EXP_MAX_ARG {
         return f64::MAX;
     }
     let k = round(x * LOG2_E);
@@ -450,12 +569,19 @@ pub fn exp(x: f64) -> f64 {
     let rr = r * r;
     let c = r - rr * (P1 + rr * (P2 + rr * (P3 + rr * (P4 + rr * P5))));
     let scaled = 1.0 + ((r * c / (2.0 - c) - lo) + hi);
-    // `k` is bounded by the saturating domain above, so the biased exponent
-    // stays inside the normal range and the scale is exact.
-    let Ok(biased) = u64::try_from(round_i32(k) + 1023) else {
-        return 0.0;
-    };
-    scaled * f64::from_bits(biased << 52)
+    // `k` runs from -1022 to 1024 over the domain, and 2^1024 is past the
+    // largest power a double holds, so the scale is applied in two halves.
+    let k = round_i32(k);
+    scaled * power_of_two(k / 2) * power_of_two(k - k / 2)
+}
+
+/// `2^n`, exact for `n` in a double's normal exponents, `-1022..=1023`.
+#[allow(
+    clippy::cast_sign_loss,
+    reason = "the clamped exponent plus its bias is at least 1"
+)]
+fn power_of_two(n: i32) -> f64 {
+    f64::from_bits(((n.clamp(-1022, 1023) + 1023) as u64) << 52)
 }
 
 #[cfg(test)]

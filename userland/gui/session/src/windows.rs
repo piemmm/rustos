@@ -378,7 +378,9 @@ impl SessionWindows {
     /// between two frames is one announcement, of the last.
     ///
     /// One walk for all three, taking reporters rather than returning
-    /// collections, so an ordinary frame allocates nothing.
+    /// collections, so an ordinary frame allocates nothing; `visible`, which
+    /// may search the compositor's windows, is asked only about a window with
+    /// an announcement pending.
     pub fn report_on_screen(
         &mut self,
         visible: impl Fn(WindowId) -> bool,
@@ -399,14 +401,15 @@ impl SessionWindows {
                 }
                 _ => {}
             }
-            if record.first_frame != FirstFrame::Shown || !visible(record.wm) {
+            let Some((state, extent)) = record.sized else {
                 continue;
-            }
-            if let Some((state, extent)) = record.sized {
-                if record.presented_extent == Some(extent) {
-                    record.sized = None;
-                    sized(ipc, state, extent);
-                }
+            };
+            if record.first_frame == FirstFrame::Shown
+                && record.presented_extent == Some(extent)
+                && visible(record.wm)
+            {
+                record.sized = None;
+                sized(ipc, state, extent);
             }
         }
     }
@@ -2485,6 +2488,35 @@ mod tests {
             on_screen(&mut windows, visible).2,
             [(3, WindowSizeState::Restored, restored)]
         );
+    }
+
+    /// A frame with nothing to announce asks nothing of the compositor:
+    /// `visible` searches its windows, so asking it about every shown window
+    /// on every frame made each frame quadratic in the windows open.
+    #[test]
+    fn a_frame_with_nothing_pending_never_asks_which_windows_are_visible() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            for window in 1..=8 {
+                open_one_sized(host, window, RESIZABLE);
+            }
+        });
+        let asked = core::cell::Cell::new(0_u32);
+        let visible = |_| {
+            asked.set(asked.get() + 1);
+            true
+        };
+        assert_eq!(on_screen(&mut windows, visible).0.len(), 8);
+        assert_eq!(on_screen(&mut windows, visible), Default::default());
+        assert_eq!(asked.get(), 0, "no window had an announcement pending");
+
+        hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            host.window_size_state_changed(5, WindowSizeState::Fullscreen)
+                .expect("a resizable window may go fullscreen");
+        });
+        on_screen(&mut windows, visible);
+        assert_eq!(asked.get(), 0, "its frame at the new extent is not in yet");
     }
 
     /// A size state the user chooses from the title bar is announced exactly

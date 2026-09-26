@@ -28,8 +28,8 @@ use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
 use crate::client::{
-    damage_in, pointer_point, present_damage, EventDrain, EventError, EventSource, Parked, Repaint,
-    Target, WindowClient, WindowEvents, WindowTransport,
+    damage_in, pointer_point, present_damage, retained_damage, EventDrain, EventError, EventSource,
+    Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
 };
 use crate::desktop::Desktop;
 use crate::server::{
@@ -3390,6 +3390,84 @@ fn a_whole_round_presents_the_window_whatever_was_reported() {
     assert_eq!(
         present_damage(&SURFACE, Repaint::Whole, &damage),
         Some(DamageRect::full(&SURFACE))
+    );
+}
+
+fn rect(x: u32, y: u32, width_px: u32, height_px: u32) -> DamageRect {
+    DamageRect {
+        x,
+        y,
+        width_px,
+        height_px,
+    }
+}
+
+#[test]
+fn a_retained_present_resends_what_an_earlier_one_left_torn() {
+    let torn = Some(rect(0, 0, 1, 1));
+    assert_eq!(
+        retained_damage(&SURFACE, false, torn, rect(2, 1, 1, 1)),
+        Some(rect(0, 0, 3, 2))
+    );
+    assert_eq!(
+        retained_damage(&SURFACE, false, None, rect(2, 1, 1, 1)),
+        Some(rect(2, 1, 1, 1))
+    );
+}
+
+#[test]
+fn a_released_window_is_repainted_whole() {
+    assert_eq!(
+        retained_damage(&SURFACE, true, Some(rect(0, 0, 1, 1)), rect(2, 1, 1, 1)),
+        Some(DamageRect::full(&SURFACE))
+    );
+}
+
+/// A rectangle past the surface was once left torn as named when the frame
+/// codec refused it, and every later present, widened over it, was refused
+/// too until a resize: a window that ignored present errors froze silently.
+#[test]
+fn a_rectangle_past_the_surface_is_sent_clipped_so_it_cannot_poison_later_presents() {
+    let first = retained_damage(&SURFACE, false, None, rect(2, 1, 50, 50));
+    assert_eq!(first, Some(rect(2, 1, 2, 2)));
+    let next = retained_damage(&SURFACE, false, first, rect(0, 0, 1, 1));
+    assert_eq!(next, Some(rect(0, 0, 4, 3)));
+    let edges = [0, 1, 3, 4, 5, u32::MAX - 1, u32::MAX];
+    let mut named = Vec::new();
+    for x in edges {
+        for y in edges {
+            for width in edges {
+                named.extend(edges.map(|height| rect(x, y, width, height)));
+            }
+        }
+    }
+    for damage in named {
+        let torn = retained_damage(&SURFACE, false, None, damage);
+        for sent in [
+            torn,
+            retained_damage(&SURFACE, false, torn, rect(1, 1, 1, 1)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert_eq!(sent.validate_in(&SURFACE), Ok(()), "{damage:?}");
+        }
+    }
+}
+
+#[test]
+fn a_rectangle_wholly_outside_the_window_repaints_nothing() {
+    assert_eq!(
+        retained_damage(&SURFACE, false, None, rect(4, 0, 2, 2)),
+        None
+    );
+    assert_eq!(
+        retained_damage(&SURFACE, false, None, rect(0, 0, 0, 3)),
+        None
+    );
+    assert_eq!(
+        retained_damage(&SURFACE, false, None, rect(u32::MAX, 0, 8, 1)),
+        None
     );
 }
 

@@ -79,13 +79,25 @@ const FRAMES: [(u8, Zoom); 2] = [(0, Zoom::FURTHEST), (Ladder::MAX_STEP, Zoom::D
 /// [`ClientError::OutOfMemory`] if a frame buffer does not fit or the cache
 /// refused a tile a frame needed.
 pub fn reference() -> Result<u64, ClientError> {
+    let mut hasher = FastHash::with_seed(reference::SEED);
+    draw_frames(|target, renderer| {
+        fold_frame(&mut hasher, target.pixels(), renderer.grid().unmapped());
+        hasher.write_u64(u64::try_from(renderer.figures()).unwrap_or(u64::MAX));
+    })?;
+    // The ground the frames are drawn from, so a change to the art moves
+    // this number too — the coverage the art crate does not carry.
+    hasher.write_u64(art::REFERENCE_DIGEST);
+    Ok(hasher.finish())
+}
+
+/// Draw each of [`FRAMES`] in order, handing `each` the frame and the
+/// renderer that drew it.
+fn draw_frames(mut each: impl FnMut(&Surface, &Renderer)) -> Result<(), ClientError> {
     let mut world = reference::World::generate()?;
     let set = Set::new().map_err(|_| ClientError::Figure)?;
     let clips = set.clips().map_err(|_| ClientError::Figure)?;
     let mut cache = reference::cache(&reference::Unpressured);
     let mut renderer = Renderer::new();
-    let mut hasher = FastHash::with_seed(reference::SEED);
-
     for (step, zoom) in FRAMES {
         let ladder = Ladder::new(step);
         let view = Viewport::new(FRAME_WIDTH, FRAME_HEIGHT, ladder.render_scale())?;
@@ -104,13 +116,9 @@ pub fn reference() -> Result<u64, ClientError> {
             &mut cache,
             &tairix_parallel::SERIAL,
         )?;
-        fold_frame(&mut hasher, target.pixels(), renderer.grid().unmapped());
-        hasher.write_u64(u64::try_from(renderer.figures()).unwrap_or(u64::MAX));
+        each(&target, &renderer);
     }
-    // The ground the frames are drawn from, so a change to the art moves
-    // this number too — the coverage the art crate does not carry.
-    hasher.write_u64(art::REFERENCE_DIGEST);
-    Ok(hasher.finish())
+    Ok(())
 }
 
 /// Fold a whole frame's pixels, and how much of it was ground the client
