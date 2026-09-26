@@ -24,6 +24,5 @@ purpose = "Walk a procedurally generated winter world"
 author = "The TAIRiX Project"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_FS_ACCESS"]
 library = "Games"
-# This bundle's own icon in its Resources/, authored as a vector so one file
-# serves every slot and every UI scale exactly.
-library-icon = "wintersun.svg"
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "wintersun.png"

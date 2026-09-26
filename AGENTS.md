@@ -1187,18 +1187,20 @@ an update to this section.
   desktop draws it in, so downscaling — never upscaling — is what a slot
   needs. A raster master is a legitimate canonical source *only* for that
   class, and never for chrome.
-  - **Every app ships its own icon, and SVG is the preferred form for it.**
+  - **Every app ships its own icon, authored as a PNG raster master first.**
     A command-line or graphical application's own icon is **mandatory**: each
     bundle carries one icon asset inside its own `Resources/`, named by its
     signed manifest, so the taskbar, launcher, desktop, and file manager draw
-    that app rather than the one generic application picture. Author it as SVG
-    wherever the artwork can be expressed in the supported subset — one vector
-    file then serves every slot and every UI scale exactly — and as a raster
-    master (above) only where the app's identity is a rendered picture. Either
-    way the build refuses a declared icon the desktop could not draw (absent,
-    over-long, undecodable, a non-square or undersized raster master, or one
-    that draws nothing), so a broken icon is a build failure, never a silent
-    fallback glyph (`plans/APPS.md` §14, `plans/ICONS.md`).
+    that app rather than the one generic application picture. An app's icon is
+    illustrative artwork: author it as a raster master (above), a lit, shaded
+    picture of what the program does, so its function reads at a glance. SVG
+    remains a supported form, and the loader accepts it on the same terms, but
+    the supported subset draws no soft shading, so a vector app icon reads as a
+    flatter picture beside the rest of the set. Either way the build refuses a
+    declared icon the desktop could not draw (absent, over-long, undecodable,
+    a non-square, undersized, or untrimmed raster master, or one that draws
+    nothing), so a broken icon is a build failure, never a silent fallback
+    glyph (`plans/APPS.md` §14, `plans/ICONS.md`).
   - **The built-in vector glyph is mandatory for every icon, always.** An
     icon that exists only as a raster asset is forbidden: each kind carries a
     first-party built-in glyph, so resolution is total — raster artwork if

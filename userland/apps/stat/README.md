@@ -78,4 +78,4 @@ stat [-Lft] [-c FORMAT | --printf=FORMAT] [--] file...
 * `src/run.rs` — the freestanding `Run` binary (host stub elsewhere).
 * `Help/<locale>/stat.md` — the bundled help documents (thirteen locales),
   the single help source (`plans/APPS.md` §6.1).
-* `Resources/stat.svg` — the bundle's own icon master (`plans/ICONS.md`).
+* `Resources/stat.png` — the bundle's own icon master (`plans/ICONS.md`).

@@ -1020,9 +1020,9 @@ fn host_fonts(ctx: &Context) -> Result<HostFonts, String> {
 
 /// Verify one icon master is artwork the desktop will actually draw.
 ///
-/// `label` names the artefact in the build error. An icon master is either
-/// **vector** artwork (SVG — the preferred form, since it is resolution
-/// independent) or a high-resolution **raster** master (PNG). Which one it is
+/// `label` names the artefact in the build error. An icon master is either a
+/// high-resolution **raster** master (PNG — the form an app's own icon is
+/// authored in) or **vector** artwork (SVG). Which one it is
 /// is decided from the bytes exactly as the sandboxed rasteriser decides it at
 /// runtime — a PNG signature, else the supported SVG subset — never from the
 /// file name, so the build accepts precisely what the desktop would draw.
@@ -1058,28 +1058,28 @@ fn verify_icon_master(
     }
 }
 
+/// Alpha at or below which a master's pixel is padding rather than drawing.
+const PADDING_ALPHA: u8 = 8;
+
+/// Pixels a trimmed master may lose to resampling at each edge of its artwork.
+const EDGE_SLACK: usize = 1;
+
 /// Verify a raster icon master: it must decode through [`tairix_image`] under
 /// the same limits the sandboxed rasteriser applies, be square (every slot
 /// draws icons in a square), be at least [`tairix_icon::MIN_ARTWORK_SIDE`] on
 /// a side so a slot only ever downscales a master rather than blurring it up,
-/// and carry at least one pixel that is not fully transparent.
+/// draw something above [`PADDING_ALPHA`], and be trimmed: its drawn content
+/// reaches within [`EDGE_SLACK`] of both edges on its longer axis and sits
+/// centred on the shorter one. A slot reserves its own clearance, so a margin
+/// baked into a master is spent twice and the icon reads smaller than its
+/// neighbours.
 ///
 /// # Errors
 ///
 /// Returns an actionable build-error message naming `label` and the geometry
 /// or decode problem.
 fn verify_raster_master(label: &str, bytes: &[u8]) -> Result<(), String> {
-    // A raster icon master is always PNG (`plans/ICONS.md`), never
-    // progressive JPEG, so the progressive-coefficient-store bound is
-    // never consulted here.
-    let limits = DecodeLimits::new(
-        tairix_icon::MAX_ARTWORK_SIDE,
-        tairix_icon::MAX_ARTWORK_SIDE,
-        u64::from(tairix_icon::MAX_ARTWORK_SIDE) * u64::from(tairix_icon::MAX_ARTWORK_SIDE),
-        0,
-    );
-    let image = tairix_image::decode(bytes, &limits)
-        .map_err(|e| format!("image: {label} is not artwork the desktop can decode: {e:?}"))?;
+    let image = decode_raster_master(label, bytes)?;
     let (width, height) = (image.width(), image.height());
     if width != height {
         return Err(format!(
@@ -1093,19 +1093,68 @@ fn verify_raster_master(label: &str, bytes: &[u8]) -> Result<(), String> {
             tairix_icon::MIN_ARTWORK_SIDE
         ));
     }
-    if image
-        .pixels()
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .all(|px| px[3] == 0)
-    {
+    let side = usize::try_from(width)
+        .map_err(|_| format!("image: {label} is {width} pixels wide, beyond this host's usize"))?;
+    let Some([left, top, right, bottom]) = drawn_bounds(side, image.pixels()) else {
         return Err(format!(
-            "image: {label} decodes but every pixel is fully transparent; an \
-             icon master must draw something"
+            "image: {label} decodes but every pixel is fully transparent or \
+             imperceptibly faint; an icon master must draw something"
+        ));
+    };
+    let (drawn_w, drawn_h) = (right - left, bottom - top);
+    let (long, short) = if drawn_w >= drawn_h {
+        ((left, side - right), (top, side - bottom))
+    } else {
+        ((top, side - bottom), (left, side - right))
+    };
+    if long.0 > EDGE_SLACK || long.1 > EDGE_SLACK {
+        return Err(format!(
+            "image: {label} carries a transparent margin: its artwork spans \
+             {drawn_w}x{drawn_h} of the {side}-pixel square; trim the master to \
+             its artwork so it reads at the size of its neighbours"
+        ));
+    }
+    if short.0.abs_diff(short.1) > 2 * EDGE_SLACK {
+        return Err(format!(
+            "image: {label} is not centred: its artwork leaves {} and {} pixels \
+             either side on its shorter axis",
+            short.0, short.1
         ));
     }
     Ok(())
+}
+
+/// Decode a raster icon master under the limits the sandboxed rasteriser
+/// applies.
+fn decode_raster_master(label: &str, bytes: &[u8]) -> Result<tairix_image::RasterImage, String> {
+    // A raster icon master is always PNG (`plans/ICONS.md`), never
+    // progressive JPEG, so the progressive-coefficient-store bound is
+    // never consulted here.
+    let limits = DecodeLimits::new(
+        tairix_icon::MAX_ARTWORK_SIDE,
+        tairix_icon::MAX_ARTWORK_SIDE,
+        u64::from(tairix_icon::MAX_ARTWORK_SIDE) * u64::from(tairix_icon::MAX_ARTWORK_SIDE),
+        0,
+    );
+    tairix_image::decode(bytes, &limits)
+        .map_err(|e| format!("image: {label} is not artwork the desktop can decode: {e:?}"))
+}
+
+/// The smallest `[left, top, right, bottom)` rectangle holding every pixel of
+/// a `side`-wide RGBA8 image drawn above [`PADDING_ALPHA`], or `None` when
+/// nothing is.
+fn drawn_bounds(side: usize, pixels: &[u8]) -> Option<[usize; 4]> {
+    let mut bounds: Option<[usize; 4]> = None;
+    for (y, row) in pixels.chunks_exact(side.checked_mul(4)?).enumerate() {
+        for (x, px) in row.as_chunks::<4>().0.iter().enumerate() {
+            if px[3] > PADDING_ALPHA {
+                bounds = Some(bounds.map_or([x, y, x + 1, y + 1], |[l, t, r, b]| {
+                    [l.min(x), t.min(y), r.max(x + 1), b.max(y + 1)]
+                }));
+            }
+        }
+    }
+    bounds
 }
 
 /// Verify a vector icon master: it must decode through the desktop's own SVG
@@ -1161,6 +1210,30 @@ mod tests {
 
     /// A minimal but wholly valid `width`×`height` 8-bit greyscale PNG,
     /// opaque white, or grey+alpha at `alpha` when one is given.
+    fn png(width: u32, height: u32, alpha: Option<u8>) -> Vec<u8> {
+        let sample: &[u8] = match alpha {
+            Some(alpha) => &[0xFF, alpha],
+            None => &[0xFF],
+        };
+        let pixels = width as usize * height as usize;
+        encode_png(width, height, alpha.is_some(), &sample.repeat(pixels))
+    }
+
+    /// A white `side`-square grey+alpha master drawn opaque inside the
+    /// `[left, top, right, bottom)` rectangle and transparent outside it.
+    fn framed_png(side: u32, [left, top, right, bottom]: [u32; 4]) -> Vec<u8> {
+        let mut samples = Vec::with_capacity(side as usize * side as usize * 2);
+        for y in 0..side {
+            for x in 0..side {
+                let inside = (left..right).contains(&x) && (top..bottom).contains(&y);
+                samples.extend_from_slice(&[0xFF, if inside { 0xFF } else { 0 }]);
+            }
+        }
+        encode_png(side, side, true, &samples)
+    }
+
+    /// Wrap row-major 8-bit `samples` — one a pixel, or grey+alpha pairs when
+    /// `with_alpha` — as a PNG.
     ///
     /// Built here rather than committed as a fixture so a test can ask for
     /// exactly the geometry — or the transparency — it wants to be refused.
@@ -1168,7 +1241,7 @@ mod tests {
     /// blocks, which is legal and keeps this to arithmetic the reader can
     /// check by eye; greyscale keeps a master-sized image comfortably inside
     /// the artwork byte bound without needing a compressor here.
-    fn png(width: u32, height: u32, alpha: Option<u8>) -> Vec<u8> {
+    fn encode_png(width: u32, height: u32, with_alpha: bool, samples: &[u8]) -> Vec<u8> {
         fn crc32(bytes: &[u8]) -> u32 {
             let mut crc = 0xFFFF_FFFFu32;
             for byte in bytes {
@@ -1189,16 +1262,13 @@ mod tests {
             out.extend_from_slice(&crc32(&crc_over).to_be_bytes());
         }
 
-        // One white sample per pixel, followed by its alpha sample when the
-        // caller asked for an alpha channel; a row is the filter byte plus
-        // `width` of those samples, and the raw image is `height` such rows.
-        let sample: &[u8] = match alpha {
-            Some(alpha) => &[0xFF, alpha],
-            None => &[0xFF],
-        };
-        let mut row = vec![0u8];
-        row.extend_from_slice(&sample.repeat(width as usize));
-        let raw = row.repeat(height as usize);
+        // Each scanline is the filter byte (none) followed by its samples.
+        let stride = width as usize * if with_alpha { 2 } else { 1 };
+        let mut raw = Vec::with_capacity((stride + 1) * height as usize);
+        for row in samples.chunks_exact(stride) {
+            raw.push(0);
+            raw.extend_from_slice(row);
+        }
 
         // RFC 1950 envelope over RFC 1951 stored blocks (each at most the
         // 16-bit block length the format allows).
@@ -1226,7 +1296,7 @@ mod tests {
 
         // Colour type 4 (grey+alpha) when an alpha channel was asked for,
         // else 0 (grey).
-        let colour_type = if alpha.is_some() { 4 } else { 0 };
+        let colour_type = if with_alpha { 4 } else { 0 };
         let mut ihdr = Vec::new();
         ihdr.extend_from_slice(&width.to_be_bytes());
         ihdr.extend_from_slice(&height.to_be_bytes());
@@ -1268,7 +1338,7 @@ mod tests {
 
     /// A vector master is accepted, and needs no pixel side: SVG is
     /// resolution independent, so the raster master's geometry rules do not
-    /// apply to it. This is the preferred form for a new app's icon.
+    /// apply to it. It stays a supported form for a bundle's icon.
     #[test]
     fn a_square_vector_master_passes() {
         let master: &[u8] =
@@ -1385,6 +1455,76 @@ mod tests {
         );
     }
 
+    /// A master whose artwork sits inside a transparent border is refused: a
+    /// slot adds its own clearance, so the icon would read smaller than every
+    /// neighbour. This is the margin the terminal master used to carry.
+    #[test]
+    fn a_master_with_a_transparent_margin_is_refused() {
+        let side = tairix_icon::MIN_ARTWORK_SIDE;
+        let err = verify_icon_master(
+            "x.app icon",
+            &framed_png(side, [21, 33, side - 10, side - 34]),
+            &mut NoFonts,
+        )
+        .expect_err("an untrimmed master must be refused");
+        assert!(err.contains("transparent margin"), "{err}");
+        assert!(
+            err.contains(&format!("{}x{}", side - 31, side - 67)),
+            "{err}"
+        );
+    }
+
+    /// Wide artwork spanning the square's width is trimmed when it is centred
+    /// top to bottom: the square is padded only as far as its aspect needs.
+    #[test]
+    fn a_wide_master_centred_on_its_short_axis_passes() {
+        let side = tairix_icon::MIN_ARTWORK_SIDE;
+        verify_icon_master(
+            "x.app icon",
+            &framed_png(side, [0, 40, side, side - 40]),
+            &mut NoFonts,
+        )
+        .expect("a trimmed wide master");
+    }
+
+    /// A pixel lost to resampling at each edge still counts as trimmed.
+    #[test]
+    fn a_pixel_of_resampling_slack_at_each_edge_passes() {
+        let side = tairix_icon::MIN_ARTWORK_SIDE;
+        verify_icon_master(
+            "x.app icon",
+            &framed_png(side, [20, 1, side - 21, side - 1]),
+            &mut NoFonts,
+        )
+        .expect("a master within the resampling slack");
+    }
+
+    /// Artwork spanning the width but pushed to the top is refused: the
+    /// padding belongs either side of it, not all below.
+    #[test]
+    fn a_master_off_centre_on_its_short_axis_is_refused() {
+        let side = tairix_icon::MIN_ARTWORK_SIDE;
+        let err = verify_icon_master(
+            "x.app icon",
+            &framed_png(side, [0, 0, side, side - 80]),
+            &mut NoFonts,
+        )
+        .expect_err("an off-centre master must be refused");
+        assert!(err.contains("not centred"), "{err}");
+        assert!(err.contains("0 and 80"), "{err}");
+    }
+
+    /// A master drawn only in imperceptibly faint pixels draws nothing a user
+    /// could see, so it is refused like a transparent one.
+    #[test]
+    fn a_master_drawn_only_below_the_padding_alpha_is_refused() {
+        let side = tairix_icon::MIN_ARTWORK_SIDE;
+        let faint = png(side, side, Some(super::PADDING_ALPHA));
+        let err = verify_icon_master("x.app icon", &faint, &mut NoFonts)
+            .expect_err("a master of padding alone must be refused");
+        assert!(err.contains("imperceptibly faint"), "{err}");
+    }
+
     /// Every icon master the image ships — the desktop's class artwork and
     /// every bundle's own icon alike — is artwork the desktop will really
     /// draw. Discovered from disk, so a new asset is judged the moment it is
@@ -1448,25 +1588,14 @@ mod tests {
         );
     }
 
-    /// How many of `icon`'s layers are painted flat in `colour`.
-    fn layers_painted(icon: &tairix_icon::VectorIcon, colour: tairix_raster::Color) -> usize {
-        let mut painted = 0;
-        tairix_raster::for_each_fill(icon.nodes(), &mut |layer| {
-            if layer.paint == tairix_raster::Paint::Solid(colour) {
-                painted += 1;
-            }
-        });
-        painted
-    }
-
-    /// The vector master a bundle ships in its own `Resources/`, decoded
-    /// exactly as the desktop decodes it.
+    /// The raster master a bundle ships in its own `Resources/`, decoded
+    /// exactly as the image build decodes it.
     ///
     /// `crate_dir` is the bundle's crate directory relative to the
     /// workspace root, because a bundle's crate is not always a child of
     /// `userland/apps` — a game's is under the `userland/games/` leaf
     /// subtree.
-    fn shipped_bundle_vector(crate_dir: &str, file: &str) -> tairix_icon::VectorIcon {
+    fn shipped_bundle_raster(crate_dir: &str, file: &str) -> tairix_image::RasterImage {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(std::path::Path::parent)
@@ -1475,110 +1604,64 @@ mod tests {
             .join("Resources")
             .join(file);
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path:?} should ship: {e}"));
-        let image = tairix_svg::decode(&bytes, tairix_svg::Viewport::Square, &mut NoFonts)
-            .unwrap_or_else(|e| panic!("{file} should decode: {e:?}"));
-        tairix_icon::VectorIcon::from_svg(&image)
+        super::decode_raster_master(file, &bytes).unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// `wintersun.svg` is authored at a weight that reads on the dark
-    /// theme's raised surface, which is what the icon bar draws a slot on.
+    /// Assert that most of `file`'s solidly drawn area stands WCAG 2.1's
+    /// non-text 3:1 clear of the dark theme's raised surface, which is what
+    /// the icon bar draws a slot on, and that the picture covers most of its
+    /// square.
     ///
-    /// The same trap the sapper icon fell into applies here and harder: a
-    /// winter scene's natural palette is pale blues on a dark ground, and
-    /// an icon drawn in the *scene's* own mid tones would disappear into
-    /// the bar while passing every "decodes and draws something" check.
-    /// So the authored weights are pinned: a clearly lit sky over the
-    /// tile, a warm disc that separates from it, snow well above the sky,
-    /// and shadowed faces a clear step below it rather than near-black.
+    /// Measured as a share of the picture rather than its mean colour: a
+    /// master drawn in pale and dark parts has a mid-grey mean yet stands out,
+    /// where one painted wholly in the bar's own tones does not.
+    fn assert_reads_on_the_dark_icon_bar(crate_dir: &str, file: &str) {
+        const SOLID_ALPHA: u8 = 0xC0;
+        const NON_TEXT_CONTRAST: f64 = 3.0;
+        let image = shipped_bundle_raster(crate_dir, file);
+        let bar = tairix_theme::Theme::dark().palette().surface_raised;
+        let bar = tairix_raster::Color::rgb(bar.r, bar.g, bar.b);
+        let pixels = image.pixels().as_chunks::<4>().0;
+        let (mut solid, mut clear) = (0u32, 0u32);
+        for px in pixels.iter().filter(|px| px[3] >= SOLID_ALPHA) {
+            solid += 1;
+            let tone = tairix_raster::Color::rgb(px[0], px[1], px[2]);
+            if super::super::artsheet::contrast(tone, bar) >= NON_TEXT_CONTRAST {
+                clear += 1;
+            }
+        }
+        let total = u32::try_from(pixels.len()).expect("a master's pixel count fits u32");
+        assert!(
+            clear * 2 > solid,
+            "only {clear} of {file}'s {solid} solidly drawn pixels stand clear of the dark bar"
+        );
+        assert!(
+            solid * 2 > total,
+            "{file} draws only {solid} of its {total} pixels solidly"
+        );
+    }
+
+    /// `wintersun.png` reads on the dark icon bar.
+    ///
+    /// The trap the sapper icon fell into applies here and harder: a winter
+    /// scene's natural palette is pale blues on a dark ground, and a master
+    /// painted in the scene's own mid tones would sink into the bar while
+    /// passing every "decodes and draws something" check.
     #[test]
     fn the_wintersun_icon_is_authored_to_read_on_the_dark_icon_bar() {
-        let tile = tairix_raster::Color::rgb(0x2B, 0x3F, 0x6B);
-        let sky = tairix_raster::Color::rgb(0x4A, 0x5F, 0x91);
-        let disc = tairix_raster::Color::rgb(0xFF, 0xD9, 0xA0);
-        let core = tairix_raster::Color::rgb(0xFF, 0xF0, 0xD2);
-        let far = tairix_raster::Color::rgb(0x6E, 0x82, 0xAE);
-        let snow = tairix_raster::Color::rgb(0xE8, 0xF1, 0xFA);
-        let shade = tairix_raster::Color::rgb(0x9F, 0xB6, 0xD6);
-        let cast = tairix_raster::Color::rgb(0x7F, 0x94, 0xBC);
-        let fir = tairix_raster::Color::rgb(0x1E, 0x3A, 0x34);
-        let trunk = tairix_raster::Color::rgb(0x16, 0x2B, 0x27);
-
-        let icon = shipped_bundle_vector("userland/games/wintersun/app", "wintersun.svg");
-        assert_eq!(tairix_raster::layer_count(icon.nodes()), 12);
-        for ink in [tile, sky, disc, core, far, snow, cast, trunk] {
-            assert_eq!(layers_painted(&icon, ink), 1, "one layer per authored tone");
-        }
-        // The two shadowed flanks of the near ridge, and the two firs.
-        assert_eq!(layers_painted(&icon, shade), 2);
-        assert_eq!(layers_painted(&icon, fir), 2);
-
-        // The sun must separate from the sky it sits in, or the icon is a
-        // blue square with a slightly different blue square on it.
-        let luminance = |c: tairix_raster::Color| {
-            (u32::from(c.r) * 30 + u32::from(c.g) * 59 + u32::from(c.b) * 11) / 100
-        };
-        assert!(
-            luminance(core) > luminance(sky) + 80,
-            "the sun does not separate from the sky"
-        );
-        assert!(
-            luminance(snow) > luminance(tile) + 80,
-            "the lit snow does not separate from the tile"
-        );
-
-        // A silhouette that decoded but drew almost nothing would still
-        // pass a "not empty" check, so pin the slot it actually covers.
-        let image = icon.rasterise(64).expect("renderable");
-        let drawn = image.pixels().iter().filter(|pixel| pixel.a > 0).count();
-        assert!(
-            drawn > 64 * 64 / 2,
-            "wintersun covers only {drawn} of {} pixels",
-            64 * 64
-        );
+        assert_reads_on_the_dark_icon_bar("userland/games/wintersun/app", "wintersun.png");
     }
 
-    /// `sapper.svg` is authored at a weight that reads on the dark theme's
-    /// raised surface, which is what the icon bar draws a slot on.
+    /// `sapper.png` reads on the dark icon bar.
     ///
     /// Its first palette was navy on near-black throughout — the tile at
     /// 1.33:1 against that ground — so the icon disappeared into the bar while
     /// passing every "decodes and draws something" check
-    /// ([`verify_icon_master`] included). Nothing about a silhouette says
-    /// whether it is *visible*, so the authored weights are pinned here: the
-    /// tile and its top band in the mid-bright blue the folder artwork uses,
-    /// the gutters one clear step darker rather than near-black, a light
-    /// uncovered cell, and the dark mine inside its lit rim. Re-darkening any
-    /// of them stops being a quiet edit.
+    /// ([`verify_icon_master`] included). Re-darkening it stops being a quiet
+    /// edit.
     #[test]
     fn the_sapper_icon_is_authored_to_read_on_the_dark_icon_bar() {
-        let tile = tairix_raster::Color::rgb(0x64, 0x8B, 0xD8);
-        let top = tairix_raster::Color::rgb(0x82, 0xA2, 0xE3);
-        let gutter = tairix_raster::Color::rgb(0x38, 0x54, 0x94);
-        let cell = tairix_raster::Color::rgb(0x96, 0xB8, 0xE3);
-        let dark = tairix_raster::Color::rgb(0x12, 0x1B, 0x30);
-        let rim = tairix_raster::Color::rgb(0xD2, 0xE7, 0xF9);
-        let gleam = tairix_raster::Color::rgb(0xF3, 0xF8, 0xFC);
-        let pennant = tairix_raster::Color::rgb(0xE5, 0x48, 0x4D);
-
-        let icon = shipped_bundle_vector("userland/apps/sapper", "sapper.svg");
-        assert_eq!(tairix_raster::layer_count(icon.nodes()), 16);
-        for ink in [tile, top, cell, rim, gleam, pennant] {
-            assert_eq!(layers_painted(&icon, ink), 1, "one layer per authored tone");
-        }
-        assert_eq!(layers_painted(&icon, gutter), 2, "two grid gutters");
-        // Four spikes, the mine disc, the pennant's base, its pole, and the
-        // dark edge behind the flag, which the red needs against this tile.
-        assert_eq!(layers_painted(&icon, dark), 8);
-
-        // A silhouette that decoded but drew almost nothing would still pass a
-        // "not empty" check, so pin the slot it actually covers.
-        let image = icon.rasterise(64).expect("renderable");
-        let drawn = image.pixels().iter().filter(|pixel| pixel.a > 0).count();
-        assert!(
-            drawn > 64 * 64 / 2,
-            "sapper covers only {drawn} of {} pixels",
-            64 * 64
-        );
+        assert_reads_on_the_dark_icon_bar("userland/apps/sapper", "sapper.png");
     }
 
     /// Every wallpaper master the image ships is a photograph the desktop's

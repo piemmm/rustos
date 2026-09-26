@@ -44,6 +44,5 @@ associations = ["image/jpeg", "image/png", "image/svg+xml", "image/gif", "image/
 # A windowed, user-facing application: list it in the desktop's program
 # library beside the other graphical tools (plans/NEW-TASKBAR.md T3).
 library = "Graphics"
-# This bundle's own icon in its Resources/, authored as SVG so one file serves
-# every slot and every UI scale exactly (plans/ICONS.md).
-library-icon = "view.svg"
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "view.png"

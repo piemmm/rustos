@@ -821,7 +821,7 @@ fn desktop(theme: &Theme) -> Color {
 }
 
 /// The WCAG contrast ratio between two opaque tones.
-fn contrast(a: Color, b: Color) -> f64 {
+pub(super) fn contrast(a: Color, b: Color) -> f64 {
     let (x, y) = (luminance(a), luminance(b));
     let (high, low) = if x > y { (x, y) } else { (y, x) };
     (high + 0.05) / (low + 0.05)

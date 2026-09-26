@@ -59,4 +59,4 @@ link [--] existing new
 * `src/run.rs` — the freestanding `Run` binary (host stub elsewhere).
 * `Help/<locale>/link.md` — the bundled help documents (thirteen locales),
   the single help source (`plans/APPS.md` §6.1).
-* `Resources/link.svg` — the bundle's own icon master (`plans/ICONS.md`).
+* `Resources/link.png` — the bundle's own icon master (`plans/ICONS.md`).

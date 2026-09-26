@@ -39,8 +39,7 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SHM", "CAP_PROC_SPAWN
 # icon-bar slot from then on, so a library row could only ever spawn a second,
 # ordinary copy alongside it. It is reached from that slot — the same reasoning
 # that keeps System Settings out of the library (plans/NEW-TASKBAR.md §3).
-# This bundle's own vector icon master in its Resources/, authored in the
-# desktop's SVG subset over a 256x256 design box (plans/ICONS.md). Still
-# declared with no `library` folder above: the key names the *bundle's* icon,
-# which is what the icon-bar slot draws, not a library row's alone.
-library-icon = "files.svg"
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+# Still declared with no `library` folder above: the key names the *bundle's*
+# icon, which is what the icon-bar slot draws, not a library row's alone.
+library-icon = "files.png"

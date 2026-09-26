@@ -825,9 +825,9 @@ plan's own text is corrected when it is next touched, or sooner.
   SMARTRAM, IMPLEMENT-OUTSTANDING-ARXFS, SPAWN (SP10 and SP11 headings), PTY
   (PTY5's D20 note), IO (IO5 unmarked), CPUFREQ (its verified metal run filed
   under "Not done").
-- "Done" beside a remaining item: FONT-SERVICE (§3.2), ICONS (§10–§12), FILELOCK
-  (its QEMU vertical), FIX-RANDOMNESS (the D111 statistic), NEW-SERVICEMANAGER
-  (SVC-3's store scan).
+- "Done" beside a remaining item: FONT-SERVICE (§3.2), FILELOCK (its QEMU
+  vertical), FIX-RANDOMNESS (the D111 statistic), NEW-SERVICEMANAGER (SVC-3's
+  store scan).
 - A stale blocker or cross-plan fact: ARXFS-FEC (FEC0 waits on stage 17, which
   is done), ARXFS-MAINTENANCE (WB4 is done), DRIVES (its open-P4 note), FIX-PANICS (the D128 and D79 cites), STRESSTEST
   (ST6's `ramzip` caveat), FIX-HARDWARE-FEATURES (the FIQ probe "depends on
@@ -843,6 +843,9 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-09-26 — §10: an app's own icon is a raster master first; SVG stays
+  accepted.** The vector subset draws no soft shading, so the flat SVG tiles
+  read as a poorer family beside the rendered pictures.
 - **2026-09-17 — §13: every planning file opens with a progress ledger.**
   Status sat wherever each plan put it, so what was built could not be seen or
   cited by id; there is no sweep, and a plan adopts the ledger with its next
@@ -871,8 +874,8 @@ lives in the charter.
   stores and a fixed lookup prefix.** It keeps the coreutils surface reviewable
   and makes "a system command cannot be shadowed" structural rather than a
   `PATH` convention.
-- **2026-08-03 — §10: every app ships its own icon, SVG preferred.** Fifty
-  programs drew one generic picture, and §10 read as requiring PNG.
+- **2026-08-03 — §10: every app ships its own icon.** Fifty programs drew one
+  generic picture.
 - **2026-08-02 — §10: raster masters are canonical for illustrative icons, and
   the built-in glyph is mandatory.** Application, file and device icons arrived
   as pictures with no vector form, and no missing file may blank a surface.

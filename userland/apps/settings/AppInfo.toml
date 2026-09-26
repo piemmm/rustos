@@ -44,8 +44,8 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
 # A windowed, user-facing application: list it in the desktop's program
 # library beside the other system tools.
 library = "SystemTools"
-# This bundle's own icon master in its Resources/, authored as SVG.
-library-icon = "settings.svg"
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "settings.png"
 # No icon-bar slot of its own: Settings is part of the desktop rather than an
 # application the user manages. It is opened from the system menu, the program
 # library, or by name, and closing its window ends it — so there is nothing

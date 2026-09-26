@@ -53,4 +53,4 @@ unlink [--] file
 * `src/run.rs` — the freestanding `Run` binary (host stub elsewhere).
 * `Help/<locale>/unlink.md` — the bundled help documents (thirteen
   locales), the single help source (`plans/APPS.md` §6.1).
-* `Resources/unlink.svg` — the bundle's own icon master (`plans/ICONS.md`).
+* `Resources/unlink.png` — the bundle's own icon master (`plans/ICONS.md`).

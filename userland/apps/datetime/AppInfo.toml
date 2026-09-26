@@ -30,5 +30,5 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_TIME_SET"]
 # somebody who can authenticate an account that may set the clock. The icon
 # below is independent of that — it is the bundle's own identity, drawn
 # wherever the bundle appears.
-# This bundle's own icon master in its Resources/, authored as SVG.
-library-icon = "datetime.svg"
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "datetime.png"

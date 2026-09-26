@@ -17,10 +17,24 @@ Read first: `AGENTS.md` §10 (the three-tier asset rule), §16.2
 (`/System/Graphics`), §19.5 (parser sandboxing), §24.4 (fixed validation
 bounds), and `plans/GUI-CONTROLS-DESIGN.md`.
 
-## Status
+## Ledger
 
-`done` — I1–I7 complete. Every stage's section below records what it now
-guarantees.
+| Id | Item | Status |
+|---|---|---|
+| I1 | The icon vocabulary and the artwork layer (`lib/icon`) | done |
+| I2 | The content-type registry (`lib/browse`) | done |
+| I3 | Build-time discovery and planting | done |
+| I4 | The taskbar and the program library | done |
+| I5 | The file manager | done |
+| I6 | Storage media are real, not guessed | done |
+| I7 | Every app carries its own icon | done |
+| I8 | The pressure vertical photographs the band it asserts over | done |
+| I9 | No surface rasterises its glyphs per frame | planned |
+| I10 | One decode path owns the SVG class assets | blocked: which path owns them is undecided |
+| I11 | An SVG element the decoder cannot honour falls back rather than being skipped | blocked: refusing per element class or globally is undecided |
+| I12 | Raster masters exceed every slot the desktop can draw them in | blocked: the master side against decode cost and the byte bound is undecided |
+
+Each item's section below records what it guarantees or what remains.
 
 ## 0. The binding decisions
 
@@ -59,8 +73,8 @@ guarantees.
   manifest's `library-icon` is independent of its `library` listing: every
   command app declares an icon and none of them is listed in the program
   library. The two were coupled once; the coupling is gone. Declaring one is
-  **mandatory** for every launchable app, SVG by preference — that rule is
-  `plans/APPS.md` §14 and this plan does not restate it.
+  **mandatory** for every launchable app, a raster master by preference — that
+  rule is `plans/APPS.md` §14 and this plan does not restate it.
 - **One vocabulary.** `IconKind` (`lib/icon`) is the single closed icon
   vocabulary. A file-class kind and a chrome glyph are the same kind of
   thing to every draw site; the difference is only which tier resolves.
@@ -132,8 +146,8 @@ illustrative file-class and disk pictures are raster. Two files claiming one
 id is a duplicate the build refuses: the raster tier would always win, so the
 vector could never be selected.
 
-**Each bundle's own icon** — `<crate>/Resources/<name>.svg` (the preferred
-form) or `<name>.png`, declared as `library-icon` in that bundle's
+**Each bundle's own icon** — `<crate>/Resources/<name>.png` (the preferred
+form) or `<name>.svg`, declared as `library-icon` in that bundle's
 `AppInfo.toml` and planted inside the bundle. Every command app and every GUI
 app under the three app roots the resource walk covers (`userland/apps`,
 `userland/shell`, `userland/gui`) carries one, so browsing the system program
@@ -145,13 +159,13 @@ the honest picture for them.
 A **raster** master is square, straight-alpha
 and at least `MIN_ARTWORK_SIDE` (256×256), so a slot only ever downscales it.
 It also carries **no transparent margin**: a master is trimmed to its artwork
-on import — rows and columns whose every pixel is below a perceptible alpha
-are padding, not drawing — and then padded back to a square only as far as the
-artwork's own aspect requires, centred. A slot reserves its own clearance
+— rows and columns whose every pixel is below a perceptible alpha are padding,
+not drawing — and then padded back to a square only as far as the artwork's
+own aspect requires, centred. A slot reserves its own clearance
 (`icon_content_side`), so margin baked into the master is spent twice and the
-icon reads smaller than every other one beside it. The Switchboard master was
-the worked example: a fifth of its height was empty, which is what left the
-capsule's picture visibly short of its neighbours'.
+icon reads smaller than every other one beside it. The image build refuses an
+untrimmed master: its drawn content must reach within a pixel of both edges on
+its longer axis and sit centred, to a pixel, on the shorter one.
 A **vector** master has no pixel side at all: the decoder requires its design
 box to be square and the desktop rasterises it at the side it is about to
 draw. Either form stays within `MAX_ARTWORK_BYTES` (256 KiB), and both are
@@ -166,7 +180,7 @@ the change that gives them a consumer — `artwork/icons/disk-floppy.png` is
 the current example: nothing in the block stack can report a floppy medium,
 so shipping it would be a picture nothing could ever choose.
 
-## 2. I1 — the vocabulary and the artwork layer (`lib/icon`) — **done**
+## 2. I1 — the vocabulary and the artwork layer (`lib/icon`)
 
 - `IconKind` covers chrome, application/service bundles, the file classes,
   and the drive media. A fine-grained kind (`text-x-rust`, `image-png`)
@@ -183,7 +197,7 @@ so shipping it would be a picture nothing could ever choose.
   medium to its icon, with paravirtual and unknown both resolving to the
   generic drive glyph — the honest answer, not a guess.
 
-## 3. I2 — the content-type registry (`lib/browse`) — **done**
+## 3. I2 — the content-type registry (`lib/browse`)
 
 One closed `MediaType` registry replaces the two overlapping
 extension-keyed tables that used to exist (a four-class icon classifier and
@@ -193,7 +207,7 @@ reverse lookup, the icon, the subclass parent, and the entry classifier
 store it was listed from). Association matching walks the subclass chain and
 ranks a specific declaration ahead of a generic one.
 
-## 4. I3 — build-time discovery and planting — **done**
+## 4. I3 — build-time discovery and planting
 
 `tools/syshelp` walks `lib/icon/assets/` and emits `GRAPHICS_FILES`
 alongside the existing per-bundle `Help/` and `Resources/` tables. The
@@ -208,10 +222,10 @@ silently render as a glyph forever with nothing telling the author. The
 image build now refuses it, naming the bundle, the file, its size, and the
 bound — and, since I7, refuses any icon that is not artwork the desktop could
 draw at all: the format is decided from the bytes as the runtime decides it, a
-raster master must be square and at least the master side, and either form
-must actually draw something.
+raster master must be square, at least the master side, and trimmed, and
+either form must actually draw something.
 
-## 5. I4 — the taskbar and the program library — **done**
+## 5. I4 — the taskbar and the program library
 
 The bar's two permanent launchers draw their shipped artwork; a pin and a
 running-task item use the application's own icon, then its kind's artwork, then
@@ -229,7 +243,7 @@ while the reported memory-pressure band is the fail-closed unknown, and the
 session refreshed its band only *after* building its caches — so artwork and
 glyph caches would have stayed cold through bring-up.
 
-## 6. I5 — the file manager — **done**
+## 6. I5 — the file manager
 
 The grid (icon) view draws file-class artwork through the same shared cache,
 decoding in a sandbox the app hosts itself under the spawn authority it
@@ -246,7 +260,7 @@ find out would be per-bundle I/O the reader never sees — while the grid, whose
 tiles are large enough to tell two applications apart, names the bundle. Only
 the rows and tools on screen are asked for.
 
-## 7. I6 — storage media are real, not guessed — **done**
+## 7. I6 — storage media are real, not guessed
 
 A volume's medium is threaded from the block device's own declaration
 through the kernel mount table onto the ungated `MOUNT_LIST` record, so the
@@ -261,18 +275,22 @@ class into a concrete class, so a composed volume may publish a medium
 nobody declared. Its only user-visible consumer today is the drive icon,
 where the generic glyph is already the right picture.
 
-## 8. I7 — every app carries its own icon — **done**
+## 8. I7 — every app carries its own icon
 
 The last stage closed the gap the tiers implied but nothing supplied: the
 system shipped one picture for *all* applications. Now:
 
 - Every command and GUI bundle ships its own icon in its `Resources/` and
   declares it in its manifest — mandatory for any new app (`plans/APPS.md`
-  §14). The shipped set is one visual family of 256×256 raster masters — a
-  bevelled plate, a chrome motif, an orange accent — with the plate tint
-  grouping a bundle by what it does (files and shell, text utilities,
-  network, process and monitoring, storage and devices, users and security),
-  so a strip of them reads as one system rather than fifty unrelated images.
+  §14). The shipped set is one family of 256×256 illustrative raster masters,
+  each a picture of what its program works on — the page a text tool reads,
+  the folder a directory tool makes, the drive a storage tool inspects — in
+  one material vocabulary (brushed aluminium, charcoal glass, paper, blue
+  folders) lit from the upper left, with one orange accent and a round emblem
+  for the action a tool performs (add, remove, edit, eject, information). A
+  strip of them reads as one system and each tool's function reads at a
+  glance. Cinder's is the deliberate exception: the mascot is an anime-style
+  character portrait.
 - `AppInfoHeader` no longer refuses an icon on an unlisted bundle. That rule
   made sense when the program library was the only consumer; the file manager
   and the desktop are consumers too, and neither has anything to do with the
@@ -286,9 +304,10 @@ system shipped one picture for *all* applications. Now:
   bundle icon alike — is artwork the desktop will draw, deciding the format
   from the bytes exactly as the runtime does: a PNG through `lib/image` under
   the same limits the sandboxed rasteriser applies, else the supported SVG
-  subset through `lib/svg`. A raster master must be square and at least
-  `MIN_ARTWORK_SIDE`, and either form must draw something — an empty document
-  or a wholly transparent master would ship as an invisible icon.
+  subset through `lib/svg`. A raster master must be square, at least
+  `MIN_ARTWORK_SIDE`, and trimmed (§1), and either form must draw something —
+  an empty document or a wholly transparent master would ship as an invisible
+  icon.
 - A bundle's manifest is untrusted at that boundary: the icon name is
   accepted only as a plain file name and resolved *inside* the bundle's own
   directory, so a hostile `library-icon` cannot aim the desktop at a file
@@ -298,19 +317,19 @@ system shipped one picture for *all* applications. Now:
   says nothing about whether the result is *visible*, and `sapper`'s first
   palette was navy throughout — its tile 1.33:1 against the dark theme's raised
   surface, which is what the icon bar draws a slot on — so the icon vanished
-  into the bar while passing every check. It is re-authored to the weight the
-  folder artwork occupies (around 5:1 on the dark ground, near 3:1 on the
-  light), and the shipped asset's authored layer colours are pinned by a test
-  beside the build's own icon sweep, so re-darkening it is no longer a quiet
-  edit.
+  into the bar while passing every check. The minefield and the winter scene
+  are the two masters whose natural palettes sink into a dark bar, so tests
+  beside the build's own icon sweep measure the shipped PNGs: most of each
+  one's solidly drawn area stands WCAG 2.1's non-text 3:1 clear of the dark
+  raised surface, so re-darkening either is no longer a quiet edit.
 
-  Deliberately **not** a build-time contrast gate. Checked against the shipped
-  art, `files.svg`'s blue is 2.55:1 against the light ground and its white
-  papers 1.15:1: any luminance-only threshold strong enough to catch `sapper`
-  rejects legitimate artwork that reads by hue. A heuristic that refuses good
-  icons to catch a bad one is worse than the author's eye (§2.3).
+  Deliberately **not** a build-time contrast gate over the whole set. The
+  paper-white document masters read on the light ground by their outline and
+  shadow rather than by area: any whole-area threshold strong enough to catch a
+  navy tile refuses them. A heuristic that refuses good icons to catch a bad
+  one is worse than the author's eye (§2.3).
 
-## 9. The pressure vertical photographs the band it asserts over — **done**
+## 9. I8 — the pressure vertical photographs the band it asserts over
 
 `tairix-test-desktop-pressure-qemu-aarch64` requires the icon bar's untouched
 slot to be **byte-identical** between its two frames, reading any drift as "the
@@ -350,7 +369,7 @@ waits on the same witness, so the runner's unverified-dump hold puts the
 baseline on disk before any click can change the screen it read
 (`plans/OPEN-DEFECTS.md` D138).
 
-## 10. Open — one surface still rasterises its glyphs per frame
+## 10. I9 — one surface still rasterises its glyphs per frame
 
 The glyph tier is cached and the draw path blits, but a control only benefits
 where its owner holds a cache to resolve through. One surface holds none, so
@@ -437,7 +456,7 @@ none is on the file manager's hot path, which is what the caching tier was
 added for. They are the remainder of "no surface rasterises on the draw
 path".
 
-## 11. Open — two SVG class-asset decode paths
+## 11. I10 — two SVG class-asset decode paths
 
 The crate now decodes a vector class asset in two places. `lib/icon/src/load.rs`
 builds a whole `IconSet` up front, one slot per `IconKind`, from an injected
@@ -448,7 +467,7 @@ the right shape for the always-resident chrome glyphs, the bounded cache for
 artwork drawn at a slot's pixel side. Deciding which owns what is a design
 question this plan has not settled.
 
-## 12. Open — an undrawable element is skipped, not refused
+## 12. I11 — an undrawable element is skipped, not refused
 
 `lib/svg` decodes the shape, paint and compositing surface of SVG 1.1
 (`plans/SVG.md`), so an authored master's artwork ships as its designer drew
@@ -484,7 +503,20 @@ a master meaningless while still passing the build gate's "draws something"
 check. That asymmetry is the strongest argument for answering per element
 class rather than globally, and it resolves as those items land.
 
-## 13. What this plan deliberately does not cover
+## 13. I12 — masters stop at 256 px while a slot can ask for 512
+
+Every raster master is authored at `MIN_ARTWORK_SIDE` (256 px), but the
+sandboxed rasteriser serves a slot up to `MAX_ICON_SIDE` (512 px), and at the
+highest UI scales a large tile asks for more than 256 — the file manager's grid
+passes it only beyond about 600%. There, and only there, a slot upscales, which
+the charter's raster rule forbids. Authoring at 512 closes it, but costs about
+four times the decode work per (asset, side) and brings the richest masters
+near `MAX_ARTWORK_BYTES`, a fixed bound a master may not raise. Which to trade
+is a decision this plan has not taken. High-resolution sources for the
+terminal, Switchboard and program-library masters are in `plans/icons/`; the
+other masters would be re-rendered or re-authored at the larger side.
+
+## 14. What this plan deliberately does not cover
 
 - **Cursors and window chrome stay vector.** They are tintable silhouettes
   resolved from the theme; a raster master would be the wrong source format

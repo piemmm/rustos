@@ -13,4 +13,5 @@ title = "DNS-SD"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_NET", "CAP_NET_DISCOVER_ALL"]
-library-icon = "dns-sd.svg"
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "dns-sd.png"

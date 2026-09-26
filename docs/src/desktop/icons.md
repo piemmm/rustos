@@ -93,9 +93,11 @@ every other tier: a glyph is retained as an untinted coverage mask keyed
 `(kind, side)`, so the shape is resolved once and drawn in whatever colour the
 control's state calls for rather than re-rasterised per icon per frame.
 
-SVG is likewise the preferred form for an **application bundle's own** icon,
-which every app must ship (`plans/APPS.md` §14) and which decodes through this
-same path. The complete order a request resolves through — a thing's own icon,
+An **application bundle's own** icon, which every app must ship
+(`plans/APPS.md` §14), is authored as a raster master: a lit, shaded picture of
+what the program does, trimmed to fill its square. An SVG bundle icon is still
+accepted and decodes through this same path. The complete order a request
+resolves through — a thing's own icon,
 then its class's raster master, then the class vector asset, then the built-in
 glyph — is described under [tairix-icon](../lib/icon.md).
 

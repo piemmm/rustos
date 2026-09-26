@@ -31,6 +31,5 @@ purpose = "A desktop companion who lives in a playpen and roams the desktop"
 author = "The TAIRiX Project"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_DESKTOP_LAYER"]
 library = "Games"
-# This bundle's own icon in its Resources/, authored as a vector so one file
-# serves every slot and every UI scale exactly.
-library-icon = "cinder.svg"
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "cinder.png"

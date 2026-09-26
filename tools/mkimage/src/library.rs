@@ -154,7 +154,7 @@ mod tests {
         let files = test_manifest(
             "files",
             Some(LibraryCategory::Accessories),
-            Some("files.svg"),
+            Some("files.png"),
         );
         let edit = test_manifest("edit", Some(LibraryCategory::Office), None);
         let ls = test_manifest("ls", None, None);
@@ -183,7 +183,7 @@ mod tests {
              os.tairix.files.name = files\n\
              os.tairix.files.bundle = /System/Applications/files.app\n\
              os.tairix.files.category = Accessories\n\
-             os.tairix.files.icon = files.svg\n"
+             os.tairix.files.icon = files.png\n"
         );
         // The derived document is a valid store the runtime readers accept.
         let parsed = tairix_appconf::Document::parse(&text).expect("a well-formed document");

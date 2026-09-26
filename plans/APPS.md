@@ -1570,13 +1570,12 @@ Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
   the curated `/System/Libraries/` set and the syscall ABI. Rationale logged
   in `PLAN.md` "Charter Amendments"; the code migration off the kernel-baked
   spawn registry is deliverable 8 above.
-- **§10 (an app's own icon — mandatory, SVG preferred)** — **done**: §10 now
-  states that every command-line and graphical app ships its own icon inside
-  its bundle, authored as SVG (**preferred** — one vector file serves every
-  slot and every scale) or, where the artwork is a rendered picture, as a
-  raster master under the existing raster rule, and that a declared icon the
-  desktop could not draw fails the build closed. The rule itself is §14 below;
-  rationale logged in `PLAN.md` "Charter Amendments".
+- **§10 (an app's own icon — mandatory, raster master first)** — **done**: §10
+  now states that every command-line and graphical app ships its own icon
+  inside its bundle, authored as a PNG raster master (SVG stays accepted), and
+  that a declared icon the desktop could not draw fails the build closed. The
+  rule itself is §14 below; rationale logged in `PLAN.md` "Charter
+  Amendments".
 
 ## 14. Every app ships its own icon — mandatory
 
@@ -1586,9 +1585,9 @@ names it in its manifest:
 
 ```
 example.app/
-├── AppInfo            # library-icon = "example.svg"
+├── AppInfo            # library-icon = "example.png"
 └── Resources/
-    └── example.svg    # this bundle's own icon
+    └── example.png    # this bundle's own icon
 ```
 
 **Why it is mandatory.** The icon is the bundle's identity, not a launcher
@@ -1598,24 +1597,29 @@ the program library. A bundle that declares none resolves to the one generic
 application picture — so an app that skips its icon makes a store of fifty
 programs look like fifty copies of the same one.
 
-**SVG is the preferred form.** One authored vector file serves every slot and
-every DPI/UI scale exactly, because the desktop rasterises it at the pixel side
-it is about to draw. It must be a flat document on a **square** design grid
-within the supported subset (`lib/svg`).
+**A raster master (PNG) is the form to author.** An app's icon is a rendered
+picture of what the program does — lit, shaded, and legible at a glance
+(`AGENTS.md` §10) — and the SVG subset draws no soft shading. The master is
+square, straight-alpha, at least `MIN_ARTWORK_SIDE` (256×256) so a slot only
+ever downscales it, and **trimmed**: its artwork spans the square on its longer
+axis and is centred on the shorter one, because margin baked into a master is
+spent twice and the icon reads smaller than its neighbours (`plans/ICONS.md`
+§1).
 
-**A raster master (PNG) is accepted** where the artwork is a rendered picture
-rather than a scalable silhouette (`AGENTS.md` §10): square, straight-alpha, and
-at least `MIN_ARTWORK_SIDE` (256×256), so a slot only ever downscales it rather
-than blurring it up. Either form is at most `MAX_ARTWORK_BYTES` (256 KiB) — a
-fixed validation bound on untrusted input, not a capacity to raise (§24.4).
+**SVG stays accepted**, on the same terms the loader has always applied: a flat
+document on a **square** design grid within the supported subset (`lib/svg`),
+rasterised at the pixel side the slot draws. Either form is at most
+`MAX_ARTWORK_BYTES` (256 KiB) — a fixed validation bound on untrusted input,
+not a capacity to raise (§24.4).
 
 **The build proves it, fail closed.** The bundle composer refuses a declared
 icon that is absent from the bundle's own `Resources/`, over-long, neither a
-decodable PNG nor an in-subset SVG, a non-square or undersized raster master, or
-one that decodes but draws nothing at all. The format is decided from the
-*bytes*, exactly as the sandboxed rasteriser decides it at runtime, never from
-the file name. "The icon is broken" is therefore a build failure naming the
-bundle and the file, never a silent fallback glyph on a user's desktop.
+decodable PNG nor an in-subset SVG, a non-square, undersized, or untrimmed
+raster master, or one that decodes but draws nothing at all. The format is
+decided from the *bytes*, exactly as the sandboxed rasteriser decides it at
+runtime, never from the file name. "The icon is broken" is therefore a build
+failure naming the bundle and the file, never a silent fallback glyph on a
+user's desktop.
 
 **Scope.** The rule binds every launchable bundle (`kind = "command"`), windowed
 app and text tool alike. A service bundle (`kind = "service"`) and a
