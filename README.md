@@ -213,6 +213,13 @@ once and the build finds them automatically — no environment variables — fro
 Homebrew (`brew install llvm lld`) or apt.llvm.org (`apt install clang-22
 lld-22`); see [`tools/cc/README.md`](./tools/cc/README.md) for the search order.
 
+The QEMU tests need QEMU 9.1 or newer on `PATH`; Ubuntu 24.04 and Debian 12
+package older versions. `cargo xtask run` also needs a window backend (GTK, or
+Cocoa on macOS) and user-mode networking (slirp). On macOS, Homebrew's `qemu`
+has all three. On Linux, `tools/ci/install-qemu.sh` builds the pinned version
+from signature-verified source and names any missing build prerequisite; set
+`TAIRIX_CACHE_DIR` to build it somewhere other than the CI cache directory.
+
 ## Licence
 
 Licensed under the [GNU General Public License v2.0 or later](./LICENSE)

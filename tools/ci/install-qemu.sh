@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# install-qemu.sh — provision the pinned QEMU the QEMU integration tests need.
+# install-qemu.sh — provision the pinned QEMU the QEMU integration tests and
+# `cargo xtask run` need.
 #
 # The runner (`tools/qemu`) spawns `qemu-system-<arch>` by bare name, so it
 # resolves through PATH. A distro QEMU older than 9.1 lacks the RISC-V `svade`
@@ -16,7 +17,7 @@
 # official source and pinned. The build lands ONCE in the runner's persistent
 # cache; every later run finds the pinned version already present and only puts
 # it on PATH. This needs no root at run time: the build-time toolchain (meson,
-# ninja, a C compiler, and the glib/pixman development libraries) is a
+# ninja, a C compiler, and the glib/pixman/GTK/slirp development libraries) is a
 # documented one-time host prerequisite the admin installs, exactly like
 # `rustup` (see tools/ci/github-runner/README.md).
 #
@@ -50,10 +51,14 @@ QEMU_TARGETS="riscv64-softmmu,x86_64-softmmu,aarch64-softmmu"
 # library `crypto/cipher.c` compiles against for the AES-CBC sessions the
 # virtio-crypto accelerator vertical drives; meson permits only one of
 # nettle/gcrypt, and nettle is the pkg-config-discoverable one, so the
-# prerequisite probe below can report it by name.
+# prerequisite probe below can report it by name. `cargo xtask run` needs two
+# more: `gtk`, the window it opens (without it the build offers only headless
+# displays), and `slirp`, the user-mode network its NIC sits on.
 QEMU_CONFIGURE_OPTS=(
     --enable-fdt
     --enable-nettle
+    --enable-gtk
+    --enable-slirp
     --disable-docs
     --disable-werror
 )
@@ -96,11 +101,19 @@ publish_path() {
     fi
 }
 
+reports_pinned_version() {
+    "${BINDIR}/qemu-system-riscv64" --version | grep -qF "version ${QEMU_VERSION}"
+}
+offers_backend() {
+    local backend=$1
+    shift
+    "${BINDIR}/qemu-system-riscv64" "$@" | grep -qx "$backend"
+}
+
 # Already provisioned? The pinned binary reporting the pinned version, built
 # from the current configuration, is the whole success condition — skip the
 # (minutes-long) rebuild.
-if [ "$(cat "$STAMP" 2>/dev/null)" = "$BUILD_ID" ] \
-    && "${BINDIR}/qemu-system-riscv64" --version 2>/dev/null | grep -qF "version ${QEMU_VERSION}"; then
+if [ "$(cat "$STAMP" 2>/dev/null)" = "$BUILD_ID" ] && reports_pinned_version 2>/dev/null; then
     log "qemu ${QEMU_VERSION} already installed at ${PREFIX}"
     publish_path
     exit 0
@@ -116,7 +129,7 @@ missing=""
 for tool in wget tar gpg gpgv python3 ninja meson pkg-config cc; do
     command -v "$tool" >/dev/null 2>&1 || missing="${missing} ${tool}"
 done
-for pc in glib-2.0 pixman-1 nettle; do
+for pc in glib-2.0 pixman-1 nettle gtk+-3.0 slirp; do
     pkg-config --exists "$pc" 2>/dev/null || missing="${missing} ${pc}(dev)"
 done
 if [ -n "$missing" ]; then
@@ -126,7 +139,7 @@ if [ -n "$missing" ]; then
   on Debian/Ubuntu:
     apt-get install -y build-essential ninja-build meson python3-venv \\
       pkg-config libglib2.0-dev libpixman-1-dev nettle-dev zlib1g-dev \\
-      libfdt-dev flex bison
+      libfdt-dev libgtk-3-dev libslirp-dev flex bison
   See tools/ci/github-runner/README.md (Host prerequisites)."
 fi
 
@@ -196,10 +209,13 @@ mkdir -p "${srcdir}/build"
     ninja install
 )
 
-# Prove the pinned binary is the version we meant to install before we publish
-# it — fail closed rather than put a wrong build on PATH.
-"${BINDIR}/qemu-system-riscv64" --version | grep -qF "version ${QEMU_VERSION}" \
-    || die "built qemu does not report version ${QEMU_VERSION}"
+# Prove the binary is the build we meant to install before we publish it — fail
+# closed rather than put a wrong build on PATH.
+reports_pinned_version || die "built qemu does not report version ${QEMU_VERSION}"
+offers_backend gtk -display help \
+    || die "built qemu offers no gtk display backend, so \`cargo xtask run\` cannot open a window"
+offers_backend user -M none -netdev help \
+    || die "built qemu offers no user network backend, so \`cargo xtask run\` has no network"
 
 printf '%s\n' "$BUILD_ID" >"$STAMP"
 

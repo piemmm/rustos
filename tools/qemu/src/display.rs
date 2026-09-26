@@ -271,8 +271,8 @@ fn no_windowing_backend_message(
     msg.push_str(
         "  A QEMU built without a windowing backend defaults to a headless VNC \
          server, which opens no window. Install a QEMU built with a windowing \
-         backend (cocoa on macOS, gtk or sdl elsewhere — e.g. your \
-         distribution's or Homebrew's qemu-system package), or set ",
+         backend (cocoa on macOS, gtk or sdl elsewhere — Homebrew's qemu, or \
+         the pinned build tools/ci/install-qemu.sh makes), or set ",
     );
     msg.push_str(QEMU_BIN_ENV);
     msg.push_str(" to one that has it.");
@@ -415,8 +415,10 @@ mod tests {
         assert!(msg.contains("/usr/local/bin/qemu-system-aarch64"));
         assert!(msg.contains("none, curses, dbus"));
         assert!(msg.contains(QEMU_BIN_ENV));
-        // The remedy names every windowing backend, including macOS's cocoa.
+        // The remedy names every windowing backend, including macOS's cocoa,
+        // and the project's own pinned build.
         assert!(msg.contains("cocoa"));
         assert!(msg.contains("gtk or sdl"));
+        assert!(msg.contains("tools/ci/install-qemu.sh"));
     }
 }

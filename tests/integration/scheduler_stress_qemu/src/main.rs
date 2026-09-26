@@ -13,8 +13,8 @@
 //! ## How it asserts it
 //!
 //! 1. The BSP reads the boot hand-off (`BootData`) → RSDP → XSDT/RSDT →
-//!    MADT to enumerate every LAPIC the firmware reports, then identifies its own LAPIC
-//!    ID via the LAPIC ID register.
+//!    MADT to enumerate every LAPIC the firmware reports, then identifies
+//!    its own LAPIC ID via the LAPIC ID register.
 //! 2. The BSP software-enables the LAPIC, installs the AP trampoline at
 //!    `AP_TRAMPOLINE_PHYS = 0x8000`, and walks the discovered AP list
 //!    serially: per AP it writes the `ApBootSlot` and drives the

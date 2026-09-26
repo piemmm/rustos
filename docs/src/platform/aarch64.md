@@ -716,6 +716,11 @@ listing what was probed, rather than starting an invisible VNC server
 (`AGENTS.md` §2.9, §2.24). Headless integration tests are unaffected:
 they keep passing `-display none` and capture the serial console.
 
+The pinned QEMU that `tools/ci/install-qemu.sh` builds carries everything the
+session uses: the `gtk` window and the `user` network backend (slirp) are
+named in its configuration, so a host missing either development package
+fails at build time, not when the session starts.
+
 ## Board-discovered interrupt controller
 
 The GICv2 distributor (`GICD`) and CPU-interface (`GICC`) MMIO bases are
