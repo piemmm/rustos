@@ -143,8 +143,8 @@ the file is bounded by the glyph's own point count. One glyph's decode is
 additionally bounded in outline points and in composite component records,
 both charged across the whole walk rather than per nesting level: a per-level
 cap still multiplies with depth, so 65535 components each naming another such
-composite would expand without end. Float rounding uses the crate's own
-bounded helpers, so it needs no `std` libm.
+composite would expand without end. Float rounding is `lib/util`'s `mathf`,
+so it needs no `std` libm and rounds as the SVG decoder and rasteriser do.
 
 ## Stability
 

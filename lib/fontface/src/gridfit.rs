@@ -38,7 +38,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::engine::{crossing, Segment};
-use crate::mathf;
+use tairix_util::mathf;
 
 /// The steepest slope, as a fraction, a segment may run off an axis and still
 /// read as an edge along it: one in four, about 76° from the axis.

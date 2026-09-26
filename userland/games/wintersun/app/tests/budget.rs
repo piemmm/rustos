@@ -5,8 +5,8 @@
 //! most likely number in this plan to be wrong". This is where it stops
 //! being a guess: the passes are timed at the baseline resolution over
 //! generated terrain with the plan's sixty-four rigged figures standing on
-//! it, and the numbers are printed so a run says what the renderer actually
-//! costs.
+//! it, along with what placing one of them costs a single core, and the
+//! numbers are printed so a run says what the renderer actually costs.
 //!
 //! # Why no elapsed time is asserted here
 //!
@@ -57,6 +57,7 @@ use tairix_wintersun_art::splat::Warp;
 use tairix_wintersun_figure::actor::Actor;
 use tairix_wintersun_figure::motion::{Clips, Kind, Set};
 use tairix_wintersun_figure::reference;
+use tairix_wintersun_figure::rig::Placement;
 use tairix_wintersun_figure::species::Species;
 use tairix_wintersun_net::value::{EntityId, Facing, WorldPoint};
 use tairix_wintersun_world::chunk::{Chunk, ChunkBuild, ChunkWindow};
@@ -133,9 +134,47 @@ fn rigs<'a>(clips: &'a Clips<'a>, visible: Bounds) -> (Cast<'a>, Vec<(EntityId, 
     (cast, walks)
 }
 
+/// What one frame of the baseline costs: the cheapest run's per-pass times,
+/// what placing one figure costs a single core, and the picture drawn.
+struct Measured {
+    times: FrameTimes,
+    placement_ns: u64,
+    pixels: Vec<Pixel>,
+}
+
+/// The cheapest of [`RUNS`] serial placements of every rig, per figure: the
+/// pose, planting and placement each figure costs whichever core it lands on,
+/// framed exactly as the renderer frames it.
+fn placement_ns(cast: &Cast<'_>, camera: Camera, view: &Viewport) -> u64 {
+    let light = Sun::winter()
+        .light()
+        .expect("the winter sun lights figures");
+    let shade = Ladder::FULL.shadow();
+    let (origin, step) = (camera.origin(view), camera.step(view));
+    let figures: Vec<_> = (0..RIGS)
+        .map(|id| cast.get(EntityId(id)).expect("it is there"))
+        .collect();
+    let mut placement = Placement::new();
+    let mut best = u64::MAX;
+    for _ in 0..RUNS {
+        let started = Instant::now();
+        for figure in &figures {
+            let drawn = figure
+                .actor()
+                .place(figure.ground(), origin, step, light, shade, &mut placement)
+                .expect("it places");
+            black_box((&drawn, &placement));
+        }
+        let spent = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        best = best.min(spent);
+    }
+    best / RIGS
+}
+
 /// Draw the baseline frame [`RUNS`] times, returning the cheapest run's
-/// per-pass costs and the picture every run drew.
-fn measure(runner: &dyn JobRunner) -> (FrameTimes, Vec<Pixel>) {
+/// per-pass costs, the per-figure placement cost and the picture every run
+/// drew.
+fn measure(runner: &dyn JobRunner) -> Measured {
     let params = RealmParams::new(RealmSpec {
         extent_chunks: 64,
         coarse_samples: 64,
@@ -222,7 +261,11 @@ fn measure(runner: &dyn JobRunner) -> (FrameTimes, Vec<Pixel>) {
             best = times;
         }
     }
-    (best, target.pixels().to_vec())
+    Measured {
+        times: best,
+        placement_ns: placement_ns(&cast, camera, &view),
+        pixels: target.pixels().to_vec(),
+    }
 }
 
 /// Print one measurement's per-pass costs against their budgets.
@@ -252,10 +295,23 @@ fn report(label: &str, times: &FrameTimes) {
 
 #[test]
 fn the_baseline_frame_is_measured_and_threading_does_not_change_it() {
-    let (times, serial) = measure(&tairix_parallel::SERIAL);
+    let Measured {
+        times,
+        placement_ns,
+        pixels: serial,
+    } = measure(&tairix_parallel::SERIAL);
     report("one thread", &times);
+    println!(
+        "  placing one figure: {}.{:01} us on one core",
+        placement_ns / 1_000,
+        placement_ns % 1_000 / 100,
+    );
 
-    let (threaded, concurrent) = measure(&Threaded::new(REFERENCE_CORES));
+    let Measured {
+        times: threaded,
+        pixels: concurrent,
+        ..
+    } = measure(&Threaded::new(REFERENCE_CORES));
     report(&format!("{REFERENCE_CORES} threads"), &threaded);
     println!(
         "  speedup {}.{:02}x on {REFERENCE_CORES} threads (bench estimate, not a guarantee)",

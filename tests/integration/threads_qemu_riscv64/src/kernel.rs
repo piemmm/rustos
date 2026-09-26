@@ -59,7 +59,7 @@ use tairix_kernel::riscv64::boot::{self as boot_riscv64, RiscvBinArch, RISCV_UAR
 use tairix_kernel::riscv64::spawn_producer::{CHILD_USER_BIAS, RISCV_PROCESS_SPAWN};
 use tairix_kernel_core::{
     AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram, InitSpawnCtx,
-    KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
+    KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
     ProgramRegistry, RandomReserve, SchedWaitQueueArch, NULL_DMA_ALLOC_FACILITY,
     NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
 };
@@ -593,6 +593,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
         wait_producer,
         sys.irq_table,
         &NULL_SHARED_MEM_FACILITY,
+        KernelArch::cross_cpu_tlb_shootdown(sys.arch),
     );
     let Ok(parent_pid) = init_ctx.spawn_driver_process(
         "/bin/th-parent",

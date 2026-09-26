@@ -4,7 +4,7 @@ wintersun — walk a procedurally generated winter world
 
 ## SYNOPSIS
 
-`wintersun`
+`wintersun [--reference-scene]`
 
 ## DESCRIPTION
 
@@ -43,11 +43,22 @@ machine is predictable rather than a surprise.
 A window larger than the software renderer can fill is drawn at up to
 2560×1440 and scaled up to the window.
 
+## OPTIONS
+
+- `-h, -?, --help` — show this command's own short help.
+- `--reference-scene` — draw the fixed reference scene and hold it still: one
+  realm, cast and moment, identical on every machine, so a picture of the
+  window can be checked against one drawn elsewhere. `F11` and `Escape` still
+  resize the window; nothing else moves.
+
 ## EXIT STATUS
 
 `0` when you leave. A non-zero status names its reason on standard error: the
 world could not be generated, the window could not be opened, or the session's
 event channel was lost.
+
+- `2` — the command line was not understood.
+- `87` — the reference scene could not be drawn.
 
 ## SEE ALSO
 

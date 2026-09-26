@@ -16,8 +16,8 @@
 //! of these onto the volume they author.
 //!
 //! The source of truth for each family is its own on-disk directory. This
-//! crate's build script walks the command-app source roots (`userland/apps`,
-//! `userland/gui`, `userland/shell`; each bundle named by its crate's
+//! crate's build script walks every program crate under `userland/`
+//! (`bundles::program_crates`; each bundle named by its crate's
 //! `AppInfo.toml`, never the crate directory) for `Help/` and `Resources/`,
 //! and walks each single-tree graphics asset family — `lib/icon/assets/` for
 //! the desktop icon masters, `lib/wallpaper/assets/` for the shipped
@@ -55,6 +55,11 @@
 #![deny(missing_docs)]
 
 extern crate alloc;
+#[cfg(any(feature = "walk", test))]
+extern crate std;
+
+#[cfg(any(feature = "walk", test))]
+pub mod bundles;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -89,12 +94,12 @@ pub struct HelpFile {
     pub bytes: &'static [u8],
 }
 
-/// The source roots the build discovered bundles under.
+/// The program crates the build discovered, workspace-relative.
 ///
-/// The build script's own list, emitted rather than restated, so a
-/// consumer that walks the roots — this crate's tests, most of all —
-/// cannot be walking a shorter list than the discovery was.
-pub const APP_ROOTS: &[&str] = &include!(concat!(env!("OUT_DIR"), "/app_roots.rs"));
+/// The build script's own answer, emitted rather than re-walked, so a
+/// consumer of the discovery — this crate's tests, most of all — cannot be
+/// reading a different set of programs than the payload was built from.
+pub const PROGRAM_CRATES: &[&str] = &include!(concat!(env!("OUT_DIR"), "/program_crates.rs"));
 
 /// Every command app's Help documents, discovered from the source tree at
 /// build time.
@@ -470,8 +475,6 @@ pub fn assemble_disk(boot: &[u8], system: &[u8], root: &[u8]) -> Result<Vec<u8>,
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
-
     use std::collections::BTreeSet;
     use std::vec::Vec;
 
@@ -526,37 +529,29 @@ mod tests {
         use std::string::{String, ToString};
         use std::{format, fs};
 
+        use super::bundles::{string_entry, MANIFEST_SOURCE};
+
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
             .expect("the crate lives at <workspace>/tools/syshelp");
         let mut store_of: BTreeMap<String, String> = BTreeMap::new();
-        for root in super::APP_ROOTS {
-            let Ok(entries) = fs::read_dir(workspace.join(root)) else {
-                continue;
+        for program in super::PROGRAM_CRATES {
+            let manifest = workspace.join(program).join(MANIFEST_SOURCE);
+            let text = fs::read_to_string(&manifest)
+                .unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
+            let (Some(name), Some(kind)) =
+                (string_entry(&text, "name"), string_entry(&text, "kind"))
+            else {
+                panic!("{}: no name or kind", manifest.display());
             };
-            for entry in entries.filter_map(Result::ok) {
-                let Ok(text) = fs::read_to_string(entry.path().join("AppInfo.toml")) else {
-                    continue;
-                };
-                let value_of = |key: &str| {
-                    text.lines()
-                        .map(str::trim)
-                        .filter(|line| !line.starts_with('#'))
-                        .find_map(|line| {
-                            let value = line.strip_prefix(key)?.trim_start().strip_prefix('=')?;
-                            value.trim().strip_prefix('"')?.strip_suffix('"')
-                        })
-                        .map(ToString::to_string)
-                };
-                let (Some(name), Some(kind)) = (value_of("name"), value_of("kind")) else {
-                    continue;
-                };
-                let store = tairix_abi::ProgramKind::from_key(&kind)
-                    .unwrap_or_else(|| panic!("{name}: unknown kind `{kind}`"))
-                    .store_dir();
-                store_of.insert(format!("{name}.app"), store.to_string());
-            }
+            let store = tairix_abi::ProgramKind::from_key(kind)
+                .unwrap_or_else(|| panic!("{name}: unknown kind `{kind}`"))
+                .store_dir();
+            store_of.insert(
+                format!("{name}{}", tairix_abi::BUNDLE_SUFFIX),
+                store.to_string(),
+            );
         }
         assert!(
             store_of.values().any(|store| store == "Services"),

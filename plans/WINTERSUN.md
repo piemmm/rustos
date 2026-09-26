@@ -41,6 +41,9 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS4 | `wintersun/art`: material synthesis, the splat field, the decal and particle vocabulary, the WinterSun palette | done |
 | WS5 | The client shell: window, the three size states, input, frame pacing, camera, terrain draw | done |
 | WS6 | Figures on screen: presets, clips, the animation state machine, the locomotion join, and the art harness measuring every shipped preset | done |
+| WS22 | The shared float maths made faster with every target still agreeing to the bit: the correctly rounded hardware square root and rounding, fdlibm's transcendentals, the `round` fix, exact axis headings | done |
+| WS23 | The client vertical: the bundle launched by name on its reference scene, its window read back as it opened, fullscreen, restored and maximised, and held pixel for pixel to the host's drawing and to the session's witness of how each frame reached the display | done |
+| WS24 | The same vertical on virtio-gpu, where the fullscreen frame must be promoted to a single layer | blocked: the live session presents through the layer path only after `plans/FIX-DISPLAY-ACCELERATION.md` Stages A–E (P9) |
 | WS7 | `Code/wintersun-store`: the schemas and the realm's single writer | planned |
 | WS8 | `Code/wintersund` + `Code/wintersun-zone`: the gateway, zone shards, interest management, back-pressure, the thousand-player floor | planned |
 | WS9 | Combat: melee, ranged ballistics, traps, the archetypes | planned |
@@ -92,7 +95,8 @@ discovered late.
 |---|---|---|---|
 | P1 | The audio stack exists at all: the PCM vocabulary, `audio_ring`, `audio-v1`, `audiochan-v1`, the engine, one driver, `audiod` | `plans/SOUND.md` SND2–SND4 | WS14 |
 | P2 | `lib/sound`'s decoder registry and the sandboxed decode seam | `plans/SOUND.md` SND9 | WS14 |
-| P3 | Window **size states** — `Restored` / `Maximized` / `Fullscreen` — on the window channel, and the compositor promoting a scanout-sized fullscreen surface to a single layer | `plans/COMPOSITOR-WORK.md` Stage J | WS5 — **done** |
+| P3 | Window **size states** — `Restored` / `Maximized` / `Fullscreen` — on the window channel | `plans/COMPOSITOR-WORK.md` Stage J | WS5 — **done** |
+| P9 | The live session presenting through the layer path, so a covering fullscreen surface is actually promoted to a single layer | `plans/FIX-DISPLAY-ACCELERATION.md` Stages A–E | WS24 |
 | P4 | `lib/crypto` gains X25519 key agreement (`lib/crypto::agree`, over the audited `x25519-dalek`, which shares the `curve25519-dalek` arithmetic already beneath `ed25519-dalek`) | `lib/crypto` | WS1 — **done** |
 | P5 | Durable storage: `lib/recdb` through its transactional and recovery items | `plans/RECDB.md` RD1–RD6 | WS7 |
 | P6 | The figure engine: shapes, rig, clips, blending, the art harness, and the character record a preset is | `plans/FIGURE.md` FG1–FG6 | WS6 — **done** |
@@ -110,14 +114,20 @@ the taskbar, and withdraws the decoration without discarding it.
 
 **Exclusive fullscreen is not a second display path.** A game does not seize
 the framebuffer: it asks for `Fullscreen`, the compositor sizes its surface to
-the scanout and promotes it to a single unblended layer, and the present goes
-through the one existing display path. That is where exclusive fullscreen's
-real benefit lives — no composition pass, a tear-free flip — and taking it any
-other way would be the private back-channel §17.3 forbids and the second blend
-path §2.2 forbids. The promotion is `Compositor::fullscreen_cover`, and it
-waits for a frame that genuinely covers the scanout: until the client presents
-at the new extent the scene composites normally, because a promoted layer has
-nothing beneath it to show through.
+the scanout, and the present goes through the one existing display path.
+Exclusive fullscreen's real benefit — no composition pass, a tear-free flip —
+is the compositor promoting that surface to a single unblended layer, and
+taking it any other way would be the private back-channel §17.3 forbids and
+the second blend path §2.2 forbids. The promotion is
+`Compositor::fullscreen_cover`, which waits for a frame that genuinely covers
+the scanout, because a promoted layer has nothing beneath it to show through.
+
+**Promotion is not reached in production yet.** It lives on the layer path,
+`Compositor::present_accelerated`, and the live session presents every frame
+through the software composite: no display service carries a layer stack
+across the process boundary (P9). The session's `WINDOW_SIZED` witness names
+the path each frame took, so on today's boards it says `composited`, and WS24
+holds the same vertical to `promoted` once P9 lands.
 
 ## 0. Binding decisions
 
@@ -145,10 +155,12 @@ These are settled. A change that contradicts one stops and asks (§15.7).
 4. **The authoritative simulation is deterministic across all four Tier-1
    targets, and that is a test.** It uses IEEE-754 `f64` with the basic
    operations and `lib/util::mathf` — TAIRiX's own libm — and nothing else.
-   Because the transcendentals are first-party Rust rather than a per-platform
-   libm, the same source yields the same bits on `x86_64`, `aarch64`,
-   `riscv64` and `wasm32`; Rust contracts no FMA, so `a * b + c` stays two
-   operations. WS2 and WS3 each carry a vertical that runs a fixed seed for a
+   `mathf`'s square root and integer rounding are operations IEEE 754 defines
+   exactly, so each target's instruction or runtime routine gives the same
+   bits; its transcendentals are first-party Rust in one fixed order rather
+   than a per-platform libm; and Rust contracts no FMA, so `a * b + c` stays
+   two operations. The same source therefore yields the same bits on
+   `x86_64`, `aarch64`, `riscv64` and `wasm32`. WS2 and WS3 each carry a vertical that runs a fixed seed for a
    fixed tick count on every target and asserts one state hash. Reaching for
    any other maths in an authoritative path breaks this and is refused.
 5. **Content is data, and there is no scripting language.** Spells, items,
@@ -868,15 +880,12 @@ the frame's third pass). What a later item needs to know:
   and as the reference figure — with the reason stated — where it cannot be
   read.
 - **The figure pass is measured with the budget's sixty-four rigs.** On the
-  development host this was measured on, at 1280×720 on four threads: terrain
-  4.7 ms (94%), light 2.6 ms (130%, as before WS6 on that host), figures
-  2.5 ms against their 3.5 ms (70%), 9.8 ms of drawing in the 16.6 ms frame.
-  Two costs were taken out on the way: every shape fill allocated its scan
-  buffers, which on the process's one heap would have serialised the bands,
-  and now reuses a `lib/raster::ScanScratch` held per band. Placing a figure
-  costs about 40 µs on one core, 40% of it in `lib/util::mathf::sqrt`'s
-  Newton iterations; a hardware square root would move every digest built on
-  `mathf`, so it is its own decision rather than this item's.
+  development host, at 1280×720 on four threads: terrain 4.7 ms (94%), light
+  2.6 ms (131%), figures 2.2 ms against their 3.5 ms (62%), 9.5 ms of drawing
+  in the 16.6 ms frame. Every shape fill reuses a `lib/raster::ScanScratch`
+  held per band, since allocating its scan buffers on the process's one heap
+  would serialise the bands. Placing a figure costs about 21 µs on one core
+  over WS22's maths, a fifth of what the figure costs; painting is the rest.
 - **Input is drained before a frame**, so a burst of events is one paint, and
   **a minimized window stops** its clock and its frames until it is shown
   again.
@@ -893,11 +902,59 @@ the frame's third pass). What a later item needs to know:
   them. `Shell` models the seat and the property model drives it; the client
   has nothing to feed it from. Deciding who tells an application its seat has
   gone — and in what form — is the display and login plans' call.
-- **Open: M1's exit criterion is shown piecewise, not end to end.** The frame
-  budget, the figures and every digest are measured, but no test yet launches
-  the bundle in a guest and reads a frame back — §15's client vertical — so
-  "one character walks in a window and in exclusive fullscreen" rests on its
-  parts.
+- **M1's picture is shown end to end** (WS23). `wintersun_client_qemu_aarch64`
+  launches the installed bundle by name from a terminal on the reference
+  scene and reads its window back as it opened, fullscreen, restored and
+  maximised, each compared pixel for pixel with the scene drawn on the host at
+  the extent the window manager gives it. What M1 still lacks is its budget:
+  the light pass is over its allocation (§3), and fullscreen's single-layer
+  promotion is reached only once P9 lands (WS24).
+
+### What WS22 settled
+
+Decision 4 rests on `lib/util::mathf`, which WS22 made faster with every
+target still agreeing to the bit. What a later item needs to know:
+
+- **The square root and integer rounding are the toolchain's.** `sqrt`,
+  `floor` and `ceil` call `core::f64::math`, which is `fsqrt` on `aarch64`,
+  `fsqrt.d` on `riscv64`, `f64.sqrt` on `wasm32`, and on soft-float `x86_64` a
+  call to compiler-builtins' correctly rounded routine. IEEE 754 fixes one
+  answer for each, and a host test holds `sqrt` bit-equal to the host's own
+  across the whole positive range. They sit behind `core_float_math` until
+  stable as inherent methods, when the calls become `x.sqrt()`, `x.floor()`
+  and `x.ceil()` and the gate goes.
+- **The transcendentals are fdlibm's**, in one fixed order with no fused
+  multiply-add: `__rem_pio2`'s quarter-turn reduction feeding `__kernel_sin`
+  and `__kernel_cos`, the four-interval `atan`, and the rational `exp` with
+  one division. Each is within an ulp of the true value; the tangent, their
+  quotient, within three. The reduction takes up to three parts of `PI/2` as
+  the earlier ones cancel, so beside a quarter turn the tiny remainder is
+  still exact to its own last bit, where one part alone is off by millions
+  of ulps; a test holds sine and cosine bit-equal to a correctly rounded libm
+  there. Angles past 1.6 million radians are taken at that bound.
+- **`round` decides on the exact fraction.** `floor(x + 0.5)` rounds the sum
+  first, which takes `0.49999999999999994`, and every odd integer past 2^52,
+  up by one.
+- **A heading along an axis is exactly that axis.** `Facing::unit_vector`
+  takes whole quarter turns in integers. `PI` has no exact double, so an
+  accurate sine of the nearest one is `1.2e-16` rather than zero, and a
+  west-facing figure's same-side surfaces would sort by that residue instead
+  of the order they were authored in. The heading is worked out once per
+  figure (`frame::Heading`), not per projected point.
+- **Measured and left alone.** `fabs` stays a comparison: a hardware `abs`
+  measured 0.9× per call, too little to pay for a pure one-line wrapper or a
+  migration of its 182 callers. A paired `sin_cos` measured slower than
+  inlined `sin` and `cos`, which already share their reduction. `fmin` and
+  `fmax` stay comparisons because IEEE leaves the sign of `min(-0, +0)` open
+  and the targets lower it differently.
+- **What each digest is taken over.** The figure and client-frame digests
+  fold raw bits and drawn figures, so their constants are the values all four
+  targets produce over this maths, as the art ledger's pixel digests are. The
+  world digest folds quantised integers, the rules make no `mathf` call and
+  the art crate has no float, so theirs do not depend on it.
+- **`x86_64` user space is still soft-float**, so there each of these is a
+  runtime call. Hardware float there is `plans/FIX-DESKTOP-SPEEDUP.md`
+  Stage G, behind its own decision, and needs no change here.
 
 ## 5. WS3/WS9/WS10/WS11/WS21 — the simulation and the rules
 
@@ -1503,10 +1560,10 @@ ducking, reverb zones, distance filtering — is the game's.
 ### Windowed, maximised, and exclusive fullscreen
 
 Three size states over P3's window channel. Windowed and maximised are
-ordinary. Fullscreen asks the compositor for a scanout-sized surface promoted
-to a single layer — no composition pass, a tear-free flip, and a resolution
-change through the existing `DISPLAY_ENDPOINT` `Configure` where the player
-chose one. Losing the seat (a fast user switch) is an event, not a crash: the
+ordinary. Fullscreen asks the compositor for a scanout-sized surface, which the
+layer path promotes to a single layer — no composition pass, a tear-free flip —
+once the live session presents through it (P9); a resolution change goes
+through the existing `DISPLAY_ENDPOINT` `Configure` where the player chose one. Losing the seat (a fast user switch) is an event, not a crash: the
 game pauses the simulation clock it owns, releases the sink lease, and resumes
 at the exact position when the seat returns (`plans/DISPLAY.md`).
 
@@ -1696,7 +1753,7 @@ the criterion for abandoning the approach rather than sinking more into it.
 | Risk | Severity | Mitigation and kill criterion |
 |---|---|---|
 | **The software renderer misses the frame budget** at 1280×720 on the reference machine | High | The stated degradation order and render scaling absorb an overrun down to the readability floor (§3); below it the frame rate gives way and the diagnostic says so, rather than the picture quietly becoming unreadable. Measured at M1, which exists for this. If 720p60 is unreachable after the SIMD and tiling work, the baseline drops to 960×540 and is **stated** rather than quietly missed; the renderer is not rescued by cutting the visual design. |
-| **Cross-target determinism breaks** | High | `lib/util::mathf` is FMA-free and intrinsic-free today, which is what makes the claim affordable; the M1 four-target hash vertical is the gate, and a change introducing `mul_add` into an authoritative path is a defect. Escape hatch if it proves unholdable: fixed-point arithmetic for the authoritative sim — costly, so it is a fallback, not a plan. |
+| **Cross-target determinism breaks** | High | `lib/util::mathf` is FMA-free, and its only intrinsics are the square root and integer rounding IEEE 754 fixes to one answer, which is what makes the claim affordable; the M1 four-target hash vertical is the gate, and a change introducing `mul_add` into an authoritative path is a defect. Escape hatch if it proves unholdable: fixed-point arithmetic for the authoritative sim — costly, so it is a fallback, not a plan. |
 | **The audio stack (P1) slips** | Medium | WS14 sits late deliberately, so M1–M3 do not block on it. The game ships silent and says so; it does not grow a private audio path (§14). |
 | **The `cinder` migration regresses a shipped feature** | Medium | `cinder`'s existing shape, paint, gait and roam tests plus its QEMU vertical are the acceptance gate. If its pixels cannot be preserved, that is surfaced (§15.7), not absorbed. |
 | **The thousand-player target is unmet** | Medium | Interest management, the per-client cap and zone splitting are the levers, and each degrades gracefully: the realm serves fewer players per zone rather than failing. The number is a measured property (§15), so a shortfall is reported with the figure reached. |
@@ -1822,8 +1879,13 @@ Every item lands with its tests; these are the claims the plan is judged on.
   uncleanly and the realm survives with the store's last tick intact.
 - **Client vertical.** The game launches, opens a window, renders a
   deterministic frame from a fixed seed, and the composited pixels are read
-  back and hashed. The three size states transition and the fullscreen surface
-  is promoted to a single layer. A seat switch pauses and resumes exactly.
+  back and compared with the same scene drawn on the host (WS23). The three
+  size states transition, each at the extent the window manager gives it, and
+  the session's witness names how each frame reached the display: composited
+  in software on ramfb, and promoted to a single layer in fullscreen on
+  virtio-gpu (WS24). A seat switch pauses and resumes exactly, once
+  `plans/NEW-DESKTOP-LOGIN.md` G5 decides who tells an application its seat has
+  gone.
 - **§28 compliance.** No frame-loop store read, file read, or IPC round trip; a
   slider drag produces one write; a pointer-motion burst produces one frame; a
   repaint's damage is scoped to what changed. Asserted, not asserted-about.

@@ -414,7 +414,10 @@ impl CrossCpuTlbShootdown for RiscvArch {
         if page_count == 0 {
             return;
         }
-        self.fence_remote(cpus.iter(), start_vaddr, page_count);
+        match cpus.reach(|cpu| self.hartid_of(cpu).map(|_| cpu)) {
+            Some(members) => self.fence_remote(members, start_vaddr, page_count),
+            None => self.shootdown_range(start_vaddr, page_count),
+        }
     }
 }
 

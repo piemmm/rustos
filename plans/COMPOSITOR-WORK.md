@@ -647,20 +647,28 @@ What it guarantees:
   can never still be pressed. The *declaration* outlives the furniture
   (`window_declared_resizable`), so an app may restate its resize range while
   fullscreen and be held to it when it returns.
-- **Promoted to a single layer, through the one display path.**
-  `Compositor::fullscreen_cover` reads every condition from the compositor's
-  own state, never from a client claim: visible, fullscreen, exactly the
-  scan-out rectangle, wholly opaque, cut to no shape, and holding presented
-  pixels for all of it. `encode_layers` then emits that surface alone — no
-  background fill, no window beneath — which is where the tear-free flip
-  comes from. The last condition is what makes dropping the background
-  sound: a window is resized before its app presents at the new extent, and
-  the margin between samples transparent, so the promotion waits for the
-  frame that genuinely covers and the scene composites normally until then.
-  The **software path needs no promotion**: an opaque run covering a row
-  already skips the desktop, the background fill and every window below it,
-  and a second occlusion mechanism beside that one is forbidden (§2.2,
+- **Promoted to a single layer on the layer path, through the one display
+  path.** `Compositor::fullscreen_cover` reads every condition from the
+  compositor's own state, never from a client claim: visible, fullscreen,
+  exactly the scan-out rectangle, wholly opaque, cut to no shape, and holding
+  presented pixels for all of it. `encode_layers` then emits that surface
+  alone — no background fill, no window beneath — which is where the
+  tear-free flip comes from. The last condition is what makes dropping the
+  background sound: a window is resized before its app presents at the new
+  extent, and the margin between samples transparent, so the promotion waits
+  for the frame that genuinely covers and the scene composites normally until
+  then. The **software path needs no promotion**: an opaque run covering a
+  row already skips the desktop, the background fill and every window below
+  it, and a second occlusion mechanism beside that one is forbidden (§2.2,
   `plans/FIX-DESKTOP-SPEEDUP.md` Stage B).
+- **Promotion is not reached in production.** It lives on
+  `Compositor::present_accelerated`, and the live session presents every
+  frame through the software composite until
+  `plans/FIX-DISPLAY-ACCELERATION.md` carries a layer stack across the display
+  service; that plan owns reaching it. What the compositor did with each frame
+  is its own record (`Compositor::presentation`: composited, layered, or the
+  one window promoted), which the session's `WINDOW_SIZED` witness states, so
+  a vertical holds the path to the frame rather than assuming it.
 - **Tests** cover: fullscreen takes the screen and withdraws every furniture
   reader; leaving lands exactly where it started; a maximized window round
   trips through fullscreen and still restores to its pre-maximize geometry;

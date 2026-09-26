@@ -6,7 +6,8 @@ use core::fmt;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ClientError {
-    /// A buffer the frame needs did not fit.
+    /// A buffer the frame needs did not fit, or a tile it needs was refused
+    /// by the material cache.
     OutOfMemory,
     /// A viewport of zero pixels, or one larger than a surface may be.
     Viewport,

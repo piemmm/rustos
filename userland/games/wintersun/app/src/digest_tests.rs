@@ -21,90 +21,12 @@ fn the_digest_is_the_same_every_time() {
 }
 
 #[test]
-fn the_frames_are_not_blank() {
-    // A digest over an all-transparent buffer would be perfectly stable
-    // and perfectly worthless, which is the failure mode a renderer's
-    // reproducibility test is most likely to have.
-    let params = reference_params().expect("the spec is in range");
-    let field = RealmField::generate(params).expect("the realm generates");
-    let roads = RoadDecals::from_realm(&field).expect("the roads fit");
-    let decals = roads.decals().expect("the decals fit");
-    let warp = Warp::new(params.seed());
-    let fray = Fray::new(params.seed());
-    let camera = Camera::new(
-        WorldPoint { x: 0, y: 0 },
-        Zoom::FURTHEST,
-        realm_bounds(params),
-    );
-    let view = Viewport::new(FRAME_WIDTH, FRAME_HEIGHT, crate::quality::RenderScale::ONE)
-        .expect("a real window");
-    let held = generate(&field, camera.visible(&view)).expect("the chunks generate");
-    let borrowed = borrow(&held).expect("the window fits");
-    let chunks = ChunkWindow::new(&borrowed).expect("generated in coordinate order");
-    let set = Set::new().expect("the shipped set");
-    let clips = set.clips().expect("the shipped clips");
-    let cast = extras(&clips, camera.centre(&view)).expect("the extras play");
-
-    PRESSURE.report(PressureBand::Normal);
-    let mut cache = MaterialCache::new(
-        "wintersun-blank-test",
-        CACHE_BACKING_BYTES,
-        &PRESSURE,
-        &SINK,
-    );
-    let mut renderer = Renderer::new();
-    let (width, height) = view.render();
-    let mut target = Surface::new(width, height).expect("a frame fits");
-    renderer
-        .render(
-            &mut target,
-            &view,
-            &Scene {
-                camera,
-                chunks,
-                decals: &decals,
-                fray: &fray,
-                warp: &warp,
-                sun: Sun::winter(),
-                sky: Sky::winter(),
-                ladder: Ladder::FULL,
-                cast: &cast,
-            },
-            &mut cache,
-            &tairix_parallel::SERIAL,
-            &Stopped,
-        )
-        .expect("the frame draws");
-
-    let pixels = target.pixels();
-    assert!(
-        pixels.iter().all(|p| p.a == 255),
-        "the ground pass left transparent pixels"
-    );
-    assert_eq!(
-        renderer.grid().unmapped(),
-        0,
-        "every visible chunk was generated"
-    );
-    assert_eq!(renderer.figures(), EXTRAS.len(), "an extra was not drawn");
-    let distinct = pixels
-        .iter()
-        .map(|p| (p.r, p.g, p.b))
-        .collect::<alloc::collections::BTreeSet<_>>();
-    assert!(
-        distinct.len() > 16,
-        "a frame of {} distinct colours is a flat fill, not terrain",
-        distinct.len()
-    );
-}
-
-#[test]
 fn the_digest_folds_in_the_art_constant() {
     // Not a claim about the value, a claim about the dependency: the
     // art's own digest is part of the input, so a change to the ground
     // moves this number rather than passing unnoticed.
-    let without = FastHash::with_seed(REFERENCE_SEED);
-    let mut with = FastHash::with_seed(REFERENCE_SEED);
+    let without = FastHash::with_seed(reference::SEED);
+    let mut with = FastHash::with_seed(reference::SEED);
     with.write_u64(art::REFERENCE_DIGEST);
     assert_ne!(without.finish(), with.finish());
 }

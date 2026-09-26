@@ -4,7 +4,7 @@ wintersun — cerdded byd gaeafol a gynhyrchir yn weithdrefnol
 
 ## SYNOPSIS
 
-`wintersun`
+`wintersun [--reference-scene]`
 
 ## DESCRIPTION
 
@@ -48,11 +48,22 @@ syndod.
 Mae ffenestr sy'n fwy nag y gall y rendrwr meddalwedd ei llenwi yn cael ei
 darlunio ar hyd at 2560×1440 ac yna ei graddio i fyny i'r ffenestr.
 
+## OPTIONS
+
+- `-h, -?, --help` — dangos cymorth byr y gorchymyn hwn.
+- `--reference-scene` — lluniadu'r olygfa gyfeirio sefydlog a'i chadw'n
+  llonydd: un byd, yr un cymeriadau a'r un eiliad, yr un fath ar bob peiriant,
+  fel y gellir cymharu llun o'r ffenestr ag un a luniwyd yn rhywle arall. Mae
+  `F11` ac `Esc` yn dal i newid maint y ffenestr; nid oes dim arall yn symud.
+
 ## EXIT STATUS
 
 `0` pan fyddwch yn gadael. Mae statws nad yw'n sero yn enwi ei reswm ar yr
 allbwn gwall safonol: ni ellid cynhyrchu'r byd, ni ellid agor y ffenestr, neu
 collwyd sianel digwyddiadau'r sesiwn.
+
+- `2` — ni ddeallwyd y llinell orchymyn.
+- `87` — ni ellid lluniadu'r olygfa gyfeirio.
 
 ## SEE ALSO
 

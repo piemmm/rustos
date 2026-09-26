@@ -30,7 +30,7 @@ use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
 use tairix_controls::{ChainModel, PlatePlacement, WindowSizeState};
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
-use tairix_log::EventId;
+use tairix_log::{EventId, Field, FieldValue};
 use tairix_window::{CursorSetName, HandOverDesk, OpenEntry, WallpaperName};
 
 use crate::launch::{
@@ -84,6 +84,93 @@ pub const WINDOW_RETITLED: EventId = EventId(20_016);
 /// The exact message [`WINDOW_RETITLED`] is emitted with. A log consumer
 /// matches on this constant rather than on a copy of its text.
 pub const WINDOW_RETITLED_MESSAGE: &str = "served window title on screen";
+
+/// Event id of the announcement that a served window is on screen at the
+/// size state it was just given, in the desktop session's reserved range.
+///
+/// The window manager applies a size state and the application answers with
+/// a frame at the new extent; only the session sees the two meet on the
+/// display. The record names the state, the extent, and how the frame reached
+/// the display.
+pub const WINDOW_SIZED: EventId = EventId(20_018);
+
+/// The exact message [`WINDOW_SIZED`] is emitted with. A log consumer matches
+/// on this constant rather than on a copy of its text.
+pub const WINDOW_SIZED_MESSAGE: &str = "served window on screen at its new size";
+
+/// The name [`WINDOW_SIZED`] records `state` under.
+#[must_use]
+pub const fn size_state_name(state: WindowSizeState) -> &'static str {
+    match state {
+        WindowSizeState::Restored => "restored",
+        WindowSizeState::Maximized => "maximized",
+        WindowSizeState::Fullscreen => "fullscreen",
+    }
+}
+
+/// The fields of one [`WINDOW_SIZED`] record, spelled once for the session
+/// that writes it and every consumer that reads the line back.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SizedRecord<'a> {
+    /// The served window, by its window-channel id.
+    pub window: u64,
+    /// The size state, as [`size_state_name`] spells it.
+    pub state: &'a str,
+    /// The client extent the state gave, in pixels.
+    pub extent: (u32, u32),
+    /// How the frame carrying it reached the display.
+    pub path: &'a str,
+}
+
+impl<'a> SizedRecord<'a> {
+    const WINDOW: &'static str = "window";
+    const STATE: &'static str = "state";
+    const WIDTH: &'static str = "width";
+    const HEIGHT: &'static str = "height";
+    const PATH: &'static str = "path";
+
+    /// The record as the fields it is logged with.
+    #[must_use]
+    pub fn fields(&self) -> [Field<'a>; 5] {
+        [
+            Field {
+                key: Self::WINDOW,
+                value: FieldValue::UnsignedInt(self.window),
+            },
+            Field {
+                key: Self::STATE,
+                value: FieldValue::Str(self.state),
+            },
+            Field {
+                key: Self::WIDTH,
+                value: FieldValue::UnsignedInt(u64::from(self.extent.0)),
+            },
+            Field {
+                key: Self::HEIGHT,
+                value: FieldValue::UnsignedInt(u64::from(self.extent.1)),
+            },
+            Field {
+                key: Self::PATH,
+                value: FieldValue::Str(self.path),
+            },
+        ]
+    }
+
+    /// Read a record back through `field`, which answers the rendered value
+    /// the line carries under a key; `None` if any field is absent or an
+    /// integer does not parse.
+    pub fn read(field: impl Fn(&str) -> Option<&'a str>) -> Option<Self> {
+        Some(Self {
+            window: field(Self::WINDOW)?.parse().ok()?,
+            state: field(Self::STATE)?,
+            extent: (
+                field(Self::WIDTH)?.parse().ok()?,
+                field(Self::HEIGHT)?.parse().ok()?,
+            ),
+            path: field(Self::PATH)?,
+        })
+    }
+}
 
 /// Event id of the one-shot announcement that an open menu chain's plates
 /// reached the display, in the desktop session's reserved range.
@@ -182,6 +269,11 @@ struct WindowRecord {
     /// Whether a retitle of this already-shown window has yet to be carried
     /// by a frame that reached the display.
     retitled: bool,
+    /// A size state applied to this window and not yet on screen: the state
+    /// and the client extent it was given.
+    sized: Option<(WindowSizeState, (u32, u32))>,
+    /// The extent of the frame the application last presented.
+    presented_extent: Option<(u32, u32)>,
     /// The process the kernel attested opened this window (a popup inherits
     /// its parent's). What a menu chain's information row resolves its
     /// attested identity from.
@@ -238,6 +330,19 @@ impl SessionWindows {
         self.records.get(&ipc).map(|record| record.wm)
     }
 
+    /// Note that the served window `ipc` was given `state` at a client of
+    /// `extent`, to be announced once a frame drawn at that extent is on the
+    /// display ([`report_on_screen`](Self::report_on_screen)).
+    ///
+    /// Every path that applies a size state records it here, so a state the
+    /// user chose from the title bar is announced exactly as one the
+    /// application asked for.
+    fn note_sized(&mut self, ipc: u64, state: WindowSizeState, extent: (u32, u32)) {
+        if let Some(record) = self.records.get_mut(&ipc) {
+            record.sized = Some((state, extent));
+        }
+    }
+
     /// Window-channel ids that successfully presented since the last take,
     /// clearing the set so the next report decision starts fresh.
     pub fn take_presented(&mut self) -> Vec<u64> {
@@ -251,8 +356,9 @@ impl SessionWindows {
     }
 
     /// Report what the frame just handed to the display shows of the served
-    /// windows: each whose awaited frame it carries, and each already on
-    /// screen whose new title it carries, where `visible` says the window was
+    /// windows: each whose awaited frame it carries, each already on screen
+    /// whose new title it carries, and each whose last applied size state it
+    /// carries at that state's extent, where `visible` says the window was
     /// composited into it.
     ///
     /// Called immediately after a frame was handed to the display, which is
@@ -265,15 +371,20 @@ impl SessionWindows {
     /// wears, so it retires any retitle still pending; a retitle is announced
     /// only for a window whose own pixels are on screen, so the record never
     /// claims a title bar over a released or hidden window, and a burst of
-    /// retitles between two frames is one announcement.
+    /// retitles between two frames is one announcement. A size state is
+    /// announced only once the application has presented at the extent the
+    /// state gave it, so the record never claims a window is fullscreen while
+    /// the display still shows the frame it drew before; a burst of changes
+    /// between two frames is one announcement, of the last.
     ///
-    /// One walk for both, taking reporters rather than returning collections,
-    /// so an ordinary frame allocates nothing.
+    /// One walk for all three, taking reporters rather than returning
+    /// collections, so an ordinary frame allocates nothing.
     pub fn report_on_screen(
         &mut self,
         visible: impl Fn(WindowId) -> bool,
         mut shown: impl FnMut(u64),
         mut retitled: impl FnMut(u64),
+        mut sized: impl FnMut(u64, WindowSizeState, (u32, u32)),
     ) {
         for (&ipc, record) in &mut self.records {
             match record.first_frame {
@@ -287,6 +398,15 @@ impl SessionWindows {
                     retitled(ipc);
                 }
                 _ => {}
+            }
+            if record.first_frame != FirstFrame::Shown || !visible(record.wm) {
+                continue;
+            }
+            if let Some((state, extent)) = record.sized {
+                if record.presented_extent == Some(extent) {
+                    record.sized = None;
+                    sized(ipc, state, extent);
+                }
             }
         }
     }
@@ -372,6 +492,8 @@ impl SessionWindows {
                 parent,
                 first_frame,
                 retitled: false,
+                sized: None,
+                presented_extent: None,
                 owner,
             },
         );
@@ -474,7 +596,7 @@ pub fn window_control_event(
     work_area: Rect,
     shell: &mut DesktopShell,
     compositor: &mut Compositor,
-    windows: &SessionWindows,
+    windows: &mut SessionWindows,
 ) -> Option<WindowEvent> {
     let resized = apply_window_control(control, wm, work_area, shell, compositor);
     // Only a served window has a window-channel id and an owning app.
@@ -483,11 +605,14 @@ pub fn window_control_event(
         WindowControlKind::Close => Some(WindowEvent::CloseRequested { window_id }),
         WindowControlKind::Minimize => Some(WindowEvent::Minimized { window_id }),
         WindowControlKind::PutToBack => None,
-        WindowControlKind::SizeToggle => resized.map(|(state, client)| WindowEvent::Resized {
-            window_id,
-            width_px: client.width,
-            height_px: client.height,
-            state,
+        WindowControlKind::SizeToggle => resized.map(|(state, client)| {
+            windows.note_sized(window_id, state, (client.width, client.height));
+            WindowEvent::Resized {
+                window_id,
+                width_px: client.width,
+                height_px: client.height,
+                state,
+            }
         }),
     }
 }
@@ -1070,6 +1195,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             .records
             .get_mut(&window_id)
             .is_some_and(|record| {
+                record.presented_extent = Some((surface.width_px, surface.height_px));
                 let unpresented = record.first_frame == FirstFrame::Unpresented;
                 if matches!(
                     record.first_frame,
@@ -1188,6 +1314,8 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         else {
             return Err(Errno::NotSupported);
         };
+        self.windows
+            .note_sized(window_id, applied, (client.width, client.height));
         self.windows.owed.push(WindowEvent::Resized {
             window_id,
             width_px: client.width,
@@ -2207,22 +2335,199 @@ mod tests {
         on_screen(windows, |_| true).0
     }
 
+    /// A window at a size state, as [`WINDOW_SIZED`] reports it.
+    type Sized = (u64, WindowSizeState, (u32, u32));
+
     /// What `windows` reports the frame just taken carries — the windows newly
-    /// on screen, then those wearing a new title — with `visible` saying which
-    /// windows it composited.
+    /// on screen, those wearing a new title, and those at a new size state —
+    /// with `visible` saying which windows it composited.
     fn on_screen(
         windows: &mut SessionWindows,
         visible: impl Fn(WindowId) -> bool,
-    ) -> (Vec<u64>, Vec<u64>) {
-        let (mut shown, mut retitled) = (Vec::new(), Vec::new());
+    ) -> (Vec<u64>, Vec<u64>, Vec<Sized>) {
+        let (mut shown, mut retitled, mut sized) = (Vec::new(), Vec::new(), Vec::new());
         windows.report_on_screen(
             visible,
             |window| shown.push(window),
-            |window| {
-                retitled.push(window);
-            },
+            |window| retitled.push(window),
+            |window, state, extent| sized.push((window, state, extent)),
         );
-        (shown, retitled)
+        (shown, retitled, sized)
+    }
+
+    /// Run `act` against a host over `shell`, `compositor` and `windows`.
+    fn hosted<R>(
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        act: impl FnOnce(&mut ShellWindowHost<'_>) -> R,
+    ) -> R {
+        let mut host = ShellWindowHost {
+            shell,
+            compositor,
+            windows,
+            picker: &mut RecordingSlot::default(),
+            apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
+            relay: &mut RefusingRelay,
+            wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
+        };
+        act(&mut host)
+    }
+
+    /// A size record reads back from the values its fields render as, and a
+    /// record missing a field or carrying a malformed extent reads as none.
+    #[test]
+    fn a_size_record_reads_back_from_its_rendered_fields() {
+        use alloc::string::ToString;
+
+        fn read<'a>(line: &'a [(&str, String)]) -> Option<SizedRecord<'a>> {
+            SizedRecord::read(|key| {
+                line.iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, value)| value.as_str())
+            })
+        }
+
+        let record = SizedRecord {
+            window: 7,
+            state: size_state_name(WindowSizeState::Maximized),
+            extent: (1022, 685),
+            path: "composited",
+        };
+        let line: Vec<(&str, String)> = record
+            .fields()
+            .iter()
+            .map(|field| (field.key, field.value.to_string()))
+            .collect();
+        assert_eq!(read(&line), Some(record));
+        for missing in 0..line.len() {
+            let mut short = line.clone();
+            short.remove(missing);
+            assert_eq!(read(&short), None, "without {}", line[missing].0);
+        }
+        for malformed in ["window", "width", "height"] {
+            let bad: Vec<(&str, String)> = line
+                .iter()
+                .map(|(key, value)| {
+                    let value = if *key == malformed {
+                        "-1"
+                    } else {
+                        value.as_str()
+                    };
+                    (*key, value.to_string())
+                })
+                .collect();
+            assert_eq!(read(&bad), None, "a malformed {malformed}");
+        }
+    }
+
+    /// A size state is announced by the frame that shows the window at the
+    /// extent it was given: once, never while the display still shows the
+    /// frame drawn at the old size, and for a burst of changes only the state
+    /// the burst ends in.
+    #[test]
+    fn a_size_state_is_announced_once_the_frame_drawn_for_it_is_on_screen() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let visible = |_| true;
+        let present = |host: &mut ShellWindowHost<'_>, (width, height): (u32, u32)| {
+            let m = mode(width, height, DisplayFormat::Rgba8888);
+            let frame = alloc::vec![0u8; (width as usize) * (height as usize) * 4];
+            host.window_presented(3, &m, &frame, whole(&m))
+                .expect("presents");
+        };
+        hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            open_one_sized(host, 3, RESIZABLE)
+        });
+        assert_eq!(on_screen(&mut windows, visible).2, Vec::<Sized>::new());
+
+        let screen = hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            host.window_size_state_changed(3, WindowSizeState::Fullscreen)
+                .expect("a resizable window may go fullscreen");
+            host.compositor.screen_rect()
+        });
+        let full = (screen.width, screen.height);
+        assert_eq!(
+            on_screen(&mut windows, visible).2,
+            Vec::<Sized>::new(),
+            "the display still shows the frame drawn before the change"
+        );
+        hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            present(host, full);
+        });
+        assert_eq!(
+            on_screen(&mut windows, visible).2,
+            [(3, WindowSizeState::Fullscreen, full)]
+        );
+        assert_eq!(on_screen(&mut windows, visible).2, Vec::<Sized>::new());
+
+        let restored = hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            host.window_size_state_changed(3, WindowSizeState::Maximized)
+                .expect("maximizes");
+            host.window_size_state_changed(3, WindowSizeState::Restored)
+                .expect("restores");
+            match host.windows.take_owed_events().last() {
+                Some(&WindowEvent::Resized {
+                    width_px,
+                    height_px,
+                    ..
+                }) => (width_px, height_px),
+                other => panic!("no restored extent owed: {other:?}"),
+            }
+        });
+        hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            present(host, restored);
+        });
+        assert_eq!(
+            on_screen(&mut windows, visible).2,
+            [(3, WindowSizeState::Restored, restored)]
+        );
+    }
+
+    /// A size state the user chooses from the title bar is announced exactly
+    /// as one the application asked for: once, by the frame drawn at the
+    /// extent it gave.
+    #[test]
+    fn a_title_bar_size_toggle_is_announced_like_a_requested_state() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let wm = hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            open_one_sized(host, 3, RESIZABLE)
+        });
+        let work_area = shell.work_area(&compositor);
+        let event = window_control_event(
+            WindowControlKind::SizeToggle,
+            wm,
+            work_area,
+            &mut shell,
+            &mut compositor,
+            &mut windows,
+        );
+        let Some(WindowEvent::Resized {
+            width_px,
+            height_px,
+            state,
+            ..
+        }) = event
+        else {
+            panic!("the toggle resized the window: {event:?}");
+        };
+        assert_eq!(state, WindowSizeState::Maximized);
+        let visible = |_| true;
+        assert_eq!(on_screen(&mut windows, visible).2, Vec::<Sized>::new());
+        hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            let m = mode(width_px, height_px, DisplayFormat::Rgba8888);
+            let frame = alloc::vec![0u8; (width_px as usize) * (height_px as usize) * 4];
+            host.window_presented(3, &m, &frame, whole(&m))
+                .expect("presents");
+        });
+        assert_eq!(
+            on_screen(&mut windows, visible).2,
+            [(3, WindowSizeState::Maximized, (width_px, height_px))]
+        );
     }
 
     /// A present whose damage or frame disagrees with the recorded
@@ -2670,7 +2975,7 @@ mod tests {
                     work_area,
                     &mut shell,
                     &mut compositor,
-                    &windows,
+                    &mut windows,
                 ),
                 Some(WindowEvent::Resized { window_id: 3, .. })
             ),
@@ -2855,7 +3160,7 @@ mod tests {
                 work_area,
                 &mut shell,
                 &mut compositor,
-                &windows,
+                &mut windows,
             ),
             None
         );
@@ -2881,7 +3186,7 @@ mod tests {
                 work_area,
                 &mut shell,
                 &mut compositor,
-                &windows,
+                &mut windows,
             ),
             None,
             "a fixed-size window does not maximize"
@@ -2905,7 +3210,7 @@ mod tests {
                 work_area,
                 &mut shell,
                 &mut compositor,
-                &windows,
+                &mut windows,
             ),
             Some(WindowEvent::CloseRequested { window_id: 7 })
         );
@@ -2932,7 +3237,7 @@ mod tests {
                 work_area,
                 &mut shell,
                 &mut compositor,
-                &windows,
+                &mut windows,
             ),
             Some(WindowEvent::Minimized { window_id: 7 })
         );
@@ -3313,7 +3618,7 @@ mod tests {
                 work_area,
                 &mut shell,
                 &mut compositor,
-                &windows,
+                &mut windows,
             ),
             Some(WindowEvent::CloseRequested { window_id: 7 })
         );
@@ -3325,7 +3630,7 @@ mod tests {
                 work_area,
                 &mut shell,
                 &mut compositor,
-                &windows,
+                &mut windows,
             ),
             None
         );
@@ -3478,7 +3783,7 @@ mod tests {
                 work_area,
                 &mut shell,
                 &mut compositor,
-                &windows,
+                &mut windows,
             ),
             Some(WindowEvent::Minimized { window_id: 7 })
         );
@@ -3521,7 +3826,7 @@ mod tests {
                 work_area,
                 &mut shell,
                 &mut compositor,
-                &windows,
+                &mut windows,
             ),
             None,
             "put-to-back is window-manager-local: no app-ward event"
@@ -3565,7 +3870,7 @@ mod tests {
             work_area,
             &mut shell,
             &mut compositor,
-            &windows,
+            &mut windows,
         );
         let client = compositor.window_client_rect(wm).expect("client");
         assert_eq!(
@@ -3591,7 +3896,7 @@ mod tests {
             work_area,
             &mut shell,
             &mut compositor,
-            &windows,
+            &mut windows,
         );
         let restored = compositor.window_client_rect(wm).expect("client");
         assert_eq!(
@@ -3787,11 +4092,12 @@ mod tests {
     /// What the frame just taken carries, judged against what the compositor
     /// actually shows.
     fn composited(windows: &mut SessionWindows, compositor: &Compositor) -> (Vec<u64>, Vec<u64>) {
-        on_screen(windows, |wm| {
+        let (shown, retitled, _) = on_screen(windows, |wm| {
             compositor
                 .window(wm)
                 .is_some_and(tairix_wm::Window::is_visible)
-        })
+        });
+        (shown, retitled)
     }
 
     /// A retitle of a window already on screen is announced by the frame that

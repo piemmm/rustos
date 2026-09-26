@@ -505,8 +505,12 @@ impl CrossCpuTlbShootdown for X86_64Arch {
     fn shootdown_user_range(&self, cpus: CpuMask<'_>, start_vaddr: u64, page_count: usize) {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            let targets = cpus.iter().filter_map(|cpu| self.lapic_id_of(cpu));
-            crate::tlb_shootdown::shootdown_remote(start_vaddr, page_count, targets);
+            match cpus.reach(|cpu| self.lapic_id_of(cpu)) {
+                Some(targets) => {
+                    crate::tlb_shootdown::shootdown_remote(start_vaddr, page_count, targets);
+                }
+                None => self.shootdown_range(start_vaddr, page_count),
+            }
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {

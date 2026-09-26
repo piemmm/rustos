@@ -6,9 +6,9 @@ use alloc::vec::Vec;
 use tairix_abi::font_ipc::FONT_MAX_OUTLINE_POINTS;
 
 use crate::gridfit::{self, AlignZones, Axes, Zone};
-use crate::mathf;
 use crate::variations::{self, Axis, AxisSetting, Gvar, VarTables};
 use crate::FontError;
+use tairix_util::mathf;
 
 /// Coverage sample rows per pixel row (vertical supersampling).
 const SAMPLE_ROWS: u32 = 4;

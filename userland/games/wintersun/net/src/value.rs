@@ -103,11 +103,23 @@ impl Facing {
     /// [`WorldPoint`]'s axes already have. Stated here, with the type,
     /// because a heading and a position disagreeing about which way round
     /// the world is would be a defect no single crate could see.
+    ///
+    /// Whole quarter turns are taken in integers, so a heading along an axis
+    /// is exactly that axis: `PI` has no exact double, and a sine taken of
+    /// the nearest one is not zero. Only the angle within a quadrant is
+    /// rounded.
     #[must_use]
     pub fn unit_vector(self) -> (f64, f64) {
-        let turn = f64::from(self.0) / f64::from(TURN_UNITS);
-        let radians = turn * core::f64::consts::TAU;
-        (mathf::cos(radians), mathf::sin(radians))
+        let turns = i32::from(self.0);
+        let within =
+            f64::from(turns % QUARTER_TURN) * (core::f64::consts::TAU / f64::from(TURN_UNITS));
+        let (c, s) = (mathf::cos(within), mathf::sin(within));
+        match turns / QUARTER_TURN {
+            0 => (c, s),
+            1 => (-s, c),
+            2 => (-c, -s),
+            _ => (s, -c),
+        }
     }
 
     /// The heading pointing along `(x, y)`, or `None` for the zero vector,
@@ -134,6 +146,9 @@ impl Facing {
 
 /// Divisions of a full turn a [`Facing`] counts in — every `u16`.
 const TURN_UNITS: i32 = 1 << 16;
+
+/// A quarter of a turn, in [`Facing`] units.
+const QUARTER_TURN: i32 = TURN_UNITS / 4;
 
 /// A position *within* an authoritative tick, as a fraction of it.
 ///

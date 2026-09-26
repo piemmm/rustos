@@ -1,7 +1,14 @@
 # FIX-DISPLAY-ACCELERATION — Wire hardware-accelerated desktop composition end-to-end
 
-Status: **planned** (staged below; no stage is optional and none defers
-work as "future").
+| # | Item | Status |
+|---|---|---|
+| A | Zero-copy layer ABI: `AccelLayer` sourced from a shared-memory reference rather than an in-process slice, with both engines and the compositor on it | blocked: a directly sourced plane needs window frames in scanout-capable memory, a decision this plan does not make (Stage A) |
+| B | `AcceleratedDisplay` across the display service: `QueryAccel` and `PresentLayers` on `DISPLAY_ENDPOINT`, `RemoteDisplay` implementing it, the session choosing its path once | planned |
+| C | The `virtio-gpu` driver: discovery, the 2D control path with host-side damage, blob-resource layers, IRQ completion, and its QEMU vertical | planned |
+| D | Damage on the accelerated path: per-layer source damage, and the software-stale region that lets a layered present consume damage | planned |
+| E | Double-buffered, vsync-synchronised flips and hardware scaling | planned |
+
+No stage is optional and none defers work as "future".
 
 Binding under `AGENTS.md`. This plan turns the *already-designed but
 dead* acceleration path into a working, first-class pipeline that
@@ -153,6 +160,18 @@ of this deliverable. Everything
 This is the foundational change: it makes an app's window shm frame usable
 as a hardware source plane, which every later stage depends on. Landing it
 first means the ABI is settled before the IPC and driver work builds on it.
+
+**The decision it waits on.** The HVS reads a plane from a physically
+contiguous buffer by its `VideoCore` bus address; today each `rpi_hvs` plane
+is a firmware buffer the driver copies into. A window's frame is an
+app-created shm region drawn as buddy chunks, contiguous only by accident and
+never promised to be device-addressable, so a plane cannot source it until
+window frames can live in scanout-capable memory. Three things are undecided:
+who allocates that memory (the app through a device-contiguous shm class, or
+the session handing out surfaces it allocated), which capability gates a
+device-contiguous allocation, and how the `VideoCore` addressing limit is
+honoured. `virtio-gpu` has no such constraint, since
+`RESOURCE_ATTACH_BACKING` takes a scatter list.
 
 ### A.1 Replace `AccelLayer`'s in-process slice with a shared-memory reference
 In `lib/abi/src/driver/display.rs`, change `AccelLayer` in place (§2.13):
@@ -357,6 +376,14 @@ Stop re-uploading/retransferring unchanged planes every frame.
 - The WM computes per-window damage from its existing `damage` module and
   threads it into each layer's `src_crop`; a fully-unchanged frame
   (blinking cursor only) re-uploads only the cursor layer.
+- A layered present consumes the damage it carried. Today it cannot:
+  `Compositor::present_accelerated` leaves `damage` in place, because the
+  software frame must stay recomposable should a later frame fall back. As
+  a result `has_damage()` stays true after every layered present, and a wake
+  loop driving the layer path would never settle. The damage the layers
+  carried moves into a software-stale region, outside `has_damage`, which
+  the software path drains when it next composites. A layered success
+  already settles what a refused software frame left owed.
 
 ### D.2 Tests
 - `rpi_hvs`/`gpu_virtio` unit tests: an unchanged layer is not re-

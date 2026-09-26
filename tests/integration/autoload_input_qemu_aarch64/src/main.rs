@@ -352,8 +352,8 @@ mod kernel {
         /// system-wide total would name no window at all, and the drift that
         /// gave once stalled this run.
         ///
-        /// Only window-event mailboxes count: their ids carry the
-        /// `0xE117_…` tag (`lib/window`'s `event_endpoint_for`). Other
+        /// Only window-event mailboxes count
+        /// (`tairix_abi::window_ipc::is_event_endpoint`). Other
         /// `MessageDelivered` ports — notably the Switchboard command
         /// mailbox the session's frame reports ride — must not steal the
         /// first-port slot, or the terminal-focus marker fires on the
@@ -369,10 +369,7 @@ mod kernel {
                 let Ok(port) = u64::from_str_radix(value, 16) else {
                     continue;
                 };
-                // Window-event mailbox tag — keep in lockstep with
-                // `lib/window`'s `EVENT_ENDPOINT_TAG` / `event_endpoint_for`.
-                const WINDOW_EVENT_TAG: u64 = 0xE117_0000_0000_0000;
-                if port & 0xFFFF_0000_0000_0000 != WINDOW_EVENT_TAG {
+                if !tairix_abi::window_ipc::is_event_endpoint(port) {
                     continue;
                 }
                 let first = self.first_window_port.load(Ordering::Acquire);

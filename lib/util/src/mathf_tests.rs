@@ -5,11 +5,13 @@
 //! reduction shows up as a numeric difference rather than as artwork that
 //! merely looks a bit wrong.
 
+extern crate std;
+
 use core::f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI, SQRT_2};
 
 use super::{
     acos, asin, atan, atan2, ceil, clamp, cos, exp, fabs, floor, fmax, fmin, hypot, round,
-    round_i32, sin, sqrt, tan, trunc,
+    round_i32, sin, sqrt, tan,
 };
 
 /// The accuracy every transcendental function is held to: far finer than the
@@ -25,14 +27,47 @@ fn close(actual: f64, expected: f64) {
     );
 }
 
-// --- rounding -----------------------------------------------------------
-
-#[test]
-fn truncation_goes_toward_zero() {
-    close(trunc(2.7), 2.0);
-    close(trunc(-2.7), -2.0);
-    close(trunc(0.0), 0.0);
+/// How many representable doubles lie between `a` and `b`.
+fn ulps_apart(a: f64, b: f64) -> u64 {
+    let ordered = |x: f64| {
+        let bits = i64::from_ne_bytes(x.to_bits().to_ne_bytes());
+        if bits < 0 {
+            i64::MIN - bits
+        } else {
+            bits
+        }
+    };
+    ordered(a).abs_diff(ordered(b))
 }
+
+/// Hold `ours` within `ulps` of the host libm's `theirs` at every point of
+/// `range` stepped by `step`, reporting the worst point either way.
+#[track_caller]
+fn tracks_the_host(
+    name: &str,
+    ours: fn(f64) -> f64,
+    theirs: fn(f64) -> f64,
+    (from, to, step): (f64, f64, f64),
+    ulps: u64,
+) {
+    let mut worst = (0, from);
+    let mut x = from;
+    while x <= to {
+        let apart = ulps_apart(ours(x), theirs(x));
+        if apart > worst.0 {
+            worst = (apart, x);
+        }
+        x += step;
+    }
+    assert!(
+        worst.0 <= ulps,
+        "{name} is {} ulps from the host at {:e}",
+        worst.0,
+        worst.1
+    );
+}
+
+// --- rounding -----------------------------------------------------------
 
 #[test]
 fn floor_and_ceil_bracket_a_fraction() {
@@ -49,6 +84,48 @@ fn round_takes_halves_upward() {
     close(round(2.5), 3.0);
     close(round(-2.5), -2.0);
     close(round(2.49), 2.0);
+}
+
+/// `floor(x + 0.5)` rounds the sum before it floors, which carries the
+/// largest double below a half, and every odd integer past 2^52, up by one.
+#[allow(
+    clippy::float_cmp,
+    reason = "a rounding result is an exact integer, so a tolerance would \
+              accept the off-by-one this pins"
+)]
+#[test]
+fn round_decides_on_the_exact_fraction() {
+    let below_half = 0.499_999_999_999_999_94;
+    assert!(below_half < 0.5 && below_half + 0.5 == 1.0);
+    assert_eq!(round(below_half), 0.0);
+    assert_eq!(round(-below_half), 0.0);
+    assert_eq!(round_i32(below_half), 0);
+    let odd = 4_503_599_627_370_497.0;
+    assert_eq!(round(odd), odd);
+    assert_eq!(round(-odd), -odd);
+    assert_eq!(round(1.5), 2.0);
+    assert_eq!(round(-1.5), -1.0);
+    assert_eq!(round(-0.5), 0.0);
+}
+
+/// Integer rounding answers `0` for a `NaN` and keeps its exact meaning past
+/// the range of any integer type.
+#[allow(
+    clippy::float_cmp,
+    reason = "these are exact integers, which is the property under test"
+)]
+#[test]
+fn integer_rounding_is_total_and_exact_at_any_magnitude() {
+    for f in [floor, ceil, round] {
+        assert_eq!(f(f64::NAN), 0.0);
+        assert_eq!(f(1e300), 1e300);
+        assert_eq!(f(-1e300), -1e300);
+    }
+    assert_eq!(round_i32(f64::NAN), 0);
+    assert_eq!(floor(-0.5), -1.0);
+    assert_eq!(ceil(0.5), 1.0);
+    assert_eq!(floor(1.5e19), 1.5e19);
+    assert_eq!(ceil(-1.5e19), -1.5e19);
 }
 
 #[test]
@@ -88,6 +165,29 @@ fn a_non_positive_square_root_is_zero_not_a_nan() {
     close(sqrt(0.0), 0.0);
     close(sqrt(-4.0), 0.0);
     close(sqrt(f64::NAN), 0.0);
+    assert_eq!(sqrt(-0.0).to_bits(), 0.0_f64.to_bits());
+    assert_eq!(sqrt(f64::NEG_INFINITY).to_bits(), 0.0_f64.to_bits());
+    assert_eq!(sqrt(f64::INFINITY).to_bits(), f64::INFINITY.to_bits());
+}
+
+/// The square root is correctly rounded, so it is the one IEEE 754 answer —
+/// the same bits the host's own square root gives, for normal, subnormal and
+/// extreme inputs alike. That agreement is what every target's instruction or
+/// runtime routine is held to, and what the cross-target digests rest on.
+#[test]
+fn the_square_root_is_correctly_rounded() {
+    // A stride through the whole positive range, co-prime to the mantissa
+    // width so it lands on every exponent with a different fraction each time.
+    let stride = 0x0000_1d3a_71f9_0b5d_u64;
+    let mut bits = 1_u64;
+    while bits < f64::INFINITY.to_bits() {
+        let x = f64::from_bits(bits);
+        assert_eq!(sqrt(x).to_bits(), f64::sqrt(x).to_bits(), "sqrt({x:e})");
+        bits += stride;
+    }
+    for x in [f64::MIN_POSITIVE, f64::MAX, 2.0, 0.5, 1e-310] {
+        assert_eq!(sqrt(x).to_bits(), f64::sqrt(x).to_bits(), "sqrt({x:e})");
+    }
 }
 
 #[test]
@@ -163,6 +263,74 @@ fn atan2_names_the_right_quadrant() {
 #[test]
 fn atan2_at_the_origin_is_zero_not_a_nan() {
     close(atan2(0.0, 0.0), 0.0);
+}
+
+/// The kernels are fdlibm's minimax polynomials, so over the angles and
+/// arguments consumers pass they track a correctly-rounded libm to within an
+/// ulp — six orders finer than the truncated series they replaced. The
+/// tangent is their quotient, and carries both errors.
+#[test]
+fn the_transcendentals_track_a_correctly_rounded_libm() {
+    tracks_the_host("sin", sin, f64::sin, (-40.0, 40.0, 0.000_97), 1);
+    tracks_the_host("cos", cos, f64::cos, (-40.0, 40.0, 0.000_97), 1);
+    tracks_the_host("tan", tan, f64::tan, (-1.5, 1.5, 0.000_97), 3);
+    tracks_the_host("atan", atan, f64::atan, (-60.0, 60.0, 0.000_97), 1);
+    tracks_the_host("exp", exp, f64::exp, (-700.0, 700.0, 0.013), 1);
+}
+
+/// Next to a multiple of `PI/2` the remainder is tiny, and only a reduction
+/// that takes more of `PI/2`'s bits as the first ones cancel keeps it accurate
+/// to its own last bit: with one part the answer here is off by millions of
+/// ulps while still looking like zero.
+#[test]
+fn angles_beside_a_quarter_turn_stay_accurate_to_the_last_bit() {
+    let quarter_turns = (1..=4_000_u32).chain([65_535, 262_143, 1_000_000]);
+    for k in quarter_turns {
+        let near = f64::from(k) * FRAC_PI_2;
+        for bits in near.to_bits() - 2..=near.to_bits() + 2 {
+            for x in [f64::from_bits(bits), -f64::from_bits(bits)] {
+                assert!(ulps_apart(sin(x), f64::sin(x)) <= 1, "sin({x:e})");
+                assert!(ulps_apart(cos(x), f64::cos(x)) <= 1, "cos({x:e})");
+            }
+        }
+    }
+}
+
+/// The oddness the kernels would lose on their own: the sign of a zero angle
+/// is kept, so a rotation by `-0` reflects nothing.
+#[test]
+fn a_negative_zero_angle_keeps_its_sign() {
+    assert_eq!(sin(-0.0).to_bits(), (-0.0_f64).to_bits());
+    assert_eq!(atan(-0.0).to_bits(), (-0.0_f64).to_bits());
+    assert_eq!(cos(-0.0).to_bits(), 1.0_f64.to_bits());
+}
+
+/// A `NaN`, an infinity or an angle past any meaningful turn still answers a
+/// finite value: a degenerate transform draws, rather than erasing a shape.
+#[test]
+fn angles_are_total() {
+    for x in [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        1e300,
+        -1e300,
+        1e17,
+    ] {
+        for (name, f) in [("sin", sin as fn(f64) -> f64), ("cos", cos), ("tan", tan)] {
+            assert!(f(x).is_finite(), "{name}({x}) = {}", f(x));
+        }
+        assert!(atan(x).is_finite(), "atan({x})");
+        assert!(
+            atan2(x, 1.0).is_finite() && atan2(1.0, x).is_finite(),
+            "atan2 over {x}"
+        );
+    }
+    close(atan(f64::NAN), 0.0);
+    close(atan(f64::INFINITY), FRAC_PI_2);
+    close(atan(f64::NEG_INFINITY), -FRAC_PI_2);
+    close(sin(f64::NAN), 0.0);
+    close(cos(f64::NAN), 1.0);
 }
 
 #[test]

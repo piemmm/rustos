@@ -28,7 +28,7 @@ use tairix_wintersun_art::splat::{splat, Geometry, SpanPlan, SpanTiles, Warp};
 use tairix_wintersun_art::weight::WeightField;
 use tairix_wintersun_net::value::{ChunkCoord, WorldPoint};
 use tairix_wintersun_world::biome::{Material, BLEND_SLOTS};
-use tairix_wintersun_world::chunk::ChunkWindow;
+use tairix_wintersun_world::chunk::{Chunk, ChunkWindow};
 use tairix_wintersun_world::geom::{CellCoord, CELL_SUB_UNITS, CHUNK_CELLS_LOG2};
 use tairix_wintersun_world::realm::RealmField;
 
@@ -355,6 +355,69 @@ pub fn worth_holding(coord: ChunkCoord, visible: Bounds) -> bool {
         at >= span.start().saturating_sub(1) && at <= span.end().saturating_add(1)
     };
     near(coord.x, &eastings) && near(coord.y, &northings)
+}
+
+/// The ground a client holds: generated chunks, in coordinate order, kept
+/// to the working set of the view looking at them ([`worth_holding`]).
+///
+/// Solving a chunk is tens of milliseconds of work, so a view that moves or
+/// resizes keeps the chunks it still covers rather than solving them again.
+#[derive(Debug, Default)]
+pub struct HeldGround {
+    held: Vec<Chunk>,
+}
+
+impl HeldGround {
+    /// Nothing held.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { held: Vec::new() }
+    }
+
+    /// Whether the chunk at `coord` is held.
+    #[must_use]
+    pub fn holds(&self, coord: ChunkCoord) -> bool {
+        self.held.binary_search_by_key(&coord, Chunk::coord).is_ok()
+    }
+
+    /// Hold `chunk` in coordinate order; a chunk already held is kept as it
+    /// is.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::OutOfMemory`] when there is no room to hold it, which
+    /// leaves the ground drawn as missing until there is.
+    pub fn adopt(&mut self, chunk: Chunk) -> Result<(), ClientError> {
+        let Err(at) = self.held.binary_search_by_key(&chunk.coord(), Chunk::coord) else {
+            return Ok(());
+        };
+        self.held
+            .try_reserve(1)
+            .map_err(|_| ClientError::OutOfMemory)?;
+        self.held.insert(at, chunk);
+        Ok(())
+    }
+
+    /// Give back every chunk a view covering `visible` no longer needs.
+    pub fn release_distant(&mut self, visible: Bounds) {
+        self.held
+            .retain(|chunk| worth_holding(chunk.coord(), visible));
+    }
+
+    /// The held chunks, borrowed in the coordinate order a [`ChunkWindow`]
+    /// binary-searches.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::OutOfMemory`] when the borrow list does not fit.
+    pub fn borrow(&self) -> Result<Vec<&Chunk>, ClientError> {
+        let mut borrowed = Vec::new();
+        borrowed
+            .try_reserve(self.held.len())
+            .map_err(|_| ClientError::OutOfMemory)?;
+        borrowed.extend(self.held.iter());
+        Ok(borrowed)
+    }
 }
 
 /// The chunk eastings and northings a view covering `visible` needs.

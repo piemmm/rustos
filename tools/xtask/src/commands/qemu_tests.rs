@@ -26,6 +26,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use tairix_desktop_session::SizedRecord;
 use tairix_itest_harness::pie::PieArch;
 use tairix_qemu::screendump::Rgb;
 use tairix_qemu::{Outcome, ReservedSocket, Runner, Spec};
@@ -33,6 +34,45 @@ use tairix_qemu::{Outcome, ReservedSocket, Runner, Spec};
 use super::image_apps::AppStoreFile;
 use super::parallel::{self, Job};
 use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
+
+/// One ordered keyboard step a vertical injects: pressed once `marker` has
+/// appeared `occurrences` times, and never while a screendump keyed earlier
+/// is still being taken.
+#[derive(Clone, Copy, Debug)]
+struct TypedStep {
+    marker: &'static str,
+    occurrences: u32,
+    keys: Keys,
+}
+
+/// What a [`TypedStep`] presses.
+#[derive(Clone, Copy, Debug)]
+enum Keys {
+    /// Text, character by character.
+    Text(&'static str),
+    /// Keys no character reaches, by QEMU key name (`tairix_qemu::NAMED_KEYS`).
+    Named(&'static [&'static str]),
+}
+
+impl TypedStep {
+    /// Type `text` once `marker` has appeared `occurrences` times.
+    const fn text(marker: &'static str, occurrences: u32, text: &'static str) -> Self {
+        Self {
+            marker,
+            occurrences,
+            keys: Keys::Text(text),
+        }
+    }
+
+    /// Press `keys` once `marker` has appeared `occurrences` times.
+    const fn named(marker: &'static str, occurrences: u32, keys: &'static [&'static str]) -> Self {
+        Self {
+            marker,
+            occurrences,
+            keys: Keys::Named(keys),
+        }
+    }
+}
 
 /// One enrolled QEMU integration test.
 struct QemuTest {
@@ -94,17 +134,19 @@ struct QemuTest {
     /// the serial console. Used by the aarch64 virtio-input vertical to
     /// make a real device→driver input event deterministic.
     keyboard: Option<(&'static str, &'static str)>,
-    /// Ordered typed-keys script: for each `(marker, occurrences, text)`
-    /// step, attach a `virtio-keyboard-device` and type `text` through
-    /// paced monitor `sendkey`s once `marker` has appeared `occurrences`
-    /// times on the serial console; the steps run strictly in order. The
+    /// Ordered typed-keys script: for each [`TypedStep`], attach a
+    /// `virtio-keyboard-device` and press its keys — text character by
+    /// character, or keys no character reaches by name — through paced
+    /// monitor `sendkey`s once its marker has appeared the required number of
+    /// times on the serial console, and never while a screendump keyed
+    /// earlier is still being taken; the steps run strictly in order. The
     /// typed-dialogue path for a guest whose primary console is the
     /// display (a `ramfb` world), which the `serial` script cannot reach:
     /// typed keys buffer as console type-ahead until the guest's reader
     /// drains them. Used by the autoload vertical to type the unlock
     /// passphrase and then the login + graphical-choice dialogue at the
     /// seat keyboard.
-    typed_keys: &'static [(&'static str, u32, &'static str)],
+    typed_keys: &'static [TypedStep],
     /// Ordered, marker-gated QEMU monitor `screendump`s of the guest
     /// display — the host-side scan-out readbacks proving each composited
     /// frame of interest reached the surface (`plans/DISPLAY.md` D7d,
@@ -175,8 +217,10 @@ fn fatal_verdict(package: &str, fields: &[&str], outcome: &Outcome) -> Result<()
 /// describes why it cannot.
 type PointerScriptBuilder = fn() -> Result<Vec<tairix_qemu::PointerStep>, String>;
 
-/// The pixel assertion a [`ScreendumpPlan`] applies to its dumped image.
-type ScreendumpAssert = fn(&QemuTest, &Path) -> Result<(), String>;
+/// The pixel assertion a [`ScreendumpPlan`] applies to its dumped image,
+/// handed the run's serial transcript too, so an assertion can hold the
+/// pixels to what the guest said about how they reached the display.
+type ScreendumpAssert = fn(&QemuTest, &Path, &str) -> Result<(), String>;
 
 /// One marker-gated screendump a [`QemuTest`] takes, with the assertion
 /// its decoded pixels must satisfy after a PASS. Dumps run strictly in
@@ -895,6 +939,12 @@ const WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
 /// that content too: its requests are served in order, so the frame carrying
 /// the title carries everything it presented before asking for it.
 const WINDOW_RETITLED_MARKER: &str = tairix_desktop_session::WINDOW_RETITLED_MESSAGE;
+
+/// Serial marker a size-state dump or keystroke waits on: the session's
+/// announcement that a served window is on screen at the size state it was
+/// just given, in a frame its client drew at that state's extent. Imported
+/// from the session crate's own definition.
+const WINDOW_SIZED_MARKER: &str = tairix_desktop_session::WINDOW_SIZED_MESSAGE;
 
 /// Serial marker a vertical gates a dump of the desktop's new look on: the
 /// session's own announcement that a frame drawn in a changed appearance
@@ -8224,17 +8274,17 @@ static TESTS: &[QemuTest] = &[
         rtc_base: None,
         keyboard: None,
         typed_keys: &[
-            (
+            TypedStep::text(
                 AUTOLOAD_INPUT_KEY_MARKER,
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
             // AW4 terminal stage: type the shell command once the terminal
             // gains focus (its spawn is the PASS gate's round-trip witness).
             // Gated on the guest focus marker, not a raw count the files
             // window satisfies before the terminal exists.
-            (
+            TypedStep::text(
                 AUTOLOAD_TERMINAL_FOCUSED_MARKER,
                 1,
                 AUTOLOAD_TERMINAL_COMMAND,
@@ -8245,7 +8295,7 @@ static TESTS: &[QemuTest] = &[
             // `sleep` and types `true` — the recovered `true` load is the
             // guest's pty job-control witness (the vertical's final PASS
             // witness; no file-manager stage follows).
-            (
+            TypedStep::text(
                 AUTOLOAD_CTRL_C_ARM_MARKER,
                 1,
                 AUTOLOAD_TERMINAL_CTRL_C_RECOVERY,
@@ -8323,14 +8373,14 @@ static TESTS: &[QemuTest] = &[
             // The encrypted-root passphrase, held until both autoloaded
             // input drivers have armed their interrupts so no keystroke
             // hits a dead device.
-            (
+            TypedStep::text(
                 AUTOLOAD_INPUT_KEY_MARKER,
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
             // The fixture account's login, then `desktop` at the text
             // shell's prompt — the same bundle a graphical login spawns.
-            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
         ],
         screendumps: &[
             ScreendumpPlan {
@@ -8406,14 +8456,14 @@ static TESTS: &[QemuTest] = &[
             // The encrypted-root passphrase, held until both autoloaded
             // input drivers have armed their interrupts so no keystroke
             // hits a dead device.
-            (
+            TypedStep::text(
                 AUTOLOAD_INPUT_KEY_MARKER,
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
             // The fixture account's login, then `desktop` at the text
             // shell's prompt — the same bundle a graphical login spawns.
-            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
         ],
         screendumps: &[],
         pointer_script: Some(filepick_pointer_script),
@@ -8488,14 +8538,14 @@ static TESTS: &[QemuTest] = &[
             // The encrypted-root passphrase, held until both autoloaded
             // input drivers have armed their interrupts so no keystroke
             // hits a dead device.
-            (
+            TypedStep::text(
                 AUTOLOAD_INPUT_KEY_MARKER,
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
             // The fixture account's login, then `desktop` at the text
             // shell's prompt — the same bundle a graphical login spawns.
-            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
         ],
         screendumps: &[ScreendumpPlan {
             marker: WINDOW_SHOWN_MARKER,
@@ -8554,14 +8604,14 @@ static TESTS: &[QemuTest] = &[
             // The encrypted-root passphrase, held until both autoloaded
             // input drivers have armed their interrupts so no keystroke
             // hits a dead device.
-            (
+            TypedStep::text(
                 AUTOLOAD_INPUT_KEY_MARKER,
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
             // The fixture account's login, then `desktop` at the text
             // shell's prompt — the same bundle a graphical login spawns.
-            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
         ],
         screendumps: &[],
         pointer_script: Some(fsmutate_pointer_script),
@@ -8610,12 +8660,12 @@ static TESTS: &[QemuTest] = &[
         rtc_base: None,
         keyboard: None,
         typed_keys: &[
-            (
+            TypedStep::text(
                 AUTOLOAD_INPUT_KEY_MARKER,
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
         ],
         screendumps: &[
             ScreendumpPlan {
@@ -8658,16 +8708,16 @@ static TESTS: &[QemuTest] = &[
         rtc_base: None,
         keyboard: None,
         typed_keys: &[
-            (
+            TypedStep::text(
                 AUTOLOAD_INPUT_KEY_MARKER,
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
             // The credential prompt is up and focused: offer the fixture
             // account. Tab moves from the account field to the password;
             // Enter submits. The broker starts datetime.app as that account.
-            (ELEVATE_PROMPT_SHOWN_MARKER, 1, "root\troot\n"),
+            TypedStep::text(ELEVATE_PROMPT_SHOWN_MARKER, 1, "root\troot\n"),
         ],
         screendumps: &[],
         pointer_script: Some(datetime_elevate_pointer_script),
@@ -8717,12 +8767,12 @@ static TESTS: &[QemuTest] = &[
         rtc_base: None,
         keyboard: None,
         typed_keys: &[
-            (
+            TypedStep::text(
                 AUTOLOAD_INPUT_KEY_MARKER,
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
         ],
         screendumps: &[
             ScreendumpPlan {
@@ -8757,6 +8807,83 @@ static TESTS: &[QemuTest] = &[
             },
         ],
         pointer_script: Some(settings_pointer_script),
+        bounded_pointer_script: false,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    // `plans/WINTERSUN.md` WS23: the WinterSun **client** vertical. The game
+    // is launched the way a user launches it, by name at a terminal's shell,
+    // on its reference scene, and its window is read back as it opened and in
+    // each size state it is put through: fullscreen by `F11`, restored by
+    // `Escape`, and maximised by the title bar's size toggle, which the game
+    // has no key for. Each dump waits on the session's own witness that the
+    // window is on screen at the state and extent it was given, and each is
+    // compared with the scene this host draws at that extent.
+    //
+    // PASS needs the guest's three witnesses in order: an `APP_LOADED` naming
+    // the game's bundle, its window's create reply, and then the load of the
+    // command the typed line runs only once the game has left cleanly — which
+    // it does only once the script presses its title bar's close control,
+    // after the last dump.
+    //
+    // Single CPU and the same 300-second *inactivity* budget its siblings
+    // carry: the longest the guest may fall silent, never a runtime deadline.
+    QemuTest {
+        package: "tairix-test-wintersun-client-qemu-aarch64",
+        binary: "tairix-test-wintersun-client-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: true,
+        crypto: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            TypedStep::text(
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            // The terminal's window is on screen, so its shell is already
+            // spawned and the line waits in its pty until the shell reads it.
+            TypedStep::text(WINDOW_SHOWN_MARKER, 1, WINTERSUN_COMMAND_LINE),
+            // Each key is held until the dump keyed on the same witness is on
+            // disk, so every dump holds the state before the next change.
+            TypedStep::named(WINDOW_SHOWN_MARKER, 2, &["f11"]),
+            TypedStep::named(WINDOW_SIZED_MARKER, 1, &["esc"]),
+        ],
+        screendumps: &[
+            ScreendumpPlan {
+                marker: WINDOW_SHOWN_MARKER,
+                occurrences: 2,
+                suffix: WINTERSUN_OPEN_DUMP,
+                assert: assert_wintersun_open_screendump,
+            },
+            ScreendumpPlan {
+                marker: WINDOW_SIZED_MARKER,
+                occurrences: 1,
+                suffix: WINTERSUN_FULLSCREEN_DUMP,
+                assert: assert_wintersun_fullscreen_screendump,
+            },
+            ScreendumpPlan {
+                marker: WINDOW_SIZED_MARKER,
+                occurrences: 2,
+                suffix: WINTERSUN_RESTORED_DUMP,
+                assert: assert_wintersun_restored_screendump,
+            },
+            ScreendumpPlan {
+                marker: WINDOW_SIZED_MARKER,
+                occurrences: 3,
+                suffix: WINTERSUN_MAXIMIZED_DUMP,
+                assert: assert_wintersun_maximized_screendump,
+            },
+        ],
+        pointer_script: Some(wintersun_pointer_script),
         bounded_pointer_script: false,
         serial: &[],
         expect: Expect::Pass,
@@ -8809,12 +8936,12 @@ static TESTS: &[QemuTest] = &[
         rtc_base: None,
         keyboard: None,
         typed_keys: &[
-            (
+            TypedStep::text(
                 AUTOLOAD_INPUT_KEY_MARKER,
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
         ],
         screendumps: &[
             ScreendumpPlan {
@@ -8882,12 +9009,12 @@ static TESTS: &[QemuTest] = &[
         rtc_base: None,
         keyboard: None,
         typed_keys: &[
-            (
+            TypedStep::text(
                 AUTOLOAD_INPUT_KEY_MARKER,
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
         ],
         screendumps: &[],
         pointer_script: Some(desktop_hover_pointer_script),
@@ -8960,7 +9087,7 @@ static TESTS: &[QemuTest] = &[
             // has armed its interrupt so no keystroke hits a dead device.
             // This vertical scripts no pointer, so the board carries no
             // mouse and the marker rises once.
-            (
+            TypedStep::text(
                 AUTOLOAD_INPUT_KEY_MARKER,
                 KEYBOARD_ONLY_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
@@ -8971,10 +9098,10 @@ static TESTS: &[QemuTest] = &[
             // activates `fontd` and holds the call until its endpoint is
             // answerable, so the ordering is the system's rather than the
             // script's.
-            (AUTOLOAD_LOGIN_MARKER, 1, SVGTEXT_LOGIN_DIALOGUE),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, SVGTEXT_LOGIN_DIALOGUE),
             // The shell exit that completes the PASS chain, held until the
             // measured record is on the transcript.
-            (SVGTEXT_MEASURED_MARKER, 1, "exit\n"),
+            TypedStep::text(SVGTEXT_MEASURED_MARKER, 1, "exit\n"),
         ],
         screendumps: &[],
         pointer_script: None,
@@ -9017,7 +9144,7 @@ static TESTS: &[QemuTest] = &[
             // keyboard driver has armed its interrupt so no keystroke hits
             // a dead device. The run scripts no pointer, so the keyboard is
             // the only input device on the board. Nothing is typed after it.
-            (
+            TypedStep::text(
                 AUTOLOAD_INPUT_KEY_MARKER,
                 KEYBOARD_ONLY_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
@@ -11045,6 +11172,532 @@ fn compute_expected_wallpaper() -> Result<ExpectedWallpaper, String> {
     })
 }
 
+/// The line the `WinterSun` client vertical types at the terminal's shell, from
+/// its shared contract.
+const WINTERSUN_COMMAND_LINE: &str = tairix_test_wintersun_client_qemu_aarch64::COMMAND_LINE;
+
+/// The `WinterSun` client vertical's first dump: the game's window as it opened.
+const WINTERSUN_OPEN_DUMP: &str = "open";
+/// The game's window in fullscreen.
+const WINTERSUN_FULLSCREEN_DUMP: &str = "fullscreen";
+/// The game's window restored from fullscreen.
+const WINTERSUN_RESTORED_DUMP: &str = "restored";
+/// The game's window maximised from its title bar.
+const WINTERSUN_MAXIMIZED_DUMP: &str = "maximized";
+
+/// The cascade slot the game's window opens in: the second, because the
+/// terminal it is launched from is the first window any client opens here.
+const WINTERSUN_CASCADE_SLOT: u64 = 1;
+
+/// Where the pointer rests while the game's window is photographed: the
+/// screen's last pixel, below every rectangle the game's client takes in any
+/// state but fullscreen, and past the end of the icon bar, whose slots open a
+/// picker under a resting pointer.
+fn wintersun_rest() -> tairix_geometry::Point {
+    let (width, height) = ramfb_screen();
+    #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+    tairix_geometry::Point::new(width as i32 - 1, height as i32 - 1)
+}
+
+/// The game's window in each size state the vertical puts it through, as the
+/// production window manager lays it out.
+struct WintersunWindow {
+    /// The window as it opened, which restoring returns it to.
+    restored: tairix_controls::FrameLayout,
+    /// The client in fullscreen.
+    fullscreen: tairix_geometry::Rect,
+    /// The window maximised from its title bar.
+    maximized: tairix_controls::FrameLayout,
+    /// Centre of the restored title bar's size toggle, which the script
+    /// clicks.
+    toggle: tairix_geometry::Point,
+    /// Centre of the maximised title bar's close control, which the script
+    /// closes the game with.
+    close: tairix_geometry::Point,
+    /// The work area the session places served windows onto.
+    work_area: tairix_geometry::Rect,
+}
+
+/// Rebuild [`WintersunWindow`] by driving a host copy of the window manager as
+/// the session drives it for the game: the window the game asks for, decorated
+/// and resizable within the game's declared range and placed in its cascade
+/// slot by the session's own rule, then put through fullscreen, restore and
+/// the size toggle by the compositor's own transitions, each rectangle read
+/// back rather than derived here.
+fn wintersun_window() -> Result<WintersunWindow, String> {
+    use tairix_abi::desktop::{Appearance, DesktopInfo};
+    use tairix_controls::{WindowControlKind, WindowSizeState};
+    use tairix_desktop_session::windows::placed_outer;
+    use tairix_wintersun_app::shell::{OPEN_HEIGHT, OPEN_WIDTH, SIZING};
+    use tairix_wm::{Compositor, Surface};
+
+    let fail = |what: &str| format!("wintersun window: {what}");
+    let theme = tairix_theme::Theme::dark();
+    let scale = RECONSTRUCTION_SCALE;
+    let (width, height) = ramfb_screen();
+    let mut compositor = geometry_compositor(&theme)?;
+
+    let desktop = DesktopInfo::new(width, height, 100, Appearance::Dark)
+        .and_then(tairix_window::Desktop::new)
+        .map_err(|e| fail(&format!("desktop: {e:?}")))?;
+    let (client_w, client_h) = desktop.window_size(OPEN_WIDTH, OPEN_HEIGHT);
+    let content = Surface::new(client_w, client_h).ok_or_else(|| fail("content surface"))?;
+    let wm = compositor.add_window(tairix_geometry::Point::ORIGIN, content);
+    if !compositor.set_window_frame(wm, window_frame(SIZING.resizable())) {
+        return Err(fail("the window refused its frame"));
+    }
+    compositor.set_window_client_size_range(
+        wm,
+        (SIZING.min_width_px(), SIZING.min_height_px()),
+        (SIZING.max_width_px(), SIZING.max_height_px()),
+    );
+    let work_area = served_work_area(&theme);
+    let bounds = compositor
+        .window(wm)
+        .map(tairix_wm::Window::bounds)
+        .ok_or_else(|| fail("no window"))?;
+    let placed = placed_outer(
+        WINTERSUN_CASCADE_SLOT,
+        (bounds.width, bounds.height),
+        work_area,
+    );
+    compositor.move_window(wm, placed.origin);
+
+    let frame = window_frame(SIZING.resizable());
+    let layout_now = |compositor: &Compositor| {
+        compositor
+            .window(wm)
+            .map(|window| frame.layout(window.bounds(), scale, &theme))
+            .ok_or_else(|| fail("the window went"))
+    };
+    let restored = layout_now(&compositor)?;
+    let (_, fullscreen) = compositor
+        .set_window_size_state(wm, WindowSizeState::Fullscreen, work_area)
+        .ok_or_else(|| fail("fullscreen refused"))?;
+    compositor
+        .set_window_size_state(wm, WindowSizeState::Restored, work_area)
+        .ok_or_else(|| fail("restore refused"))?;
+    if layout_now(&compositor)? != restored {
+        return Err(fail(
+            "restoring did not return the window to where it opened",
+        ));
+    }
+    let control = |layout: &tairix_controls::FrameLayout, wanted: WindowControlKind| {
+        frame
+            .title_bar()
+            .layout(layout.title_bar, scale, &theme)
+            .controls()
+            .iter()
+            .find(|(kind, _)| *kind == wanted)
+            .map(|&(_, rect)| rect)
+            .ok_or_else(|| fail(&format!("the title bar seats no {wanted:?}")))
+            .and_then(|rect| rect_centre(rect, "title-bar control"))
+    };
+    let toggle = control(&restored, WindowControlKind::SizeToggle)?;
+    let (state, _) = compositor
+        .toggle_window_size(wm, work_area)
+        .ok_or_else(|| fail("the size toggle refused"))?;
+    if state != WindowSizeState::Maximized {
+        return Err(fail(&format!("the size toggle went to {state:?}")));
+    }
+    let maximized = layout_now(&compositor)?;
+    Ok(WintersunWindow {
+        close: control(&maximized, WindowControlKind::Close)?,
+        restored,
+        fullscreen,
+        maximized,
+        toggle,
+        work_area,
+    })
+}
+
+/// A host compositor over the guest's ramfb screen, driven for geometry alone:
+/// nothing is rasterised, so its caches are handed a gauge that has never been
+/// told a band and admits nothing.
+fn geometry_compositor(theme: &tairix_theme::Theme) -> Result<tairix_wm::Compositor, String> {
+    use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
+    use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_log::DiscardSink;
+    use tairix_reclaim::ReportedPressure;
+    use tairix_wm::{chrome_cache, frost_cache, Compositor};
+
+    static NO_PRESSURE_FEED: ReportedPressure = ReportedPressure::unknown();
+    static DISCARD_SINK: DiscardSink = DiscardSink;
+
+    let (width, height) = ramfb_screen();
+    let mode = DisplayMode {
+        width_px: width,
+        height_px: height,
+        stride_bytes: width * 4,
+        format: DisplayFormat::Rgba8888,
+    };
+    let frame_bytes = usize::try_from(u64::from(mode.stride_bytes) * u64::from(height))
+        .map_err(|_| "geometry compositor: frame size".to_string())?;
+    Compositor::new(
+        mode,
+        theme.clone(),
+        chrome_cache(SEAT_PRIMARY, frame_bytes, &NO_PRESSURE_FEED, &DISCARD_SINK),
+        frost_cache(SEAT_PRIMARY, frame_bytes, &NO_PRESSURE_FEED, &DISCARD_SINK),
+        &NO_PRESSURE_FEED,
+    )
+    .ok_or_else(|| "geometry compositor: none for the ramfb mode".to_string())
+}
+
+/// Park on the desktop's reveal, launch the terminal from the program library,
+/// rest the pointer clear of every client rectangle the game will take, and,
+/// once the game's window is on screen restored and photographed, press its
+/// title bar's size toggle; once it is photographed maximised, press its close
+/// control.
+///
+/// Closing from the title bar rather than by a key is deliberate: pressing a
+/// title-bar control gives the window's furniture the keyboard, so a key
+/// typed after the size toggle would drive the furniture, not the game. The
+/// typed line, `F11` and `Escape` are keyboard steps.
+fn wintersun_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_qemu::MouseButton;
+
+    let BarLaunch {
+        library_button,
+        entry_row,
+        ..
+    } = reconstruct_bar_launch()?;
+    let window = wintersun_window()?;
+
+    let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
+    pen.click(ready, 1, MouseButton::Primary, library_button);
+    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
+    pen.aim(LIBRARY_SHOWN_MARKER, 1, wintersun_rest());
+    // Restored from fullscreen and photographed, so the next change is the
+    // maximise; the pointer stays on the toggle through the last dump.
+    pen.click(WINDOW_SIZED_MARKER, 2, MouseButton::Primary, window.toggle);
+    pen.click(WINDOW_SIZED_MARKER, 3, MouseButton::Primary, window.close);
+    Ok(pen.steps())
+}
+
+/// Every `WINDOW_SIZED` record in `serial`, in order, read from the line shape
+/// the kernel's diagnostic sink writes (`id=<n> <message> key=value …`).
+fn window_sized_witnesses(serial: &str) -> Vec<SizedRecord<'_>> {
+    let head = format!(
+        "id={} {WINDOW_SIZED_MARKER}",
+        tairix_desktop_session::WINDOW_SIZED.0
+    );
+    serial
+        .lines()
+        .filter_map(|line| {
+            let fields = line.get(line.find(&head)? + head.len()..)?;
+            SizedRecord::read(|key| {
+                fields
+                    .split_whitespace()
+                    .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
+            })
+        })
+        .collect()
+}
+
+/// The `ordinal`-th (one-based) `WINDOW_SIZED` record in `serial` names
+/// `state` at `client`'s extent, was presented by software composition, and
+/// names the same window as every record before it.
+fn assert_wintersun_sized_witness(
+    t: &QemuTest,
+    serial: &str,
+    ordinal: usize,
+    state: tairix_controls::WindowSizeState,
+    client: tairix_geometry::Rect,
+) -> Result<(), String> {
+    let witnesses = window_sized_witnesses(serial);
+    let expected = SizedRecord {
+        window: witnesses.first().map_or(0, |first| first.window),
+        state: tairix_desktop_session::size_state_name(state),
+        extent: (client.width, client.height),
+        path: tairix_wm::Presentation::Composited.as_str(),
+    };
+    match witnesses.get(ordinal - 1) {
+        Some(found) if *found == expected => Ok(()),
+        found => Err(format!(
+            "test --qemu ({}): size-state witness {ordinal} is {found:?}, expected {expected:?} \
+             (the game's one window, at the extent the window manager gives it, composited)",
+            t.package
+        )),
+    }
+}
+
+/// The reference scene as the game draws it into a `width`×`height` window,
+/// drawn here by the game's own library.
+fn wintersun_reference(
+    width: u32,
+    height: u32,
+) -> Result<Vec<tairix_raster::color::Pixel>, String> {
+    use tairix_wintersun_app::frame::Renderer;
+    use tairix_wintersun_app::reference::{self, Unpressured, World};
+
+    let fail = |what: &str| format!("wintersun reference {width}x{height}: {what}");
+    let mut world = World::generate().map_err(|e| fail(&e.to_string()))?;
+    let set = tairix_wintersun_figure::motion::Set::new().map_err(|e| fail(&format!("{e:?}")))?;
+    let clips = set.clips().map_err(|e| fail(&format!("{e:?}")))?;
+    let mut window =
+        tairix_raster::surface::Surface::new(width, height).ok_or_else(|| fail("no surface"))?;
+    world
+        .draw_window(
+            &clips,
+            &mut window,
+            &mut None,
+            &mut Renderer::new(),
+            &mut reference::cache(&Unpressured),
+            &tairix_parallel::SERIAL,
+        )
+        .map_err(|e| fail(&e.to_string()))?;
+    Ok(window.pixels().to_vec())
+}
+
+/// Every screen pixel a cursor of the session's side can cover with its
+/// hotspot on `pointer`, whichever cursor it is: an image is that side square
+/// and its hotspot lies inside it.
+fn cursor_footprint(pointer: tairix_geometry::Point) -> tairix_geometry::Rect {
+    let side = RECONSTRUCTION_SCALE.scale_length(tairix_cursor::CURSOR_BASE_SIDE_PX);
+    let reach = i32::try_from(side.saturating_sub(1)).unwrap_or(i32::MAX);
+    tairix_geometry::Rect::new(
+        pointer.x.saturating_sub(reach),
+        pointer.y.saturating_sub(reach),
+        side.saturating_mul(2).saturating_sub(1),
+        side.saturating_mul(2).saturating_sub(1),
+    )
+}
+
+/// The squares at the corners of a decorated window of `outer` bounds that
+/// its rounded plate may cut: where client pixels are anti-aliased over the
+/// desktop behind the window rather than shown as the client drew them.
+fn plate_corners(outer: tairix_geometry::Rect) -> [tairix_geometry::Rect; 4] {
+    use tairix_geometry::Rect;
+
+    let theme = tairix_theme::Theme::dark();
+    let (inset, radius) = tairix_controls::FrameRim::of(RECONSTRUCTION_SCALE, &theme).plate();
+    let (inset_px, radius_px) = (
+        i32::try_from(inset).unwrap_or(0),
+        i32::try_from(radius).unwrap_or(0),
+    );
+    let left = outer.left() + inset_px;
+    let top = outer.top() + inset_px;
+    let right = outer.right() - inset_px - radius_px;
+    let bottom = outer.bottom() - inset_px - radius_px;
+    [
+        Rect::new(left, top, radius, radius),
+        Rect::new(right, top, radius, radius),
+        Rect::new(left, bottom, radius, radius),
+        Rect::new(right, bottom, radius, radius),
+    ]
+}
+
+/// `region` of `image` shows the reference scene drawn at `client`'s extent
+/// with its top-left pixel at `client`'s, pixel for pixel, except inside
+/// `masked`.
+fn assert_wintersun_scene(
+    t: &QemuTest,
+    path: &Path,
+    image: &tairix_qemu::screendump::Image,
+    client: tairix_geometry::Rect,
+    region: tairix_geometry::Rect,
+    masked: &[tairix_geometry::Rect],
+) -> Result<(), String> {
+    let reference = wintersun_reference(client.width, client.height)?;
+    let region = region
+        .intersection(&client)
+        .intersection(&tairix_geometry::Rect::new(0, 0, image.width, image.height));
+    let mut compared = 0u64;
+    let mut differing = Vec::new();
+    for y in region.top()..region.bottom() {
+        for x in region.left()..region.right() {
+            let at = tairix_geometry::Point::new(x, y);
+            if masked.iter().any(|rect| rect.contains(at)) {
+                continue;
+            }
+            let (Ok(sx), Ok(sy), Ok(cx), Ok(cy)) = (
+                u32::try_from(x),
+                u32::try_from(y),
+                usize::try_from(x - client.left()),
+                usize::try_from(y - client.top()),
+            ) else {
+                continue;
+            };
+            let drawn = reference
+                .get(cy * client.width as usize + cx)
+                .map(|p| (p.r, p.g, p.b));
+            let shown = image.pixel(sx, sy)?;
+            compared += 1;
+            if drawn != Some(shown) {
+                differing.push((x, y, drawn, shown));
+            }
+        }
+    }
+    if compared == 0 {
+        return Err(format!(
+            "test --qemu ({}): {} compared no pixel of the game's client",
+            t.package,
+            path.display()
+        ));
+    }
+    if differing.is_empty() {
+        return Ok(());
+    }
+    let first: Vec<String> = differing
+        .iter()
+        .take(4)
+        .map(|(x, y, drawn, shown)| format!("({x},{y}) drew {drawn:?} shows {shown:?}"))
+        .collect();
+    Err(format!(
+        "test --qemu ({}): {} differs from the reference scene at {} of {compared} pixels of \
+         the game's {}x{} client at ({}, {}): {}",
+        t.package,
+        path.display(),
+        differing.len(),
+        client.width,
+        client.height,
+        client.left(),
+        client.top(),
+        first.join(", ")
+    ))
+}
+
+/// The game's window as it opened: its client, above the icon bar, shows the
+/// reference scene at the client extent the window manager gave it.
+fn assert_wintersun_open_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
+    let window = wintersun_window()?;
+    let image = read_screendump(t, path)?;
+    let mut masked = plate_corners(window.restored.outer).to_vec();
+    masked.push(cursor_footprint(wintersun_rest()));
+    assert_wintersun_scene(
+        t,
+        path,
+        &image,
+        window.restored.client,
+        window.work_area,
+        &masked,
+    )
+}
+
+/// Fullscreen: the session announced the state at the scan-out's extent,
+/// composited, and the whole scan-out is the scene — no icon bar, no
+/// decoration, nothing of the desktop left showing.
+fn assert_wintersun_fullscreen_screendump(
+    t: &QemuTest,
+    path: &Path,
+    serial: &str,
+) -> Result<(), String> {
+    let window = wintersun_window()?;
+    assert_wintersun_sized_witness(
+        t,
+        serial,
+        1,
+        tairix_controls::WindowSizeState::Fullscreen,
+        window.fullscreen,
+    )?;
+    let image = read_screendump(t, path)?;
+    let screen = tairix_geometry::Rect::new(0, 0, image.width, image.height);
+    if window.fullscreen != screen {
+        return Err(format!(
+            "test --qemu ({}): fullscreen gave a {:?} client on a {:?} scan-out",
+            t.package, window.fullscreen, screen
+        ));
+    }
+    assert_wintersun_scene(
+        t,
+        path,
+        &image,
+        window.fullscreen,
+        screen,
+        &[cursor_footprint(wintersun_rest())],
+    )
+}
+
+/// Restored: announced at the extent the window opened with, and the screen
+/// above the icon bar is exactly the frame the window opened in — the same
+/// place, the same furniture, the same scene.
+fn assert_wintersun_restored_screendump(
+    t: &QemuTest,
+    path: &Path,
+    serial: &str,
+) -> Result<(), String> {
+    let window = wintersun_window()?;
+    assert_wintersun_sized_witness(
+        t,
+        serial,
+        2,
+        tairix_controls::WindowSizeState::Restored,
+        window.restored.client,
+    )?;
+    let restored = read_screendump(t, path)?;
+    let open_path = sibling_screendump(path, WINTERSUN_RESTORED_DUMP, WINTERSUN_OPEN_DUMP)?;
+    let open = read_screendump(t, &open_path)?;
+    let area = window.work_area;
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
+                continue;
+            };
+            let (was, is) = (open.pixel(x, y)?, restored.pixel(x, y)?);
+            if was != is {
+                return Err(format!(
+                    "test --qemu ({}): restoring from fullscreen changed ({x},{y}) from {was:?} \
+                     to {is:?}; the window must come back decorated where it opened",
+                    t.package
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Maximised: announced at the work area's client, the window fills the work
+/// area, and its client shows the scene drawn at that extent.
+fn assert_wintersun_maximized_screendump(
+    t: &QemuTest,
+    path: &Path,
+    serial: &str,
+) -> Result<(), String> {
+    let window = wintersun_window()?;
+    assert_wintersun_sized_witness(
+        t,
+        serial,
+        3,
+        tairix_controls::WindowSizeState::Maximized,
+        window.maximized.client,
+    )?;
+    if window.maximized.outer != window.work_area {
+        return Err(format!(
+            "test --qemu ({}): maximising gave a {:?} window on a {:?} work area",
+            t.package, window.maximized.outer, window.work_area
+        ));
+    }
+    let image = read_screendump(t, path)?;
+    let mut masked = plate_corners(window.maximized.outer).to_vec();
+    masked.push(cursor_footprint(window.toggle));
+    assert_wintersun_scene(
+        t,
+        path,
+        &image,
+        window.maximized.client,
+        window.maximized.client,
+        &masked,
+    )
+}
+
+/// The dump `sibling` a plan took beside the one at `path`, whose own suffix
+/// is `suffix`: dumps are named `<binary>.<suffix>.screendump.ppm` beside
+/// the kernel binary.
+fn sibling_screendump(path: &Path, suffix: &str, sibling: &str) -> Result<PathBuf, String> {
+    let own = format!(".{suffix}.screendump.ppm");
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(&own))
+        .ok_or_else(|| format!("{} is not a {suffix} screendump", path.display()))?;
+    Ok(path.with_file_name(format!("{stem}.{sibling}.screendump.ppm")))
+}
+
 /// Read and fully decode a dumped scan-out image.
 fn read_screendump(t: &QemuTest, path: &Path) -> Result<tairix_qemu::screendump::Image, String> {
     let bytes = std::fs::read(path)
@@ -11055,13 +11708,17 @@ fn read_screendump(t: &QemuTest, path: &Path) -> Result<tairix_qemu::screendump:
 
 /// [`ScreendumpPlan`] assertion: the dark-theme composited desktop — the
 /// session boots with the shared dark theme active.
-fn assert_dark_desktop_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_dark_desktop_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
     assert_desktop_screendump(t, path, &tairix_theme::Theme::dark())
 }
 
 /// [`ScreendumpPlan`] assertion: the served files window on the
 /// dark-theme desktop (see [`assert_files_window_screendump`]).
-fn assert_files_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_files_window_dark_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
     assert_files_window_screendump(t, path, &tairix_theme::Theme::dark())
 }
 
@@ -11472,7 +12129,7 @@ fn bare_bar_dump_path(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
 /// into "this run's gesture put it there": the frames are the same screen, so
 /// an application slot that differs between them differs *because of the
 /// launch*.
-fn assert_bare_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_bare_bar_dark_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     assert_desktop_wallpaper(t, path, &image, &theme, &[])
@@ -11488,7 +12145,11 @@ fn assert_bare_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), Stri
 /// wallpaper across the whole frame: the window covers a large part of this
 /// output. The desktop's presence is measured where it is genuinely expected
 /// instead — exactly, over the bare column beside the window.
-fn assert_one_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_one_window_dark_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     let bare = read_screendump(t, &bare_bar_dump_path(t, path)?)?;
@@ -11504,7 +12165,11 @@ fn assert_one_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), St
 ///
 /// That last fact is the point of the frame: the bar shows *applications*, so
 /// a second window of one application must not put a second slot beside it.
-fn assert_two_windows_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_two_windows_dark_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     let bare = read_screendump(t, &bare_bar_dump_path(t, path)?)?;
@@ -11563,7 +12228,11 @@ const MAX_UNDER_PRESSURE_SLOT_DRIFT: f64 = 0.0;
 /// This frame is the artwork baseline the second one is read against, so what
 /// it samples is the wallpaper — the slot itself is judged by the comparison,
 /// not here.
-fn assert_icons_drawn_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_icons_drawn_dark_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     assert_desktop_wallpaper(t, path, &image, &theme, &[])
@@ -11573,7 +12242,11 @@ fn assert_icons_drawn_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), S
 /// **second** dump, taken the moment the guest witnesses the machine leave the
 /// normal pressure band: the icon bar still draws exactly the artwork it drew
 /// before.
-fn assert_bar_artwork_survived_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_bar_artwork_survived_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     let drawn = read_screendump(
@@ -12497,7 +13170,11 @@ fn settings_plate_edges(
 /// [`ScreendumpPlan`] assertion for the Settings vertical's **first** dump:
 /// the window, on General, over the composited dark desktop, its strip
 /// selecting the pane it opened on and its column drawing that pane's plates.
-fn assert_settings_general_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_settings_general_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     let window = settings_window_layout(&theme).outer;
@@ -12520,7 +13197,7 @@ fn assert_settings_general_screendump(t: &QemuTest, path: &Path) -> Result<(), S
 /// [`ScreendumpPlan`] assertion for the Settings vertical's **second** dump:
 /// Lock Screen composes a form — its setting and its *Lock Now* command on a
 /// plate — rather than stating an absence.
-fn assert_settings_lock_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_settings_lock_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     let walk = settings_walk()?;
@@ -12540,7 +13217,11 @@ fn assert_settings_lock_screendump(t: &QemuTest, path: &Path) -> Result<(), Stri
 /// [`ScreendumpPlan`] assertion for the Settings vertical's **third** dump:
 /// the pane the strip walked to states its absence in words on the surface,
 /// with no plate and no control.
-fn assert_settings_absence_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_settings_absence_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     let walk = settings_walk()?;
@@ -12621,7 +13302,11 @@ fn row_holds_track(row: &[Rgb], fill: tairix_theme::Rgba, groove: tairix_theme::
 /// [`ScreendumpPlan`] assertion for the Settings vertical's **fourth** dump:
 /// Storage, reached past the strip's fold, drawing its volume cards and at
 /// least one capacity track that is neither empty nor full.
-fn assert_settings_storage_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_settings_storage_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     let walk = settings_walk()?;
@@ -12722,7 +13407,11 @@ fn assert_lightened(
 /// The window's client is deliberately not read: the application redraws its
 /// own pixels for the new look on its own time, so this frame may hold them in
 /// either appearance, or part way between.
-fn assert_settings_light_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_settings_light_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
     let theme = tairix_theme::Theme::light();
     let image = read_screendump(t, path)?;
     let dark = read_screendump(
@@ -13938,7 +14627,11 @@ const MENU_SETTINGS_ROW_LABEL: &str = tairix_terminal::menu::Command::Settings.l
 /// This frame is also the baseline the plate dump is read against, which is
 /// what turns "something is drawn where the plate goes" into "*this* run's
 /// right-click put it there".
-fn assert_menu_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_menu_window_dark_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     assert_cascade_slot_covered(t, path, &image, &theme, MENU_TERMINAL_CASCADE_SLOT)
@@ -13960,7 +14653,11 @@ fn assert_menu_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), S
 /// The rectangle is the one the production chain reports, so a placement
 /// regression moves the probe off the plate and fails here rather than passing
 /// on a menu drawn somewhere else.
-fn assert_menu_plate_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+fn assert_menu_plate_dark_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
     /// The share of the plate rectangle that must differ from the frame before
     /// the menu opened. Measured at 0.922 on the board while the plate was
     /// opaque; four fifths of the ground still moves a dark backdrop well clear
@@ -14977,8 +15674,11 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     // it, step by step — each step once its own readiness marker has
     // appeared the required number of times — the console-input path for
     // a display-console guest, where the serial script cannot reach.
-    for (marker, occurrences, text) in t.typed_keys {
-        spec = spec.with_typed_keys(*marker, *occurrences, *text);
+    for step in t.typed_keys {
+        spec = match step.keys {
+            Keys::Text(text) => spec.with_typed_keys(step.marker, step.occurrences, text),
+            Keys::Named(keys) => spec.with_named_keys(step.marker, step.occurrences, keys),
+        };
     }
 
     // Arm the ordered, marker-gated screendumps: the host-side scan-out
@@ -15064,12 +15764,12 @@ fn pass_verdict(
     audio_capture: Option<&Path>,
 ) -> Result<(), String> {
     match outcome {
-        Outcome::Pass { .. } => {
+        Outcome::Pass { serial } => {
             // The guest passed, but the run is not verified until its dumps
             // agree too.
             let mut verified = Ok(());
             for (path, assert) in screendump_paths {
-                if let Err(e) = assert(t, path) {
+                if let Err(e) = assert(t, path, &serial) {
                     verified = Err(format!("{e} (full serial: {})", serial_log.display()));
                     break;
                 }
@@ -15224,7 +15924,7 @@ mod tests {
         desktop_hover_pointer_script, fatal_verdict, filepick_pointer_script, fold_peer_verdict,
         handover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
         qemu_job_weight, row_holds_track, settings_pointer_script, sidecar_path, Expect, FsDisk,
-        PrimePlan, QemuTest, AARCH64_TARGET, AUDIOTONE_PASS_PREFIX,
+        PrimePlan, QemuTest, TypedStep, AARCH64_TARGET, AUDIOTONE_PASS_PREFIX,
         AUTOLOAD_INPUT_ARMED_OCCURRENCES, AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER,
         BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
         DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, KEYBOARD_ONLY_ARMED_OCCURRENCES, MEMSOAK_PASS_PREFIX,
@@ -15274,6 +15974,7 @@ mod tests {
             ("picker delegation", filepick_pointer_script()),
             ("hand-over", handover_pointer_script()),
             ("settings", settings_pointer_script()),
+            ("wintersun client", super::wintersun_pointer_script()),
         ] {
             let steps = script.unwrap_or_else(|e| panic!("{label} script builds: {e}"));
             for (index, step) in steps.iter().enumerate() {
@@ -15299,6 +16000,156 @@ mod tests {
     /// The bundle the Settings guest attributes its launch to is the one the
     /// capsule's *Settings…* row starts, so the guest cannot wait for a load
     /// nothing in the run performs.
+    /// The line the `WinterSun` vertical types, the keys it presses and the
+    /// bundles its guest latches are the ones the game, its key map and the
+    /// planted store actually understand, each read from its own definition.
+    #[test]
+    fn the_wintersun_vertical_types_what_the_game_and_its_store_understand() {
+        use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
+        use tairix_abi::window_ipc::WindowSizeState;
+        use tairix_abi::ProgramKind;
+        use tairix_test_wintersun_client_qemu_aarch64::{
+            COMMAND_LINE, GAME_APP_NAME, THEN_COMMAND,
+        };
+        use tairix_wintersun_app::cli::{self, Launch, REFERENCE_SCENE};
+        use tairix_wintersun_app::input::{Command, Controls};
+
+        assert_eq!(
+            COMMAND_LINE,
+            format!("{GAME_APP_NAME} {REFERENCE_SCENE} && {THEN_COMMAND}\n")
+        );
+        assert_eq!(cli::parse(&[REFERENCE_SCENE]), Ok(Launch::ReferenceScene));
+
+        let pressed = |key| {
+            Controls::new().apply_key(&KeyInput::Pressed {
+                key,
+                modifiers: Modifiers::default(),
+            })
+        };
+        assert_eq!(
+            pressed(KeyValue::Named(NamedKeyCode::F11)),
+            Some(Command::Resize(WindowSizeState::Fullscreen))
+        );
+        assert_eq!(
+            pressed(KeyValue::Named(NamedKeyCode::Escape)),
+            Some(Command::Resize(WindowSizeState::Restored))
+        );
+        for name in ["f11", "esc"] {
+            assert!(tairix_qemu::NAMED_KEYS.contains(&name), "{name}");
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("the workspace root");
+        let planted =
+            tairix_itest_harness::app_image::discover_app_manifests(&root.join("userland"))
+                .expect("the store's manifests are discovered");
+        let kind_of = |name: &str| {
+            planted
+                .iter()
+                .find(|app| app.manifest.name == name)
+                .map(|app| app.manifest.kind)
+        };
+        assert_eq!(kind_of(GAME_APP_NAME), Some(ProgramKind::Application));
+        assert_eq!(kind_of(THEN_COMMAND), Some(ProgramKind::Command));
+    }
+
+    /// The window manager gives the game's window three different extents,
+    /// the controls it is maximised and closed by are on screen, and the
+    /// pointer rests clear of every client it photographs but fullscreen's.
+    #[test]
+    fn the_wintersun_window_takes_three_extents_and_its_toggle_is_reachable() {
+        let window = super::wintersun_window().expect("the window reconstructs");
+        let extents = [
+            window.restored.client,
+            window.fullscreen,
+            window.maximized.client,
+        ]
+        .map(|client| (client.width, client.height));
+        assert!(
+            extents[0] != extents[1] && extents[1] != extents[2] && extents[0] != extents[2],
+            "{extents:?}"
+        );
+        let (width, height) = super::ramfb_screen();
+        let screen = tairix_geometry::Rect::new(0, 0, width, height);
+        assert!(screen.contains(window.toggle), "{:?}", window.toggle);
+        assert!(window.restored.title_bar.contains(window.toggle));
+        assert!(screen.contains(window.close), "{:?}", window.close);
+        assert!(window.maximized.title_bar.contains(window.close));
+        let rest = super::cursor_footprint(super::wintersun_rest());
+        for client in [window.restored.client, window.maximized.client] {
+            assert!(
+                rest.intersection(&client.intersection(&window.work_area))
+                    .is_empty(),
+                "the resting cursor reaches into {client:?}"
+            );
+        }
+        assert_eq!(window.maximized.outer, window.work_area);
+    }
+
+    /// A `WINDOW_SIZED` record is read back from exactly the line the kernel's
+    /// diagnostic sink writes for it, and nothing else passes for one.
+    #[test]
+    fn a_size_state_witness_is_read_from_the_line_the_kernel_writes() {
+        use tairix_log::{Event, Field, FieldValue, Level};
+
+        let record = super::SizedRecord {
+            window: 7,
+            state: "fullscreen",
+            extent: (1024, 768),
+            path: "composited",
+        };
+        let [window, state, width, height, path] = record.fields();
+        // The kernel prepends the task it attributes the record to.
+        let task = Field {
+            key: "task",
+            value: FieldValue::UnsignedInt(12),
+        };
+        let fields = [task, window, state, width, height, path];
+        let event = Event {
+            level: Level::Info,
+            id: tairix_desktop_session::WINDOW_SIZED,
+            message: tairix_desktop_session::WINDOW_SIZED_MESSAGE,
+            fields: &fields,
+        };
+        let mut line = String::new();
+        tairix_log::write_diag_line(&mut line, Some(4_321), true, &event);
+        let other = Event {
+            id: tairix_desktop_session::WINDOW_SHOWN,
+            message: tairix_desktop_session::WINDOW_SHOWN_MESSAGE,
+            ..event
+        };
+        tairix_log::write_diag_line(&mut line, Some(4_322), true, &other);
+        assert_eq!(super::window_sized_witnesses(&line), [record]);
+    }
+
+    /// The cursor mask holds every image the session could draw with its
+    /// hotspot on the pointer, wherever in the image that hotspot is.
+    #[test]
+    fn the_cursor_mask_holds_any_cursor_on_the_pointer() {
+        let side = super::RECONSTRUCTION_SCALE.scale_length(tairix_cursor::CURSOR_BASE_SIDE_PX);
+        let pointer = tairix_geometry::Point::new(500, 300);
+        let mask = super::cursor_footprint(pointer);
+        let side_i32 = i32::try_from(side).expect("a small side");
+        for hy in 0..side_i32 {
+            for hx in 0..side_i32 {
+                let image = tairix_geometry::Rect::new(pointer.x - hx, pointer.y - hy, side, side);
+                assert_eq!(image.intersection(&mask), image, "hotspot ({hx},{hy})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_sibling_dump_is_named_beside_its_own() {
+        let restored = Path::new("/t/kernel.restored.screendump.ppm");
+        assert_eq!(
+            super::sibling_screendump(restored, "restored", "open"),
+            Ok(Path::new("/t/kernel.open.screendump.ppm").to_path_buf())
+        );
+        assert!(super::sibling_screendump(restored, "open", "restored").is_err());
+    }
+
     #[test]
     fn the_settings_guest_waits_for_the_bundle_the_menu_row_starts() {
         let bundle = super::bundle_path(
@@ -15954,10 +16805,10 @@ mod tests {
     #[test]
     fn the_input_armed_gate_counts_the_drivers_the_board_actually_has() {
         for t in TESTS {
-            let Some((_, occurrences, _)) = t
+            let Some(TypedStep { occurrences, .. }) = t
                 .typed_keys
                 .iter()
-                .find(|(marker, _, _)| *marker == AUTOLOAD_INPUT_KEY_MARKER)
+                .find(|step| step.marker == AUTOLOAD_INPUT_KEY_MARKER)
             else {
                 continue;
             };
@@ -16016,7 +16867,7 @@ mod tests {
         assert!(t
             .typed_keys
             .iter()
-            .all(|(marker, _, _)| *marker != tairix_fontd::events::SERVICE_READY_MESSAGE));
+            .all(|step| step.marker != tairix_fontd::events::SERVICE_READY_MESSAGE));
     }
 
     /// The value-pipe vertical's machine-id marker is exactly what the

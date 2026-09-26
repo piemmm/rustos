@@ -4241,7 +4241,7 @@ fn the_choosers_close_control_cancels_the_pick() {
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker.begin(7, &mut shell, &mut comp).expect("accepted");
     let wm = picker.wm_id().expect("a picker window is showing");
-    let windows = SessionWindows::new();
+    let mut windows = SessionWindows::new();
 
     let work_area = shell.work_area(&comp);
     assert_eq!(
@@ -4251,7 +4251,7 @@ fn the_choosers_close_control_cancels_the_pick() {
             work_area,
             &mut shell,
             &mut comp,
-            &windows,
+            &mut windows,
         ),
         None,
         "a session-owned window has no client to tell"

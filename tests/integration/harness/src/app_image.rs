@@ -57,7 +57,7 @@ use tairix_crypto::Ed25519SecretKey;
 use tairix_net::dnssd::{ServiceType, Transport};
 
 /// File name of a program crate's manifest source, beside its `Cargo.toml`.
-pub const APP_MANIFEST_SOURCE: &str = "AppInfo.toml";
+pub use tairix_syshelp::bundles::MANIFEST_SOURCE as APP_MANIFEST_SOURCE;
 
 /// A failed manifest parse, discovery walk, or bundle composition. The
 /// message names the offending file and cause; the build fails closed on
@@ -174,16 +174,10 @@ impl AppManifestSource {
         let mut author = None;
         let mut icon_bar = None;
         let mut instances = None;
-        for (index, raw) in text.lines().enumerate() {
-            let line = raw.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let at = format!("{ctx} line {}", index + 1);
-            let (key, value) = line
-                .split_once('=')
-                .ok_or_else(|| AppImageError::new(&at, "expected `key = value`"))?;
-            let (key, value) = (key.trim(), value.trim());
+        for (number, entry) in tairix_syshelp::bundles::manifest_entries(text) {
+            let at = format!("{ctx} line {number}");
+            let (key, value) =
+                entry.ok_or_else(|| AppImageError::new(&at, "expected `key = value`"))?;
             match key {
                 "id" => set(&at, key, &mut id, parse_string(&at, value)?)?,
                 "name" => set(&at, key, &mut name, parse_string(&at, value)?)?,
@@ -340,14 +334,14 @@ fn check_len(ctx: &str, key: &str, value: &str, max: usize) -> Result<(), AppIma
 
 /// Parse a double-quoted string with no embedded quote or escape.
 fn parse_string(at: &str, value: &str) -> Result<String, AppImageError> {
-    let inner = value
-        .strip_prefix('"')
-        .and_then(|rest| rest.strip_suffix('"'))
-        .ok_or_else(|| AppImageError::new(at, "expected a double-quoted string"))?;
-    if inner.contains(['"', '\\']) {
-        return Err(AppImageError::new(at, "quotes/escapes are not supported"));
-    }
-    Ok(inner.to_string())
+    tairix_syshelp::bundles::quoted_string(value)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            AppImageError::new(
+                at,
+                "expected a double-quoted string with no quote or escape inside",
+            )
+        })
 }
 
 /// Parse a bare `true`/`false`. Anything else is a packaging defect rather
@@ -506,9 +500,9 @@ pub struct DiscoveredApp {
     pub manifest: AppManifestSource,
 }
 
-/// Walk the userland crate roots (`<userland>/<class>/<crate>/`) and parse
-/// every crate's `AppInfo.toml`, returning the discovered programs sorted
-/// by bundle name.
+/// Parse the `AppInfo.toml` of every program crate the shared walk finds
+/// under `userland_root` (`tairix_syshelp::bundles::program_crates`),
+/// returning the discovered programs sorted by bundle name.
 ///
 /// This walk **is** the store's source of truth at build time: adding a
 /// program is dropping an `AppInfo.toml` beside its `Cargo.toml`, never
@@ -520,26 +514,26 @@ pub struct DiscoveredApp {
 /// crate whose `Cargo.toml` package name cannot be read, or two crates
 /// claiming the same bundle name.
 pub fn discover_app_manifests(userland_root: &Path) -> Result<Vec<DiscoveredApp>, AppImageError> {
+    let programs = tairix_syshelp::bundles::program_crates(userland_root, |_| {})
+        .map_err(|e| AppImageError::new(userland_root.display(), e))?;
     let mut found: Vec<DiscoveredApp> = Vec::new();
-    for class_dir in sorted_dirs(userland_root)? {
-        for crate_dir in sorted_dirs(&class_dir)? {
-            let Some(discovered) = discover_crate_manifest(&crate_dir)? else {
-                continue;
-            };
-            if let Some(clash) = found
-                .iter()
-                .find(|d| d.manifest.name == discovered.manifest.name)
-            {
-                return Err(AppImageError::new(
-                    crate_dir.join(APP_MANIFEST_SOURCE).display(),
-                    format!(
-                        "bundle name `{}` already claimed by package `{}`",
-                        discovered.manifest.name, clash.package
-                    ),
-                ));
-            }
-            found.push(discovered);
+    for crate_dir in programs {
+        let Some(discovered) = discover_crate_manifest(&crate_dir)? else {
+            continue;
+        };
+        if let Some(clash) = found
+            .iter()
+            .find(|d| d.manifest.name == discovered.manifest.name)
+        {
+            return Err(AppImageError::new(
+                crate_dir.join(APP_MANIFEST_SOURCE).display(),
+                format!(
+                    "bundle name `{}` already claimed by package `{}`",
+                    discovered.manifest.name, clash.package
+                ),
+            ));
         }
+        found.push(discovered);
     }
     found.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
     Ok(found)
@@ -571,22 +565,6 @@ pub fn discover_crate_manifest(crate_dir: &Path) -> Result<Option<DiscoveredApp>
         crate_dir: crate_dir.to_path_buf(),
         manifest,
     }))
-}
-
-/// The immediate subdirectories of `root`, sorted by name so the walk is
-/// deterministic across filesystems.
-fn sorted_dirs(root: &Path) -> Result<Vec<PathBuf>, AppImageError> {
-    let mut dirs = Vec::new();
-    let entries = std::fs::read_dir(root).map_err(|e| AppImageError::new(root.display(), e))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| AppImageError::new(root.display(), e))?;
-        let path = entry.path();
-        if path.is_dir() {
-            dirs.push(path);
-        }
-    }
-    dirs.sort();
-    Ok(dirs)
 }
 
 /// Read the `[package] name` from a crate's `Cargo.toml`.
@@ -1234,6 +1212,7 @@ mod tests {
                 "wc",
                 "whoami",
                 "widgets",
+                "wintersun",
                 "yes"
             ]
         );

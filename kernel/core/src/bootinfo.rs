@@ -527,20 +527,15 @@ pub trait KernelArch: SchedulerArch {
     /// Handed to each space at its creation: PID 1's through the boot
     /// spawner, every later one's through the spawn runtime.
     ///
-    /// # Default
-    ///
-    /// [`None`], which is right only where no TLB exists: `wasm32` and the
-    /// host test arch. Every bare-metal port returns its handle.
+    /// [`None`] is right only where no TLB exists, as on the host test arch;
+    /// every bare-metal port returns its handle. There is no default, so no
+    /// port can leave its spaces reaching no other CPU by omission.
     #[must_use]
     fn cross_cpu_tlb_shootdown(
         arch: &'static Self,
     ) -> Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)>
     where
-        Self: Sized,
-    {
-        let _ = arch;
-        None
-    }
+        Self: Sized;
 
     /// Hand the kernel core the architecture's **platform entropy source** —
     /// the per-port hardware random-number handle (x86 `RDSEED`/`RDRAND`,

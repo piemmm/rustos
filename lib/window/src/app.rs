@@ -272,7 +272,7 @@ pub fn bind_event_mailbox() -> Result<Binding, ShellError> {
             Errno::NotFound,
         ));
     };
-    let endpoint = crate::client::event_endpoint_for(origin.pid());
+    let endpoint = tairix_abi::window_ipc::event_endpoint_for(origin.pid());
     if tairix_abi::ipc::is_reserved_endpoint(endpoint)
         || tairix_rt::port_bind(
             endpoint,
@@ -774,6 +774,22 @@ impl WindowPane {
 struct Retained {
     pane: WindowPane,
     surface: Surface,
+    /// Where the retained picture no longer matches the screen: a paint
+    /// refused, or a present failed, part-way through this rectangle.
+    torn: Option<DamageRect>,
+}
+
+impl Retained {
+    /// The rectangle a present of `damage` must repaint and send: the whole
+    /// window when the session released its copy, and otherwise `damage`
+    /// grown over any rectangle left torn, which this takes.
+    fn repaint(&mut self, damage: DamageRect) -> DamageRect {
+        let torn = self.torn.take();
+        if self.pane.content_released() {
+            return DamageRect::full(self.pane.mode());
+        }
+        torn.map_or(damage, |torn| damage.union(torn))
+    }
 }
 
 /// The live window channel an app owns, and the one window it may or may not
@@ -875,7 +891,11 @@ impl AppWindow {
         };
         let (pane, server) =
             WindowPane::open(&mut self.client, event_endpoint, mode, title, sizing)?;
-        self.retained = Some(Retained { pane, surface });
+        self.retained = Some(Retained {
+            pane,
+            surface,
+            torn: None,
+        });
         Ok(server)
     }
 
@@ -895,17 +915,51 @@ impl AppWindow {
         damage: DamageRect,
         paint: impl FnOnce(&mut Surface),
     ) -> Result<(), Errno> {
+        match self.try_present(damage, |surface| {
+            paint(surface);
+            Ok::<(), core::convert::Infallible>(())
+        })? {
+            Ok(()) => Ok(()),
+            Err(never) => match never {},
+        }
+    }
+
+    /// [`present`](Self::present) for a paint that can refuse.
+    ///
+    /// A refused paint presents nothing, so the window keeps showing its last
+    /// frame; the pixels the paint may have left half-drawn are repainted by
+    /// the next present, whose paint is handed a clip covering them.
+    ///
+    /// # Errors
+    ///
+    /// `Ok(Err(_))` carries the paint's own refusal, with nothing presented;
+    /// the outer error is [`present`](Self::present)'s.
+    pub fn try_present<E>(
+        &mut self,
+        damage: DamageRect,
+        paint: impl FnOnce(&mut Surface) -> Result<(), E>,
+    ) -> Result<Result<(), E>, Errno> {
         let Some(held) = self.retained.as_mut() else {
-            return Ok(());
+            return Ok(Ok(()));
         };
-        let damage = if held.pane.content_released() {
-            DamageRect::full(held.pane.mode())
-        } else {
-            damage
-        };
-        held.surface
-            .with_clip(damage.x, damage.y, damage.width_px, damage.height_px, paint);
-        held.pane.present(&mut self.client, &held.surface, damage)
+        let damage = held.repaint(damage);
+        let mut painted = Ok(());
+        held.surface.with_clip(
+            damage.x,
+            damage.y,
+            damage.width_px,
+            damage.height_px,
+            |surface| painted = paint(surface),
+        );
+        if painted.is_err() {
+            held.torn = Some(damage);
+            return Ok(painted);
+        }
+        if let Err(err) = held.pane.present(&mut self.client, &held.surface, damage) {
+            held.torn = Some(damage);
+            return Err(err);
+        }
+        Ok(Ok(()))
     }
 
     /// Re-map the frame region onto `new_mode`, answering whether the new
@@ -930,6 +984,9 @@ impl AppWindow {
             return false;
         }
         held.surface = surface;
+        // The old geometry's torn rectangle names pixels of a surface that is
+        // gone, and the caller repaints the fresh one whole.
+        held.torn = None;
         true
     }
 

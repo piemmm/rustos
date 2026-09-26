@@ -4,8 +4,9 @@
 looks through and the frame they see in it: the camera, the tiled software
 renderer, the terrain splat and its light composite, the figures standing on
 the ground, the fixed-tick pacing the render interpolates over, the input
-drain, the three window size states, and the degradation ladder a blown frame
-budget turns. It is `plans/WINTERSUN.md` WS5 and WS6, and a crate of the
+drain, the three window size states, the degradation ladder a blown frame
+budget turns, and the one reference scene every check of the picture draws. It
+is `plans/WINTERSUN.md` WS5, WS6 and WS23, and a crate of the
 `userland/games/` leaf subtree. Stability tier: **experimental**.
 
 Everything with behaviour is the crate's `[lib]`; the `[[bin]]` is the on-disk
@@ -136,6 +137,33 @@ A figure standing in water is sunk by the depth the rules report at its cell
 and nothing of it is drawn below the surface; its contact shadow thins as the
 water deepens.
 
+## The command line
+
+`wintersun` takes no operands. `-h`, `-?` and `--help` print the bundle's own
+short help, and win wherever they are reached; `--reference-scene` holds the
+reference scene still in place of a new world (below); `--` ends the options.
+Anything else, read left to right before a help switch, is a usage error with
+exit status `2`. A reference scene that cannot be drawn exits `87` with its
+reason, since a window holding some other picture would defeat the mode.
+
+## The reference scene
+
+`reference` is one realm, one cast and one moment, drawn by three consumers
+that must agree to the bit: the cross-target digest folds it at two fixed
+sizes, `Run --reference-scene` holds it in a live window, and the client
+vertical draws it on the host at that window's size to check what the guest
+scanned out. Everything that decides a pixel is fixed there — the seed, the
+cast, the moment, the material cache's size — except the pressure the cache is
+taken under, which is the caller's: the digest and the host take it at
+normal pressure whatever the machine says, and a live window takes it under
+the process's own gauge so it gives memory back like any other cache. A frame
+whose cache refused a tile is drawn with that material flat and is not the
+reference, so the renderer counts refusals, the digest fails rather than fold
+one, and a live window says so on standard error.
+
+The window holding it draws again only when its extent changes or the session
+gave its copy of the pixels back, so a still scene costs no frames.
+
 ## The player
 
 The player walks as a preset record the bundle ships in its own `Resources/`,
@@ -217,15 +245,27 @@ fullscreen before its extent would lay out edge-to-edge at the old size.
 Leaving fullscreen returns to the state it was entered from, so a maximised
 window comes back maximised.
 
+The window opens at the baseline resolution at the desktop's scale, capped to
+the screen by the one rule every application's window size goes through, so
+on a screen smaller than the baseline the window still fits and its title
+bar's controls stay reachable. A frame the renderer refuses is withheld, so the
+window keeps showing the last frame drawn rather than a half-painted one, and a
+run of refusals is reported once.
+
 ## The frame budget
 
 The baseline is 1280×720 at 60 Hz — a 16.6 ms frame — on a four-core machine,
 with the per-pass allocation `plans/WINTERSUN.md` states. `tests/budget.rs`
 measures it rather than asserting about it, on one thread and on four, with the
 plan's sixty-four rigged figures standing on the ground, and prints what each
-pass cost against its budget. No elapsed time is asserted: a wall-clock bound
-is a claim about the machine, so what the test gates is that real threads draw
-the picture one thread does.
+pass cost against its budget and what placing one figure costs a single core.
+No elapsed time is asserted: a wall-clock bound is a claim about the machine,
+so what the test gates is that real threads draw the picture one thread does.
+
+The material cache is a share of the machine's memory, asked of the System
+Information API once before the window opens, and obeys the band the kernel
+publishes to the process. A system that will not say how much memory it has
+admits no tiles, and the ground is drawn in its materials' flat tones.
 
 The headroom is *derived* from the frame and the named passes rather than
 stated beside them: two numbers that must add up are one number and a
@@ -247,3 +287,12 @@ The cross-target rendering claim is four verticals —
 `client_frame_qemu_{aarch64,riscv64,x86_64}` and `client_frame_wasm32` — each
 folding two composited frames into `digest::REFERENCE_DIGEST`. They are also
 what first builds the ground art and the figures for each Tier-1 target.
+
+`wintersun_client_qemu_aarch64` is the end-to-end claim: the installed bundle
+is launched by name from a terminal on the reference scene, and its window is
+read back as it opened, fullscreen, restored and maximised. Each dump waits on
+the session's witness that the window is on screen at that state's extent, and
+is compared pixel for pixel with the scene drawn on the host at the extent the
+window manager gives it, the cursor and the window's rounded corners aside.
+The witness also names how the frame reached the display, which on this
+software-composited board must be `composited`.

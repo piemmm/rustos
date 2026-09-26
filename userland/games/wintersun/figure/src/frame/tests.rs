@@ -6,7 +6,7 @@ use core::f64::consts::{FRAC_PI_2, PI};
 use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
 
-use super::{project, toward_camera, Basis, Body, Rotation, FORESHORTEN};
+use super::{project, toward_camera, Basis, Body, Heading, Rotation, FORESHORTEN};
 
 /// Facings in the sense `Facing` itself documents: zero east, advancing south.
 const EAST: Facing = Facing(0);
@@ -14,8 +14,8 @@ const SOUTH: Facing = Facing(0x4000);
 const WEST: Facing = Facing(0x8000);
 const NORTH: Facing = Facing(0xC000);
 
-/// Slack for a value that has been through the shared transcendentals, which
-/// are accurate to about 1e-9.
+/// Slack for a value that has been through the shared transcendentals: far
+/// coarser than their error, far finer than a pixel.
 const SLACK: f64 = 1e-9;
 
 fn close(a: f64, b: f64) -> bool {
@@ -35,7 +35,7 @@ fn foreshortening_is_the_elevation_the_doc_claims() {
 
 #[test]
 fn facing_east_lays_forward_across_the_screen() {
-    let there = project(EAST, Body::FORWARD);
+    let there = project(Heading::of(EAST), Body::FORWARD);
     assert!(close(there.dx, 1.0));
     assert!(close(there.dy, 0.0));
     assert!(close(there.depth, 0.0));
@@ -43,7 +43,7 @@ fn facing_east_lays_forward_across_the_screen() {
 
 #[test]
 fn facing_south_lays_forward_into_the_scene_foreshortened() {
-    let there = project(SOUTH, Body::FORWARD);
+    let there = project(Heading::of(SOUTH), Body::FORWARD);
     assert!(close(there.dx, 0.0));
     // South is toward the camera, so a step forward draws lower and nearer.
     assert!(close(there.dy, FORESHORTEN));
@@ -52,7 +52,7 @@ fn facing_south_lays_forward_into_the_scene_foreshortened() {
 
 #[test]
 fn facing_north_walks_away_and_sorts_further() {
-    let there = project(NORTH, Body::FORWARD);
+    let there = project(Heading::of(NORTH), Body::FORWARD);
     assert!(close(there.dy, -FORESHORTEN));
     assert!(
         there.depth < 0.0,
@@ -62,14 +62,14 @@ fn facing_north_walks_away_and_sorts_further() {
 
 #[test]
 fn the_figures_left_is_north_when_it_faces_east() {
-    let there = project(EAST, Body::SIDE);
+    let there = project(Heading::of(EAST), Body::SIDE);
     assert!(close(there.dx, 0.0));
     assert!(close(there.depth, -1.0), "its left is away from the camera");
 }
 
 #[test]
 fn the_figures_left_is_east_when_it_faces_south() {
-    let there = project(SOUTH, Body::SIDE);
+    let there = project(Heading::of(SOUTH), Body::SIDE);
     assert!(close(there.dx, 1.0));
     assert!(close(there.depth, 0.0));
 }
@@ -77,7 +77,7 @@ fn the_figures_left_is_east_when_it_faces_south() {
 #[test]
 fn height_is_not_foreshortened() {
     for facing in [EAST, SOUTH, WEST, NORTH] {
-        let there = project(facing, Body::UP);
+        let there = project(Heading::of(facing), Body::UP);
         assert!(close(there.dx, 0.0));
         assert!(
             close(there.dy, -1.0),
@@ -91,8 +91,8 @@ fn height_is_not_foreshortened() {
 fn depth_is_not_the_screen_row() {
     // A raised hand draws higher without becoming further away, which is why
     // the sort key cannot be the row: it would put the hand behind the body.
-    let flat = project(SOUTH, Body::new(4.0, 0.0, 0.0));
-    let raised = project(SOUTH, Body::new(4.0, 0.0, 30.0));
+    let flat = project(Heading::of(SOUTH), Body::new(4.0, 0.0, 0.0));
+    let raised = project(Heading::of(SOUTH), Body::new(4.0, 0.0, 30.0));
     assert!(close(flat.depth, raised.depth));
     assert!(raised.dy < flat.dy, "the raised part draws higher");
 }
@@ -104,7 +104,7 @@ fn a_whole_turn_of_headings_needs_no_new_geometry() {
     let offset = Body::new(6.0, 2.0, 40.0);
     for step in 0..16u32 {
         let facing = Facing(u16::try_from(step * 4096).expect("inside a turn"));
-        let there = project(facing, offset);
+        let there = project(Heading::of(facing), offset);
         assert!(there.dx.is_finite() && there.dy.is_finite() && there.depth.is_finite());
     }
 }
@@ -224,10 +224,13 @@ fn a_basis_reads_a_held_direction_back_exactly() {
 #[test]
 fn the_camera_direction_moves_nothing_on_screen() {
     for facing in [EAST, SOUTH, WEST, NORTH, Facing(0x1234)] {
-        let toward = toward_camera(facing);
+        let toward = toward_camera(Heading::of(facing));
         assert!(close(toward.length(), 1.0), "it must be a direction");
-        let here = project(facing, Body::new(3.0, -2.0, 7.0));
-        let moved = project(facing, Body::new(3.0, -2.0, 7.0).plus(toward.scaled(5.0)));
+        let here = project(Heading::of(facing), Body::new(3.0, -2.0, 7.0));
+        let moved = project(
+            Heading::of(facing),
+            Body::new(3.0, -2.0, 7.0).plus(toward.scaled(5.0)),
+        );
         assert!(
             close(here.dx, moved.dx) && close(here.dy, moved.dy),
             "{facing:?} moved the point on screen"

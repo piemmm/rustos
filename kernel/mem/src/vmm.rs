@@ -358,12 +358,13 @@ impl<P: PageTable> AddressSpace<P> {
     }
 
     /// Reach the CPUs `tlb` tracks whenever an entry of this space is cleared.
-    /// Done before the space is made active on any CPU.
-    pub fn attach_tlb(&mut self, tlb: SpaceTlb) {
+    /// Done before the space is made active on any CPU, which crate privacy
+    /// holds to: only a live space's construction attaches one.
+    pub(crate) fn attach_tlb(&mut self, tlb: SpaceTlb) {
         self.tlb = Some(tlb);
     }
 
-    /// The reach [`Self::attach_tlb`] installed.
+    /// The reach a live space's construction attached, if any.
     #[must_use]
     pub fn tlb(&self) -> Option<&SpaceTlb> {
         self.tlb.as_ref()
@@ -499,7 +500,7 @@ impl<P: PageTable> AddressSpace<P> {
     ///
     /// No CPU may hold, or come to hold, a translation of this space: it must
     /// be active on none, and have been discarded by each CPU that ran it.
-    pub unsafe fn clear_lowest(&mut self) -> Option<(Page, Result<Frame, PageTableError>)> {
+    pub(crate) unsafe fn clear_lowest(&mut self) -> Option<(Page, Result<Frame, PageTableError>)> {
         let (page, _) = self.live.pop_first()?;
         let cleared = self
             .table
@@ -606,7 +607,7 @@ impl<P: PageTable> AddressSpace<P> {
     /// the active translation regime of any CPU, and no other reference
     /// into its tables may be live. After the call the space translates
     /// nothing.
-    pub unsafe fn reclaim_table_frames(&mut self) {
+    pub(crate) unsafe fn reclaim_table_frames(&mut self) {
         // SAFETY: forwarded caller contract (see above).
         unsafe { self.table.reclaim_table_frames() }
     }

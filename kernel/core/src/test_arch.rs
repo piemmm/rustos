@@ -386,6 +386,13 @@ impl KernelArch for TestArch {
         None
     }
 
+    fn cross_cpu_tlb_shootdown(
+        _arch: &'static Self,
+    ) -> Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)> {
+        // The host has no TLB for another CPU to hold.
+        None
+    }
+
     fn cpu_name(&self) -> Option<tairix_abi::CpuName> {
         // The host test arch runs on whatever machine hosts the tests: it
         // discovers no CPU model, stating an honest `None` rather than

@@ -582,8 +582,8 @@ pub const ENV_SHOWN_NAME: &str = "FULLNAME";
 /// device-channel namespace, above an 8-bit per-interface index
 /// ([`crate::session_ipc::session_wake_endpoint`],
 /// [`crate::switchboard_ipc::command_endpoint_for`],
-/// [`crate::driver::net_channel::notify_endpoint_for`], and the window
-/// client's `event_endpoint_for`). Bounding a pid to the low 40 bits is what
+/// [`crate::driver::net_channel::notify_endpoint_for`], and
+/// [`crate::window_ipc::event_endpoint_for`]). Bounding a pid to the low 40 bits is what
 /// keeps every one of those packings lossless: two principals can never
 /// derive the same endpoint id, a derived id can never fold into a reserved
 /// one, and no derivation needs a mask that could alias two pids together.

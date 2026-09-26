@@ -4,7 +4,7 @@ wintersun — parcourir un monde hivernal généré de façon procédurale
 
 ## SYNOPSIS
 
-`wintersun`
+`wintersun [--reference-scene]`
 
 ## DESCRIPTION
 
@@ -47,11 +47,23 @@ prévisible plutôt qu'une surprise.
 Une fenêtre plus grande que ce que le rendu logiciel peut remplir est dessinée
 en 2560×1440 au plus, puis agrandie à la taille de la fenêtre.
 
+## OPTIONS
+
+- `-h, -?, --help` — afficher l'aide courte de cette commande.
+- `--reference-scene` — dessiner la scène de référence fixe et la tenir
+  immobile : un seul monde, les mêmes personnages et le même instant,
+  identiques sur toutes les machines, pour qu'une image de la fenêtre puisse
+  être comparée à une autre dessinée ailleurs. `F11` et `Échap` changent
+  toujours la taille de la fenêtre ; rien d'autre ne bouge.
+
 ## EXIT STATUS
 
 `0` quand vous quittez. Un état non nul indique sa raison sur la sortie
 d'erreur : le monde n'a pas pu être généré, la fenêtre n'a pas pu être
 ouverte, ou le canal d'événements de la session a été perdu.
+
+- `2` — la ligne de commande n'a pas été comprise.
+- `87` — la scène de référence n'a pas pu être dessinée.
 
 ## SEE ALSO
 

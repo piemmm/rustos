@@ -223,3 +223,43 @@ fn the_ground_worth_holding_is_the_view_and_a_chunk_around_it() {
         edge
     ));
 }
+
+/// Held ground is kept in coordinate order however it arrives, a chunk
+/// adopted twice is held once, and a view that moves away gives back what it
+/// no longer needs while keeping what it still draws.
+#[test]
+fn held_ground_is_ordered_deduplicated_and_trimmed_to_the_view() {
+    let field = field();
+    let near = bounds(-2_000, -2_000, 2_000, 2_000);
+    let mut arrived = chunks(&field, near);
+    assert!(arrived.len() > 2, "the view spans several chunks");
+    let coords: alloc::vec::Vec<_> = arrived.iter().map(Chunk::coord).collect();
+    arrived.reverse();
+
+    let mut ground = HeldGround::new();
+    for chunk in arrived {
+        ground.adopt(chunk).expect("room to hold it");
+    }
+    let again = ChunkBuild::new(coords[0])
+        .expect("a chunk fits")
+        .finish(&field)
+        .expect("a chunk generates");
+    ground.adopt(again).expect("room to hold it");
+    let held: alloc::vec::Vec<_> = ground
+        .borrow()
+        .expect("room to borrow")
+        .iter()
+        .map(|chunk| chunk.coord())
+        .collect();
+    assert_eq!(held, coords, "held in coordinate order, each once");
+    assert!(ChunkWindow::new(&ground.borrow().expect("room")).is_ok());
+
+    let far = bounds(900_000, 900_000, 902_000, 902_000);
+    ground.release_distant(far);
+    assert!(coords.iter().all(|coord| !ground.holds(*coord)));
+    for chunk in chunks(&field, near) {
+        ground.adopt(chunk).expect("room to hold it");
+    }
+    ground.release_distant(near);
+    assert!(coords.iter().all(|coord| ground.holds(*coord)));
+}

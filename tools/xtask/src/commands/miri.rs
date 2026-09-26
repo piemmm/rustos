@@ -128,6 +128,25 @@ pub const TARGETS: &[Target] = &[
         spread: Spread::OneProcess,
     },
     Target {
+        package: "tairix-util",
+        description: "the volatile stores a secret is wiped with, and the wiped buffer's destructor",
+        features: &[],
+        scope: Scope::LibExcept {
+            skip: &[
+                "mathf::tests::the_transcendentals_track_a_correctly_rounded_libm",
+                "mathf::tests::angles_beside_a_quarter_turn_stay_accurate_to_the_last_bit",
+            ],
+            reason: "both hold the first-party sine, cosine, tangent, arctangent and exponential \
+                     to the host's libm within an ulp, and the interpreter perturbs each of \
+                     those host operations by a few ulps on purpose, to model how libms \
+                     differ, so what they would report is its injected error rather than \
+                     anything about this crate. The module they test carries no `unsafe`, and \
+                     its exact operations — the square root and integer rounding — stay \
+                     interpreted through the tests that remain",
+        },
+        spread: Spread::OneProcess,
+    },
+    Target {
         package: "tairix-inline",
         description: "the allocation-free tier's inline slot arrays, and the volatile scrub a secret ring leaves behind",
         features: &[],

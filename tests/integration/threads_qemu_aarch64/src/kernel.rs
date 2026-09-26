@@ -64,7 +64,7 @@ use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_B
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
 use tairix_kernel_core::{
     AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram, InitSpawnCtx,
-    KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
+    KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
     ProgramRegistry, RandomReserve, SchedWaitQueueArch, NULL_DMA_ALLOC_FACILITY,
     NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
 };
@@ -642,6 +642,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         wait_producer,
         sys.irq_table,
         &NULL_SHARED_MEM_FACILITY,
+        KernelArch::cross_cpu_tlb_shootdown(sys.arch),
     );
     let Ok(parent_pid) = init_ctx.spawn_driver_process(
         "/bin/th-parent",

@@ -16,6 +16,9 @@ workspace = true
 # family and its layout by, shared with the font-service protocol so a
 # family key means the same thing on disk and on the wire.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The shared bounded `f64` maths, so glyph coordinates round exactly as the
+# SVG decoder's and the rasteriser's do.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The shared non-cryptographic hash the static-face rasterisation golden is

@@ -7,9 +7,9 @@ use alloc::vec::Vec;
 
 use crate::engine::Segment;
 use crate::gridfit::{fit, AlignZones, Axes, Zone};
-use crate::mathf;
 use crate::tests::asset;
 use crate::{CellGeometry, Face, ATLAS_EM_PX};
+use tairix_util::mathf;
 
 /// One outline segment.
 fn seg(x0: f64, y0: f64, x1: f64, y1: f64) -> Segment {

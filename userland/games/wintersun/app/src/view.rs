@@ -18,6 +18,8 @@
 //! is unaffected — and it keeps every span whole.
 
 use tairix_parallel::{bands, JobRunner};
+use tairix_raster::surface::Surface;
+use tairix_raster::Region;
 
 use crate::camera::Zoom;
 use crate::error::ClientError;
@@ -127,6 +129,54 @@ impl Viewport {
     #[must_use]
     pub const fn needs_resample(&self) -> bool {
         self.render_width != self.window_width || self.render_height != self.window_height
+    }
+
+    /// Draw one frame into `window`, a surface of this view's window extent,
+    /// through `render`, which draws the render target it is handed.
+    ///
+    /// Where the target is the window, `render` writes the window's own
+    /// pixels. Otherwise it draws into `reduced`, kept across frames and
+    /// reallocated only when the target's extent moves, which is then
+    /// resampled up to the window.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Viewport`] for a `window` of another extent or a
+    /// resample the surfaces refuse, [`ClientError::OutOfMemory`] for a
+    /// reduced target that does not fit, and whatever `render` refuses.
+    pub fn draw_into<T>(
+        &self,
+        window: &mut Surface,
+        reduced: &mut Option<Surface>,
+        render: impl FnOnce(&mut Surface) -> Result<T, ClientError>,
+    ) -> Result<T, ClientError> {
+        if (window.width(), window.height()) != self.window() {
+            return Err(ClientError::Viewport);
+        }
+        if !self.needs_resample() {
+            return render(window);
+        }
+        let (width, height) = self.render();
+        if reduced
+            .as_ref()
+            .is_none_or(|held| (held.width(), held.height()) != (width, height))
+        {
+            *reduced = Surface::new(width, height);
+        }
+        let small = reduced.as_mut().ok_or(ClientError::OutOfMemory)?;
+        let drawn = render(small)?;
+        small
+            .resample_into(
+                Region {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                },
+                window,
+            )
+            .map_err(|_| ClientError::Viewport)?;
+        Ok(drawn)
     }
 
     /// How many bands `runner` should cut this target's rows into.

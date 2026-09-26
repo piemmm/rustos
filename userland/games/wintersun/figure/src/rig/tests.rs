@@ -870,7 +870,7 @@ fn a_limit_that_fixes_an_axis_admits_only_rest_on_it() {
 /// the skinning itself had come apart.
 #[test]
 fn surfaces_that_meet_at_a_joint_stay_met() {
-    use crate::frame::project;
+    use crate::frame::{project, Heading};
     use crate::humanoid;
     use crate::pose::{Param, Pose};
     use crate::socket::Side;
@@ -953,8 +953,8 @@ fn surfaces_that_meet_at_a_joint_stay_met() {
                 let (offset, end, start) = seam(*parent, *child, &frames);
                 let drift = offset.plus(rest[index].scaled(-1.0)).length();
                 worst = mathf::fmax(worst, drift);
-                let here = project(facing, end);
-                let there = project(facing, start);
+                let here = project(Heading::of(facing), end);
+                let there = project(Heading::of(facing), start);
                 apart = mathf::fmax(apart, mathf::hypot(here.dx - there.dx, here.dy - there.dy));
             }
         }

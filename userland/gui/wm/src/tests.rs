@@ -12,7 +12,7 @@ use crate::color::{div255, Color, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region};
 use crate::surface::Surface;
-use crate::{Compositor, PointerCatch, WindowId};
+use crate::{Compositor, PointerCatch, Presentation, WindowId};
 
 use tairix_cursor::CursorImage;
 use tairix_hash::BuildFastHash;
@@ -5398,6 +5398,121 @@ fn promotion_waits_for_a_frame_that_genuinely_covers() {
     assert!(c.set_surface(id, opaque(320, 240, RED)));
     c.present_accelerated(&mut display).expect("present");
     assert_eq!(display.layers.len(), 1, "promoted now it truly covers");
+}
+
+/// A frame the display refused is still owed: the next present sends it even
+/// though nothing changed in between, and only what it composited, not the
+/// whole screen again.
+#[test]
+fn a_refused_frame_is_sent_again_by_the_next_present() {
+    let m = mode(8, 8);
+    let mut c = new_compositor(m, BLUE).expect("compositor");
+    let mut display = MockDisplay::new(m);
+    c.present(&mut display).expect("the first frame");
+    c.add_window(Point::new(1, 1), opaque(2, 2, RED));
+
+    let mut refusing = MockDisplay::new(m);
+    refusing.fail = true;
+    assert_eq!(c.present(&mut refusing), Err(DriverError::DeviceFault));
+    assert!(c.has_damage(), "the refused frame is still owed");
+
+    c.present(&mut display).expect("the retry");
+    assert_eq!(display.last, c.frame(), "the retry sent the frame");
+    assert_eq!(
+        display.regions,
+        [DamageRect {
+            x: 1,
+            y: 1,
+            width_px: 2,
+            height_px: 2,
+        }],
+        "only what the refused frame changed is sent again"
+    );
+    assert!(!c.has_damage(), "nothing is owed once the display took it");
+}
+
+/// A layer stack carries the whole scene, so a frame the display refused
+/// earlier is owed no longer once the engine takes one.
+#[test]
+fn a_layered_frame_settles_a_frame_the_display_refused() {
+    let m = mode(8, 8);
+    let mut c = new_compositor(m, BLUE).expect("compositor");
+    c.add_window(Point::new(1, 1), opaque(2, 2, RED));
+    let mut refusing = MockDisplay::new(m);
+    refusing.fail = true;
+    assert_eq!(c.present(&mut refusing), Err(DriverError::DeviceFault));
+    assert!(c.has_damage(), "the refused frame is owed");
+
+    let mut engine = MockAccel::new(m, generous_caps());
+    c.present_accelerated(&mut engine)
+        .expect("the layered present");
+    assert_eq!(engine.layers.len(), 2, "the engine took the scene");
+    assert!(!c.has_damage(), "nothing is owed once the engine holds it");
+
+    let mut display = MockDisplay::new(m);
+    c.present(&mut display).expect("an idle wake");
+    assert!(
+        display.regions.is_empty() && display.full_presents == 0,
+        "the settled frame is not sent again"
+    );
+}
+
+/// The compositor records how the frame on the display was produced once
+/// the display takes it, and nothing before then; a wake with nothing to
+/// present, or a present the display refused, leaves the record as it was.
+#[test]
+fn the_presentation_is_recorded_once_the_display_takes_a_frame() {
+    let m = mode(8, 8);
+    let mut c = new_compositor(m, BLUE).expect("compositor");
+    let id = c.add_window(Point::new(1, 1), opaque(2, 2, RED));
+    assert_eq!(c.presentation(), None);
+    assert!(!c.on_display(id), "no frame has reached the display");
+
+    let mut refusing = MockDisplay::new(m);
+    refusing.fail = true;
+    assert!(c.present(&mut refusing).is_err());
+    assert_eq!(c.presentation(), None, "a refused frame is not on display");
+
+    let mut display = MockDisplay::new(m);
+    c.present(&mut display).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Composited));
+    assert!(c.on_display(id));
+    c.present(&mut display).expect("an idle wake");
+    assert_eq!(c.presentation(), Some(Presentation::Composited));
+
+    assert!(c.set_visible(id, false));
+    c.present(&mut display).expect("presents");
+    assert!(!c.on_display(id), "a hidden window is not on display");
+}
+
+/// A layer stack and a promoted surface are each recorded as what they are,
+/// and only the promoted window is on the display while it is promoted.
+#[test]
+fn a_promoted_frame_carries_its_window_and_nothing_under_it() {
+    let (mut c, id) = fullscreenable_compositor();
+    let under = c.add_window(Point::new(4, 4), opaque(10, 10, GREEN));
+    c.raise(id);
+    let mut display = MockAccel::new(mode(320, 240), generous_caps());
+
+    c.present_accelerated(&mut display).expect("present");
+    assert_eq!(c.presentation(), Some(Presentation::Layered));
+    assert!(c.on_display(id) && c.on_display(under));
+
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+        .expect("fullscreen");
+    c.present_accelerated(&mut display).expect("present");
+    assert_eq!(c.presentation(), Some(Presentation::Promoted(id)));
+    assert!(c.on_display(id));
+    assert!(
+        !c.on_display(under),
+        "nothing beneath a promoted surface is shown"
+    );
+    assert_eq!(Presentation::Promoted(id).as_str(), "promoted");
+
+    // A software fallback is a composite, whatever path was asked for.
+    assert!(c.set_opacity(id, 200));
+    c.present_accelerated(&mut display).expect("present");
+    assert_eq!(c.presentation(), Some(Presentation::Composited));
 }
 
 #[test]

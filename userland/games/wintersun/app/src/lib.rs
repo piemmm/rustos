@@ -9,6 +9,7 @@ extern crate alloc;
 
 pub mod budget;
 pub mod camera;
+pub mod cli;
 pub mod digest;
 pub mod error;
 pub mod figures;
@@ -18,6 +19,7 @@ pub mod light;
 pub mod pacing;
 pub mod presets;
 pub mod quality;
+pub mod reference;
 pub mod shell;
 pub mod terrain;
 pub mod view;

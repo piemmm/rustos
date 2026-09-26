@@ -55,20 +55,11 @@
 //!
 //! # Zero-on-free
 //!
-//! [`DmaPool::free`] zeroes every byte of the data region through a
-//! volatile-clear primitive (delegated to the `zeroize` crate per) **before** the frames are returned to the
+//! [`DmaPool::free`] zeroes every byte of the data region through the
+//! `zeroize` crate's volatile clear **before** the frames are returned to the
 //! [`FrameAllocator`]. The driver may not see leftover bytes in a
 //! later allocation, and a forensic dump of free physical memory
 //! cannot recover the credentials the buffer once held.
-//!
-//! # Not in scope here
-//!
-//! * IRQ delivery — that's `kernel/sched` / `kernel/syscall` work and
-//!   is the subject of the next session prompt's Item 2.
-//! * The user-space `VirtioHost` shim — lives in
-//!   `drivers/bus/virtio` and will be glued to this pool once the
-//!   driver host learns to thread a `DmaPool` through to its loaded
-//!   modules.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -483,9 +474,9 @@ impl DmaWindowMap {
     ///
     /// # Errors
     ///
-    /// As [`DmaPool::free`]. Every error but [`DmaError::UnknownBuffer`] comes
-    /// after the record is removed, so the block will not be surrendered at
-    /// teardown whether or not its frames went back.
+    /// As [`DmaPool::free`]. A block whose pages could not all be cleared, or
+    /// whose frames could not be scrubbed, stays live and is surrendered at
+    /// teardown; one the allocator refuses back is not.
     pub fn free_at<P: PageTable>(
         &mut self,
         space: &mut AddressSpace<P>,
@@ -757,27 +748,11 @@ impl DmaWindowMap {
         })
     }
 
-    /// Free a previously-allocated DMA buffer.
-    ///
-    /// Every byte of the data region is zeroed (via the audited
-    /// `zeroize` crate's volatile clear) *before* the backing frames
-    /// are returned to the [`FrameAllocator`], so neither a later
-    /// allocation nor a forensic dump of free memory can recover the
-    /// credentials the buffer once held. The clear
-    /// runs through the direct map, i.e. on the same physical frames
-    /// the device used.
+    /// The one release behind [`Self::free_from`] and [`Self::free_at`].
     ///
     /// # Errors
     ///
-    /// * [`DmaError::UnknownBuffer`] — the buffer's `virt` is not the
-    ///   start of a live allocation in this pool (covers double-free
-    ///   and cross-pool free).
-    /// * [`DmaError::DirectMap`] — the buffer's frames are outside the
-    ///   direct physical map, so the zero-on-free clear cannot run
-    ///   (a platform-config bug).
-    /// * [`DmaError::PageTable`] — propagated from
-    ///   [`AddressSpace::unmap`] (e.g. if a higher-level test removed
-    ///   a mapping out of band).
+    /// As [`DmaPool::free`].
     fn free_inner<P: PageTable>(
         &mut self,
         space: &mut AddressSpace<P>,
@@ -786,33 +761,38 @@ impl DmaWindowMap {
         buf: DmaBuffer,
         retire: &mut dyn Retire,
     ) -> Result<(), DmaError> {
-        let record = self
-            .allocations
-            .remove(&buf.virt.as_u64())
-            .ok_or(DmaError::UnknownBuffer)?;
+        let key = buf.virt.as_u64();
+        let record = *self.allocations.get(&key).ok_or(DmaError::UnknownBuffer)?;
         let data_pages = record.data_pages;
         let first_data_slot = record.leading_guard_slot + 1;
         let trailing_guard_slot = record.leading_guard_slot + 1 + data_pages;
 
-        for i in 0..data_pages {
+        // A page already cleared is where the loop means to leave it.
+        let cleared = (0..data_pages).try_for_each(|i| {
             let page = Page::from_addr(self.virt_of_slot(first_data_slot + i))?;
-            // The frame is `record.start_frame + i`, already known.
-            let _ = space.unmap(page)?;
-        }
-        // Scrubbed only once no CPU and no snapshot can still write it, or a
-        // late store would survive into the next owner.
+            match space.unmap(page) {
+                Ok(_) | Err(PageTableError::NotMapped) => Ok(()),
+                Err(err) => Err(err),
+            }
+        });
+        // Even after a failed page, and before any scrub: the pages before it
+        // are gone here, but a late store through another CPU or a snapshot
+        // would survive into the next owner.
         let base = self.virt_of_slot(first_data_slot).as_u64();
         space.shoot_remote(base, data_pages as u64);
         retire.retire(base, data_pages as u64);
+        // A page still mapped, or a block that cannot be scrubbed, keeps its
+        // record, so teardown surrenders the frames rather than leaking them.
+        cleared?;
         scrub_block(phys, record.start_frame, data_pages)?;
-        frames
-            .free_order(record.start_frame, record.order)
-            .map_err(DmaError::Alloc)?;
 
+        self.allocations.remove(&key);
         for s in record.leading_guard_slot..=trailing_guard_slot {
             self.slot_used[s] = false;
         }
-        Ok(())
+        frames
+            .free_order(record.start_frame, record.order)
+            .map_err(DmaError::Alloc)
     }
 
     fn virt_of_slot(&self, slot: usize) -> VirtAddr {
@@ -971,9 +951,13 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
     /// * [`DmaError::DirectMap`] — the buffer's frames are outside the
     ///   direct physical map, so the zero-on-free clear cannot run
     ///   (a platform-config bug).
-    /// * [`DmaError::PageTable`] — propagated from
-    ///   [`AddressSpace::unmap`] (e.g. if a higher-level test removed
-    ///   a mapping out of band).
+    /// * [`DmaError::PageTable`] — a page [`AddressSpace::unmap`] could
+    ///   not clear. A page already cleared is not an error.
+    /// * [`DmaError::Alloc`] — the allocator refused the scrubbed block.
+    ///
+    /// A live buffer's range is shot down and retired whatever becomes of it.
+    /// Only an allocator refusal drops the record; after the two errors
+    /// before it the block stays live, for teardown to surrender.
     pub fn free(&mut self, buf: DmaBuffer) -> Result<(), DmaError> {
         self.window
             .free_from(&mut self.address_space, self.frames, self.phys, buf)

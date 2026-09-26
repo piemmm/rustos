@@ -86,7 +86,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::CpuId;
 
 /// Bits in one [`CpuMask`] word.
-const MASK_WORD_BITS: usize = 64;
+const MASK_WORD_BITS: usize = u64::BITS as usize;
 
 /// A read-only view of a set of CPUs, one bit per dense [`CpuId`], over
 /// storage the caller owns: the HAL allocates nothing.
@@ -105,13 +105,46 @@ impl<'a> CpuMask<'a> {
         Self { words }
     }
 
+    /// How many words the storage of a mask over dense ids below `cpus`
+    /// needs.
+    #[must_use]
+    pub const fn words_for(cpus: usize) -> usize {
+        cpus.div_ceil(MASK_WORD_BITS)
+    }
+
+    /// The word of a mask's storage `cpu` lies in, and its bit there.
+    #[must_use]
+    pub const fn slot(cpu: CpuId) -> (usize, u64) {
+        let index = cpu as usize;
+        (index / MASK_WORD_BITS, 1 << (index % MASK_WORD_BITS))
+    }
+
     /// Whether `cpu` is a member.
     #[must_use]
     pub fn contains(self, cpu: CpuId) -> bool {
-        let index = cpu as usize;
+        let (word, bit) = Self::slot(cpu);
         self.words
-            .get(index / MASK_WORD_BITS)
-            .is_some_and(|word| word.load(Ordering::Acquire) & (1 << (index % MASK_WORD_BITS)) != 0)
+            .get(word)
+            .is_some_and(|word| word.load(Ordering::Acquire) & bit != 0)
+    }
+
+    /// Every member as the id `id_of` reaches it by, or `None` if one has
+    /// none.
+    ///
+    /// A port gives an id to every CPU it starts, so a member without one
+    /// means the mask no longer names only CPUs the port can reach: a
+    /// shootdown over it must reach every CPU instead.
+    pub fn reach<'f, T>(
+        self,
+        id_of: impl Fn(CpuId) -> Option<T> + 'f,
+    ) -> Option<impl Iterator<Item = T> + 'f>
+    where
+        'a: 'f,
+    {
+        if self.iter().any(|cpu| id_of(cpu).is_none()) {
+            return None;
+        }
+        Some(self.iter().filter_map(id_of))
     }
 
     /// Whether no CPU is a member.
@@ -220,8 +253,9 @@ pub trait CrossCpuTlbShootdown {
     /// [`crate::tlb::TlbShootdown`], and `cpus` holds every other CPU the
     /// space can be cached on, so a CPU outside it is never interrupted. A
     /// port whose local flush already reaches every CPU owes nothing here.
-    /// The default reaches every online CPU, which over-invalidates and is
-    /// always correct.
+    /// A port that cannot reach a member ([`CpuMask::reach`]) reaches every
+    /// CPU instead, never skips it. The default reaches every online CPU,
+    /// which over-invalidates and is always correct.
     fn shootdown_user_range(&self, cpus: CpuMask<'_>, start_vaddr: u64, page_count: usize) {
         let _ = cpus;
         self.shootdown_range(start_vaddr, page_count);
@@ -305,6 +339,7 @@ pub mod conformance {
         use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
         extern crate std;
+        use std::vec;
         use std::vec::Vec;
 
         /// A faithful host double: it records how many pages were shot
@@ -369,6 +404,43 @@ pub mod conformance {
                 "a CPU past the storage is no member"
             );
             assert!(!mask.is_empty());
+        }
+
+        /// Storage laid out by `slot` and sized by `words_for` is read back as
+        /// exactly the CPUs set in it, at every word boundary.
+        #[test]
+        fn storage_laid_out_by_slot_reads_back_as_its_members() {
+            assert_eq!(CpuMask::words_for(0), 0);
+            assert_eq!(CpuMask::words_for(64), 1);
+            assert_eq!(CpuMask::words_for(65), 2);
+            let cpus = [0, 63, 64, 129];
+            let words: Vec<AtomicU64> = (0..CpuMask::words_for(130))
+                .map(|_| AtomicU64::new(0))
+                .collect();
+            for cpu in cpus {
+                let (word, bit) = CpuMask::slot(cpu);
+                words[word].fetch_or(bit, Ordering::Relaxed);
+            }
+            let members: Vec<u32> = CpuMask::new(&words).iter().collect();
+            assert_eq!(members, cpus);
+        }
+
+        /// A mask whose every member has an id is reached member by member;
+        /// one naming a CPU without an id must be widened to every CPU,
+        /// never reached with that CPU silently dropped.
+        #[test]
+        fn a_member_without_an_id_widens_the_reach_to_every_cpu() {
+            let words = [AtomicU64::new(0b1011)];
+            let mask = CpuMask::new(&words);
+            let ids = |cpu: u32| (cpu < 3).then_some(cpu + 100);
+            let reached: Option<Vec<u32>> = mask.reach(ids).map(Iterator::collect);
+            assert_eq!(reached, None, "CPU 3 has no id");
+            let all = |cpu: u32| Some(cpu + 100);
+            let reached: Option<Vec<u32>> = mask.reach(all).map(Iterator::collect);
+            assert_eq!(reached, Some(vec![100, 101, 103]));
+            let empty = CpuMask::new(&[]);
+            let reached: Option<Vec<u32>> = empty.reach(ids).map(Iterator::collect);
+            assert_eq!(reached, Some(vec![]), "an empty mask reaches nobody");
         }
 
         #[test]

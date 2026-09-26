@@ -390,21 +390,19 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         // path `spawn_init` returns and we halt below, so the leak is
         // immaterial; on success it diverges and the context lives for the
         // running kernel's lifetime, exactly like the state it borrows.
-        let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(
-            KernelInitSpawner::new(
-                state.frame_allocator,
-                audit_sink,
-                &state.scheduler,
-                &state.caps,
-                &state.peer_watch,
-                &state.aspaces,
-                state.arch.as_ref(),
-                process_wait,
-                &state.irq,
-                build_shared_mem_facility(state.arch.as_ref(), state.frame_allocator),
-            )
-            .with_tlb_shootdown(A::cross_cpu_tlb_shootdown(state.arch.as_ref())),
-        ));
+        let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(KernelInitSpawner::new(
+            state.frame_allocator,
+            audit_sink,
+            &state.scheduler,
+            &state.caps,
+            &state.peer_watch,
+            &state.aspaces,
+            state.arch.as_ref(),
+            process_wait,
+            &state.irq,
+            build_shared_mem_facility(state.arch.as_ref(), state.frame_allocator),
+            A::cross_cpu_tlb_shootdown(state.arch.as_ref()),
+        )));
         init.spawn_init(ctx);
     }
 
@@ -1091,9 +1089,8 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     /// driver-spawn path do not consult it.
     shared_mem_facility: &'static (dyn crate::devres::SharedMemFacility + 'static),
     /// The cross-CPU invalidation the spaces this spawner builds discard
-    /// their cleared translations through; [`None`] leaves them reaching no
-    /// other CPU, which is right only for a spawner that runs its processes
-    /// on one CPU or on a port whose local flush already broadcasts.
+    /// their cleared translations through: the port's own
+    /// ([`KernelArch::cross_cpu_tlb_shootdown`]).
     tlb_shootdown: Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)>,
 }
 
@@ -1106,7 +1103,9 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
     /// `arch` are the live registries a freshly built task is registered
     /// with; `peer_watch` holds the watches on `caps`' records; `process_wait` is the producer a spawned driver's parent/child
     /// wait link is recorded with (the fail-closed
-    /// [`crate::NULL_PROCESS_WAIT`] when none is wired).
+    /// [`crate::NULL_PROCESS_WAIT`] when none is wired); `tlb_shootdown` is
+    /// `arch`'s own [`KernelArch::cross_cpu_tlb_shootdown`], required so no
+    /// spawner builds spaces that reach no other CPU by omission.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1120,6 +1119,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
         process_wait: &'static (dyn ProcessWait + 'static),
         irq: &'a IrqTable,
         shared_mem_facility: &'static (dyn crate::devres::SharedMemFacility + 'static),
+        tlb_shootdown: Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)>,
     ) -> Self {
         Self {
             frames,
@@ -1132,19 +1132,8 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             process_wait,
             irq,
             shared_mem_facility,
-            tlb_shootdown: None,
+            tlb_shootdown,
         }
-    }
-
-    /// Reach the other CPUs through `shootdown` when a space this spawner
-    /// built clears an entry.
-    #[must_use]
-    pub fn with_tlb_shootdown(
-        mut self,
-        shootdown: Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)>,
-    ) -> Self {
-        self.tlb_shootdown = shootdown;
-        self
     }
 }
 
@@ -3058,6 +3047,7 @@ mod tests {
             process_wait,
             &state.irq,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
+            None,
         );
 
         let before = state.scheduler.live_task_count();
@@ -3195,6 +3185,7 @@ mod tests {
             process_wait,
             &state.irq,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
+            None,
         );
 
         let mut caps = CapabilitySet::empty();
@@ -3249,6 +3240,7 @@ mod tests {
             process_wait,
             &state.irq,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
+            None,
         );
 
         let mut caps = CapabilitySet::empty();
@@ -3325,6 +3317,7 @@ mod tests {
             process_wait,
             &state.irq,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
+            None,
         );
 
         // An unknown handle names no live driver: fail closed, reclaim
@@ -3387,6 +3380,7 @@ mod tests {
             process_wait,
             &state.irq,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
+            None,
         );
         let retired_elsewhere = 0x05ee_d296u64;
         let sec = SecProcessId(retired_elsewhere);
@@ -3432,6 +3426,7 @@ mod tests {
             process_wait,
             &state.irq,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
+            None,
         );
 
         // A two-thread driver: its leader plus one thread aliased onto the same
@@ -3503,6 +3498,7 @@ mod tests {
             process_wait,
             &state.irq,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
+            None,
         );
         // A parked task at the number, as the admission leaves a driver it has
         // not yet started: the unload's own teardown retires it.

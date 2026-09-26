@@ -4,7 +4,7 @@ wintersun — eine prozedural erzeugte Winterwelt durchwandern
 
 ## SYNOPSIS
 
-`wintersun`
+`wintersun [--reference-scene]`
 
 ## DESCRIPTION
 
@@ -48,12 +48,24 @@ vorhersehbar ist statt überraschend.
 Ein Fenster, das größer ist, als der Software-Renderer füllen kann, wird mit
 höchstens 2560×1440 gezeichnet und auf die Fenstergröße hochskaliert.
 
+## OPTIONS
+
+- `-h, -?, --help` — die Kurzhilfe dieses Befehls anzeigen.
+- `--reference-scene` — die feste Referenzszene zeichnen und stillhalten: eine
+  Welt, dieselben Figuren und derselbe Augenblick, auf jeder Maschine gleich,
+  damit ein Bild des Fensters mit einem anderswo gezeichneten verglichen
+  werden kann. `F11` und `Esc` ändern weiterhin die Fenstergröße; sonst bewegt
+  sich nichts.
+
 ## EXIT STATUS
 
 `0`, wenn Sie beenden. Ein Status ungleich null nennt seinen Grund auf der
 Standardfehlerausgabe: die Welt konnte nicht erzeugt werden, das Fenster
 konnte nicht geöffnet werden, oder der Ereigniskanal der Sitzung ging
 verloren.
+
+- `2` — die Befehlszeile wurde nicht verstanden.
+- `87` — die Referenzszene konnte nicht gezeichnet werden.
 
 ## SEE ALSO
 

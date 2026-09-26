@@ -520,6 +520,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         wait_producer,
         sys.irq_table,
         &NULL_SHARED_MEM_FACILITY,
+        KernelArch::cross_cpu_tlb_shootdown(sys.arch),
     );
     let Ok(parent_pid) = init_ctx.spawn_driver_process(
         "/bin/sbx",

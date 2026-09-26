@@ -59,8 +59,8 @@
 //! a panic. One glyph's decode is bounded in outline points and in composite
 //! component records, both charged across the whole walk rather than per
 //! nesting level, so a composite cannot multiply its work by recursing.
-//! Floating-point rounding uses the crate's own bounded `mathf` helpers so it
-//! needs no `std` libm.
+//! Floating-point rounding uses the shared `tairix_util::mathf`, so it needs no
+//! `std` libm and rounds exactly as every other rasteriser does.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -75,7 +75,6 @@ mod engine;
 mod family;
 mod gridfit;
 pub mod lineart;
-mod mathf;
 mod store;
 mod variations;
 

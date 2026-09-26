@@ -292,11 +292,10 @@ mod tests {
     use std::sync::Mutex;
 
     use tairix_abi::hwtree::HwResource;
-    use tairix_arch_api::{CpuMask, CrossCpuTlbShootdown};
     use tairix_kernel_irq::WaitStep;
     use tairix_kernel_mem::{
-        LiveSpaceError, LiveUserSpace, MmioError, Page, PhysAddr, PhysMap, SharedMemory,
-        SimPhysMap, VirtAddr, PAGE_SIZE,
+        LiveSpaceError, LiveUserSpace, MmioError, Page, PhysAddr, PhysMap, RecordedRemote,
+        SharedMemory, SimPhysMap, VirtAddr, PAGE_SIZE,
     };
 
     use crate::devres::SharedChunk;
@@ -322,24 +321,12 @@ mod tests {
         EVENTS.with(|events| events.borrow_mut().push(event));
     }
 
-    struct Remote;
-
-    impl CrossCpuTlbShootdown for Remote {
-        fn shootdown_page(&self, vaddr: u64) {
-            record(Event::Shootdown(vaddr, 1));
-        }
-        fn shootdown_range(&self, start_vaddr: u64, page_count: usize) {
-            record(Event::Shootdown(start_vaddr, page_count));
-        }
-        fn shootdown_user_range(&self, cpus: CpuMask<'_>, start_vaddr: u64, page_count: usize) {
-            if !cpus.is_empty() {
-                self.shootdown_range(start_vaddr, page_count);
-            }
-        }
+    fn record_shootdown(start_vaddr: u64, page_count: usize) {
+        record(Event::Shootdown(start_vaddr, page_count));
     }
 
     /// The reach every test space shoots other CPUs down through.
-    static REMOTE: Remote = Remote;
+    static REMOTE: RecordedRemote = RecordedRemote(record_shootdown);
 
     /// A CPU other than the one each test runs on.
     const OTHER_CPU: u32 = 1;

@@ -273,8 +273,9 @@ Done. What now holds:
   output, clean teardown on end-of-stream / child exit / close. The
   program-library popup's terminal entry spawns it
   (`plans/NEW-TASKBAR.md` T5); the app event-mailbox
-  naming rule is now `tairix_window::event_endpoint_for` (one definition,
-  shared with the files app), and the cascade placement is
+  naming rule is `tairix_abi::window_ipc::event_endpoint_for` (one
+  definition, beside the other pid-derived endpoints, which the
+  allocator-free verticals read too), and the cascade placement is
   `tairix_desktop_session::windows::cascade_origin_for` (shared with the
   vertical's click script).
 - The autoload QEMU vertical drives the AW4 tail after the AW3

@@ -20,9 +20,7 @@
 /// starting at `base` or if any intermediate arithmetic would overflow.
 ///
 /// `offset == region_len` is rejected: it is a one-past-the-end pointer
-/// and dereferencing it is undefined behaviour. Callers asking for
-/// "the end" should request `region_len - 1` and add one explicitly via
-/// [`end_within`].
+/// and dereferencing it is undefined behaviour.
 #[must_use]
 pub fn offset_within(base: *mut u8, region_len: usize, offset: usize) -> Option<*mut u8> {
     if offset >= region_len {
@@ -35,21 +33,6 @@ pub fn offset_within(base: *mut u8, region_len: usize, offset: usize) -> Option<
     // reordered against, or elided beside, an access through `base`.
     base.addr().checked_add(offset)?;
     Some(base.wrapping_add(offset))
-}
-
-/// Compute `base + region_len` — the one-past-the-end pointer for an
-/// allocation of `region_len` bytes starting at `base`.
-///
-/// Returns `None` if the address would overflow `usize`. The result is
-/// *not* dereferenceable; it is only valid for pointer comparison and
-/// for constructing exclusive end markers.
-#[must_use]
-pub fn end_within(base: *mut u8, region_len: usize) -> Option<*mut u8> {
-    // Provenance-preserving for the same reason as `offset_within`, even
-    // though this one is never dereferenced: a marker derived from an
-    // integer does not compare meaningfully against pointers into `base`.
-    base.addr().checked_add(region_len)?;
-    Some(base.wrapping_add(region_len))
 }
 
 /// Construct a `&mut [u8]` of `len` bytes starting at `base + offset`,
@@ -136,20 +119,6 @@ mod tests {
         // refusal to wrap is under test, so it carries no provenance.
         let base = core::ptr::without_provenance_mut::<u8>(usize::MAX - 4);
         assert!(offset_within(base, 16, 8).is_none());
-    }
-
-    #[test]
-    fn end_within_returns_one_past_end() {
-        let mut buf = vec![0u8; 16];
-        let base = buf.as_mut_ptr();
-        let end = end_within(base, 16).unwrap();
-        assert_eq!(end as usize - base as usize, 16);
-    }
-
-    #[test]
-    fn end_within_rejects_overflow() {
-        let base = core::ptr::without_provenance_mut::<u8>(usize::MAX - 4);
-        assert!(end_within(base, 8).is_none());
     }
 
     #[test]

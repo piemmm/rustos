@@ -70,7 +70,7 @@ use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_use
 use tairix_kernel::spawn_layout::USER_STACK_COMMIT_PAGES;
 use tairix_kernel_core::{
     spawn_kthread, AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram,
-    InitSpawnCtx, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap,
+    InitSpawnCtx, KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap,
     ProcessWait, ProgramRegistry, RandomReserve, SchedWaitQueueArch, Yielder,
     NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
 };
@@ -813,6 +813,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         wait_producer,
         sys.irq_table,
         &NULL_SHARED_MEM_FACILITY,
+        KernelArch::cross_cpu_tlb_shootdown(sys.arch),
     );
     let Ok(parent_pid) = init_ctx.spawn_driver_process(
         "/bin/mp-parent",

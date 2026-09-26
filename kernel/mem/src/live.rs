@@ -3153,14 +3153,13 @@ mod tests {
         use crate::frame::{Frame, FrameAllocator, PhysAddr, PAGE_SIZE};
         use crate::live::{LiveSpace, LiveUserSpace};
         use crate::phys::SimPhysMap;
-        use crate::retire::{ActiveCpus, Retire, SpaceTlb};
+        use crate::retire::{ActiveCpus, RecordedRemote, Retire, SpaceTlb};
         use crate::test_fixture::{custody, frame_backing};
         use crate::vmm::{AddressSpace, HostPageTable, MapFlags, Page, VirtAddr};
         use tairix_arch_api::mmu::{
             AccessTracking, AddressSpace as HalAddressSpace, MapError, PageFlags,
         };
         use tairix_arch_api::tlb::TlbShootdown;
-        use tairix_arch_api::{CpuMask, CrossCpuTlbShootdown};
 
         extern crate std;
         use std::cell::{Cell, RefCell};
@@ -3184,24 +3183,12 @@ mod tests {
             EVENTS.with(|events| core::mem::take(&mut *events.borrow_mut()))
         }
 
-        /// The other CPUs' reach: `'static`, as the port's handle is.
-        struct Remote;
-
-        impl CrossCpuTlbShootdown for Remote {
-            fn shootdown_page(&self, vaddr: u64) {
-                self.shootdown_range(vaddr, 1);
-            }
-            fn shootdown_range(&self, start: u64, pages: usize) {
-                EVENTS.with(|events| events.borrow_mut().push(Event::Remote(start, pages)));
-            }
-            fn shootdown_user_range(&self, cpus: CpuMask<'_>, start: u64, pages: usize) {
-                if !cpus.is_empty() {
-                    self.shootdown_range(start, pages);
-                }
-            }
+        fn record_remote(start: u64, pages: usize) {
+            EVENTS.with(|events| events.borrow_mut().push(Event::Remote(start, pages)));
         }
 
-        static REMOTE: Remote = Remote;
+        /// The other CPUs' reach.
+        static REMOTE: RecordedRemote = RecordedRemote(record_remote);
 
         /// A CPU other than the one each test runs on.
         const OTHER_CPU: u32 = 1;

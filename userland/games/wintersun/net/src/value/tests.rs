@@ -84,6 +84,29 @@ fn a_heading_is_the_inverse_of_its_own_unit_vector() {
     }
 }
 
+/// A heading along an axis is exactly that axis. Taken through the nearest
+/// double to `PI`, the west heading's southward part is `1.2e-16`, not zero,
+/// and a figure facing west then sorts its surfaces by that residue instead of
+/// the order they were authored in.
+#[allow(
+    clippy::float_cmp,
+    reason = "an axis is exact, which is the property under test"
+)]
+#[test]
+fn a_heading_along_an_axis_is_exactly_that_axis() {
+    for (raw, axis) in [
+        (0x0000, (1.0, 0.0)),
+        (0x4000, (0.0, 1.0)),
+        (0x8000, (-1.0, 0.0)),
+        (0xC000, (0.0, -1.0)),
+    ] {
+        assert_eq!(Facing(raw).unit_vector(), axis, "heading {raw:#06x}");
+    }
+    // Either side of an axis, the quadrant hand-off is continuous.
+    let (before, after) = (Facing(0x3FFF).unit_vector(), Facing(0x4001).unit_vector());
+    assert!((before.0 + after.0).abs() < 1e-15 && (before.1 - after.1).abs() < 1e-15);
+}
+
 #[test]
 fn a_heading_is_scale_invariant() {
     let near = Facing::towards(3, 4).expect("a heading");

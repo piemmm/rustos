@@ -131,7 +131,7 @@ plan's ledger. A `blocked` row names its blocker.
 | fixdrivers | Device logic lives in `drivers/`, not `lib/*` (`plans/fixdrivers.md`) | done |
 | USB | The modular USB stack and hot-removal (`plans/USB.md`) | done |
 | SOUND | The audio stack and the `dmaengine-v1` DMA-engine seam (`plans/SOUND.md`) | in progress |
-| FIX-DISPLAY-ACCELERATION | Hardware layer composition and `gpu_virtio` (`plans/FIX-DISPLAY-ACCELERATION.md`) | planned |
+| FIX-DISPLAY-ACCELERATION | Hardware layer composition and `gpu_virtio` (`plans/FIX-DISPLAY-ACCELERATION.md`) | blocked: Stage A waits on the scanout-memory decision |
 | GPU | The `lib/gpu` render and compute seam and its backends (`plans/GPU.md`) | planned |
 | SHADER | SPIR-V, its validator, and the WGSL front end (`plans/SHADER.md`) | planned |
 
@@ -247,7 +247,7 @@ README requires this file to name them:
 | `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan, the file manager's bundle scan and occupancy probes |
 | `fallible` | `lib/raster`, `userland/gui/wm`, `lib/image` |
 | `fmt` | `kernel/sec`, `kernel/ipc` |
-| `mathf` | `lib/fontface`, `lib/svg` |
+| `mathf` | `lib/fontface`, `lib/svg`, `lib/raster`, `lib/audio`, `cinder`, WinterSun |
 | `retry` | `userland/system/timed`, `userland/system/init` |
 | `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field |
 | `size` | `du`, `df` |

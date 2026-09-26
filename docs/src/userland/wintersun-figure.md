@@ -39,6 +39,9 @@ depth  = into
 
 `east` and `south` come from the simulation's own `Facing`, so a figure and
 the body that moves it cannot disagree about which way round the world is.
+They are worked out once per figure (`frame::Heading`), and a heading along an
+axis is exactly that axis, so a depth tie at a cardinal facing is a real tie
+rather than one broken by the rounding residue of `PI`.
 
 Parts then paint **far-first** by `depth`. Facing away, a face sorts behind
 the skull and is simply covered; facing the camera it comes forward. Nothing

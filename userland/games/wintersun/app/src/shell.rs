@@ -9,7 +9,26 @@
 //! separately. A client that set its own state optimistically would lay
 //! out edge-to-edge in a window that had stayed where it was.
 
-use tairix_abi::window_ipc::WindowSizeState;
+use tairix_abi::window_ipc::{WindowSizeState, WindowSizing};
+
+use crate::budget::{BASELINE_HEIGHT, BASELINE_WIDTH};
+
+/// The width the game's window opens at, in logical pixels: the resolution
+/// the frame budget is stated for.
+pub const OPEN_WIDTH: u32 = BASELINE_WIDTH;
+
+/// The height the game's window opens at, in logical pixels.
+pub const OPEN_HEIGHT: u32 = BASELINE_HEIGHT;
+
+/// The range a user may resize the game's window within: down to a client
+/// that still shows a stretch of the world, and with no ceiling, since a
+/// larger window simply shows more of it.
+pub const SIZING: WindowSizing = WindowSizing::Resizable {
+    min_width_px: 320,
+    min_height_px: 240,
+    max_width_px: 0,
+    max_height_px: 0,
+};
 
 /// What the window is doing.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

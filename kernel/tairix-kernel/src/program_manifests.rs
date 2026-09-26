@@ -1445,6 +1445,15 @@ mod tests {
     // row or manifest constant exists for them.
     const WINDOWED_APP_REQUEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
 
+    // The game `wintersun` (plans/WINTERSUN.md): the windowed application's
+    // pair, plus `CAP_FS_ACCESS` to read the figure preset its bundle ships in
+    // `Resources/` before its window opens.
+    const WINTERSUN_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::SHM,
+    ];
+
     // The desktop companion's expected request (plans/CINDER.md): the windowed
     // application's pair, plus `CAP_DESKTOP_LAYER` — presence on the desktop
     // outside a window of its own, which is the whole difference between a
@@ -1628,6 +1637,7 @@ mod tests {
             ("wc", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("whoami", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("widgets", ProgramKind::Application, WINDOWED_APP_REQUEST),
+            ("wintersun", ProgramKind::Application, WINTERSUN_REQUEST),
             ("yes", ProgramKind::Command, PURE_TOOL_REQUEST),
         ];
 

@@ -21,8 +21,6 @@ use crate::frame::{Frame, PAGE_SIZE};
 use crate::phys::PhysMap;
 use crate::vmm::{MapFlags, Page};
 
-const WORD_BITS: usize = u64::BITS as usize;
-
 /// The CPUs on which a user address space is the active translation regime.
 ///
 /// They are the only CPUs whose TLBs can hold its translations: no port tags
@@ -42,7 +40,7 @@ impl ActiveCpus {
     ///
     /// [`AllocError::OutOfMemory`] when the storage cannot be allocated.
     pub fn new(cpus: usize) -> Result<Self, AllocError> {
-        let len = cpus.div_ceil(WORD_BITS);
+        let len = CpuMask::words_for(cpus);
         let mut words = Vec::new();
         words
             .try_reserve_exact(len)
@@ -88,9 +86,8 @@ impl ActiveCpus {
     }
 
     fn slot(&self, cpu: CpuId) -> Option<(&AtomicU64, u64)> {
-        let index = usize::try_from(cpu).ok()?;
-        let word = self.words.get(index / WORD_BITS)?;
-        Some((word, 1 << (index % WORD_BITS)))
+        let (word, bit) = CpuMask::slot(cpu);
+        Some((self.words.get(word)?, bit))
     }
 }
 
@@ -138,6 +135,31 @@ impl SpaceTlb {
             remote.shootdown_range(base, pages);
         } else {
             remote.shootdown_user_range(self.cpus.mask(), base, pages);
+        }
+    }
+}
+
+/// A remote reach for host tests that hands each invalidation it is asked
+/// for to its recorder as `(base, pages)`, `'static` as a port's handle is.
+///
+/// A user range reaches the recorder only when the mask names a CPU, as it
+/// reaches a port's other CPUs only then.
+#[cfg(any(test, feature = "host-tests"))]
+pub struct RecordedRemote(pub fn(u64, usize));
+
+#[cfg(any(test, feature = "host-tests"))]
+impl CrossCpuTlbShootdown for RecordedRemote {
+    fn shootdown_page(&self, vaddr: u64) {
+        (self.0)(vaddr, 1);
+    }
+
+    fn shootdown_range(&self, start_vaddr: u64, page_count: usize) {
+        (self.0)(start_vaddr, page_count);
+    }
+
+    fn shootdown_user_range(&self, cpus: CpuMask<'_>, start_vaddr: u64, page_count: usize) {
+        if !cpus.is_empty() {
+            (self.0)(start_vaddr, page_count);
         }
     }
 }
@@ -331,33 +353,17 @@ mod tests {
         }
     }
 
-    /// A remote reach that records where it was asked to go. It must be
-    /// `'static`, as the real handle is, so the log it writes lives in a
-    /// thread-local the test reads back.
-    struct RemoteLog;
-
     std::thread_local! {
         static REMOTE: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
     }
 
-    impl CrossCpuTlbShootdown for RemoteLog {
-        fn shootdown_page(&self, vaddr: u64) {
-            self.shootdown_range(vaddr, 1);
-        }
-        fn shootdown_range(&self, start_vaddr: u64, page_count: usize) {
-            REMOTE.with(|log| {
-                log.borrow_mut()
-                    .push(Event::Remote(start_vaddr, page_count));
-            });
-        }
-        fn shootdown_user_range(&self, cpus: CpuMask<'_>, start_vaddr: u64, page_count: usize) {
-            if !cpus.is_empty() {
-                self.shootdown_range(start_vaddr, page_count);
-            }
-        }
+    /// The remote reach's log lives in a thread-local, because the reach is
+    /// `'static` as the real handle is.
+    fn record_remote(base: u64, pages: usize) {
+        REMOTE.with(|log| log.borrow_mut().push(Event::Remote(base, pages)));
     }
 
-    static REMOTE_LOG: RemoteLog = RemoteLog;
+    static REMOTE_LOG: RecordedRemote = RecordedRemote(record_remote);
 
     fn reach(active: &[CpuId]) -> SpaceTlb {
         let cpus = ActiveCpus::new(4).expect("a small set allocates");

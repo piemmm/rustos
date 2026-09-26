@@ -98,6 +98,7 @@ pub struct Renderer {
     light: LightBuffer,
     tools: Vec<Tools>,
     stage: Stage,
+    refused_tiles: usize,
 }
 
 /// What one band paints with, held across frames so a band allocates
@@ -139,6 +140,13 @@ impl Renderer {
         self.stage.placed()
     }
 
+    /// How many materials the last frame drew in their flat tone because the
+    /// cache would not admit their tiles.
+    #[must_use]
+    pub const fn refused_tiles(&self) -> usize {
+        self.refused_tiles
+    }
+
     /// Draw one frame of `scene` into `target`.
     ///
     /// # Errors
@@ -170,7 +178,7 @@ impl Renderer {
         self.grid
             .rebuild(&scene.chunks, visible, scene.decals, scene.fray)?;
         let quality = scene.ladder.material_quality();
-        terrain::ensure_tiles(cache, &self.grid, quality, step);
+        self.refused_tiles = terrain::ensure_tiles(cache, &self.grid, quality, step);
         let pass = terrain::Pass {
             warp: scene.warp,
             cache,

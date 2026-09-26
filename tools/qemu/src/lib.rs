@@ -398,7 +398,7 @@ pub struct KeyInjection {
 /// `virtio-keyboard-device`, waits for [`ready_marker`](Self::ready_marker)
 /// on the serial console (proving the keyboard driver is armed — typed
 /// keys buffer as type-ahead until the guest's reader drains them), then
-/// types [`text`](Self::text) one `sendkey` per character through the QEMU
+/// presses its [`keys`](Self::keys) one `sendkey` at a time through the QEMU
 /// monitor. Keys are **paced**: each is held briefly and the next is sent
 /// only after the previous hold has elapsed, so repeated characters
 /// ("tt") arrive as distinct press/release edges and are never coalesced
@@ -411,10 +411,49 @@ pub struct KeyTyping {
     /// before typing starts (minimum 1) — the same per-driver-instance
     /// counting as [`KeyInjection::ready_occurrences`].
     pub ready_occurrences: u32,
-    /// The text to type. Every character must be printable ASCII, `\n`
-    /// (sent as `ret`), or `\t` (sent as `tab`); the runner fails the run
-    /// on the first untypable character (fail closed, never skipped).
-    pub text: String,
+    /// What the step presses.
+    pub keys: TypedKeys,
+}
+
+/// What one [`KeyTyping`] step presses, one key at a time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypedKeys {
+    /// Text, character by character: printable ASCII, `\n` (sent as `ret`),
+    /// `\t` (sent as `tab`), or the `\u{3}` Ctrl-C chord. The runner fails
+    /// the run on the first untypable character (fail closed, never skipped).
+    Text(String),
+    /// Keys no character reaches, by QEMU key name, each one of
+    /// [`NAMED_KEYS`]; any other name fails the run rather than being sent to
+    /// a monitor that would ignore it.
+    Named(Vec<String>),
+}
+
+/// The keys a [`TypedKeys::Named`] step may press.
+pub const NAMED_KEYS: &[&str] = &["esc", "f11"];
+
+impl TypedKeys {
+    /// How many keys the step presses.
+    fn len(&self) -> usize {
+        match self {
+            Self::Text(text) => text.chars().count(),
+            Self::Named(keys) => keys.len(),
+        }
+    }
+
+    /// The QEMU key name of the step's `index`th key, `None` past its end,
+    /// or why the key cannot be sent.
+    fn key(&self, index: usize) -> Option<Result<String, String>> {
+        match self {
+            Self::Text(text) => text.chars().nth(index).map(qkeycode_for),
+            Self::Named(keys) => keys.get(index).map(|name| {
+                if NAMED_KEYS.contains(&name.as_str()) {
+                    Ok(name.clone())
+                } else {
+                    Err(format!("`{name}` is not a named key the runner sends"))
+                }
+            }),
+        }
+    }
 }
 
 /// One step of a deterministic, ordered pointer-injection script — the
@@ -1323,7 +1362,24 @@ impl Spec {
         self.input_typing.push(KeyTyping {
             ready_marker: ready_marker.into(),
             ready_occurrences: occurrences.max(1),
-            text: text.into(),
+            keys: TypedKeys::Text(text.into()),
+        });
+        self
+    }
+
+    /// Append one step pressing `keys`, each a [`NAMED_KEYS`] name, in the
+    /// same ordered, marker-gated sequence as [`Self::with_typed_keys`].
+    #[must_use]
+    pub fn with_named_keys(
+        mut self,
+        ready_marker: impl Into<String>,
+        occurrences: u32,
+        keys: &[&str],
+    ) -> Self {
+        self.input_typing.push(KeyTyping {
+            ready_marker: ready_marker.into(),
+            ready_occurrences: occurrences.max(1),
+            keys: TypedKeys::Named(keys.iter().map(|key| (*key).to_string()).collect()),
         });
         self
     }
@@ -3005,19 +3061,22 @@ impl InjectionState {
         }
         self.drive_monitor_commands(spec, monitor, markers.monitor)?;
         if let Some(typing) = spec.input_typing.get(self.typed_step) {
-            // Steps run strictly in order, each gated on its own marker;
-            // within a step the keys are paced — at most one per call,
-            // and only once the previous key's hold has fully elapsed —
-            // so repeated characters arrive as distinct press/release
-            // edges.
+            // Steps run strictly in order, each gated on its own marker and
+            // held while a dump keyed earlier is still being taken, since a
+            // key can change the screen as surely as a click; within a step
+            // the keys are paced — at most one per call, and only once the
+            // previous key's hold has fully elapsed — so repeated characters
+            // arrive as distinct press/release edges.
             let step_seen = markers
                 .typing
                 .get(self.typed_step)
                 .is_some_and(|seen| seen.load(Ordering::Acquire));
-            if step_seen && Instant::now() >= self.next_typed_key_at {
-                if let Some(c) = typing.text.chars().nth(self.typed_in_step) {
-                    let key =
-                        qkeycode_for(c).map_err(|e| format!("typed-text injection failed: {e}"))?;
+            if step_seen
+                && !self.dump_pending(spec, markers)
+                && Instant::now() >= self.next_typed_key_at
+            {
+                if let Some(key) = typing.keys.key(self.typed_in_step) {
+                    let key = key.map_err(|e| format!("typed-text injection failed: {e}"))?;
                     self.send(
                         monitor,
                         "typed-text",
@@ -3028,7 +3087,7 @@ impl InjectionState {
                     // A fully-typed step advances immediately so an
                     // already-seen next marker starts the next step on
                     // the following tick.
-                    if self.typed_in_step >= typing.text.chars().count() {
+                    if self.typed_in_step >= typing.keys.len() {
                         self.typed_step += 1;
                         self.typed_in_step = 0;
                     }
@@ -3075,13 +3134,7 @@ impl InjectionState {
         // *step* per poll tick, so a motion is processed before whatever
         // follows it lands at the new position; a `Click` step sends both of
         // its mask changes in that one tick, because a click is one gesture.
-        let dump_pending = spec.screendumps.get(self.dump_step).is_some_and(|_| {
-            self.dump_state == DumpState::Sent
-                || markers
-                    .screendump
-                    .get(self.dump_step)
-                    .is_some_and(|seen| seen.load(Ordering::Acquire))
-        });
+        let dump_pending = self.dump_pending(spec, markers);
         if let Some(step) = spec.pointer_script.get(self.pointer_step) {
             let step_seen = markers
                 .pointer
@@ -3111,6 +3164,19 @@ impl InjectionState {
             }
         }
         Ok(())
+    }
+
+    /// Whether a dump whose marker has appeared is still waiting to be taken
+    /// and verified, which holds every further injection back so the dump
+    /// captures the frame it was keyed on.
+    fn dump_pending(&self, spec: &Spec, markers: &InjectionMarkers<'_>) -> bool {
+        spec.screendumps.get(self.dump_step).is_some_and(|_| {
+            self.dump_state == DumpState::Sent
+                || markers
+                    .screendump
+                    .get(self.dump_step)
+                    .is_some_and(|seen| seen.load(Ordering::Acquire))
+        })
     }
 
     /// Send the tracked button-state mask as a `mouse_button` command.
@@ -4239,11 +4305,112 @@ mod tests {
         let t = &s.input_typing[0];
         assert_eq!(t.ready_marker, "armed");
         assert_eq!(t.ready_occurrences, 1, "occurrences clamp at >= 1");
-        assert_eq!(t.text, "root\n");
+        assert_eq!(t.keys, TypedKeys::Text("root\n".into()));
         let t = &s.input_typing[1];
         assert_eq!(t.ready_marker, "db loaded");
         assert_eq!(t.ready_occurrences, 1);
-        assert_eq!(t.text, "g\n");
+        assert_eq!(t.keys, TypedKeys::Text("g\n".into()));
+    }
+
+    /// Named keys join the one ordered script, so a function key lands
+    /// exactly where it was scripted between two pieces of typed text.
+    #[test]
+    fn named_keys_join_the_one_ordered_script() {
+        let s = Spec::for_aarch64_kernel("/tmp/k")
+            .with_typed_keys("prompt", 1, "go\n")
+            .with_named_keys("drawn", 0, &["f11", "esc"])
+            .with_typed_keys("restored", 1, "q");
+        let keys: Vec<&TypedKeys> = s.input_typing.iter().map(|t| &t.keys).collect();
+        assert_eq!(
+            keys,
+            [
+                &TypedKeys::Text("go\n".into()),
+                &TypedKeys::Named(vec!["f11".into(), "esc".into()]),
+                &TypedKeys::Text("q".into()),
+            ]
+        );
+        assert_eq!(s.input_typing[1].ready_occurrences, 1);
+    }
+
+    /// A named key outside the set fails the run rather than reaching a
+    /// monitor that would ignore it; text maps as it always has.
+    #[test]
+    fn only_the_named_keys_the_runner_knows_are_sent() {
+        let named = TypedKeys::Named(vec!["f11".into(), "esc".into(), "f13".into()]);
+        assert_eq!(named.len(), 3);
+        assert_eq!(named.key(0), Some(Ok("f11".into())));
+        assert_eq!(named.key(1), Some(Ok("esc".into())));
+        assert!(
+            matches!(named.key(2), Some(Err(_))),
+            "f13 is not a named key"
+        );
+        assert_eq!(named.key(3), None);
+        let text = TypedKeys::Text("q\n".into());
+        assert_eq!(
+            (text.key(0), text.key(1)),
+            (Some(Ok("q".into())), Some(Ok("ret".into())))
+        );
+    }
+
+    /// A key, like a click, waits for a dump keyed before it: sent while the
+    /// dump is still being taken, it could change the frame the dump was keyed
+    /// on.
+    #[test]
+    fn a_typed_key_waits_for_a_pending_dump() {
+        use std::io::Read;
+        use std::os::unix::net::UnixListener;
+
+        let dump =
+            std::env::temp_dir().join(format!("tairix-qemu-keydump-{}.ppm", std::process::id()));
+        let _ = std::fs::remove_file(&dump);
+        let spec = Spec::for_aarch64_kernel("/kernel")
+            .with_screendump("shown", 1, &dump)
+            .with_named_keys("shown", 1, &["f11"]);
+        let socket = ReservedSocket::reserve("keydump").expect("a socket path");
+        let listener = UnixListener::bind(socket.path()).expect("the monitor binds");
+        let seen = || Arc::new(AtomicBool::new(true));
+        let (typing, dumps) = ([seen()], [seen()]);
+        let key = AtomicBool::new(false);
+        let markers = InjectionMarkers {
+            key: &key,
+            typing: &typing,
+            pointer: &[],
+            screendump: &dumps,
+            monitor: &[],
+        };
+        let mut state = InjectionState::new(&spec);
+
+        state.drive(&spec, Some(&socket), &markers).expect("drives");
+        let (mut peer, _) = listener.accept().expect("the runner connected");
+        peer.set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("a read timeout");
+        let sent = |peer: &mut std::os::unix::net::UnixStream| {
+            let mut buf = [0u8; 256];
+            let n = peer.read(&mut buf).unwrap_or(0);
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        };
+        let first = sent(&mut peer);
+        assert!(
+            first.contains("screendump"),
+            "the dump goes first: {first:?}"
+        );
+        assert!(!first.contains("sendkey"), "the key waited: {first:?}");
+
+        // Still unverified: the key stays held.
+        state.drive(&spec, Some(&socket), &markers).expect("drives");
+        std::fs::write(&dump, b"P6\n1 1\n255\n\0\0\0").expect("the dump lands");
+        state
+            .drive(&spec, Some(&socket), &markers)
+            .expect("verifies the dump");
+        state
+            .drive(&spec, Some(&socket), &markers)
+            .expect("sends the key");
+        let then = sent(&mut peer);
+        assert!(
+            then.contains("sendkey f11"),
+            "the key follows the dump: {then:?}"
+        );
+        let _ = std::fs::remove_file(&dump);
     }
 
     #[test]
@@ -4312,12 +4479,14 @@ mod tests {
     #[test]
     fn qkeycode_map_covers_the_typed_dialogue_characters() {
         // The exact character classes the interactive verticals type:
-        // lowercase words, digits, space, hyphen, and the line terminator.
+        // lowercase words, digits, space, hyphen, the shell's `&&`, and the
+        // line terminator.
         assert_eq!(qkeycode_for('a').as_deref(), Ok("a"));
         assert_eq!(qkeycode_for('z').as_deref(), Ok("z"));
         assert_eq!(qkeycode_for('7').as_deref(), Ok("7"));
         assert_eq!(qkeycode_for(' ').as_deref(), Ok("spc"));
         assert_eq!(qkeycode_for('-').as_deref(), Ok("minus"));
+        assert_eq!(qkeycode_for('&').as_deref(), Ok("shift-7"));
         assert_eq!(qkeycode_for('\n').as_deref(), Ok("ret"));
         assert_eq!(qkeycode_for('\t').as_deref(), Ok("tab"));
         // The ETX byte types the Ctrl-C job-control chord (`plans/PTY.md`).

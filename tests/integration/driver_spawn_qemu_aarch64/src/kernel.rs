@@ -36,9 +36,9 @@ use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args};
 use tairix_kernel::driver_spawn_loader::{InitCtxDriverProcessSpawn, SpawnDriverLoader};
 use tairix_kernel_core::AddressSpaceRegistry;
 use tairix_kernel_core::{
-    BootReserve, DispatchCallbackSlot, KernelDispatchHook, KernelInitSpawner, RandomReserve,
-    EMPTY_PROGRAM_REGISTRY, NULL_DMA_ALLOC_FACILITY, NULL_MEM_MAP, NULL_MMIO_MAP_FACILITY,
-    NULL_PROCESS_WAIT, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
+    BootReserve, DispatchCallbackSlot, KernelArch, KernelDispatchHook, KernelInitSpawner,
+    RandomReserve, EMPTY_PROGRAM_REGISTRY, NULL_DMA_ALLOC_FACILITY, NULL_MEM_MAP,
+    NULL_MMIO_MAP_FACILITY, NULL_PROCESS_WAIT, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
 };
 use tairix_kernel_ipc::{EndpointId, Port, PortRegistry};
 use tairix_kernel_irq::{IrqTable, UnsupportedController};
@@ -571,6 +571,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         &NULL_PROCESS_WAIT,
         sys.irq_table,
         &NULL_SHARED_MEM_FACILITY,
+        KernelArch::cross_cpu_tlb_shootdown(sys.arch),
     );
     let spawn = InitCtxDriverProcessSpawn::new(&init_ctx);
     let args: [&[u8]; 3] = [b"drvstub", REPLY_ENDPOINT_ARG, REPLY_PORT_NAME];

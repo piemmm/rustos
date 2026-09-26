@@ -1355,6 +1355,28 @@ what makes the witness a later frame's: Settings retitles to the pane on show
 only after presenting that pane, so the Settings QEMU vertical gates each
 per-pane dump on it.
 
+### And a size state's: the window on screen at the state it was given
+
+`WINDOW_SIZED` ("served window on screen at its new size") is emitted after a
+frame reached the display showing a served window at the size state it was last
+given, whether the application asked for the state or the user chose it from the
+title bar. It names the `window`, the `state` (`restored`, `maximized`,
+`fullscreen`), the client `width` and `height` the state gave, and the `path`
+the frame reached the display by: `composited` in software, `layered` as a
+stack of hardware layers, or `promoted`, the fullscreen window handed to the
+layer engine as the scene's one layer. The path is the compositor's own record
+of what it did with that frame (`Compositor::presentation`), never an
+assumption.
+
+The window manager applies a state at once, but the pixels at the new extent
+are the application's, so the witness waits for the frame the application drew
+at that extent: until then the display still shows the frame drawn at the old
+size, and a record claiming fullscreen over it would be false. A burst of
+changes between two frames is one announcement, of the state it ends in, and
+nothing is announced for a window the displayed frame does not carry, such as
+one beneath a promoted fullscreen surface. The `WinterSun` client QEMU vertical
+gates each size-state dump on it and holds the pixels to the path it names.
+
 ### And the desktop's new look: the restyle on screen
 
 `DESKTOP_RESTYLED` ("desktop restyled on screen") is emitted, naming the

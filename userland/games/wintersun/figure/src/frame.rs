@@ -283,14 +283,31 @@ pub struct Projected {
     pub depth: f64,
 }
 
-/// Project body-frame `offset` for a figure facing `facing`.
+/// The ground direction a heading points along, worked out once per figure
+/// because every point placed under it needs the same cosine and sine.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Heading {
+    pub(crate) east: f64,
+    pub(crate) south: f64,
+}
+
+impl Heading {
+    /// The direction `facing` points along.
+    #[must_use]
+    pub fn of(facing: Facing) -> Self {
+        let (east, south) = facing.unit_vector();
+        Self { east, south }
+    }
+}
+
+/// Project body-frame `offset` for a figure facing along `heading`.
 ///
 /// The answer is in the same figure-local pixels `offset` is, relative to the
 /// figure's ground point; scaling to the surface and adding the anchor is the
 /// caller's one conversion.
 #[must_use]
-pub fn project(facing: Facing, offset: Body) -> Projected {
-    let (across, into) = ground(facing, offset);
+pub fn project(heading: Heading, offset: Body) -> Projected {
+    let (across, into) = ground(heading, offset);
     Projected {
         // Into the scene moves down the screen, foreshortened; height moves
         // up it unforeshortened.
@@ -301,14 +318,14 @@ pub fn project(facing: Facing, offset: Body) -> Projected {
 }
 
 /// The direction from a surface point toward the camera, in the frame of a
-/// figure facing `facing`.
+/// figure facing along `heading`.
 ///
 /// The one direction a point may move along without moving on screen, which
 /// is what makes it the axis a silhouette is taken against: a surface is on
 /// the near side exactly where its normal leans toward this.
 #[must_use]
-pub fn toward_camera(facing: Facing) -> Body {
-    let (east, south) = facing.unit_vector();
+pub fn toward_camera(heading: Heading) -> Body {
+    let Heading { east, south } = heading;
     let toward = Body::new(south, -east, FORESHORTEN);
     // The ground part is a unit vector turned by the heading, so the length
     // is the constant `hypot(1, FORESHORTEN)` and never zero.
@@ -317,11 +334,11 @@ pub fn toward_camera(facing: Facing) -> Body {
 
 /// `offset`'s displacement across the screen and into the scene, before the
 /// depth axis is foreshortened.
-fn ground(facing: Facing, offset: Body) -> (f64, f64) {
+fn ground(heading: Heading, offset: Body) -> (f64, f64) {
     // Zero faces east and the turn advances toward south, which is the sense
     // the world's own axes have. The figure's left is therefore a quarter
     // turn back from its heading: east when facing south.
-    let (east, south) = facing.unit_vector();
+    let Heading { east, south } = heading;
     (
         offset.forward * east + offset.side * south,
         offset.forward * south - offset.side * east,

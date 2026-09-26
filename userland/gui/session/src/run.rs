@@ -99,7 +99,8 @@ mod program {
         SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
     use tairix_abi::window_ipc::{
-        MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
+        event_endpoint_for, MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT,
+        WINDOW_MAX_REQUEST,
     };
     use tairix_abi::{
         CapabilityId, DriverError, Errno, Notice, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp,
@@ -124,19 +125,20 @@ mod program {
         load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report, open_tray,
         parse, publish_pinboard, reap_launched, relay_power, resolve_launch,
         resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
-        window_control_alternate_event, window_control_event, Answer, AppBarBridge, AppBarService,
-        AppearanceWork, ArtworkFileReader, ArtworkSandbox, BundleIndex, CliError, Command,
-        ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
-        DesktopOutcome, DesktopShell, DeviceInputSource, DocumentRelay, ElevatePrompt, Elevator,
-        FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
-        HangTracker, HoldBack, IconRasteriser, IdleAction, IdleClock, IdlePolicy, InputPolicy,
-        KeyboardInputSource, Launch, LaunchHost, LaunchTable, LaunchTarget, LayerDecision,
-        LayerFeed, LoadedPinboard, LoadedPrograms, OwnerBundleGate, OwnerWindow, PickConclusion,
-        Prepared, PresentedOwners, PreviewDone, PreviewJob, PreviewRequest, PromptOutcome, Routed,
-        ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
-        SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker, SessionWindows,
-        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk,
-        WallpaperJob, WallpaperService, WallpaperSource, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
+        size_state_name, window_control_alternate_event, window_control_event, Answer,
+        AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
+        BundleIndex, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
+        DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
+        DocumentRelay, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
+        FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, IdleAction,
+        IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource, Launch, LaunchHost, LaunchTable,
+        LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, OwnerBundleGate,
+        OwnerWindow, PickConclusion, Prepared, PresentedOwners, PreviewDone, PreviewJob,
+        PreviewRequest, PromptOutcome, Routed, ScreenFade, ScreenLock, Screensaver, Seat,
+        SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock,
+        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord,
+        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperJob,
+        WallpaperService, WallpaperSource, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
         APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
         DATETIME_RUN_PATH, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
@@ -146,7 +148,7 @@ mod program {
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
         SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
         SWITCHBOARD_RUN_PATH, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
-        WINDOW_SHOWN_MESSAGE,
+        WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -167,12 +169,11 @@ mod program {
     use tairix_theme::Accessibility;
     use tairix_wallpaper::{DesktopSettings, MAX_WALLPAPER_BYTES, WALLPAPER_STORE};
     use tairix_window::{
-        event_endpoint_for, CallerIdentity, EventSink, OpenEntry, WallpaperName, WindowServer,
-        WINDOW_REPLY_MAX,
+        CallerIdentity, EventSink, OpenEntry, WallpaperName, WindowServer, WINDOW_REPLY_MAX,
     };
     use tairix_wm::{
-        chrome_cache, frost_cache, Compositor, InputResponse, Point, Rect, Region, Surface,
-        WindowControlKind,
+        chrome_cache, frost_cache, Compositor, InputResponse, Point, Presentation, Rect, Region,
+        Surface, WindowControlKind,
     };
 
     extern crate alloc;
@@ -986,14 +987,25 @@ mod program {
                 value: LogFieldValue::UnsignedInt(window),
             }]
         };
+        // The compositor's own record of how this frame reached the display,
+        // so a witness names the path the frame took rather than one assumed.
+        let presentation = compositor.presentation();
         windows.report_on_screen(
-            |wm| {
-                compositor
-                    .window(wm)
-                    .is_some_and(tairix_wm::Window::is_visible)
-            },
+            |wm| compositor.on_display(wm),
             |id| log_info(WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, &window(id)),
             |id| log_info(WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, &window(id)),
+            |window, state, extent| {
+                let Some(path) = presentation.map(Presentation::as_str) else {
+                    return;
+                };
+                let record = SizedRecord {
+                    window,
+                    state: size_state_name(state),
+                    extent,
+                    path,
+                };
+                log_info(WINDOW_SIZED, WINDOW_SIZED_MESSAGE, &record.fields());
+            },
         );
         shell.report_restyled(fade.revealed(), |appearance| {
             let field = LogField {

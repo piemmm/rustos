@@ -15,7 +15,10 @@
 //!   degradation ladder has shrunk the target;
 //! * the player's figure: the default preset read once, before the window
 //!   opens, from the bundle's own `Resources/`, and posed each frame at the
-//!   moment that frame shows.
+//!   moment that frame shows;
+//! * `--reference-scene`: the one fixed scene (`reference`) in the same
+//!   window, drawn only when its extent or its retained pixels change, so a
+//!   picture of the window can be checked against the scene drawn elsewhere.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
@@ -32,21 +35,23 @@ mod program {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
 
-    use tairix_abi::driver::display::DamageRect;
+    use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::fs::OpenFlags;
-    use tairix_abi::window_ipc::{WindowEvent, WindowSizing};
-    use tairix_abi::{Errno, WaitSetOp, WaitSourceKind};
+    use tairix_abi::window_ipc::WindowEvent;
+    use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
+    use tairix_help::{own_short_help, BundleHelp};
     use tairix_log::{Event, Sink};
     use tairix_parallel::{JobRunner, Pool};
     use tairix_raster::surface::Surface;
-    use tairix_reclaim::{PressureBand, ReportedPressure};
-    use tairix_rt::io::{Stderr, Write};
+    use tairix_rt::io::{Stderr, Stdout, Write};
     use tairix_rt::File;
     use tairix_util::defer::JobDesk;
     use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
+    use tairix_window::desktop::Desktop;
     use tairix_window::{EventDrain, EventError, EventMailbox, EventSource, Parked, WindowEvents};
-    use tairix_wintersun_app::budget::{FrameTimes, Governor, BASELINE_HEIGHT, BASELINE_WIDTH};
+    use tairix_wintersun_app::budget::{FrameTimes, Governor};
     use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
+    use tairix_wintersun_app::cli::{self, CliError, Launch, USAGE};
     use tairix_wintersun_app::error::ClientError;
     use tairix_wintersun_app::figures::{submerged, Cast};
     use tairix_wintersun_app::frame::{Clock, Renderer, Scene};
@@ -55,16 +60,17 @@ mod program {
     use tairix_wintersun_app::pacing::{Motion, Pacer};
     use tairix_wintersun_app::presets;
     use tairix_wintersun_app::quality::{Ladder, RenderScale};
-    use tairix_wintersun_app::shell::Shell;
-    use tairix_wintersun_app::terrain::{visible_chunks, worth_holding, RoadDecals};
+    use tairix_wintersun_app::reference;
+    use tairix_wintersun_app::shell::{self, Shell};
+    use tairix_wintersun_app::terrain::{visible_chunks, HeldGround, RoadDecals};
     use tairix_wintersun_app::view::Viewport;
     use tairix_wintersun_art::cache::MaterialCache;
-    use tairix_wintersun_art::decal::{Bounds, Fray};
+    use tairix_wintersun_art::decal::Fray;
     use tairix_wintersun_art::splat::Warp;
     use tairix_wintersun_figure::actor::Actor;
     use tairix_wintersun_figure::identity::{Identity, RECORD_LEN};
     use tairix_wintersun_figure::motion::{Clips, Set};
-    use tairix_wintersun_figure::reference;
+    use tairix_wintersun_figure::reference as figures;
     use tairix_wintersun_figure::species::Species;
     use tairix_wintersun_net::client::{Intent, IntentKind};
     use tairix_wintersun_net::value::{
@@ -88,16 +94,11 @@ mod program {
     /// Exit code for a player whose figure could not be built.
     const EXIT_NO_FIGURE: i32 = 86;
 
-    /// Memory the material cache is sized from when the system does not
-    /// say. Replaced by the discovered figure once the client asks the
-    /// System Information API for it.
-    const CACHE_BACKING_BYTES: usize = 64 * 1024 * 1024;
+    /// Exit code for a reference scene that could not be drawn.
+    const EXIT_NO_SCENE: i32 = 87;
 
-    /// The window the game opens at, in logical pixels: the resolution
-    /// the frame budget is stated for.
-    const OPEN_WIDTH: u32 = BASELINE_WIDTH;
-    /// The height the game opens at.
-    const OPEN_HEIGHT: u32 = BASELINE_HEIGHT;
+    /// Exit code for a command line outside the grammar.
+    const EXIT_USAGE: i32 = 2;
 
     /// The body the camera follows: an ordinary entity of the local zone,
     /// so it walks around hills rather than through them.
@@ -133,7 +134,9 @@ mod program {
     struct Park<'a> {
         mailbox: EventMailbox,
         set: u64,
-        quarry: &'a Quarry,
+        /// The chunk worker, or `None` for a scene whose ground is solved
+        /// before it is drawn.
+        quarry: Option<&'a Quarry>,
         /// When the next frame is due, or `None` when the client owes
         /// none — a window with no seat, where the park carries no
         /// deadline at all and the CPU is given up entirely.
@@ -171,7 +174,9 @@ mod program {
                     // The readiness is a level peek, so leaving it
                     // undrained would report ready for ever and turn the
                     // park into a spin.
-                    self.quarry.wake.drain();
+                    if let Some(quarry) = self.quarry {
+                        quarry.wake.drain();
+                    }
                     Ok(Parked::Interrupted)
                 }
                 // The band moved, so the material tiles the frame holds
@@ -206,8 +211,22 @@ mod program {
         }
     }
 
-    static SINK: Journal = Journal;
-    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    /// The machine's memory, which the material cache is a small share of.
+    ///
+    /// Asked once, before the window opens. A system that will not say
+    /// admits no tiles rather than a guessed amount, and the materials are
+    /// drawn in their flat tones.
+    fn cache_backing_bytes() -> usize {
+        match tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport) {
+            Ok(total) => usize::try_from(total).unwrap_or(usize::MAX),
+            Err(err) => {
+                report(&alloc::format!(
+                    "memory size unavailable ({err:?}); materials drawn in their flat tones"
+                ));
+                0
+            }
+        }
+    }
 
     /// The chunk generator, run off the frame loop.
     ///
@@ -309,8 +328,11 @@ mod program {
         roads: RoadDecals,
         warp: Warp,
         fray: Fray,
-        held: Vec<Chunk>,
+        ground: HeldGround,
         refused: Vec<ChunkCoord>,
+        /// Whether the last solved chunk found no room to be held, so a run
+        /// of them is reported once.
+        unheld: bool,
     }
 
     impl World {
@@ -320,31 +342,10 @@ mod program {
                 roads: RoadDecals::from_realm(field)?,
                 warp: Warp::new(params.seed()),
                 fray: Fray::new(params.seed()),
-                held: Vec::new(),
+                ground: HeldGround::new(),
                 refused: Vec::new(),
+                unheld: false,
             })
-        }
-
-        /// Keep the chunks in coordinate order, which is what the window
-        /// binary-searches.
-        fn adopt(&mut self, chunk: Chunk) {
-            let coord = chunk.coord();
-            match self.held.binary_search_by_key(&coord, Chunk::coord) {
-                Ok(_) => {}
-                Err(at) => self.held.insert(at, chunk),
-            }
-        }
-
-        fn holds(&self, coord: ChunkCoord) -> bool {
-            self.held.binary_search_by_key(&coord, Chunk::coord).is_ok()
-        }
-
-        /// Give back the ground a view covering `visible` no longer needs,
-        /// so what is held is the view's working set however far the
-        /// player walks.
-        fn release_distant(&mut self, visible: Bounds) {
-            self.held
-                .retain(|chunk| worth_holding(chunk.coord(), visible));
         }
 
         /// Ask the quarry for the nearest chunk the view needs and has
@@ -365,7 +366,7 @@ mod program {
             let nearest = visible_chunks(camera.visible(view))
                 .filter(|coord| {
                     self.params.holds_chunk(coord.x, coord.y)
-                        && !self.holds(*coord)
+                        && !self.ground.holds(*coord)
                         && !self.refused.contains(coord)
                 })
                 .min_by_key(|coord| chunk_distance(*coord, centre));
@@ -379,7 +380,13 @@ mod program {
         /// Record what the quarry answered.
         fn take(&mut self, answer: Quarried) {
             match answer {
-                Quarried::Ready(chunk) => self.adopt(chunk),
+                Quarried::Ready(chunk) => {
+                    let held = self.ground.adopt(chunk).is_ok();
+                    if !held && !self.unheld {
+                        report("no memory to hold solved ground; it is drawn as unmapped");
+                    }
+                    self.unheld = !held;
+                }
                 Quarried::Refused(coord) => {
                     if !self.refused.contains(&coord) {
                         self.refused.push(coord);
@@ -387,10 +394,6 @@ mod program {
                     }
                 }
             }
-        }
-
-        fn borrow(&self) -> Vec<&Chunk> {
-            self.held.iter().collect()
         }
     }
 
@@ -424,6 +427,9 @@ mod program {
         cast: Cast<'a>,
         /// When the player's figure was last posed.
         posed_ns: Option<u64>,
+        /// Whether the last frame was refused, so a run of them is reported
+        /// once.
+        refusing: bool,
     }
 
     /// Advance the simulation by `ticks` and record where the player got
@@ -438,7 +444,9 @@ mod program {
         if ticks == 0 {
             return;
         }
-        let borrowed = world.borrow();
+        let Ok(borrowed) = world.ground.borrow() else {
+            return;
+        };
         let Ok(terrain) = ChunkTerrain::new(&borrowed) else {
             return;
         };
@@ -485,32 +493,75 @@ mod program {
     /// Pose the player's figure for the moment this frame shows, then draw
     /// and present the frame, no deeper down the ladder than the window and
     /// the zoom let figures stay readable.
+    ///
+    /// Answers whether a frame reached the window, so only a frame that was
+    /// drawn is measured against the budget.
     fn draw(
         session: &mut Session<'_>,
         world: &World,
         player: EntityId,
         runner: &dyn JobRunner,
         now: u64,
-    ) -> Result<(), Errno> {
+    ) -> Result<bool, Errno> {
         let Some(mode) = session.window.mode().copied() else {
-            return Ok(());
+            return Ok(false);
         };
         session.governor.hold(Ladder::floor(
             mode.width_px,
             mode.height_px,
             session.camera.zoom(),
         ));
+        match draw_frame(session, world, player, runner, now, &mode) {
+            Ok(()) => {
+                session.refusing = false;
+                Ok(true)
+            }
+            // Said once for a run of refused frames rather than once a frame.
+            Err(Unpresented::Refused(err)) => {
+                if !core::mem::replace(&mut session.refusing, true) {
+                    report(&alloc::format!("frames refused: {err}"));
+                }
+                Ok(false)
+            }
+            Err(Unpresented::Lost(err)) => Err(err),
+        }
+    }
+
+    /// Why a frame did not reach the window.
+    enum Unpresented {
+        /// It could not be drawn, and nothing was presented.
+        Refused(ClientError),
+        /// The session would not take it.
+        Lost(Errno),
+    }
+
+    impl From<ClientError> for Unpresented {
+        fn from(err: ClientError) -> Self {
+            Self::Refused(err)
+        }
+    }
+
+    impl From<Errno> for Unpresented {
+        fn from(err: Errno) -> Self {
+            Self::Lost(err)
+        }
+    }
+
+    /// Draw the frame `mode`'s window shows and present it, withholding one
+    /// that could not be drawn so the window keeps the last one that was.
+    fn draw_frame(
+        session: &mut Session<'_>,
+        world: &World,
+        player: EntityId,
+        runner: &dyn JobRunner,
+        now: u64,
+        mode: &DisplayMode,
+    ) -> Result<(), Unpresented> {
         let scale = session.governor.ladder().render_scale();
-        let Ok(view) = Viewport::new(mode.width_px, mode.height_px, scale) else {
-            return Ok(());
-        };
-        let borrowed = world.borrow();
-        let Ok(chunks) = ChunkWindow::new(&borrowed) else {
-            return Ok(());
-        };
-        let Ok(decals) = world.roads.decals() else {
-            return Ok(());
-        };
+        let view = Viewport::new(mode.width_px, mode.height_px, scale)?;
+        let borrowed = world.ground.borrow()?;
+        let chunks = ChunkWindow::new(&borrowed).map_err(|_| ClientError::World)?;
+        let decals = world.roads.decals()?;
         pose_player(session, &borrowed, player, now);
         let scene = Scene {
             camera: session.camera,
@@ -524,62 +575,22 @@ mod program {
             cast: &session.cast,
         };
 
-        // Native scale writes the window's own pixels; a shrunk target
-        // is drawn once into the client's own surface and resampled up,
-        // which is the only case that pays for a second buffer.
-        if view.needs_resample() {
-            let (rw, rh) = view.render();
-            let fresh = session
-                .scaled
-                .as_ref()
-                .is_none_or(|held| held.width() != rw || held.height() != rh);
-            if fresh {
-                session.scaled = Surface::new(rw, rh);
-            }
-            let Some(small) = session.scaled.as_mut() else {
-                return Ok(());
-            };
-            let times = match session.renderer.render(
-                small,
-                &view,
-                &scene,
-                &mut session.cache,
-                runner,
-                &Monotonic,
-            ) {
-                Ok(times) => times,
-                Err(err) => {
-                    report(&alloc::format!("frame refused: {err}"));
-                    return Ok(());
-                }
-            };
-            session.times = times;
-            let source = tairix_raster::Region {
-                x: 0,
-                y: 0,
-                width: rw,
-                height: rh,
-            };
-            let small = &*small;
-            session.window.present(DamageRect::full(&mode), |surface| {
-                if small.resample_into(source, surface).is_err() {
-                    report("the reduced frame could not be scaled to the window");
-                }
-            })
-        } else {
-            let mut times = FrameTimes::new();
-            let renderer = &mut session.renderer;
-            let cache = &mut session.cache;
-            let outcome =
-                session.window.present(DamageRect::full(&mode), |surface| {
-                    match renderer.render(surface, &view, &scene, cache, runner, &Monotonic) {
-                        Ok(measured) => times = measured,
-                        Err(err) => report(&alloc::format!("frame refused: {err}")),
-                    }
-                });
-            session.times = times;
-            outcome
-        }
+        let (renderer, cache, scaled) = (
+            &mut session.renderer,
+            &mut session.cache,
+            &mut session.scaled,
+        );
+        let mut times = FrameTimes::new();
+        session
+            .window
+            .try_present(DamageRect::full(mode), |surface| {
+                view.draw_into(surface, scaled, |target| {
+                    renderer.render(target, &view, &scene, cache, runner, &Monotonic)
+                })
+                .map(|measured| times = measured)
+            })??;
+        session.times = times;
+        Ok(())
     }
 
     /// What one read of the event stream came to.
@@ -676,8 +687,47 @@ mod program {
         false
     }
 
+    /// Print the bundle's own short help, or the usage banner where its Help
+    /// tree cannot be read.
+    fn short_help() -> i32 {
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let bytes = own_short_help(&BundleHelp::new("wintersun"), locale, "wintersun")
+            .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
+        match Stdout.write_all(&bytes) {
+            Ok(()) => 0,
+            Err(_) => 1,
+        }
+    }
+
+    /// Open the game's window at the size the budget is stated for, as the
+    /// desktop's scale lays it out and no larger than its screen, answering
+    /// the serving session's id or the exit code a refusal ends the client
+    /// with.
+    fn open_window(
+        window: &mut AppWindow,
+        desktop: &Desktop,
+        endpoint: u64,
+    ) -> Result<ProcId, i32> {
+        let (width, height) = desktop.window_size(shell::OPEN_WIDTH, shell::OPEN_HEIGHT);
+        let mode = app::mode_for(width, height);
+        window
+            .open(endpoint, &mode, "WinterSun", shell::SIZING)
+            .map_err(fail_shell)
+    }
+
     /// The client's whole life.
+    ///
+    /// Exit codes: `0` when the player leaves or short help is served, `2` for
+    /// a command line outside the grammar, and otherwise the reason the
+    /// client could not go on, stated on `stderr`.
     fn main() -> i32 {
+        let launch = match tairix_rt::args().as_deref().map(cli::parse) {
+            Some(Ok(launch)) => launch,
+            Some(Err(CliError::Usage)) | None => return fail(EXIT_USAGE, USAGE),
+        };
+        if launch == Launch::Help {
+            return short_help();
+        }
         let mut window = AppWindow::new();
         let desktop = match app::bring_up_desktop(window.client()) {
             Ok((desktop, _themes)) => desktop,
@@ -687,6 +737,9 @@ mod program {
             Ok(binding) => binding,
             Err(err) => return fail_shell(err),
         };
+        if launch == Launch::ReferenceScene {
+            return reference_scene(window, &desktop, binding.endpoint(), binding.set());
+        }
 
         let params = RealmParams::winter_default(tairix_rt::clock_get());
         let Ok(field) = RealmField::generate(params) else {
@@ -718,7 +771,6 @@ mod program {
             );
         }
 
-        PRESSURE.report(PressureBand::Normal);
         let mut session = Session {
             window,
             shell: Shell::new(),
@@ -729,30 +781,22 @@ mod program {
             controls: Controls::new(),
             governor: Governor::new(),
             renderer: Renderer::new(),
-            cache: MaterialCache::new("wintersun", CACHE_BACKING_BYTES, &PRESSURE, &SINK),
+            cache: MaterialCache::new(
+                "wintersun",
+                cache_backing_bytes(),
+                tairix_rt::pressure::gauge(),
+                &Journal,
+            ),
             scaled: None,
             times: FrameTimes::new(),
             cast,
             posed_ns: None,
+            refusing: false,
         };
 
-        let mode = app::mode_for(
-            desktop.scale().scale_length(OPEN_WIDTH),
-            desktop.scale().scale_length(OPEN_HEIGHT),
-        );
-        let server = match session.window.open(
-            binding.endpoint(),
-            &mode,
-            "WinterSun",
-            WindowSizing::Resizable {
-                min_width_px: 320,
-                min_height_px: 240,
-                max_width_px: 0,
-                max_height_px: 0,
-            },
-        ) {
+        let server = match open_window(&mut session.window, &desktop, binding.endpoint()) {
             Ok(server) => server,
-            Err(err) => return fail_shell(err),
+            Err(code) => return code,
         };
 
         let pool = Pool::for_cpus(online_cpus());
@@ -761,7 +805,7 @@ mod program {
         let events = WindowEvents::new(Park {
             mailbox: EventMailbox::new(binding.endpoint(), server),
             set: binding.set(),
-            quarry: &quarry,
+            quarry: Some(&quarry),
             deadline_ns: &deadline,
             pressure_moved: &pressure_moved,
         });
@@ -814,7 +858,7 @@ mod program {
             Ok(identity) => Some(identity),
             Err(reason) => {
                 report(&alloc::format!("{reason}; walking as the reference figure"));
-                reference::identity(Species::Human).ok()
+                figures::identity(Species::Human).ok()
             }
         }
     }
@@ -940,23 +984,159 @@ mod program {
             session.camera.look_at(session.follow.at(alpha));
             if let Some(mode) = session.window.mode().copied() {
                 if let Ok(view) = Viewport::new(mode.width_px, mode.height_px, RenderScale::ONE) {
-                    world.release_distant(session.camera.visible(&view));
+                    world.ground.release_distant(session.camera.visible(&view));
                     world.request_visible(&session.camera, &view, quarry, armed);
                 }
             }
 
-            if draw(session, world, player, pool, now).is_err() {
-                return fail(EXIT_CHANNEL_LOST, "present refused");
-            }
-            let floored = session.governor.floored();
-            session.governor.observe(&session.times);
-            if session.governor.floored() && !floored {
-                report(
-                    "frames overrun at the least detail that keeps figures readable; \
-                     the frame rate is giving way",
-                );
+            match draw(session, world, player, pool, now) {
+                Ok(true) => {
+                    let floored = session.governor.floored();
+                    session.governor.observe(&session.times);
+                    if session.governor.floored() && !floored {
+                        report(
+                            "frames overrun at the least detail that keeps figures readable; \
+                             the frame rate is giving way",
+                        );
+                    }
+                }
+                Ok(false) => {}
+                Err(_) => return fail(EXIT_CHANNEL_LOST, "present refused"),
             }
         }
+    }
+
+    /// The reference scene in the game's window, held still until the player
+    /// leaves.
+    fn reference_scene(mut window: AppWindow, desktop: &Desktop, endpoint: u64, set: u64) -> i32 {
+        let Ok(mut world) = reference::World::generate() else {
+            return fail(EXIT_NO_REALM, "the reference realm could not be generated");
+        };
+        let Ok(motion) = Set::new() else {
+            return fail(EXIT_NO_FIGURE, "the motion set could not be built");
+        };
+        let Ok(clips) = motion.clips() else {
+            return fail(EXIT_NO_FIGURE, "the motion set's clips could not be built");
+        };
+        let server = match open_window(&mut window, desktop, endpoint) {
+            Ok(server) => server,
+            Err(code) => return code,
+        };
+        let start = WorldPoint { x: 0, y: 0 };
+        let mut session = Session {
+            window,
+            shell: Shell::new(),
+            camera: Camera::new(start, Zoom::DEFAULT, realm_bounds(world.params())),
+            follow: Motion::still(start),
+            facing: Facing(0),
+            pacer: Pacer::new(TickRate::default_rate()),
+            controls: Controls::new(),
+            governor: Governor::new(),
+            renderer: Renderer::new(),
+            cache: reference::cache(tairix_rt::pressure::gauge()),
+            scaled: None,
+            times: FrameTimes::new(),
+            cast: Cast::new(),
+            posed_ns: None,
+            refusing: false,
+        };
+        // Never armed: nothing in the scene moves, so no frame is ever owed.
+        let deadline = core::cell::Cell::new(None);
+        let pressure_moved = core::cell::Cell::new(false);
+        let events = WindowEvents::new(Park {
+            mailbox: EventMailbox::new(endpoint, server),
+            set,
+            quarry: None,
+            deadline_ns: &deadline,
+            pressure_moved: &pressure_moved,
+        });
+        let pool = Pool::for_cpus(online_cpus());
+        reference_loop(
+            &mut session,
+            &mut world,
+            &clips,
+            &pool,
+            events,
+            &pressure_moved,
+        )
+    }
+
+    /// Serve the reference scene's window: the scene is drawn whenever the
+    /// window owes it — first, then after its extent changed or the session
+    /// gave its copy of the pixels back — and the client parks until an event
+    /// changes that, never drawing for input that moves nothing.
+    ///
+    /// Drawn before the first park, because the session shows a window only
+    /// on its first present: parked first, the client would wait for an event
+    /// the session sends only to a window it has shown.
+    fn reference_loop(
+        session: &mut Session<'_>,
+        world: &mut reference::World,
+        clips: &Clips<'_>,
+        pool: &Pool,
+        mut events: WindowEvents<Park<'_>>,
+        pressure_moved: &core::cell::Cell<bool>,
+    ) -> i32 {
+        let mut drawn: Option<(u32, u32)> = None;
+        loop {
+            if let Some(mode) = session.window.mode().copied() {
+                let extent = (mode.width_px, mode.height_px);
+                if drawn != Some(extent) || session.window.content_released() {
+                    match draw_reference(session, world, clips, pool, &mode) {
+                        Ok(()) => drawn = Some(extent),
+                        // Holding a picture that is not the scene would
+                        // defeat the one thing this mode is for.
+                        Err(Unpresented::Refused(err)) => {
+                            return fail(
+                                EXIT_NO_SCENE,
+                                &alloc::format!("the reference scene could not be drawn: {err}"),
+                            )
+                        }
+                        Err(Unpresented::Lost(_)) => {
+                            return fail(EXIT_CHANNEL_LOST, "present refused")
+                        }
+                    }
+                }
+            }
+            let waited = events.wait(session.window.client());
+            if pressure_moved.replace(false) {
+                session.cache.enforce_pressure();
+            }
+            if let Served::Stop(code) = serve(session, waited) {
+                return code;
+            }
+            loop {
+                let read = events.try_wait(session.window.client());
+                match serve(session, read) {
+                    Served::Stop(code) => return code,
+                    Served::Empty => break,
+                    Served::Applied => {}
+                }
+            }
+        }
+    }
+
+    /// Draw the reference scene into the whole window and present it, or
+    /// present nothing where it could not be drawn exactly, a refused tile
+    /// included.
+    fn draw_reference(
+        session: &mut Session<'_>,
+        world: &mut reference::World,
+        clips: &Clips<'_>,
+        runner: &dyn JobRunner,
+        mode: &DisplayMode,
+    ) -> Result<(), Unpresented> {
+        let (renderer, cache, reduced) = (
+            &mut session.renderer,
+            &mut session.cache,
+            &mut session.scaled,
+        );
+        session
+            .window
+            .try_present(DamageRect::full(mode), |surface| {
+                world.draw_window(clips, surface, reduced, renderer, cache, runner)
+            })??;
+        Ok(())
     }
 
     tairix_rt::entry!(main);

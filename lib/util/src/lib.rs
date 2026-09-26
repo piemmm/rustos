@@ -68,6 +68,9 @@
 //! the two-or-more concrete callers.
 
 #![no_std]
+// `mathf` takes the correctly rounded square root and rounding `core` exposes
+// only behind this gate until they are stabilised as inherent `f64` methods.
+#![feature(core_float_math)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 

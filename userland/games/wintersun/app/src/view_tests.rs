@@ -146,3 +146,82 @@ fn a_tiny_target_is_never_split_below_one_row() {
     assert_eq!(view.band_count(&Reversed::new(16)), 1);
     assert_eq!(view.band_rows(&Reversed::new(16)), 1);
 }
+
+/// A window the software path draws whole is handed to the paint as it
+/// stands, and no second buffer is made for it.
+#[test]
+fn a_native_window_is_drawn_in_its_own_pixels() {
+    use tairix_raster::color::Color;
+    use tairix_raster::surface::Surface;
+
+    let colour = Color::rgb(10, 20, 30);
+    let view = Viewport::new(64, 48, RenderScale::ONE).expect("a real window");
+    let mut window = Surface::new(64, 48).expect("a window fits");
+    let mut reduced = None;
+    let drawn = view
+        .draw_into(&mut window, &mut reduced, |target| {
+            assert_eq!((target.width(), target.height()), (64, 48));
+            target.fill(colour);
+            Ok(7)
+        })
+        .expect("draws");
+    assert_eq!(drawn, 7, "the paint's own answer comes back");
+    assert!(reduced.is_none(), "a native frame needs no reduced target");
+    assert!(window.pixels().iter().all(|p| *p == colour.premultiply()));
+}
+
+/// A window past the cap is drawn reduced and resampled up over the whole
+/// window, and the reduced target is kept for the next frame at that extent.
+#[test]
+fn a_window_past_the_cap_is_drawn_reduced_and_resampled_up() {
+    use tairix_raster::color::Color;
+    use tairix_raster::surface::Surface;
+
+    let colour = Color::rgb(200, 100, 50);
+    let view = Viewport::new(3840, 2160, RenderScale::ONE).expect("a 4K window");
+    let mut window = Surface::new(3840, 2160).expect("a window fits");
+    let mut reduced = None;
+    let paint = |target: &mut Surface| {
+        assert_eq!((target.width(), target.height()), view.render());
+        target.fill(colour);
+        Ok(())
+    };
+    view.draw_into(&mut window, &mut reduced, paint)
+        .expect("draws");
+    assert!(window.pixels().iter().all(|p| *p == colour.premultiply()));
+    let held = reduced.as_ref().map(|s| s.pixels().as_ptr());
+    view.draw_into(&mut window, &mut reduced, paint)
+        .expect("draws again");
+    assert_eq!(
+        reduced.as_ref().map(|s| s.pixels().as_ptr()),
+        held,
+        "an unchanged extent reuses the reduced target"
+    );
+}
+
+/// A surface that is not the view's window is refused before anything is
+/// drawn, and a paint's refusal comes back as it was.
+#[test]
+fn a_mismatched_window_or_a_refused_paint_draws_nothing() {
+    use tairix_raster::surface::Surface;
+
+    let view = Viewport::new(64, 48, RenderScale::ONE).expect("a real window");
+    let mut wrong = Surface::new(48, 64).expect("fits");
+    let mut reduced = None;
+    let mut called = false;
+    assert_eq!(
+        view.draw_into(&mut wrong, &mut reduced, |_| {
+            called = true;
+            Ok(())
+        }),
+        Err(ClientError::Viewport)
+    );
+    assert!(!called, "the paint never ran over the wrong surface");
+    let mut window = Surface::new(64, 48).expect("fits");
+    assert_eq!(
+        view.draw_into(&mut window, &mut reduced, |_| Err::<(), _>(
+            ClientError::OutOfMemory
+        )),
+        Err(ClientError::OutOfMemory)
+    );
+}

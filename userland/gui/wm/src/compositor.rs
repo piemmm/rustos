@@ -134,6 +134,31 @@ pub enum PointerTarget {
     ResizeBand(WindowId, ResizeEdge),
 }
 
+/// How the frame now on the display was produced
+/// ([`Compositor::presentation`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Presentation {
+    /// Composited in software into the one scan-out frame.
+    Composited,
+    /// Handed to the display's layer engine, a layer for each surface.
+    Layered,
+    /// Handed to the layer engine as the scene's one layer: this window,
+    /// which covers the scan-out.
+    Promoted(WindowId),
+}
+
+impl Presentation {
+    /// The name a witness record states the presentation by.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Composited => "composited",
+            Self::Layered => "layered",
+            Self::Promoted(_) => "promoted",
+        }
+    }
+}
+
 /// A software compositing window manager surface.
 ///
 /// The compositor owns its output's display density as a [`Scale`]: the
@@ -251,6 +276,12 @@ pub struct Compositor {
     /// [`composite`](Compositor::composite) and read back through
     /// [`frame_stats`](Compositor::frame_stats).
     stats: FrameCounters,
+    /// How the frame on the display was produced; `None` before one got
+    /// there.
+    presented: Option<Presentation>,
+    /// What the scan-out frame holds that the display refused to take: owed
+    /// to the next present, which sends it again without recomposing it.
+    undelivered: Region,
     /// Which of the composite's specialisations may serve this compositor.
     /// Only a test turns one off, to compose the same scene the general way
     /// and hold the two to each other; production has no reason to and no way
@@ -372,6 +403,8 @@ impl Compositor {
             scanout: Region::new(),
             plane: Region::new(),
             stats: FrameCounters::new(),
+            presented: None,
+            undelivered: Region::new(),
             #[cfg(test)]
             fast_paths: FastPaths::ALL,
             next_id: 1,
@@ -2687,9 +2720,10 @@ impl Compositor {
 
     /// Whether the next frame would change a pixel the display shows — an
     /// explicitly marked rectangle, a pending re-encode
-    /// ([`set_reveal`](Self::set_reveal)), or a cursor
+    /// ([`set_reveal`](Self::set_reveal)), a cursor
     /// move/show/hide/replacement whose damage has not yet been derived by a
-    /// [`composite`](Self::composite).
+    /// [`composite`](Self::composite), or a frame the display refused, which
+    /// the next [`present`](Self::present) sends again.
     ///
     /// This answers exactly the question the next
     /// [`composite`](Self::composite) does: it is `true` if and only if that
@@ -2703,7 +2737,10 @@ impl Compositor {
     pub fn has_damage(&self) -> bool {
         let screen = self.screen_rect();
         let on_screen = |rect: Rect| !rect.intersection(&screen).is_empty();
-        if self.damage.intersects(screen) || self.scanout.intersects(screen) {
+        if self.damage.intersects(screen)
+            || self.scanout.intersects(screen)
+            || self.undelivered.intersects(screen)
+        {
             return true;
         }
         if !self.cursor_needs_recompose() {
@@ -3108,15 +3145,51 @@ impl Compositor {
             return Ok(());
         }
         self.stats.begin_frame(self.screen_px());
-        let region = self.recompose_damage();
+        let mut region = self.recompose_damage();
+        let mut owed = core::mem::take(&mut self.undelivered);
+        owed.clip(self.screen_rect());
+        for &rect in owed.rects() {
+            region.add(rect);
+        }
         if region.is_empty() {
             return Ok(());
         }
         self.stats.bump_present();
         let mut list = [DamageRect::full(&self.mode); MAX_DAMAGE_RECTS];
-        match damage_list(&region, &self.mode, &mut list) {
+        let sent = match damage_list(&region, &self.mode, &mut list) {
             Some(rects) => display.present_rects(&self.frame, rects),
             None => display.present(&self.frame),
+        };
+        if let Err(err) = sent {
+            self.undelivered = region;
+            return Err(err);
+        }
+        self.presented = Some(Presentation::Composited);
+        Ok(())
+    }
+
+    /// How the frame now on the display was produced, or `None` before any
+    /// frame reached it.
+    ///
+    /// The compositor's own decision, recorded only once the display took the
+    /// frame, so a witness naming it cannot claim a path no frame took.
+    #[must_use]
+    pub const fn presentation(&self) -> Option<Presentation> {
+        self.presented
+    }
+
+    /// Whether the frame now on the display was produced from `id`'s pixels:
+    /// a visible window of a composited or layered frame, or the one window
+    /// a promoted frame is. Nothing is on the display before a frame reached
+    /// it, and a promoted frame carries no window but its own.
+    #[must_use]
+    pub fn on_display(&self, id: WindowId) -> bool {
+        match self.presented {
+            None => false,
+            Some(Presentation::Promoted(cover)) => cover == id,
+            Some(Presentation::Composited | Presentation::Layered) => {
+                self.window(id).is_some_and(Window::is_visible)
+            }
         }
     }
 
@@ -3158,15 +3231,25 @@ impl Compositor {
             let fallback = self.ensure_chrome(|_| true);
             self.encode_layers(&caps, &fallback)
         };
-        if let Some(buffers) = layers {
+        let presentation = if let Some((buffers, presentation)) = layers {
             let layers: Vec<AccelLayer<'_>> = buffers.iter().map(LayerBuf::as_layer).collect();
             self.stats.bump_present();
-            display.present_layers(&layers)
+            display.present_layers(&layers)?;
+            presentation
         } else {
             self.recompose_damage();
             self.stats.bump_present();
-            display.present(&self.frame)
-        }
+            if let Err(err) = display.present(&self.frame) {
+                self.undelivered.add(self.screen_rect());
+                return Err(err);
+            }
+            Presentation::Composited
+        };
+        // Either way the display now holds the whole scene, so nothing an
+        // earlier refused frame left owed is owed any more.
+        self.undelivered.clear();
+        self.presented = Some(presentation);
+        Ok(())
     }
 
     /// Whether any visible window is translucent as a whole.
@@ -3186,17 +3269,21 @@ impl Compositor {
             .any(|window| window.is_visible() && window.opacity() != u8::MAX)
     }
 
-    /// Encode the current scene as hardware layers, or `None` if the
-    /// engine's [`AccelCaps`] cannot serve it, or a screen reveal
-    /// ([`set_reveal`](Self::set_reveal)) is in flight (the caller falls back
-    /// to software either way). `fallback` carries the furniture the cache
-    /// would not retain for this pass.
+    /// Encode the current scene as hardware layers, with how they present
+    /// it, or `None` if the engine's [`AccelCaps`] cannot serve it, or a
+    /// screen reveal ([`set_reveal`](Self::set_reveal)) is in flight (the
+    /// caller falls back to software either way). `fallback` carries the
+    /// furniture the cache would not retain for this pass.
     ///
     /// A [`fullscreen_cover`](Self::fullscreen_cover) is promoted to the
     /// single layer the scene actually is: the background fill and every
     /// window under it are dropped, because none of them can contribute a
     /// pixel. The cursor still rides on top where one is shown.
-    fn encode_layers(&self, caps: &AccelCaps, fallback: &ChromeFallback) -> Option<Vec<LayerBuf>> {
+    fn encode_layers(
+        &self,
+        caps: &AccelCaps,
+        fallback: &ChromeFallback,
+    ) -> Option<(Vec<LayerBuf>, Presentation)> {
         // The engine scans a layer out as the driver was handed it, so
         // nothing it composes passes through the reveal and the screen would
         // appear at full strength while the fade ran.
@@ -3217,7 +3304,8 @@ impl Compositor {
                 |lx, ly| cover.sample_local(lx, ly, None),
             )?);
             self.encode_cursor_layer(&mut layers)?;
-            return admitted(layers, caps);
+            return admitted(layers, caps)
+                .map(|layers| (layers, Presentation::Promoted(cover.id())));
         }
         layers.push(
             self.encode_layer(self.mode.width_px, self.mode.height_px, 0, 0, |_, _| {
@@ -3250,7 +3338,7 @@ impl Compositor {
             )?);
         }
         self.encode_cursor_layer(&mut layers)?;
-        admitted(layers, caps)
+        admitted(layers, caps).map(|layers| (layers, Presentation::Layered))
     }
 
     /// Append the cursor as the top-most layer where one is shown.

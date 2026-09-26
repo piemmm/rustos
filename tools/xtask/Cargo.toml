@@ -373,6 +373,10 @@ tairix-test-datetime-elevate-qemu-aarch64 = { path = "../../tests/integration/da
 # The Settings vertical's shared contract: the bundle the guest attributes the
 # launch to, which a unit test pins to the one the capsule's row starts.
 tairix-test-settings-qemu-aarch64 = { path = "../../tests/integration/settings_qemu_aarch64", version = "=0.0.0" }
+# The WinterSun client vertical's shared contract: the line typed at the shell
+# and the bundles its guest latches, so the script and the PASS gate read one
+# definition.
+tairix-test-wintersun-client-qemu-aarch64 = { path = "../../tests/integration/wintersun_client_qemu_aarch64", version = "=0.0.0" }
 # The desktop-under-pressure vertical's shared contract: the count of windows
 # the pointer script opens, which is also the occurrence the last screendump
 # is gated on, so the script and the guest's PASS gate read one definition.
@@ -422,6 +426,15 @@ tairix-display = { path = "../../lib/display", version = "=0.0.0" }
 # (plans/FIGURE.md FG5). A `userland/games/*` crate: xtask is host build glue
 # (`Tooling`, outside the product layering), so depending on it is permitted.
 tairix-wintersun-figure = { path = "../../userland/games/wintersun/figure", version = "=0.0.0" }
+# The client vertical checks the pixels a guest scanned out against the
+# game's own reference scene, drawn here by the very library the bundle's
+# `Run` draws it with, so the comparison is against the game rather than a
+# copy of it. Taken without its `run` feature: the host needs the library,
+# not the freestanding program.
+tairix-wintersun-app = { path = "../../userland/games/wintersun/app", version = "=0.0.0", default-features = false }
+# The desktop an application sizes its window against: the client vertical
+# opens the game's window at the size its own `Desktop` caps it to.
+tairix-window = { path = "../../lib/window", version = "=0.0.0" }
 
 [target.'cfg(unix)'.dependencies]
 # The pipeline's step timeout must be able to kill a hung step's whole

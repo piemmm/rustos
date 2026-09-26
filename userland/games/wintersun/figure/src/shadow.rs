@@ -19,10 +19,9 @@
 use tairix_util::mathf;
 
 use crate::error::FigureError;
-use crate::frame::{Body, FORESHORTEN};
+use crate::frame::{Body, Heading, FORESHORTEN};
 use tairix_raster::shape::{Placed, Shape};
 use tairix_raster::Color;
-use tairix_wintersun_net::value::Facing;
 
 /// How far a light may rake the shadow out before the stretch is capped.
 ///
@@ -70,14 +69,15 @@ impl Light {
         })
     }
 
-    /// The direction it travels, in the frame of a figure facing `facing`.
+    /// The direction it travels, in the frame of a figure facing along
+    /// `heading`.
     ///
     /// The light is the scene's and the figure turns under it, so a surface
     /// normal can only be judged against it once it is expressed in the
     /// frame that normal is stated in.
     #[must_use]
-    pub fn toward(self, facing: Facing) -> Body {
-        let (east, south) = facing.unit_vector();
+    pub fn toward(self, heading: Heading) -> Body {
+        let Heading { east, south } = heading;
         let flat = mathf::cos(self.elevation);
         let (across, into) = (self.across * flat, self.into * flat);
         Body::new(

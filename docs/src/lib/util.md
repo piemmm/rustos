@@ -94,7 +94,9 @@ and panic-free throughout.
   the `lib/rt` elevation client, the shell's `elevate` builtin, the login
   supervisor's elevation broker, and the masked text field in
   `lib/controls` — erases through this one implementation rather than its
-  own.
+  own. Its volatile stores are why `cargo xtask miri` interprets the crate's
+  suite, bar the two tests that hold `mathf` to the host's libm, whose results
+  the interpreter perturbs on purpose.
 * `defer` — the one way an interactive surface hands a piece of slow work to
   a worker: `JobDesk<Req, Ans>` holds one request waiting, one in flight, and
   one answer landed, and nothing about it blocks, locks, or performs I/O (the
@@ -123,8 +125,14 @@ and panic-free throughout.
   Consumers: `mount`, `passwd`, `useradd`, `usermod`, and `groupadd`.
 * `mathf` — bounded, total `f64` maths for `no_std` geometry (`floor`,
   `sqrt`, `sin`, `atan2`, …) with no external libm, so the glyph
-  rasteriser (`lib/fontface`), the SVG decoder (`lib/svg`), and the desktop
-  companion round and rotate identically. Every function returns a finite
+  rasteriser (`lib/fontface`), the SVG decoder (`lib/svg`), the raster
+  engine, the audio engine, the desktop companion and WinterSun round and
+  rotate identically, and on every target the same bits. The square root and
+  integer rounding are the toolchain's correctly rounded forms — one
+  instruction on `aarch64`, `riscv64` and `wasm32`, the compiler runtime's
+  routine on soft-float `x86_64` — so IEEE 754 fixes their answer; the
+  transcendentals are fdlibm's range reductions and minimax kernels in one
+  fixed order with no fused multiply-add, within an ulp of the true value. Every function returns a finite
   answer for every finite input, so no caller guards against a `NaN`.
 * `retry` — the two retry schedules. `RetryLadder` is for waiting on
   something that has not appeared yet and has no readiness event: a

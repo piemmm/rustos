@@ -21,8 +21,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::engine::{err, Reader};
-use crate::mathf;
 use crate::FontError;
+use tairix_util::mathf;
 
 /// The data a simple glyph needs for IUP: its contour end indices and the
 /// original (pre-delta) coordinate of every outline point.

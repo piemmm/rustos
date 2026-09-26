@@ -503,7 +503,7 @@ mod tests {
         spec.input_typing = vec![crate::KeyTyping {
             ready_marker: "armed".into(),
             ready_occurrences: 2,
-            text: "hunter2\n".into(),
+            keys: crate::TypedKeys::Text("hunter2\n".into()),
         }];
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         assert!(argv.iter().any(|a| a == "virtio-keyboard-device"));

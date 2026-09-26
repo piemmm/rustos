@@ -8,7 +8,7 @@ use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
 
 use crate::error::FigureError;
-use crate::frame::{project, toward_camera, Basis, Body, Rotation};
+use crate::frame::{project, toward_camera, Basis, Body, Heading, Rotation};
 use crate::joint::{Joint, JointId, MAX_JOINTS};
 use crate::mesh::{self, Ring, Stretch, BANDS, EDGES, MAX_RINGS, STRIP};
 use crate::shadow::Light;
@@ -642,8 +642,8 @@ impl<'a> Posture<'a> {
         self.rig
             .resolve(&self.rotations, stance.root, &mut out.frames);
         let seen = Seen {
-            view: toward_camera(stance.facing),
-            light: stance.light.toward(stance.facing),
+            view: toward_camera(stance.heading),
+            light: stance.light.toward(stance.heading),
         };
 
         for part in &self.rig.parts {
@@ -704,7 +704,7 @@ impl<'a> Posture<'a> {
 /// here, so placing has nothing left to check about it.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Stance {
-    facing: Facing,
+    heading: Heading,
     scale: f64,
     at: (f64, f64),
     root: Resolved,
@@ -761,7 +761,7 @@ impl Stance {
             return Err(FigureError::GeometryUnreal);
         }
         Ok(Self {
-            facing,
+            heading: Heading::of(facing),
             scale,
             at,
             root: Resolved::REST,
@@ -957,13 +957,13 @@ impl Placement {
         let mut depth = 0.0;
         for (index, hoop) in hoops.iter().enumerate() {
             let start = mesh::near(*hoop, seen.view);
-            depth += project(stance.facing, hoop.at).depth;
+            depth += project(stance.heading, hoop.at).depth;
             for (edge, row) in slot.edge.iter_mut().enumerate() {
                 // Bounded by `EDGES`, far below the mantissa's own range.
                 #[allow(clippy::cast_precision_loss, reason = "bounded by EDGES")]
                 let step = edge as f64;
                 let (point, _) = hoop.surface(start + STRIP * step);
-                let placed = project(stance.facing, point);
+                let placed = project(stance.heading, point);
                 row[index] = subpixel((
                     stance.at.0 + placed.dx * stance.scale,
                     stance.at.1 + placed.dy * stance.scale,
@@ -985,7 +985,7 @@ impl Placement {
 
         slot.depth = if let Some(point) = surface.sort {
             let local = surface.at.plus(surface.stretch.point(point));
-            project(stance.facing, own.at.plus(own.basis.apply(local))).depth
+            project(stance.heading, own.at.plus(own.basis.apply(local))).depth
         } else {
             // Bounded by `MAX_RINGS`, and a part with no rings returned above.
             #[allow(clippy::cast_precision_loss, reason = "bounded by MAX_RINGS")]

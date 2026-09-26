@@ -2133,6 +2133,7 @@ dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
  "tairix-hash",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2406,6 +2407,7 @@ dependencies = [
  "tairix-fdt",
  "tairix-net",
  "tairix-qemu",
+ "tairix-syshelp",
 ]
 
 [[package]]
@@ -6622,6 +6624,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-wintersun-client-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-ipc",
+ "tairix-log",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-test-world-determinism-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -6975,6 +6992,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-hash",
+ "tairix-help",
  "tairix-input",
  "tairix-log",
  "tairix-parallel",
@@ -7173,6 +7191,7 @@ dependencies = [
  "tairix-test-svgtext",
  "tairix-test-tcpecho",
  "tairix-test-tcpserve",
+ "tairix-test-wintersun-client-qemu-aarch64",
  "tairix-theme",
  "tairix-users",
  "tairix-util",
@@ -7180,6 +7199,8 @@ dependencies = [
  "tairix-view",
  "tairix-virtio-input",
  "tairix-wallpaper",
+ "tairix-window",
+ "tairix-wintersun-app",
  "tairix-wintersun-figure",
  "tairix-wm",
 ]

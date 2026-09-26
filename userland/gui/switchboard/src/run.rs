@@ -1293,7 +1293,7 @@ mod program {
         {
             return Err(fail(EXIT_NO_COMMANDS, "command mailbox bind refused"));
         }
-        let events = tairix_window::event_endpoint_for(pid);
+        let events = tairix_abi::window_ipc::event_endpoint_for(pid);
         if tairix_abi::ipc::is_reserved_endpoint(events)
             || tairix_rt::port_bind(
                 events,

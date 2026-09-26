@@ -59,6 +59,28 @@ use crate::{Errno, ProcId};
 /// fabricated input events, so an unentitled bind fails closed.
 pub const WINDOW_ENDPOINT: u64 = 0x5749_1001;
 
+/// High tag of an application's event-mailbox endpoint id
+/// ([`event_endpoint_for`]).
+const EVENT_ENDPOINT_TAG: u64 = 0xE117_0000_0000_0000;
+
+/// The event-mailbox endpoint id an application binds for its window
+/// events: its kernel task id under a fixed high tag, so every instance
+/// binds a distinct, collision-free, non-reserved id and no two can disagree
+/// about the id space. A pid is bounded to [`crate::PID_MAX`] precisely so it
+/// fits beneath the tag. The mailbox is owner-only to receive and every
+/// message carries its sender's kernel-attested origin, so the id needs no
+/// secrecy.
+#[must_use]
+pub const fn event_endpoint_for(pid: u64) -> u64 {
+    EVENT_ENDPOINT_TAG | (pid & crate::PID_MAX)
+}
+
+/// Whether `endpoint` is an id [`event_endpoint_for`] derives.
+#[must_use]
+pub const fn is_event_endpoint(endpoint: u64) -> bool {
+    endpoint & !crate::PID_MAX == EVENT_ENDPOINT_TAG
+}
+
 /// Magic number identifying a window-channel request (`"WIN1"`
 /// little-endian).
 pub const WINDOW_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"WIN1");
@@ -5851,6 +5873,30 @@ mod tests {
             offset_x: -12,
             offset_y: 24,
         }
+    }
+
+    /// Distinct tasks get distinct mailbox ids that embed the pid recoverably
+    /// and never land on a reserved rendezvous, right up to the widest pid
+    /// the kernel draws; only a derived id reads as one.
+    #[test]
+    fn event_endpoint_ids_are_distinct_per_task_and_never_reserved() {
+        use super::{event_endpoint_for, is_event_endpoint};
+
+        assert_ne!(event_endpoint_for(1), event_endpoint_for(2));
+        for pid in [0u64, 1, 7, 0x0000_FFFF_FFFF, crate::PID_MAX] {
+            let endpoint = event_endpoint_for(pid);
+            assert!(!crate::ipc::is_reserved_endpoint(endpoint));
+            assert_eq!(endpoint & crate::PID_MAX, pid);
+            assert!(is_event_endpoint(endpoint));
+        }
+        assert!(!is_event_endpoint(WINDOW_ENDPOINT));
+        assert!(
+            !is_event_endpoint(event_endpoint_for(7) | (1 << 40)),
+            "a bit between the pid and the tag"
+        );
+        assert!(!is_event_endpoint(
+            crate::switchboard_ipc::command_endpoint_for(7)
+        ));
     }
 
     #[test]

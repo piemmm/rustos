@@ -870,10 +870,12 @@ where
     ///
     /// A continue delivered to a child that is not actually stopped is a
     /// harmless no-op — matching the long-standing Unix behaviour where
-    /// continuing a running process succeeds without effect — so an
-    /// [`SchedError::InvalidState`] from `unpark` is folded to `Ok`. A child
-    /// the scheduler no longer knows (it exited between authorisation and
-    /// delivery) fails closed with [`Errno::NotFound`].
+    /// continuing a running process succeeds without effect — and `unpark`
+    /// answers it `Ok`. An [`SchedError::InvalidState`], a thread that has
+    /// exited but is not yet reaped, is folded to `Ok` too, as a continue to
+    /// a zombie is. A child the scheduler no longer knows (it was reaped
+    /// between authorisation and delivery) fails closed with
+    /// [`Errno::NotFound`].
     fn resume(&self, child: ProcessId) -> Result<(), Errno> {
         let threads = self.threads_of(child);
         // Lift the stop overlay *before* the unpark, so the dispatch that
@@ -1000,8 +1002,8 @@ where
     fn stop_claimed(&self, claim: ClaimedKill) -> bool {
         match claim.site {
             // Every in-kernel park loop re-tests the gate after a wake and
-            // unwinds; `InvalidState` is a thread already runnable, which
-            // reaches its boundary by itself.
+            // unwinds; `InvalidState` is a thread that has already exited,
+            // with no boundary left to reach.
             KillSite::Boundary => matches!(
                 self.scheduler.unpark(claim.thread),
                 Ok(()) | Err(SchedError::InvalidState)

@@ -143,6 +143,35 @@ impl DamageRect {
         }
     }
 
+    /// The smallest rectangle covering both `self` and `other`; an empty one
+    /// covers nothing and leaves the other as it is.
+    ///
+    /// The edges are summed in `u64` and narrowed back, so an edge past
+    /// `u32::MAX` saturates rather than wrapping the union small.
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        let empty = |rect: &Self| rect.width_px == 0 || rect.height_px == 0;
+        if empty(&self) {
+            return other;
+        }
+        if empty(&other) {
+            return self;
+        }
+        let far = |start: u32, extent: u32| {
+            u32::try_from(u64::from(start) + u64::from(extent)).unwrap_or(u32::MAX)
+        };
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = far(self.x, self.width_px).max(far(other.x, other.width_px));
+        let bottom = far(self.y, self.height_px).max(far(other.y, other.height_px));
+        Self {
+            x,
+            y,
+            width_px: right - x,
+            height_px: bottom - y,
+        }
+    }
+
     /// Whether this rectangle covers the whole of `mode`'s surface.
     #[must_use]
     pub const fn covers(&self, mode: &DisplayMode) -> bool {
@@ -486,6 +515,35 @@ mod tests {
     fn format_discriminants_are_frozen() {
         assert_eq!(DisplayFormat::Rgba8888.as_u8(), 1);
         assert_eq!(DisplayFormat::Bgra8888.as_u8(), 2);
+    }
+
+    const fn rect(x: u32, y: u32, width_px: u32, height_px: u32) -> DamageRect {
+        DamageRect {
+            x,
+            y,
+            width_px,
+            height_px,
+        }
+    }
+
+    #[test]
+    fn a_union_is_the_box_around_both_and_ignores_an_empty_one() {
+        assert_eq!(rect(2, 3, 4, 5).union(rect(10, 1, 2, 2)), rect(2, 1, 10, 7));
+        assert_eq!(rect(2, 3, 4, 5).union(rect(3, 4, 1, 1)), rect(2, 3, 4, 5));
+        assert_eq!(rect(2, 3, 4, 5).union(rect(9, 9, 0, 4)), rect(2, 3, 4, 5));
+        assert_eq!(rect(9, 9, 4, 0).union(rect(2, 3, 4, 5)), rect(2, 3, 4, 5));
+    }
+
+    /// An edge past the coordinate space saturates the union rather than
+    /// wrapping it into a small box that would miss the pixels it names.
+    #[test]
+    fn a_union_past_the_coordinate_space_saturates() {
+        let far = rect(u32::MAX - 1, 0, 4, 1);
+        assert_eq!(
+            rect(0, 0, 1, 1).union(far),
+            rect(0, 0, u32::MAX, 1),
+            "the far edge is clamped, not wrapped"
+        );
     }
 
     struct MockDisplay {

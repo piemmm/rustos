@@ -113,7 +113,7 @@ const NET_NOTIFY_ENDPOINT_TAG: u64 = 0x4E4E_0000_0000_0000;
 ///
 /// It packs the stack's own kernel task id `pid` and the per-interface slot
 /// `index` under a fixed high tag,
-/// mirroring the window client's `event_endpoint_for`: a distinct,
+/// mirroring [`crate::window_ipc::event_endpoint_for`]: a distinct,
 /// collision-free, **non-reserved** id, so the stack `port_bind`s it
 /// without [`CapabilityId::IPC_BIND_PRIVILEGED`](crate::CapabilityId::IPC_BIND_PRIVILEGED)
 /// and two interfaces (or two stacks) can never disagree about the id

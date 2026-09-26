@@ -8,12 +8,16 @@
 //! in for physical RAM so the bytes a test writes "as the device"
 //! alias the bytes the pool hands the driver.
 
+extern crate std;
+
 use super::*;
 use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use crate::frame::{FrameAllocator, PAGE_SIZE};
 use crate::phys::SimPhysMap;
+use crate::retire::{ActiveCpus, RecordedRemote, SpaceTlb};
 use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
+use std::vec::Vec;
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as HalAddressSpace, MapError, PageFlags};
 use tairix_arch_api::tlb::TlbShootdown;
 
@@ -51,12 +55,27 @@ fn pool_with_capacity<'a>(
     sim: &'a SimPhysMap,
     capacity_pages: usize,
 ) -> DmaPool<'a, HostPageTable> {
-    DmaPool::new(
+    pool_over(
         AddressSpace::new(HostPageTable::new()),
+        frames,
+        sim,
+        capacity_pages,
+    )
+}
+
+/// Construct a pool over `space` with `capacity_pages` virtual slots.
+fn pool_over<'a>(
+    space: AddressSpace<HostPageTable>,
+    frames: &'a FrameAllocator,
+    phys: &'a dyn PhysMap,
+    capacity_pages: usize,
+) -> DmaPool<'a, HostPageTable> {
+    DmaPool::new(
+        space,
         VirtAddr::new(0x1000_0000),
         capacity_pages,
         frames,
-        sim,
+        phys,
     )
     .expect("pool constructs")
 }
@@ -66,6 +85,9 @@ struct RecordingPhysMap<'a> {
     calls: Cell<usize>,
     last_phys: Cell<u64>,
     last_len: Cell<usize>,
+    /// Whether the map has stopped reaching RAM, as a platform whose direct
+    /// map misses a region does.
+    refusing: Cell<bool>,
 }
 
 impl<'a> RecordingPhysMap<'a> {
@@ -75,6 +97,7 @@ impl<'a> RecordingPhysMap<'a> {
             calls: Cell::new(0),
             last_phys: Cell::new(0),
             last_len: Cell::new(0),
+            refusing: Cell::new(false),
         }
     }
 
@@ -93,6 +116,9 @@ impl<'a> RecordingPhysMap<'a> {
 
 impl PhysMap for RecordingPhysMap<'_> {
     fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        if self.refusing.get() {
+            return None;
+        }
         self.inner.translate(phys, len)
     }
 
@@ -722,4 +748,114 @@ fn a_block_spans_its_order_in_pages() {
     };
     assert_eq!(block.len(), 8 * PAGE_SIZE);
     assert!(!block.is_empty());
+}
+
+std::thread_local! {
+    static REMOTE_RUNS: RefCell<Vec<(u64, usize)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn record_remote(base: u64, pages: usize) {
+    REMOTE_RUNS.with(|runs| runs.borrow_mut().push((base, pages)));
+}
+
+fn remote_runs() -> Vec<(u64, usize)> {
+    REMOTE_RUNS.with(|runs| core::mem::take(&mut *runs.borrow_mut()))
+}
+
+/// The other CPUs' reach.
+static REMOTE: RecordedRemote = RecordedRemote(record_remote);
+
+/// A space live on another CPU too, so a release must reach it.
+fn shared_space() -> AddressSpace<HostPageTable> {
+    let cpus = ActiveCpus::new(2).expect("one word allocates");
+    cpus.enter(1);
+    let mut space = AddressSpace::new(HostPageTable::new());
+    space.attach_tlb(SpaceTlb::new(cpus, Some(&REMOTE)));
+    space
+}
+
+/// Every run a release retired, in order.
+#[derive(Default)]
+struct Retired(Vec<(u64, u64)>);
+
+impl Retire for Retired {
+    fn retire(&mut self, base: u64, pages: u64) {
+        self.0.push((base, pages));
+    }
+
+    fn restore(&mut self, _page: Page, _frame: Frame, _flags: MapFlags) {
+        unreachable!("a free never undoes its unmap");
+    }
+}
+
+/// A free that finds one of its pages already cleared still reaches every
+/// other view of the range and gives the block back, where stopping at that
+/// page left the frames and slots held by nothing.
+#[test]
+fn a_free_that_finds_a_page_already_cleared_still_returns_the_block() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let initial_free = frames.free_frames();
+    let mut pool = pool_over(shared_space(), &frames, &sim, 16);
+    let buf = pool.alloc(4 * PAGE_SIZE).expect("alloc 4 pages");
+    let base = buf.virt().as_u64();
+    let second = Page::from_addr(VirtAddr::new(base + PAGE_SIZE as u64)).expect("aligned");
+    pool.address_space
+        .unmap(second)
+        .expect("the page was mapped");
+    remote_runs();
+
+    let mut retired = Retired::default();
+    let freed = pool.window.free_at(
+        &mut pool.address_space,
+        pool.frames,
+        pool.phys,
+        buf.virt(),
+        &mut retired,
+    );
+
+    assert_eq!(freed, Ok(4 * PAGE_SIZE));
+    assert_eq!(remote_runs(), [(base, 4)], "every other CPU was reached");
+    assert_eq!(retired.0, [(base, 4)], "every snapshot was retired");
+    assert_eq!(pool.live(), 0);
+    assert_eq!(pool.address_space.mapped_pages(), 0);
+    assert_eq!(frames.free_frames(), initial_free, "the block went back");
+    let again = pool.alloc(4 * PAGE_SIZE).expect("its slots are free again");
+    assert_eq!(again.virt().as_u64(), base);
+}
+
+/// A block that cannot be scrubbed is not handed back to the allocator: its
+/// record stays live for teardown to surrender, and its range is still shot
+/// down and retired first.
+#[test]
+fn a_block_that_cannot_be_scrubbed_stays_live_for_teardown() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let phys = RecordingPhysMap::new(&sim);
+    let mut pool = pool_over(shared_space(), &frames, &phys, 16);
+    let buf = pool.alloc(2 * PAGE_SIZE).expect("alloc 2 pages");
+    let base = buf.virt().as_u64();
+    let held = frames.free_frames();
+    phys.refusing.set(true);
+    remote_runs();
+
+    let mut retired = Retired::default();
+    let freed = pool.window.free_at(
+        &mut pool.address_space,
+        pool.frames,
+        pool.phys,
+        buf.virt(),
+        &mut retired,
+    );
+
+    assert_eq!(freed, Err(DmaError::DirectMap));
+    assert_eq!(remote_runs(), [(base, 2)]);
+    assert_eq!(retired.0, [(base, 2)]);
+    assert_eq!(pool.address_space.mapped_pages(), 0, "its pages are gone");
+    assert_eq!(pool.live(), 1, "the block is still the pool's");
+    assert_eq!(
+        frames.free_frames(),
+        held,
+        "none of it reached the allocator"
+    );
 }

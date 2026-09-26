@@ -47,7 +47,7 @@ use tairix_kernel::{
     handle_panic_via_kernel_core, BinArch, FreeListAllocator, DISPATCH_SLOT, SERIAL_SINK,
 };
 use tairix_kernel_core::{
-    AddressSpaceRegistry, AuditEvent, BootReserve, EmbeddedProgram, InitSpawnCtx,
+    AddressSpaceRegistry, AuditEvent, BootReserve, EmbeddedProgram, InitSpawnCtx, KernelArch,
     KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
     ProgramRegistry, RandomReserve, SchedWaitQueueArch, NULL_DMA_ALLOC_FACILITY,
     NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
@@ -480,6 +480,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
         wait_producer,
         sys.irq_table,
         &NULL_SHARED_MEM_FACILITY,
+        KernelArch::cross_cpu_tlb_shootdown(sys.arch),
     );
     let Ok(parent_pid) = init_ctx.spawn_driver_process(
         "/bin/wf-parent",

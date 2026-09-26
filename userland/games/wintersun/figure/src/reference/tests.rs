@@ -13,7 +13,7 @@ use super::{
     FACINGS, FIGURES, MARGIN, PHASES, SAMPLES, SIDES, STANDING,
 };
 use crate::breath::Breath;
-use crate::frame::project;
+use crate::frame::{project, Heading};
 use crate::humanoid;
 use crate::identity::{
     EarForm, EyeShape, FaceShape, Features, HairStyle, HornForm, Identity, Setting, TailForm,
@@ -381,11 +381,11 @@ fn every_build_stays_within_the_allowances() {
                 for part in reference.rig().parts() {
                     for hoop in reference.surfaces(part, &frames).expect("it carries") {
                         for turn in 0u16..16 {
-                            let facing = Facing(turn * 0x1000);
-                            let centre = project(facing, hoop.at).dy;
+                            let heading = Heading::of(Facing(turn * 0x1000));
+                            let centre = project(heading, hoop.at).dy;
                             let spread = mathf::hypot(
-                                project(facing, hoop.wide).dy,
-                                project(facing, hoop.deep).dy,
+                                project(heading, hoop.wide).dy,
+                                project(heading, hoop.deep).dy,
                             );
                             let slot = &mut reached[kind.index()];
                             slot.0 = mathf::fmax(slot.0, (spread - centre) / reach);

@@ -792,9 +792,8 @@ Every fallible operation in this crate returns
 ## 7. Unsafe & pointer arithmetic discipline
 
 Per `AGENTS.md` §4, raw pointer arithmetic is confined to the
-`ptr` module's bounds-checked helpers (`offset_within`,
-`end_within`, `slice_within`). Every other module routes pointer
-math through them. Every `unsafe` block carries a `// SAFETY:`
+crate-private `ptr` module's bounds-checked helpers (`offset_within`,
+`slice_within`). Every other module routes pointer math through them. Every `unsafe` block carries a `// SAFETY:`
 rationale per `AGENTS.md` §2.10, encapsulated behind a safe public
 API; no `unsafe` leaks across crate boundaries.
 

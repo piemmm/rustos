@@ -33,7 +33,7 @@
 //! # Unsafe and pointer arithmetic
 //!
 //! Every `unsafe` block carries a `// SAFETY:` rationale. Raw pointer arithmetic only happens inside the bounds-checked
-//! helpers in [`ptr`]; no other module is allowed to call
+//! helpers of the crate-private `ptr` module; no other module is allowed to call
 //! `<*mut _>::add` / `<*mut _>::offset` directly.
 //!
 //! # Documentation
@@ -65,7 +65,7 @@ pub mod mmio;
 pub mod pagetables;
 pub mod phys;
 pub mod pressure;
-pub mod ptr;
+mod ptr;
 pub mod ramtest;
 pub mod ramzip;
 pub mod retire;
@@ -129,5 +129,7 @@ pub use vmm::{
 
 #[cfg(any(test, feature = "host-tests"))]
 pub use phys::SimPhysMap;
+#[cfg(any(test, feature = "host-tests"))]
+pub use retire::RecordedRemote;
 #[cfg(any(test, feature = "host-tests"))]
 pub use vmm::HostPageTable;

@@ -47,7 +47,8 @@ code.
 * `argv` — resolving a value-taking option's attached or following value.
   Consumers: `mount`, `passwd`, `useradd`, `usermod`, and `groupadd`.
 * `mathf` — bounded, total `f64` maths for `no_std` geometry, with no
-  external libm. Consumers: `lib/fontface`, `lib/svg`, `cinder`.
+  external libm and the same bits on every target. Consumers:
+  `lib/fontface`, `lib/svg`, `lib/raster`, `lib/audio`, `cinder`, WinterSun.
 * `retry` — `RetryLadder`, a bounded doubling one-shot schedule for
   waiting on something with no readiness event, and `RestartPacer`, a
   capped doubling delay between restarts of something that keeps dying,

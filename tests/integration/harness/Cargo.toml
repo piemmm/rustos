@@ -22,7 +22,7 @@ driver-image = ["dep:tairix-crypto"]
 # `AppInfo.toml` manifest discovery (`src/app_image.rs`): Ed25519 signing
 # plus the SHA-256 the canonical bundle content hash uses, both from
 # `lib/crypto`. Opt-in for the same reason as `driver-image`.
-app-image = ["dep:tairix-crypto"]
+app-image = ["dep:tairix-crypto", "dep:tairix-syshelp"]
 
 [dependencies]
 # The single source of truth for the `rxe` load-image wire format, reused so
@@ -42,6 +42,11 @@ tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0", optional = t
 # The RFC 6335 service-type grammar a manifest's `browses` entries are held
 # to, from the one crate that defines it.
 tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
+# The one walk of where program crates live, shared with the payload
+# discovery that embeds each bundle's `Help/` and `Resources/`.
+tairix-syshelp = { path = "../../../tools/syshelp", version = "=0.0.0", features = [
+    "walk",
+], optional = true }
 
 [dev-dependencies]
 # Build a real flattened device tree (the same fixture the `lib/fdt` unit

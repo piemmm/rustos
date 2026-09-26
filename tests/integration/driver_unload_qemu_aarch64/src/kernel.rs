@@ -55,7 +55,7 @@ use tairix_kernel::aarch64::arch_wrapper::Aarch64BinArch;
 use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
 use tairix_kernel::driver_spawn_loader::{InitCtxDriverProcessSpawn, SpawnDriverLoader};
 use tairix_kernel_core::{
-    AddressSpaceRegistry, InitSpawnCtx, KernelInitSpawner, NULL_PROCESS_WAIT,
+    AddressSpaceRegistry, InitSpawnCtx, KernelArch, KernelInitSpawner, NULL_PROCESS_WAIT,
     NULL_SHARED_MEM_FACILITY,
 };
 use tairix_kernel_irq::IrqTable;
@@ -406,6 +406,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         &NULL_PROCESS_WAIT,
         sys.irq_table,
         &NULL_SHARED_MEM_FACILITY,
+        KernelArch::cross_cpu_tlb_shootdown(sys.arch),
     );
     let spawn = InitCtxDriverProcessSpawn::new(&init_ctx);
     let args: [&[u8]; 1] = [b"drvstub"];

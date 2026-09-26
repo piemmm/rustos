@@ -40,24 +40,10 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-/// Source roots under which command-app bundles live. A bundle's help is
-/// discovered from `<root>/<crate>/Help/`; the planted bundle is
-/// `<name>.app`, where `<name>` is the crate's `AppInfo.toml` manifest
-/// name — the same source of truth the app-bundle composer plants under —
-/// so a crate whose directory is not its command word (the desktop
-/// session at `userland/gui/session`, bundle `desktop.app`) still lands
-/// under its real bundle name. Extending this list is a rare structural
-/// change, not a per-bundle edit.
-///
-/// Emitted into the generated table as `APP_ROOTS` so the crate's own
-/// tests walk the same roots this discovery did. A second copy in a test
-/// silently stops testing whatever a new root adds.
-const APP_ROOTS: &[&str] = &[
-    "userland/apps",
-    "userland/games/wintersun",
-    "userland/gui",
-    "userland/shell",
-];
+// The one walk the bundle composer shares, so a bundle's payload and the
+// bundle itself are found by one rule.
+#[path = "src/bundles.rs"]
+mod bundles;
 
 /// One single-tree desktop graphics asset family: a source directory under
 /// the workspace root, the `/System/Graphics` subdirectory its files are
@@ -152,43 +138,41 @@ fn main() {
         .expect("crate lives at <workspace>/tools/syshelp")
         .to_path_buf();
 
+    // A program crate added anywhere the walk looks reruns the build.
+    let programs = bundles::program_crates(&workspace.join("userland"), |dir| {
+        println!("cargo:rerun-if-changed={}", dir.display());
+    })
+    .expect("the userland tree is readable");
+
     let mut rows = String::from("[\n");
-    for root_rel in APP_ROOTS {
-        let root = workspace.join(root_rel);
-        println!("cargo:rerun-if-changed={}", root.display());
-        if !root.is_dir() {
+    for crate_dir in &programs {
+        let help = crate_dir.join("Help");
+        if !help.is_dir() {
             continue;
         }
-        for app in sorted_children(&root) {
-            let crate_dir = root.join(&app);
-            let help = crate_dir.join("Help");
-            if !help.is_dir() {
+        println!("cargo:rerun-if-changed={}", help.display());
+        let (bundle, store) = bundle_identity(crate_dir);
+        for locale in sorted_children(&help) {
+            let locale_dir = help.join(&locale);
+            if !locale_dir.is_dir() {
                 continue;
             }
-            println!("cargo:rerun-if-changed={}", help.display());
-            let (bundle, store) = bundle_identity(&crate_dir);
-            for locale in sorted_children(&help) {
-                let locale_dir = help.join(&locale);
-                if !locale_dir.is_dir() {
+            println!("cargo:rerun-if-changed={}", locale_dir.display());
+            for file in sorted_children(&locale_dir) {
+                let path = locale_dir.join(&file);
+                let is_md = path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+                if !path.is_file() || !is_md {
                     continue;
                 }
-                println!("cargo:rerun-if-changed={}", locale_dir.display());
-                for file in sorted_children(&locale_dir) {
-                    let path = locale_dir.join(&file);
-                    let is_md = path
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
-                    if !path.is_file() || !is_md {
-                        continue;
-                    }
-                    println!("cargo:rerun-if-changed={}", path.display());
-                    let abs = path.to_str().expect("help path is valid UTF-8");
-                    writeln!(
-                        rows,
-                        "    HelpFile {{ store: {store:?}, bundle: {bundle:?}, locale: {locale:?}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
-                    )
-                    .expect("write to String");
-                }
+                println!("cargo:rerun-if-changed={}", path.display());
+                let abs = path.to_str().expect("help path is valid UTF-8");
+                writeln!(
+                    rows,
+                    "    HelpFile {{ store: {store:?}, bundle: {bundle:?}, locale: {locale:?}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
+                )
+                .expect("write to String");
             }
         }
     }
@@ -200,32 +184,25 @@ fn main() {
         .expect("write generated help table");
 
     let mut resource_rows = String::from("[\n");
-    for root_rel in APP_ROOTS {
-        let root = workspace.join(root_rel);
-        if !root.is_dir() {
+    for crate_dir in &programs {
+        let resources = crate_dir.join("Resources");
+        if !resources.is_dir() {
             continue;
         }
-        for app in sorted_children(&root) {
-            let crate_dir = root.join(&app);
-            let resources = crate_dir.join("Resources");
-            if !resources.is_dir() {
+        println!("cargo:rerun-if-changed={}", resources.display());
+        let (bundle, store) = bundle_identity(crate_dir);
+        for file in sorted_children(&resources) {
+            let path = resources.join(&file);
+            if !path.is_file() {
                 continue;
             }
-            println!("cargo:rerun-if-changed={}", resources.display());
-            let (bundle, store) = bundle_identity(&crate_dir);
-            for file in sorted_children(&resources) {
-                let path = resources.join(&file);
-                if !path.is_file() {
-                    continue;
-                }
-                println!("cargo:rerun-if-changed={}", path.display());
-                let abs = path.to_str().expect("resource path is valid UTF-8");
-                writeln!(
-                    resource_rows,
-                    "    ResourceFile {{ store: {store:?}, bundle: {bundle:?}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
-                )
-                .expect("write to String");
-            }
+            println!("cargo:rerun-if-changed={}", path.display());
+            let abs = path.to_str().expect("resource path is valid UTF-8");
+            writeln!(
+                resource_rows,
+                "    ResourceFile {{ store: {store:?}, bundle: {bundle:?}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
+            )
+            .expect("write to String");
         }
     }
     resource_rows.push(']');
@@ -235,15 +212,19 @@ fn main() {
         .and_then(|mut f| f.write_all(resource_rows.as_bytes()))
         .expect("write generated resource table");
 
-    let mut roots = String::from("[\n");
-    for root_rel in APP_ROOTS {
-        writeln!(roots, "    {root_rel:?},").expect("write to String");
+    let mut crates = String::from("[\n");
+    for crate_dir in &programs {
+        let relative = crate_dir
+            .strip_prefix(&workspace)
+            .expect("the walk stays inside the workspace");
+        let relative = relative.to_str().expect("program path is valid UTF-8");
+        writeln!(crates, "    {relative:?},").expect("write to String");
     }
-    roots.push(']');
-    let dest = PathBuf::from(env("OUT_DIR")).join("app_roots.rs");
+    crates.push(']');
+    let dest = PathBuf::from(env("OUT_DIR")).join("program_crates.rs");
     fs::File::create(&dest)
-        .and_then(|mut f| f.write_all(roots.as_bytes()))
-        .expect("write generated app-root table");
+        .and_then(|mut f| f.write_all(crates.as_bytes()))
+        .expect("write generated program-crate table");
 
     emit_graphics_table(&workspace);
 
@@ -393,25 +374,23 @@ fn family_directories(family: &GraphicsFamily, assets: &Path) -> Vec<(Option<Str
 /// tree: fail the build loudly rather than plant the payload under a
 /// guessed bundle.
 fn bundle_identity(crate_dir: &Path) -> (String, &'static str) {
-    let manifest = crate_dir.join("AppInfo.toml");
+    let manifest = crate_dir.join(bundles::MANIFEST_SOURCE);
     let text = fs::read_to_string(&manifest)
         .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
     let value_of = |key: &str| {
-        text.lines()
-            .map(str::trim)
-            .filter(|line| !line.starts_with('#'))
-            .find_map(|line| {
-                let value = line.strip_prefix(key)?.trim_start().strip_prefix('=')?;
-                value.trim().strip_prefix('"')?.strip_suffix('"')
-            })
-            .unwrap_or_else(|| panic!("{}: no `{key} = \"...\"` key", manifest.display()))
+        bundles::string_entry(&text, key).unwrap_or_else(|| {
+            panic!(
+                "{}: no top-level `{key} = \"...\"` entry",
+                manifest.display()
+            )
+        })
     };
     let name = value_of("name");
     let kind = value_of("kind");
     let store = tairix_abi::ProgramKind::from_key(kind)
         .unwrap_or_else(|| panic!("{}: unknown kind `{kind}`", manifest.display()))
         .store_dir();
-    (format!("{name}.app"), store)
+    (format!("{name}{}", tairix_abi::BUNDLE_SUFFIX), store)
 }
 
 /// The names of a directory's entries, sorted, so the generated table (and

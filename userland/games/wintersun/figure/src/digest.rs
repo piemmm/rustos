@@ -43,7 +43,7 @@ use tairix_wintersun_net::value::Facing;
 
 use crate::clip::Clip;
 use crate::error::FigureError;
-use crate::frame::project;
+use crate::frame::{project, Heading};
 use crate::gait::Gait;
 use crate::humanoid;
 use crate::mesh::Hoop;
@@ -69,7 +69,7 @@ use crate::species::Species;
 /// change that moves it changes every figure anybody will ever see, and the
 /// new value is written down deliberately rather than pasted out of a
 /// failure.
-pub const REFERENCE_DIGEST: u64 = 0x9A61_8EF9_E425_DD95;
+pub const REFERENCE_DIGEST: u64 = 0x695D_313A_73ED_2E37;
 
 /// The stream the reference grid is folded into.
 pub const REFERENCE_SEED: u64 = 0x5749_4E54_4552_4647;
@@ -176,9 +176,10 @@ pub fn reference() -> Result<u64, FigureError> {
             rigging
                 .posture(&planted.pose())?
                 .resolve(planted.root(), &mut frames);
+            let heading = Heading::of(cell.facing);
             for part in figure.rig().parts() {
                 for hoop in figure.surfaces(part, &frames)? {
-                    fold_hoop(&mut hasher, cell.facing, hoop);
+                    fold_hoop(&mut hasher, heading, hoop);
                 }
             }
             fold_usize(&mut hasher, placement.len());
@@ -347,13 +348,13 @@ fn fold_planted(hasher: &mut FastHash, planted: &Planted) {
 }
 
 /// One carried ring, and where it projects to, at full precision.
-fn fold_hoop(hasher: &mut FastHash, facing: Facing, hoop: Hoop) {
+fn fold_hoop(hasher: &mut FastHash, heading: Heading, hoop: Hoop) {
     for axis in [hoop.at, hoop.wide, hoop.deep] {
         fold_real(hasher, axis.forward);
         fold_real(hasher, axis.side);
         fold_real(hasher, axis.up);
     }
-    let placed = project(facing, hoop.at);
+    let placed = project(heading, hoop.at);
     fold_real(hasher, placed.dx);
     fold_real(hasher, placed.dy);
     fold_real(hasher, placed.depth);

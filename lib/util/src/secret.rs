@@ -162,16 +162,19 @@ mod tests {
     fn dropping_a_wiped_buffer_erases_it() {
         let mut buf = core::mem::ManuallyDrop::new(Wiped::<16>::new());
         buf[..6].copy_from_slice(b"secret");
-        let bytes = core::ptr::addr_of!(buf.0);
+        let slot = core::ptr::addr_of_mut!(buf);
 
         // SAFETY: `buf` is a `ManuallyDrop`, so its destructor has not run
         // and its storage belongs to this frame for the whole test. Running
         // that destructor by hand leaves the storage in place — the buffer
         // owns nothing but plain bytes — so reading it back afterwards
-        // observes exactly what the destructor wrote into it.
+        // observes exactly what the destructor wrote into it. The drop and
+        // the read are both reborrowed from `slot`, so the drop's exclusive
+        // borrow cannot invalidate the pointer the read goes through.
         unsafe {
-            core::mem::ManuallyDrop::drop(&mut buf);
-            assert_eq!(*bytes, [0u8; 16], "the destructor erased the secret");
+            core::mem::ManuallyDrop::drop(&mut *slot);
+            let erased = &*slot;
+            assert_eq!(erased.0, [0u8; 16], "the destructor erased the secret");
         }
     }
 }

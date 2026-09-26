@@ -22,7 +22,7 @@
 //!
 //! The translation is the only place a physical address becomes a
 //! pointer; callers route every dereference through the returned
-//! [`NonNull`] and the bounds-checked helpers in [`crate::ptr`]
+//! [`NonNull`] and the crate's bounds-checked pointer helpers
 //! (no raw pointer arithmetic without a
 //! bounds-checked wrapper).
 

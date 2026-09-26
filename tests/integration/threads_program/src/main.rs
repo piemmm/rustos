@@ -471,17 +471,20 @@ mod program {
 
     /// The `parallel` role: prove the fork-join pool on real threads.
     fn parallel() -> i32 {
-        let (Some(workers), Some(rounds)) = (
-            tairix_rt::arg(2).and_then(parse_u64),
-            tairix_rt::arg(3).and_then(parse_u64),
-        ) else {
-            return FAIL_ARGS;
-        };
         /// Slots the pass covers. Large enough that a piece is real work, small
         /// enough to stay well inside the fixture's frame budget.
         const SLOTS: usize = 2048;
 
-        let pool = tairix_parallel::Pool::with_workers(workers as usize);
+        let (Some(workers), Some(rounds)) = (
+            tairix_rt::arg(2)
+                .and_then(parse_u64)
+                .and_then(|workers| usize::try_from(workers).ok()),
+            tairix_rt::arg(3).and_then(parse_u64),
+        ) else {
+            return FAIL_ARGS;
+        };
+
+        let pool = tairix_parallel::Pool::with_workers(workers);
         if pool.worker_count() == 0 {
             return FAIL_POOL;
         }
@@ -494,7 +497,7 @@ mod program {
         // thread and the dispatch does not wait for help that never comes.
         let mut first = alloc::vec![0u64; 64];
         stamp(&mut first, &pool, pieces);
-        if first.iter().any(|slot| *slot == 0) {
+        if first.contains(&0) {
             return FAIL_PARALLEL;
         }
 
@@ -526,7 +529,7 @@ mod program {
             tairix_parallel::for_each(&pool, &mut split, &|piece| {
                 let mut inner = alloc::vec![0u64; 8];
                 stamp(&mut inner, &pool, 4);
-                if inner.iter().any(|slot| *slot == 0) {
+                if inner.contains(&0) {
                     nested_ok.store(false, core::sync::atomic::Ordering::Relaxed);
                 }
                 for slot in piece.slots.iter_mut() {

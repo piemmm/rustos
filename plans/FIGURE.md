@@ -213,6 +213,11 @@ exactly, everywhere.
   points against the billboard's 468, so it is not the dearer design.
 - **Still no allocator.** A part holds its rings in a fixed array and a
   placement holds its strips in another; nothing on the path allocates.
+- **Placing is a fifth of what a figure costs.** Posing, planting and
+  carrying every ring to the screen costs about 21 µs a figure on one core of
+  the development host (`wintersun/app`'s `tests/budget.rs` prints it), and
+  the heading's cosine and sine are worked out once per figure
+  (`frame::Heading`) rather than per projected point.
 - **Every free end is closed.** An open tube shows its own near rim as a
   crescent where the surface should have ended — at the crown of a head that
   reads as a notch cut out of it, and at a shoulder as a wing. Capping is
@@ -562,7 +567,10 @@ running game shed detail past the point a player can read it.
   complete placed-strip stream, the planting roots and misses, the gait's own
   phases and the quality numbers, over raw `f64::to_bits` with no quantisation.
   One vertical per Tier-1 target, matching `world_determinism` and
-  `rules_determinism`.
+  `rules_determinism`. It and the ledger's pixel digests are taken over
+  `lib/util::mathf`'s correctly rounded square root and fdlibm kernels and over
+  headings exact along each axis (`plans/WINTERSUN.md` WS22), so a last-bit
+  change there moves the digest and shows in the ledger as a few edge pixels.
 - **The accessor audit ran, and kept three the letter of it would have cut.**
   Deleted for having no caller at all: `Clip::events`, `Travel::keys`,
   `Spring::damping`, `Recoil::spring`, `Contact::radius`, `Light::elevation`,
