@@ -99,10 +99,12 @@ HAL traits so it names no concrete port:
 
 - `conformance::run_scheduler_arch(arch)` checks the `SchedulerArch`
   contract: `current_cpu` stable across back-to-back calls, `ticks_now`
-  monotonically non-decreasing, `send_ipi` to self (and to a stray
-  target) a panic-free no-op equivalent, and `core_class` total — it
-  returns a stable, valid class for every `CpuId`, including an
-  out-of-range one.
+  monotonically non-decreasing, `quantum_ticks` — the preemption quantum
+  in the port's own tick, which the policies size their requests and
+  boost interval in — stable across back-to-back calls, `send_ipi` to
+  self (and to a stray target) a panic-free no-op equivalent, and
+  `core_class` total — it returns a stable, valid class for every
+  `CpuId`, including an out-of-range one.
 - `conformance::run_all(arch, side_channel, memory_tagging, discovery,
   per_cpu)` runs that suite **and** the §19.1 side-channel vertical
   (`sidechannel::conformance`), the §19.10 memory-tagging vertical

@@ -41,3 +41,5 @@ tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 [dev-dependencies]
 tairix-kernel-sched-eevdf = { path = ".", version = "=0.0.0", features = ["test-arch"] }
 tairix-kernel-sched-api = { path = "../api", version = "=0.0.0", features = ["conformance"] }
+# The shared test generator the run-queue model check draws its operations from.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }

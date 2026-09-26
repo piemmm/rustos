@@ -159,6 +159,18 @@ impl Calibration {
         // (no `expect`/`unwrap` in production paths).
         u64::try_from(ns).unwrap_or(u64::MAX)
     }
+
+    /// One `initial_count` quantum rebased from LAPIC ticks onto the TSC, so
+    /// it can be added to an `rdtsc` reading; `0` when either rate is unknown.
+    #[must_use]
+    pub fn quantum_tsc(self) -> u64 {
+        if self.ticks_per_second == 0 {
+            return 0;
+        }
+        let ticks = u128::from(self.initial_count).saturating_mul(u128::from(self.tsc_per_second))
+            / u128::from(self.ticks_per_second);
+        u64::try_from(ticks).unwrap_or(u64::MAX)
+    }
 }
 
 /// Pure ticks/sec → initial-count math.
@@ -586,6 +598,36 @@ mod tests {
         };
         // A zero rate must not panic; `0` is the documented fallback.
         assert_eq!(zero.tsc_ticks_to_ns(123_456), 0);
+    }
+
+    #[test]
+    fn a_quantum_is_rebased_from_lapic_ticks_onto_the_tsc() {
+        // 100 LAPIC ticks at 100 kHz is 1 ms, which a 3 GHz TSC counts 3e6 times.
+        let cal = Calibration {
+            ticks_per_second: 100_000,
+            initial_count: 100,
+            period_micros: 1_000,
+            tsc_per_second: 3_000_000_000,
+        };
+        assert_eq!(cal.quantum_tsc(), 3_000_000);
+
+        let uncalibrated = Calibration {
+            ticks_per_second: 0,
+            ..cal
+        };
+        assert_eq!(
+            uncalibrated.quantum_tsc(),
+            0,
+            "an unknown rate is no quantum"
+        );
+
+        let saturating = Calibration {
+            ticks_per_second: 1,
+            initial_count: u32::MAX,
+            tsc_per_second: u64::MAX,
+            ..cal
+        };
+        assert_eq!(saturating.quantum_tsc(), u64::MAX);
     }
 
     #[test]

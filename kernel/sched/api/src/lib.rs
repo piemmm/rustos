@@ -12,8 +12,11 @@
 //!   [`SchedulerArch`]) and the host [`TestArch`] double;
 //! * [`StealScan`], the per-CPU work-stealing scan start every per-CPU-queue
 //!   policy shares;
-//! * the [`park`] handshake — the park/unpark window and its wake token,
-//!   which is task lifecycle rather than policy; and
+//! * the [`park`] handshake — the park/unpark window, its wake token, and the
+//!   settle after a body returns, which are task lifecycle rather than policy;
+//! * the [`share`] accounting the proportional-share policies divide a CPU
+//!   by — band weights, the per-run charge, and the ledger of where each
+//!   task's weight is counted; and
 //! * the shared `conformance` suite (feature `conformance`) every
 //!   concrete scheduler must pass.
 //!
@@ -33,6 +36,7 @@ pub mod error;
 pub mod outcome;
 pub mod park;
 pub mod policy;
+pub mod share;
 pub mod steal;
 pub mod task;
 

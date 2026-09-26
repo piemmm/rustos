@@ -293,6 +293,10 @@ impl SchedulerArch for RiscvArch {
         read_time()
     }
 
+    fn quantum_ticks(&self) -> u64 {
+        crate::preempt::timer_interval_ticks()
+    }
+
     fn send_ipi(&self, target: CpuId) {
         // Resolve the destination hart id first. Sending to the calling
         // CPU is permitted (a self-reschedule). An unmapped / out-of-range

@@ -465,8 +465,8 @@ pub fn consume_fired_quantum(now: u64) -> Option<u64> {
     reprogram()
 }
 
-/// The calling hart's recorded tick interval in `time`-CSR ticks (`0`
-/// if unset or no storage registered). Test/diagnostic observer.
+/// The quantum `set_preemption` arms on the calling hart, in `time`-CSR ticks
+/// (`0` if unset or no storage registered).
 #[must_use]
 pub fn timer_interval_ticks() -> u64 {
     match per_cpu_index(current_hartid()) {
@@ -694,6 +694,22 @@ pub(crate) fn on_software_interrupt() {
     if let Some(cb) = IPI_CALLBACK_FN.load() {
         cb(current_hartid());
     }
+}
+
+/// Serialises the host tests that touch this module's process-global slots:
+/// the preempt suite, which writes the calling hart's, and any test reading
+/// them through the port, such as the Arch HAL conformance vertical's
+/// quantum. Lives here so both files share one lock (no flaky tests).
+#[cfg(test)]
+static STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the shared host-test serialisation lock. A panicking sibling must
+/// not wedge the rest, so a poisoned lock is recovered.
+#[cfg(test)]
+pub(crate) fn test_state_lock() -> std::sync::MutexGuard<'static, ()> {
+    STATE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

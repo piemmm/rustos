@@ -4,8 +4,8 @@
 //!
 //! The `irq_wait` syscall handler blocks a *user* task on a bound line
 //! through `SyscallIrqWaiter` (in [`crate::syscalls`]), which composes the
-//! shared [`tairix_kernel_irq::block_until_ready`] loop with
-//! `Scheduler::yield_current` + `KernelArch::monotonic_ns`. An in-kernel
+//! shared [`tairix_kernel_irq::block_until_ready`] loop with a park on the
+//! IRQ wait queue + `KernelArch::monotonic_ns`. An in-kernel
 //! service kthread — the INCREMENT (2) root-unlock kthread, which must
 //! drive interrupt-driven [`VirtioBlk`]/EMMC2 block I/O before any login
 //! can authenticate — has no syscall frame and no `Scheduler` borrow: it

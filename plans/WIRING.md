@@ -67,7 +67,7 @@ user entry, a context switch, Sv-equivalent paging, TSC, and Intel
 hybrid (`big`/`Atom`) **core-class** discovery.
 
 The HAL surface *migrated* into `kernel/arch/api` so far:
-`SchedulerArch` (per-CPU id, ticks, IPI, `core_class`),
+`SchedulerArch` (per-CPU id, ticks, quantum, IPI, `core_class`),
 `SideChannelMitigation` (§19.1), `MemoryTagging` (§19.10),
 `EnterUser`/`UserEntry` (§17.2), `PlatformDiscovery` (W1), `PerCpu`
 (W2), `IrqController` + `InterruptEntry` (W3), `Timer` (W4),

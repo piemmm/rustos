@@ -200,12 +200,14 @@ decides "the process is gone":
   hardware-tree node vanished, which stops that driver's whole group.
 
 The per-thread half of every one of them is the single `threads::retire` rule:
-retire the dying thread's own state (its signal-intake, kill-gate and
-running-kill overlays, its user-stack span, its capability alias) and report how
-many threads of the group are still live. Dropping the capability alias is what
-makes that count fall, so it can only ever fall through one definition. **Only
-when it was the group's last thread still executing** is the process's terminal
-status recorded for the parent's `wait` and the process reclaimed.
+retire the dying thread's own state (its capability alias, its signal-intake and
+kill-gate state, its user-stack span) and report how many threads of the group
+are still live. Dropping the capability alias is what makes that count fall, so
+it can only ever fall through one definition, and it is dropped first: a death
+is only ever claimed against a member, so once the alias is gone the gate clear
+is the last word on the thread. **Only when it was the group's last thread still
+executing** is the process's terminal status recorded for the parent's `wait`
+and the process reclaimed.
 
 That gate is load-bearing, not tidiness. A process's address space, capability
 record, endpoints, and open files may be released only when no thread of it is
@@ -218,6 +220,14 @@ against it, carrying the terminal status
 the first dying thread declared, and whichever thread lands last performs the
 teardown. Carrying the status through the deferral is what stops a sibling's
 synthesised `128 + n` from overwriting a real `exit` code.
+
+A group death is claimed against the threads the group table holds, under that
+table's read lock, and `thread_create` registers a new thread under its write
+lock only while its creator owes no death. So a thread created as its group is
+killed is either among the threads the kill claims, or finds its creator dying
+and is refused (`Errno::Interrupted`, which the kill landing at the call's
+boundary keeps from ever reaching user space) — never a thread that outlives
+the kill of the group it joined.
 
 A thread's id outlives its task too. A kill removes a parked victim from the
 scheduler before any of this runs, and the leader's id is the process's number

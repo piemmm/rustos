@@ -125,6 +125,10 @@ const WITNESSES_PER_CPU: u32 = 2;
 /// `PREEMPT_PERIOD_US` so does not need transporting.
 static BSP_CALIBRATION_PACKED: AtomicU64 = AtomicU64::new(0);
 
+/// One quantum in TSC ticks, from the BSP's calibration (the only one that
+/// samples the TSC); `0` until it is published. Machine-wide, like the period.
+static QUANTUM_TSC: AtomicU64 = AtomicU64::new(0);
+
 fn pack_calibration(c: Calibration) -> u64 {
     // `ticks_per_second` is at most `u32::MAX` because `initial_count`
     // is `u32` and the LAPIC counter is 32-bit. `calibrate` caps it
@@ -308,6 +312,9 @@ impl SchedulerArch for SmpArch {
             (u64::from(hi) << 32) | u64::from(lo)
         }
     }
+    fn quantum_ticks(&self) -> u64 {
+        QUANTUM_TSC.load(Ordering::Acquire)
+    }
     fn send_ipi(&self, _target: u32) {
         // No preemption in (b); the receiver is already polling
         // `step()`. Stage 3a (c) replaces this with a real IPI.
@@ -415,6 +422,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
         calibration.ticks_per_second, calibration.initial_count, calibration.period_micros
     );
     BSP_CALIBRATION_PACKED.store(pack_calibration(calibration), Ordering::Release);
+    QUANTUM_TSC.store(calibration.quantum_tsc(), Ordering::Release);
     preempt::set_cpu_id_for_lapic(bsp_id, 0);
 
     // Discover APs.
@@ -441,7 +449,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
         cpus: cpu_count,
         queue_capacity_per_band: 8192,
         yields_before_demotion: 4,
-        boost_interval_ticks: 256,
+        boost_interval_quanta: 256,
     };
     let arch = Arc::new(SmpArch);
     let sched = Arc::new(Scheduler::new(cfg, arch).expect("scheduler"));

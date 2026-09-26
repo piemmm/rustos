@@ -14,7 +14,7 @@
 //!   concerns. The polling loop that drives `irq_wait` to completion
 //!   lives in `kernel/core::syscalls::KernelSyscallHandlers::irq_wait`,
 //!   which composes [`IrqTable::try_wait_step`] with
-//!   `KernelArch::monotonic_ns` and `Scheduler::yield_current` —
+//!   `KernelArch::monotonic_ns` and a park on the IRQ wait queue —
 //!   primitives that already exist. No new scheduler interface is
 //!   introduced (no interface creep).
 //! * **Mask-before-wake.** [`IrqTable::fire`] calls

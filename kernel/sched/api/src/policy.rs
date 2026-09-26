@@ -9,8 +9,8 @@
 //!
 //! The trait deliberately mirrors the operational surface enumerates:
 //! task admission ([`spawn`](SchedulerPolicy::spawn)), picking the next
-//! runnable task on a CPU ([`step`](SchedulerPolicy::step)), cooperative
-//! yield ([`yield_current`](SchedulerPolicy::yield_current)), block/wake
+//! runnable task on a CPU ([`step`](SchedulerPolicy::step)) and settling the
+//! yield, park or exit its body returns, block/wake
 //! ([`park`](SchedulerPolicy::park) / [`unpark`](SchedulerPolicy::unpark) /
 //! [`exit`](SchedulerPolicy::exit)), priority/quantum accounting (driven by
 //! [`on_timer_tick`](SchedulerPolicy::on_timer_tick) and observable through
@@ -291,17 +291,6 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     fn running_cpu(&self, id: TaskId) -> Option<CpuId> {
         (0..self.cpu_count()).find(|&cpu| self.current_task(cpu) == Some(id))
     }
-
-    /// Cooperatively yield the currently dispatching task on its CPU.
-    ///
-    /// Models a voluntary syscall yield (no MLFQ demotion); the task is
-    /// re-enqueued at its current priority and the current-task slot is
-    /// cleared.
-    ///
-    /// # Errors
-    /// * [`crate::SchedError::NoSuchTask`] if the id is unknown.
-    /// * [`crate::SchedError::InvalidState`] if the task is not running.
-    fn yield_current(&self, id: TaskId) -> SchedResult<()>;
 
     /// Move `id` into the [`SchedClass`] `class`.
     ///

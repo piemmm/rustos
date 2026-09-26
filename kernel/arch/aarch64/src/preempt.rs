@@ -467,8 +467,7 @@ pub fn consume_fired_quantum(cpu: CpuId, now: u64) -> Option<u64> {
     reprogram(cpu)
 }
 
-/// The recorded tick interval for `cpu` in counter ticks (`0` if unset).
-/// Test/diagnostic observer.
+/// The quantum `set_preemption` arms on `cpu`, in counter ticks (`0` if unset).
 #[must_use]
 pub fn timer_interval_ticks(cpu: CpuId) -> u64 {
     match per_cpu_index(cpu) {
@@ -745,27 +744,29 @@ pub(crate) fn on_ipi_interrupt(cpu: CpuId) {
     }
 }
 
+/// Serialises the host tests that touch this module's process-wide statics:
+/// the preempt suite, which clears the callback slots and registered per-CPU
+/// slices, and any test driving them through the port, such as the timer
+/// HAL's conformance vertical. Lives outside the test module so both share one
+/// lock (no flaky tests).
+#[cfg(test)]
+static STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the shared host-test serialisation lock. A panicking sibling leaves
+/// the statics defined, and each test resets them on entry, so a poisoned
+/// lock is recovered.
+#[cfg(test)]
+pub(crate) fn test_state_lock() -> std::sync::MutexGuard<'static, ()> {
+    STATE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     extern "C" fn host_cb(_cpu: CpuId) {}
-
-    /// Serialises the tests that mutate the process-wide preemption statics
-    /// (the callback slots and the registered per-CPU slices). The host test
-    /// runner executes a crate's tests on parallel threads, and these statics
-    /// are global: without this lock one test's `clear_for_tests` /
-    /// `reset_preempt_storage_for_tests` races another's record-then-read and
-    /// the suite fails intermittently. Poison is tolerated (a panicking test
-    /// still leaves the statics in a defined state, which each test resets on
-    /// entry) so one failure does not cascade into spurious failures.
-    static GLOBAL_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn lock_global_state() -> std::sync::MutexGuard<'static, ()> {
-        GLOBAL_STATE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
 
     #[test]
     fn interval_clamps_to_at_least_one_tick() {
@@ -785,7 +786,7 @@ mod tests {
 
     #[test]
     fn callback_round_trips_through_the_slot() {
-        let _guard = lock_global_state();
+        let _guard = test_state_lock();
         clear_for_tests();
         assert!(timer_callback().is_none());
         // Coerce once: the slot is compared against *this* pointer
@@ -800,7 +801,7 @@ mod tests {
 
     #[test]
     fn ipi_callback_round_trips_through_its_own_slot() {
-        let _guard = lock_global_state();
+        let _guard = test_state_lock();
         clear_for_tests();
         assert!(ipi_callback().is_none());
         let cb: extern "C" fn(CpuId) = host_cb;
@@ -814,7 +815,7 @@ mod tests {
 
     #[test]
     fn preempt_callback_round_trips_through_its_own_slot() {
-        let _guard = lock_global_state();
+        let _guard = test_state_lock();
         clear_for_tests();
         assert!(preempt_callback().is_none());
         let cb: extern "C" fn(CpuId) = host_cb;
@@ -844,7 +845,7 @@ mod tests {
         static STORAGE: PreemptStorage<4> = PreemptStorage::new();
         static STORAGE2: PreemptStorage<2> = PreemptStorage::new();
 
-        let _guard = lock_global_state();
+        let _guard = test_state_lock();
         reset_preempt_storage_for_tests();
 
         // Before any storage is registered, every per-CPU observer fails
@@ -911,7 +912,7 @@ mod tests {
     fn a_fired_quantum_re_arms_a_still_pending_wakeup() {
         static STORAGE: PreemptStorage<2> = PreemptStorage::new();
 
-        let _guard = lock_global_state();
+        let _guard = test_state_lock();
         reset_preempt_storage_for_tests();
         assert_eq!(STORAGE.register(), Ok(2));
 

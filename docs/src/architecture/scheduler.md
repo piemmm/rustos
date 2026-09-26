@@ -45,18 +45,25 @@ The default policy is **CFQ — Completely Fair Queuing**, modelled on
 Linux's Completely Fair Scheduler (Molnar, 2007). Each task carries a
 virtual runtime `vruntime`; on each CPU the ready task with the
 *smallest* `vruntime` is dispatched next — the leftmost node of Linux
-CFS's red-black tree, here an ordered `BTreeSet<(vruntime, seq, TaskId)>`
-(`O(log n)` pick/insert/remove). A dispatch charges the running task
+CFS's red-black tree, here the top of a min-heap keyed by
+`(vruntime, seq, TaskId)` (`O(log n)` pick and insert; nothing is removed
+from the middle, since a stale entry is discarded when picked, and a push
+reserves its room fallibly). A dispatch charges the running task
 `elapsed_ticks * SCALE / weight` of virtual runtime. Equal-weight tasks
 therefore receive equal CPU time even when an interrupt-driven task runs
 briefly and parks while a CPU-bound task consumes a full quantum; a
 heavier-weighted task's `vruntime` rises more slowly for the same elapsed
 service. The result is proportional CPU-time share, with no band ever
 starved (every `vruntime` advances monotonically). The three `Priority`
-bands map to a 4:2:1 weight ratio (the CFS "nice level" analog). A per-CPU
+bands map to a 4:2:1 weight ratio (the CFS "nice level" analog). The
+weights, `SCALE`, and the charge are the shared proportional-share
+accounting in `kernel/sched/api`'s `share` module, which CFQ and EEVDF both
+use. `SCALE` is 4, the least common multiple of the weights: virtual
+runtime counts raw port ticks, and a multi-gigahertz counter scaled any
+further would saturate `u64` within hours of CPU time. A per-CPU
 monotonic `min_vruntime` floor places a joining or migrated task one
-`SLEEPER_CREDIT` (a single unit of service) *ahead* of the front of the
-CPU's timeline — the CFS `place_entity` sleeper credit. The credit is what
+`SLEEPER_CREDIT` (one tick of service at the lightest weight) *ahead* of
+the front of the CPU's timeline — the CFS `place_entity` sleeper credit. The credit is what
 makes a woken task sort **strictly** before the population that has been
 running: placing it merely level with the leftmost ready entry leaves the
 `(vruntime, seq, TaskId)` tie-break to settle the pick, which hands the CPU to
@@ -131,9 +138,11 @@ count as a yield.
 ### Periodic priority boost
 
 To bound the worst-case starvation latency, every
-`boost_interval_ticks` (measured against
-[`SchedulerArch::ticks_now`]) the scheduler promotes every non-exited
-task back to `Priority::High` and resets its yields-at-band counter.
+`boost_interval_quanta` quanta (converted to the port's own tick through
+[`SchedulerArch::quantum_ticks`], so one setting means the same span on
+every port; the default is a second's worth at the shared quantum rate)
+the scheduler promotes every non-exited task back to `Priority::High` and
+resets its yields-at-band counter.
 The boost is fired by whichever CPU notices the threshold first; the
 CAS on `last_boost_tick` makes it idempotent across cores. The boost
 does *not* migrate tasks between queues — instead, the dispatch path
@@ -147,7 +156,7 @@ This is what gives the starvation-freedom property exercised by the
 > runs of `T` is bounded by
 >
 > ```text
-> boost_interval_ticks · (1 + total_higher_priority_work)
+> boost_interval_quanta · quantum · (1 + total_higher_priority_work)
 > ```
 
 ### Per-CPU run queues + work-stealing
@@ -181,44 +190,60 @@ work-stealing structure as MLFQ, but orders tasks by a continuous
 
 Each CPU keeps its own fixed-point **virtual time** `V`. Each task has a
 **weight** derived from its [`Priority`] band (`High`:`Normal`:`Low` =
-`4`:`2`:`1`) and two virtual-time markers:
+`4`:`2`:`1`, the shared proportional-share weights) and two virtual-time
+markers:
 
 * an **eligible time** `ve` — the task may run only once `V >= ve`;
-* a **deadline** `vd = ve + request / weight`, where `request` is one
-  dispatch's worth of service.
+* a **deadline** `vd = ve + request / weight`, where a `request` is one
+  quantum of service: the port's own quantum in its own tick
+  ([`SchedulerArch::quantum_ticks`]), the span that preempts a task that
+  runs on. An uncalibrated quantum is the smallest request, one tick.
 
 Admission (spawn / unpark / migration) sets `ve = V` (zero initial lag)
 and `vd = ve + request/weight`. On each dispatch the CPU runs the
-**eligible** task with the **earliest** `vd` (ties broken by `TaskId`,
-which is arbitrary but total, so the pick is deterministic); the task's
-fulfilled request then rolls `ve` forward
-to its old `vd` and computes the next `vd`. `V` advances by
-`service / total_weight` of the tasks competing on that CPU, so a task
-accrues virtual time inversely to its weight and receives a CPU share
-proportional to it. No task is ever starved: every eligible task has a
-finite, monotonically increasing deadline.
+**eligible** task with the **earliest** `vd` (ties broken by arrival
+order, never by the randomly drawn `TaskId`). Every run is charged the
+ticks it actually used, measured on the same bracket the per-task CPU
+time is: `ve` advances by that service over the task's weight, and `vd`
+moves on a whole request only once `ve` has reached it — a task that ran
+short keeps its deadline, since the rest of its request is still owed.
+`V` advances by the same service over the **time-shared** weight competing
+on that CPU (real-time service is not delivered to the fair competition,
+so it neither advances `V` nor dilutes its rate), with the remainder too
+small to make a whole unit of `V` carried to the next run so short runs
+under a heavy load still move the clock exactly. A task therefore
+receives CPU *time* — not dispatches — proportional to its weight: a
+task that runs a tick and yields pays a tick, where a fixed per-dispatch
+charge billed it a whole quantum. No task is ever starved: every eligible
+task has a finite, monotonically increasing deadline.
 
 ### Fully tickless
 
-Fairness, eligibility, and preemption are driven **entirely by virtual
-time advanced as work is dispatched** — never by a periodic timer tick.
-`Scheduler::on_timer_tick` is a pure observation counter for this
-policy; no scheduling decision reads it. This is what makes the policy
-tickless: a real arch port can run its timer in one-shot / `NO_HZ` mode,
-arming it only for the next virtual deadline rather than at a fixed
-frequency. The `tickless_weight_proportional_fairness` unit test proves
-fairness holds while `ticks_now()` never moves and `on_timer_tick` is
-never called.
+Fairness, eligibility, and preemption are driven **entirely by measured
+virtual time** — never by a periodic timer tick. `Scheduler::on_timer_tick`
+is a pure observation counter for this policy; no scheduling decision
+reads it. This is what makes the policy tickless: a real arch port can run
+its timer in one-shot / `NO_HZ` mode, arming it only for the next virtual
+deadline rather than at a fixed frequency. The
+`tickless_weight_proportional_fairness` unit test proves fairness holds
+while `ticks_now()` never moves and `on_timer_tick` is never called (a
+zero-tick run is charged one tick), and
+`equal_weights_share_time_not_dispatches` that two equal-weight tasks
+spending their quanta differently still split the CPU's time evenly.
 
 ### Per-CPU queues + work-stealing
 
-Each CPU owns one virtual-time `RunQueue` with its own clock. An idle
-CPU steals the earliest-deadline task from a victim chosen by the shared
-`StealScan` (`kernel/sched/api`) and **rebases** the migrated task's `ve`/`vd`
-onto the stealing CPU's clock (the EEVDF migration rule — a task carries no lag across
-CPUs). The earliest-eligible-deadline scan is `O(n)` in the per-CPU
-ready count; a future tree-backed index can replace it behind the
-`RunQueue` boundary without changing the policy.
+Each CPU owns one virtual-time `RunQueue` with its own clock. Its ready
+set is two binary heaps: *pending*, keyed by eligible time, and
+*eligible*, keyed by deadline. `V` never moves backwards, so an entry
+crosses from pending to eligible at most once per enqueue and the pick is
+`O(log n)` amortised, with nothing scanned. When no entry is eligible —
+which an integer clock can transiently produce — the earliest-eligible
+entry runs and `V` is fast-forwarded to it, so a CPU holding runnable work
+never idles waiting for virtual time. An idle CPU steals the task a victim
+chosen by the shared `StealScan` (`kernel/sched/api`) would run next and
+**rebases** the migrated task's `ve`/`vd` onto the stealing CPU's clock
+(the EEVDF migration rule — a task carries no lag across CPUs).
 
 ## Heterogeneous CPUs (performance + efficiency cores)
 
@@ -289,8 +314,9 @@ wrong (re-placing on every yield would migrate a task whenever another
 CPU dipped below its home's load, thrashing caches for no fairness
 gain); only a class mismatch — e.g. a `Low` task work-stealing parked on
 a performance core — migrates it, to the least-loaded CPU of the right
-class. EEVDF carries the task's competing weight with it across a class
-migration (the same no-lag-across-CPUs rebase that work-stealing uses).
+class, and signals that CPU, which may be idle. CFQ and EEVDF carry the
+task's competing weight with it across a class migration (EEVDF with the
+same no-lag-across-CPUs rebase that work-stealing uses).
 
 ### Promotion and demotion
 
@@ -394,7 +420,15 @@ same shape as `set_sched_class`:
 
 Per policy: **CFQ** and **EEVDF** re-derive their 4:2:1 fair-share weight
 from the stored level on every enqueue, so the change simply takes effect
-lastingly from the next dispatch. **MLFQ** treats the recorded level as the
+lastingly from the next dispatch. A CPU's competing weight changes only
+through the task's weight ledger (`kernel/sched/api`'s
+`share::WeightLedger`), which records the weight, CPU, and class it
+counted and takes exactly that off when the task leaves, so a level
+changed while the task is counted cannot leave a CPU's total drifting. The
+same lock orders a count against a departure: a steal or wake racing a
+remote park re-reads under it whether the task still competes, and a park
+or exit changes state under it, so no interleaving counts a task twice or
+leaves a parked one counted. **MLFQ** treats the recorded level as the
 task's *current band* with fresh yield residency — its demotion rule and
 anti-starvation boost keep adjusting the band afterwards, exactly as they
 do for every other task, so an externally lowered task is still boosted
@@ -414,6 +448,11 @@ The scheduler never sleeps or busy-waits on its own. It signals
 
 * `spawn` calls after enqueuing a fresh task.
 * `unpark` calls after re-enqueueing a previously parked task.
+* A yield that migrates a task to another CPU, and an overflow drain that
+  re-queues one onto a CPU other than the draining one, signal that CPU:
+  an idle core sleeps in its idle wait, and a queue entry alone cannot
+  make it run. The shared conformance suite pins the migration case for
+  every policy (`a_yield_migration_announces_the_destination`).
 
 The arch port decides whether that IPI raises a hardware interrupt
 immediately, schedules a deferred reschedule, or — on
@@ -486,7 +525,7 @@ boost rides the same on-demand one-shots the preemption path already
 arms: those fire **only while a CPU is contended** (which is precisely
 when starvation is possible), so `step` — and with it MLFQ's
 `maybe_priority_boost` — runs at the quantum cadence and the boost fires
-once `boost_interval_ticks` of virtual/wall time elapse. A CPU running a
+once `boost_interval_quanta` quanta of wall time elapse. A CPU running a
 sole runnable task disarms (no starvation is possible, so no boost is
 needed), and **no global fixed-frequency tick is ever reintroduced** —
 the §17.1 mandate the carve-out protects.
@@ -946,7 +985,6 @@ not caller-supplied).
 | `Scheduler::dispatch` (exit)     | clears the slot, every branch            |
 | `Scheduler::park(id)`            | clears the slot **only** once the body lock proves no CPU is running `id`; otherwise IPIs the running CPU, which clears its own slot on dispatch exit |
 | `Scheduler::exit(id)`            | same proof, same fallback: clears the slot only when it holds the body lock, else defers and IPIs |
-| `Scheduler::yield_current(id)`   | re-enqueues `id` Ready, then clears slot. **No production caller** — the `yield` syscall reaches the scheduler through `TaskAction::Yield` at dispatch exit instead |
 
 The slot is exposed read-only through
 `Scheduler::current_task(cpu) -> Option<TaskId>`. The setter and
@@ -961,8 +999,8 @@ ground truth.
   same-CPU `dispatch` set/clear pair under
   `lib/sync::RwLock`'s process-only contract
   (`AGENTS.md` §1).
-* The clear-by-id helper used by `park` / `exit` /
-  `yield_current` is a per-slot compare-exchange; a concurrent
+* The clear-by-id helper used by `park` / `exit` is a per-slot
+  compare-exchange; a concurrent
   `dispatch` of a *different* task on a sibling CPU is therefore
   untouched.
 * **A slot outlives any remote request to clear it while its task is
@@ -1043,28 +1081,17 @@ served twice. Both fail closed on an out-of-range CPU, and the shared
 conformance suite pins the behaviour
 (`load_observations_track_dispatch`).
 
-### `yield_current` vs body-returned `TaskAction::Yield`
+### A yield is a body's return, never a call into the scheduler
 
-`Scheduler::yield_current(task_id)` models a **voluntary syscall
-yield**: the task is `TaskState::Running` on its CPU, the caller wants
-to relinquish the rest of its quantum, and the scheduler re-Readies the
-task and clears the slot.
-
-It has **no production caller**, and adding one needs care. It clears
-the current-task slot but suspends nothing, so it is only ever sound
-when the caller suspends immediately afterwards. A blocking wait that
-called it as a fallback and then returned to user space left the task
-running as a caller the next syscall could not attribute — which halted
-the CPU outright. The `yield` syscall does not use it: the dispatch hook
-returns `Reschedule { action: Yield }` and the scheduler re-enqueues
-from the `TaskAction::Yield` the kthread reports at dispatch exit.
-
-`TaskAction::Yield` returned by a task body is the
-**body-loop yield**: it is processed by `dispatch` along with
-MLFQ demotion bookkeeping (`yields_at_band` /
-`yields_before_demotion`). The two notions are deliberately
-distinct so the syscall handler is not on the hook for demotion
-policy, which would be interface creep into the syscall layer.
+A task yields by its body returning `TaskAction::Yield`, which `dispatch`
+settles along with each policy's own accounting (MLFQ's demotion
+bookkeeping, CFQ's and EEVDF's charge). The `yield` syscall reaches it
+that way: the dispatch hook returns `Reschedule { action: Yield }` and the
+scheduler re-enqueues from the `TaskAction::Yield` the kthread reports at
+dispatch exit. The contract has no call that re-enqueues a running task
+from inside its own run: one would clear the current-task slot while
+suspending nothing, leaving the task running as a caller the next syscall
+could not attribute — which once halted the CPU outright.
 
 ### Parking a waiter on its *live* CPU
 
@@ -1139,17 +1166,27 @@ These hold at every API boundary:
 3. **No `panic!`, `unwrap`, `expect` in the dispatch path.** Every
    reachable failure produces a typed [`SchedError`].
 4. **Cancellation safety.** `park`, `unpark`, `exit` can race with the
-   task's own body. The scheduler re-resolves the task's state after
-   the body returns:
+   task's own body. After the body returns, every policy settles the
+   task through the one shared `park::settle` (`kernel/sched/api`), whose
+   every transition is a compare-exchange from the state it was decided
+   on — a remote park, wake or yield landing while the body unwinds is
+   honoured rather than overwritten, and a lost exchange is decided again
+   against the new state:
 
-   | observed state | body returned | effective action |
-   | -------------- | ------------- | ---------------- |
-   | `doomed` (§5)  | not `Park`    | `Exit`           |
-   | `Exited`       | *anything*    | `Exit`           |
-   | *anything*     | `Exit`        | `Exit`           |
-   | `Parked`       | *anything*    | `Park`           |
-   | *anything*     | `Park`        | `Park`           |
-   | otherwise      | `Yield`       | `Yield`          |
+   | observed state | body returned              | settled                          |
+   | -------------- | -------------------------- | -------------------------------- |
+   | `Exited`       | *anything*                 | retire                           |
+   | *any other*    | `Exit`, or `doomed` (§5) and not `Park` | → `Exited`, retire  |
+   | `Ready`        | `Park` / `Yield`           | nothing owed: a remote wake already queued it |
+   | `Parked`       | `Park` / `Yield`           | commit the park: a remote park already took it out of the competition |
+   | `Running`      | `Park`                     | → `Parked`, commit the park      |
+   | `Running`      | `Yield`                    | → `Ready`, re-enqueue            |
+
+   A store over a remote wake is what a job-control stop and continue
+   reaching a running child produced before: a body's `Park` applied over
+   the wake stranded the task, and its `Yield` queued it a second time. The
+   shared conformance suite pins both
+   (`a_rewake_while_the_body_ran_leaves_the_task_queued_once`).
 
 5. **SMP quiescence and reclamation ownership.** `exit(id)` returns an
    `ExitDisposition` so its caller can reclaim a task's resources
@@ -1165,14 +1202,20 @@ These hold at every API boundary:
      (drops the body, marks `Exited`) and returns
      `ExitDisposition::Quiesced`. The caller owns teardown and reclaims
      now.
-   * `try_lock` **fails** → a dispatch owns the task. `exit` marks it
-     `doomed` (a first-wins flag), IPIs the running CPU to force a prompt
-     reschedule, and returns `ExitDisposition::Deferred`. It does **not**
-     mark the task `Exited` — the owning dispatch performs that final
-     transition itself when its body returns (invariant 4), so no policy
-     ever exposes an `Exited` task that is still running. The caller must
-     **not** reclaim; the deferred teardown is landed by the kernel/core
-     dispatch loop (`land_running_kill`) once the task is quiescent.
+   * `try_lock` **fails** → a dispatch owns the task. `exit` has already
+     marked it `doomed` (a first-wins flag), IPIs the running CPU to force a
+     prompt reschedule — every CPU, when no current-task slot the killer can
+     see names the task yet — and returns `ExitDisposition::Deferred`. It
+     does **not** mark the task `Exited`: the owning dispatch performs that
+     final transition itself when its body returns (invariant 4), so no
+     policy ever exposes an `Exited` task that is still running. The mark and
+     the body probe are paired against the dispatch's release of the body and
+     its read of the mark (`park::doom` / `park::observe_doom`, one sequential
+     fence on each side), so a dispatch reported as owning the body always
+     reads the mark; unpaired, the killer could see the body held while the
+     run read the mark stale and queued the task again. The caller must
+     **not** reclaim; the kernel/core dispatch loop lands the death once the
+     scheduler reports the task `Exited` (`land_retired_kill`).
    * The task was already terminal (or a prior termination owns its
      teardown) → `ExitDisposition::AlreadyExited`; reclaim runs exactly
      once no matter how many kills arrive. A repeat that finds the victim
@@ -1184,8 +1227,8 @@ These hold at every API boundary:
    state) is **not** force-exited: its kill is landed at that body's own
    boundary once it unwinds, so the state a half-unwound kernel stack owns
    is never reclaimed under. `kernel/core` (`procsignal`) drives the caller
-   side — the signal-terminate path and the driver-unload path both consult
-   the kill gate first and only then branch on the disposition; see the
+   side — the signal-terminate path and the driver-unload path both record
+   the death in the kill gate first and only then ask the scheduler; see the
    kernel signals doc.
 
 6. **Task identity is drawn, not counted.** A `TaskId` comes from one
@@ -1226,6 +1269,12 @@ These hold at every API boundary:
    reserved ids (`NO_TASK`, `INIT_TASK_ID`) are never candidates for a draw,
    and admitting one a live task already holds is `SchedError::TaskIdInUse`.
 
+8. **Competing weight is exact.** Under CFQ and EEVDF a CPU's competing
+   weight moves only through each task's weight ledger, which takes off
+   exactly what it put on and changes it under the same lock the task's
+   departures take (see
+   [Changing a live task's priority](#changing-a-live-tasks-priority)).
+
 ## Crate layout (§17.1)
 
 The scheduler is split per `AGENTS.md` §17.1 into a contract crate and
@@ -1261,10 +1310,16 @@ The scheduler's behaviour is covered by:
 
 * The shared conformance suite `kernel/sched/api/src/conformance.rs`
   (`AGENTS.md` §17.1): generic over `SchedulerPolicy`, it asserts
-  correct spawn/dispatch/block/wake and yield semantics, starvation-
-  freedom, fairness across bands, and a deadlock-free, lossless,
-  bounded-latency stress of 10 000 tasks across 4 simulated cores.
-  Every concrete policy must pass it.
+  correct spawn/dispatch/block/wake and yield semantics, that a remote
+  park and wake landing while a body runs leave the task queued once,
+  that a yield migration signals its destination, starvation-freedom,
+  fairness across bands, and a deadlock-free, lossless, bounded-latency
+  stress of 10 000 tasks across 4 simulated cores. Every concrete policy
+  must pass it.
+* `kernel/sched/api/src/park.rs` and `share.rs` — the post-body settle
+  against every transition a remote party can land (including a lost
+  exchange decided again), and the weight ledger's count/departure
+  contract.
 * `kernel/sched/api/tests/conformance.rs` runs the suite against the
   in-tree MLFQ policy; `kernel/sched/eevdf/tests/conformance.rs` and
   `kernel/sched/cfq/tests/conformance.rs` run the identical suite against
@@ -1273,13 +1328,19 @@ The scheduler's behaviour is covered by:
 * `kernel/sched/cfq/src/scheduler.rs` `#[cfg(test)] mod tests` —
   CFQ-specific coverage: that a sole runnable task keeps the periodic
   tick armed (the non-tickless carve-out) while an idle CPU disarms,
-  weight-proportional dispatch, work-stealing, park/unpark, and the
-  `on_timer_tick` preemption counter.
+  weight-proportional dispatch, work-stealing, park/unpark, that a
+  reprioritised task and a stale stolen entry leave every CPU's weight
+  exact, and the `on_timer_tick` preemption counter.
 * `kernel/sched/eevdf/src/scheduler.rs` `#[cfg(test)] mod tests` —
   EEVDF-specific coverage: tickless weight-proportional fairness
-  (asserting no tick is ever used), even sharing of equal-weight tasks,
+  (asserting no tick is ever used), even sharing of equal-weight tasks —
+  of their time, not their dispatch counts — a request kept until it is
+  served, real-time service leaving the fair clock alone, exact weight
+  under reprioritisation and stale steals, the overflow drain's signal,
   work-stealing, park/unpark, the current-task slot, and that
-  `on_timer_tick` is observation-only.
+  `on_timer_tick` is observation-only. `runqueue.rs` model-checks the
+  two-heap pick against the linear earliest-eligible-deadline scan over a
+  long random mix of pushes, picks and clock advances.
 * `kernel/sched/mlfq/tests/scheduler.rs` — MLFQ-specific integration
   tests (fairness across ≥ 4 cores, work-stealing balance, IPI-based
   preemption, cancellation safety, error surface).

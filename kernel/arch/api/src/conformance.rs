@@ -11,8 +11,9 @@
 //!
 //! * [`run_scheduler_arch`] — the [`SchedulerArch`] contract
 //!   (`current_cpu` stable, `ticks_now` monotonically non-decreasing,
-//!   `send_ipi` to self a no-op-equivalent, `core_class` total and
-//!   panic-free for every input including an out-of-range [`CpuId`]).
+//!   `quantum_ticks` stable, `send_ipi` to self a no-op-equivalent,
+//!   `core_class` total and panic-free for every input including an
+//!   out-of-range [`CpuId`]).
 //! * [`run_all`] — the whole HAL slice migrated so far: it runs
 //!   [`run_scheduler_arch`] **and** the side-channel vertical
 //!   ([`sidechannel::conformance::run_all`]),
@@ -56,11 +57,13 @@ use crate::{
 ///
 /// Panics (failing the test) if any required property does not hold:
 /// `current_cpu` is unstable across back-to-back calls, `ticks_now` goes
-/// backwards, a `send_ipi` or `core_class` call panics, or `core_class`
-/// disagrees with itself for the same [`CpuId`].
+/// backwards, `quantum_ticks` disagrees with itself, a `send_ipi` or
+/// `core_class` call panics, or `core_class` disagrees with itself for the
+/// same [`CpuId`].
 pub fn run_scheduler_arch<A: SchedulerArch + ?Sized>(arch: &A) {
     current_cpu_is_stable(arch);
     ticks_are_monotonic(arch);
+    quantum_is_stable(arch);
     send_ipi_to_self_is_a_noop(arch);
     core_class_is_total(arch);
 }
@@ -134,6 +137,17 @@ fn ticks_are_monotonic<A: SchedulerArch + ?Sized>(arch: &A) {
     }
 }
 
+/// `quantum_ticks` is a calibrated length, not a clock: back-to-back reads on
+/// one CPU agree, so a policy sizing one request from it cannot see two scales.
+fn quantum_is_stable<A: SchedulerArch + ?Sized>(arch: &A) {
+    let quantum = arch.quantum_ticks();
+    assert_eq!(
+        arch.quantum_ticks(),
+        quantum,
+        "quantum_ticks must agree across back-to-back calls"
+    );
+}
+
 /// Sending an IPI to the calling CPU is permitted and is a no-op
 /// equivalent to a self-reschedule: it must not
 /// panic. Targeting an arbitrary (possibly unmapped) CPU is also
@@ -186,6 +200,10 @@ mod tests {
 
         fn ticks_now(&self) -> u64 {
             self.ticks.fetch_add(1, Ordering::Relaxed) + 1
+        }
+
+        fn quantum_ticks(&self) -> u64 {
+            1
         }
 
         fn send_ipi(&self, _target: CpuId) {}
@@ -302,6 +320,9 @@ mod tests {
         fn ticks_now(&self) -> u64 {
             0
         }
+        fn quantum_ticks(&self) -> u64 {
+            0
+        }
         fn send_ipi(&self, _target: CpuId) {}
         fn core_class(&self, cpu: CpuId) -> CoreClass {
             assert_ne!(cpu, CpuId::MAX, "port forgot to bound the CPU index");
@@ -331,6 +352,9 @@ mod tests {
                 1
             }
         }
+        fn quantum_ticks(&self) -> u64 {
+            0
+        }
         fn send_ipi(&self, _target: CpuId) {}
     }
 
@@ -338,5 +362,31 @@ mod tests {
     #[should_panic(expected = "ticks_now went backwards")]
     fn suite_rejects_a_backwards_tick_source() {
         run_scheduler_arch(&BackwardsTicks);
+    }
+
+    /// A port that answers a different quantum on every read gives a policy no
+    /// single time scale, and must be rejected.
+    #[derive(Default)]
+    struct FlappingQuantum {
+        reads: AtomicU64,
+    }
+
+    impl SchedulerArch for FlappingQuantum {
+        fn current_cpu(&self) -> CpuId {
+            0
+        }
+        fn ticks_now(&self) -> u64 {
+            0
+        }
+        fn quantum_ticks(&self) -> u64 {
+            self.reads.fetch_add(1, Ordering::Relaxed)
+        }
+        fn send_ipi(&self, _target: CpuId) {}
+    }
+
+    #[test]
+    #[should_panic(expected = "quantum_ticks must agree")]
+    fn suite_rejects_a_quantum_that_changes_between_reads() {
+        run_scheduler_arch(&FlappingQuantum::default());
     }
 }

@@ -43,6 +43,10 @@ impl SchedulerArch for DoubleArch {
         self.ticks.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    fn quantum_ticks(&self) -> u64 {
+        1
+    }
+
     fn send_ipi(&self, _target: CpuId) {}
 }
 

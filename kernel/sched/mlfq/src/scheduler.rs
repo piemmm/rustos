@@ -9,7 +9,8 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_kernel_sched_api::{park, ParkableTask, StealScan};
+use tairix_kernel_sched_api::park::{self, Settled};
+use tairix_kernel_sched_api::{ParkableTask, StealScan};
 use tairix_sync::{RwLock, SpinLock};
 
 use crate::loom_compat::{AtomicU64, Ordering};
@@ -572,7 +573,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         // First termination request wins and owns the teardown; any repeat
         // owes nothing, so reclaim runs exactly once even under a burst of
         // kills against the same task.
-        if task.doomed.swap(true, Ordering::AcqRel) {
+        if !park::doom(&task.doomed) {
             // The repeat owns no teardown, but an escalation must still be
             // able to escalate: re-nudge a victim that is *still executing*
             // so it reaches its stopping point now rather than running on
@@ -595,14 +596,9 @@ impl<A: SchedulerArch> Scheduler<A> {
         // temporary outlives the `task` handle.
         {
             let Some(mut body) = task.body.try_lock() else {
-                // A dispatch owns the task right now (it is running its body
-                // on some CPU). It will observe the `doomed` mark when its
-                // body returns and perform the final `Exited` transition
-                // itself, so the killer must not reclaim yet. Nudge the
-                // running CPU into the scheduler so a CPU-bound victim alone
-                // on a tickless core (no quantum armed) is preempted
-                // promptly rather than running on after it was told to die.
-                self.nudge_running_cpu(id);
+                // A dispatch owns the body and, by `doom`'s pairing, reads the
+                // mark when it returns and retires the task itself.
+                park::nudge_doomed(&*self.arch, self.running_cpu_of(id), self.cpu_count());
                 return Ok(ExitDisposition::Deferred);
             };
             *body = None;
@@ -799,7 +795,13 @@ impl<A: SchedulerArch> Scheduler<A> {
     fn maybe_priority_boost(&self) {
         let now = self.arch.ticks_now();
         let last = self.last_boost_tick.load(Ordering::Acquire);
-        if now.wrapping_sub(last) < self.config.boost_interval_ticks {
+        // An uncalibrated quantum counts as one tick: boosting early only
+        // costs demotion its effect, never starves a task.
+        let interval = self
+            .config
+            .boost_interval_quanta
+            .saturating_mul(self.arch.quantum_ticks().max(1));
+        if now.wrapping_sub(last) < interval {
             return;
         }
         if self
@@ -938,19 +940,10 @@ impl<A: SchedulerArch> Scheduler<A> {
         StepOutcome::Ran(id)
     }
 
-    /// Resolve the effective disposition of a task whose body has just
-    /// returned `action` and apply it: retire it, park it, or re-enqueue it.
-    ///
-    /// The body's `action` is reconciled against external races. A
-    /// termination requested while the task executed
-    /// ([`ExitDisposition::Deferred`]) makes this dispatch own the final
-    /// transition to quiescence — the task is retired rather than
-    /// re-enqueued — *unless* it returned `Park`, which means it blocked
-    /// inside a syscall handler and still holds kernel state only its own
-    /// unwind can release; that kill is landed at the syscall boundary once
-    /// the handler unwinds, so the park is honoured and the task is resumed
-    /// to reach it. A concurrent external `park`/`exit` observed on the task
-    /// likewise wins over a stale `Yield`.
+    /// Apply what a task whose body just returned `action` is owed — retire,
+    /// park, re-enqueue, or nothing when a remote wake already re-queued it —
+    /// as the shared [`park::settle`] resolves it against any park, wake or
+    /// kill that landed while the body ran.
     fn retire_park_or_requeue(
         &self,
         task: &Arc<TaskInner>,
@@ -959,31 +952,20 @@ impl<A: SchedulerArch> Scheduler<A> {
         cpu: CpuId,
         action: TaskAction,
     ) {
-        let observed_state = task.load_state();
-        let doomed = task.doomed.load(Ordering::Acquire);
-        let effective = if doomed && action != TaskAction::Park {
-            TaskAction::Exit
-        } else {
-            match (observed_state, action) {
-                (TaskState::Exited, _) | (_, TaskAction::Exit) => TaskAction::Exit,
-                (TaskState::Parked, _) | (_, TaskAction::Park) => TaskAction::Park,
-                _ => TaskAction::Yield,
-            }
-        };
-
-        match effective {
-            TaskAction::Exit => {
-                task.store_state(TaskState::Exited);
+        let doomed = park::observe_doom(&task.doomed);
+        // MLFQ keeps no competing weight, so a departure is the transition alone.
+        match park::settle(&**task, action, doomed, |transition: &dyn Fn() -> bool| {
+            transition()
+        }) {
+            Settled::Retire => {
                 if let Some(mut guard) = task.body.try_lock() {
                     *guard = None;
                 }
                 self.tasks.write().remove(&id);
             }
-            TaskAction::Park => {
-                task.store_state(TaskState::Parked);
-                park::commit_park(&**task, |woken| self.admit_woken(woken));
-            }
-            TaskAction::Yield => self.reenqueue_after_yield(task, id, prio, cpu),
+            Settled::Park => park::commit_park(&**task, |woken| self.admit_woken(woken)),
+            Settled::Requeue => self.reenqueue_after_yield(task, id, prio, cpu),
+            Settled::Readmitted => {}
         }
     }
 
@@ -997,9 +979,9 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// re-placed on a CPU of the class its (possibly demoted or boosted)
     /// priority now calls for — a task boosted to `High` migrates *up* to a
     /// performance core, one demoted to `Low` migrates back *down*; on a
-    /// homogeneous machine this resolves to the CPU it just ran on.
+    /// homogeneous machine this resolves to the CPU it just ran on. A task
+    /// that migrates is announced to its new CPU, which may be idle.
     fn reenqueue_after_yield(&self, task: &TaskInner, id: TaskId, prio: Priority, cpu: CpuId) {
-        task.store_state(TaskState::Ready);
         let (class, dest_prio) = if task.load_sched_class().is_realtime() {
             (SchedClass::Realtime, prio)
         } else {
@@ -1018,12 +1000,17 @@ impl<A: SchedulerArch> Scheduler<A> {
         };
         let dest = self.preferred_home(dest_prio, cpu);
         task.home_cpu.store(dest, Ordering::Release);
-        let target = self
+        let queued = self
             .cpus
             .get(dest as usize)
-            .unwrap_or(&self.cpus[cpu as usize]);
-        if target.push_class(class, dest_prio, id).is_err() {
+            .is_some_and(|target| target.push_class(class, dest_prio, id).is_ok());
+        if !queued {
             self.overflow.lock().push(id);
+        }
+        // Signal after publishing: an idle `dest` sleeps in its idle wait, and
+        // the queue alone cannot make its dispatcher run.
+        if dest != cpu {
+            self.arch.send_ipi(dest);
         }
     }
 
@@ -1209,47 +1196,6 @@ impl<A: SchedulerArch> Scheduler<A> {
         }
     }
 
-    /// Cooperatively yield the currently dispatching task on its CPU.
-    ///
-    /// Intended to be called from inside a syscall handler
-    /// (`yield_now`) where the issuing task's [`TaskId`] has just been
-    /// looked up via [`Self::current_task`]. The task is required to be
-    /// in [`TaskState::Running`]; on success its state is flipped back
-    /// to [`TaskState::Ready`], it is re-enqueued at its current
-    /// priority on its home CPU, and the per-CPU current-task slot is
-    /// cleared so the next dispatch is free to pick a different task.
-    ///
-    /// Demotion is **not** applied here: `yield_current` models a
-    /// voluntary syscall yield, not a quantum-expiry. The MLFQ demotion
-    /// path lives in the scheduler's internal `dispatch` routine and is
-    /// reached when the task body itself returns
-    /// [`crate::TaskAction::Yield`]; that keeps the two yield
-    /// notions distinct, avoiding the interface creep
-    /// forbids.
-    ///
-    /// # Errors
-    /// * [`SchedError::NoSuchTask`] if the id is unknown.
-    /// * [`SchedError::InvalidState`] if the task is not [`TaskState::Running`].
-    pub fn yield_current(&self, id: TaskId) -> SchedResult<()> {
-        let task = self
-            .tasks
-            .read()
-            .get(&id)
-            .cloned()
-            .ok_or(SchedError::NoSuchTask)?;
-        task.cas_state(TaskState::Running, TaskState::Ready)
-            .map_err(|_| SchedError::InvalidState)?;
-        let prio = task.load_priority();
-        let class = task.load_sched_class();
-        let home = task.home_cpu.load(Ordering::Acquire);
-        let cpu = self.cpu_state(home)?;
-        if cpu.push_class(class, prio, id).is_err() {
-            self.overflow.lock().push(id);
-        }
-        self.clear_current_matching(id);
-        Ok(())
-    }
-
     /// Move `id` into scheduling class `class`, governing its next enqueue
     /// onward (see [`SchedulerPolicy::set_sched_class`]).
     ///
@@ -1267,7 +1213,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             return Err(SchedError::InvalidState);
         }
         // Record the class; every enqueue point (`admit_woken`, the
-        // dispatch yield path, overflow drain, `yield_current`) reads it and
+        // dispatch yield path, overflow drain) reads it and
         // routes the task to the matching band, so a task adopts the class
         // the next time it is placed on a run queue — its next wake or
         // yield. The usual caller elevates itself while Running, so it is
@@ -1351,8 +1297,8 @@ impl<A: SchedulerArch> Scheduler<A> {
     }
 
     /// Defensively clear every per-CPU current-task slot whose entry
-    /// equals `id`. Used by [`Self::park`], [`Self::exit`], and
-    /// [`Self::yield_current`] so a task that just transitioned out of
+    /// equals `id`. Used by [`Self::park`] and [`Self::exit`] so a task
+    /// that just transitioned out of
     /// [`TaskState::Running`] cannot remain the current task on any
     /// CPU. The CAS is per-slot, so a concurrent `dispatch` of a
     /// *different* task on a sibling CPU is untouched.
@@ -1483,10 +1429,6 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
         Scheduler::current_task(self, cpu)
     }
 
-    fn yield_current(&self, id: TaskId) -> SchedResult<()> {
-        Scheduler::yield_current(self, id)
-    }
-
     fn set_sched_class(&self, id: TaskId, class: SchedClass) -> SchedResult<()> {
         Scheduler::set_sched_class(self, id, class)
     }
@@ -1515,7 +1457,7 @@ mod tests {
             cpus,
             queue_capacity_per_band: 64,
             yields_before_demotion: 1,
-            boost_interval_ticks: 1024,
+            boost_interval_quanta: 1024,
         };
         let sched = Scheduler::new(cfg, arch.clone()).expect("sched");
         (arch, sched)
@@ -1750,7 +1692,7 @@ mod tests {
             cpus: 1,
             queue_capacity_per_band: 64,
             yields_before_demotion: 1,
-            boost_interval_ticks: 1024,
+            boost_interval_quanta: 1024,
         };
         let sched = Arc::new(Scheduler::new(cfg, arch.clone()).expect("sched"));
         let a2 = arch.clone();
@@ -1885,7 +1827,7 @@ mod tests {
             cpus: 1,
             queue_capacity_per_band: 16,
             yields_before_demotion: 1,
-            boost_interval_ticks: 2,
+            boost_interval_quanta: 2,
         };
         let sched = Scheduler::new(cfg, arch.clone()).expect("sched");
         let runs = Arc::new(core::sync::atomic::AtomicU32::new(0));
@@ -2001,7 +1943,7 @@ mod tests {
             cpus: 1,
             queue_capacity_per_band: 64,
             yields_before_demotion: 1,
-            boost_interval_ticks: 1024,
+            boost_interval_quanta: 1024,
         };
         let sched = Arc::new(Scheduler::new(cfg, arch.clone()).expect("sched"));
         let observed = Arc::new(AtomicU64::new(0));
@@ -2058,50 +2000,6 @@ mod tests {
         assert_eq!(sched.current_task(1), None);
     }
 
-    #[test]
-    fn yield_current_requeues_and_clears_slot() {
-        let (arch, sched) = mk(1);
-        let id = sched
-            .spawn(0, Priority::Normal, |_| TaskAction::Yield)
-            .expect("spawn");
-        arch.set_current_cpu(0);
-        // Mimic the state mid-dispatch: task running, slot published.
-        sched
-            .tasks
-            .read()
-            .get(&id)
-            .cloned()
-            .expect("task")
-            .store_state(TaskState::Running);
-        sched.set_current(0, id);
-        assert_eq!(sched.current_task(0), Some(id));
-        sched.yield_current(id).expect("yield");
-        // Slot cleared.
-        assert_eq!(sched.current_task(0), None);
-        // Task is Ready and on a run queue: the next step dispatches it.
-        assert_eq!(sched.state_of(id), TaskState::Ready);
-        let outcome = sched.step(0).expect("step");
-        assert_eq!(outcome, StepOutcome::Ran(id));
-    }
-
-    #[test]
-    fn yield_current_rejects_non_running_task() {
-        let (_arch, sched) = mk(1);
-        let id = sched
-            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
-            .expect("spawn");
-        // Freshly-spawned task is Ready, not Running — `yield_current`
-        // models an in-flight syscall yield and must reject anything
-        // else (fail-closed).
-        assert_eq!(sched.yield_current(id), Err(SchedError::InvalidState));
-    }
-
-    #[test]
-    fn yield_current_rejects_unknown_task() {
-        let (_arch, sched) = mk(1);
-        assert_eq!(sched.yield_current(424_242), Err(SchedError::NoSuchTask));
-    }
-
     // ---------------------------------------------------------------
     // Heterogeneous CPUs (performance + efficiency cores).
     // ---------------------------------------------------------------
@@ -2116,7 +2014,7 @@ mod tests {
             cpus: 4,
             queue_capacity_per_band: 64,
             yields_before_demotion: 1,
-            boost_interval_ticks: 2,
+            boost_interval_quanta: 2,
         };
         let sched = Scheduler::new(cfg, arch.clone()).expect("sched");
         (arch, sched)

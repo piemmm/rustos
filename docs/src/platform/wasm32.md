@@ -59,6 +59,12 @@ frame. A directed reschedule to another worker arrives over a
 `MessageChannel` post (`WasmArch::send_ipi`) and re-enters the exported
 `tairix_arch_wasm32_on_message`.
 
+A running task is preempted at the next frame, so this port's quantum is
+the host's frame period. The host sets that period (display refresh,
+background-tab throttling), so `WasmArch::quantum_ticks` reports the
+interval between the two most recent frames as measured
+(`preempt::frame_interval_ns`), or `0` until two frames have run.
+
 The tick and IPI callbacks drive a *live* `kernel/sched` scheduler — the
 same `tairix-kernel-sched-mlfq::Scheduler` the bare-metal ports run
 (`plans/WIRING.md` Stage W8). On the main thread the

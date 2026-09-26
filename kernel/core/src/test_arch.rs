@@ -343,6 +343,12 @@ impl SchedulerArch for TestArch {
         self.ticks.load(Ordering::Relaxed)
     }
 
+    /// One tick: this double's ticks are abstract, so a quantum-denominated
+    /// setting counts the same ticks a test drives.
+    fn quantum_ticks(&self) -> u64 {
+        1
+    }
+
     fn send_ipi(&self, _target: CpuId) {
         self.ipis.fetch_add(1, Ordering::Relaxed);
     }

@@ -326,8 +326,8 @@ Three implementations exist:
   (`AGENTS.md` §2.2). A caller with no published resume handle is not a
   resumable user task: `reschedule_current` returns `false` and the wait
   fails closed with `Errno::NotImplemented`, the same answer the futex
-  wait gives the same condition. It must not fall back to
-  `Scheduler::yield_current` — that clears the caller's per-CPU
+  wait gives the same condition. It must not fall back to re-enqueueing
+  the caller without suspending it — that clears the caller's per-CPU
   current-task slot without suspending anything, leaving the task
   running as a caller the next syscall cannot attribute.
 * **`KthreadIrqWaiter`** (`kernel/core::kthread_irq`): the waiter an

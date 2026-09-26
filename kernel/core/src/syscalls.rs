@@ -5111,11 +5111,11 @@ where
         // `DispatchOutcome::Reschedule { action: Yield, .. }`; the
         // bin-crate callback then suspends the caller back to the
         // scheduler, which re-enqueues it from the `TaskAction::Yield` the
-        // kthread reports when it switches back. Driving
-        // `Scheduler::yield_current` here as well would double-handle the
-        // re-enqueue — and, fatally, mutate scheduler state re-entrantly
-        // from inside the in-flight `step` the kthread is running under
-        // (the SP2a note's reconciliation). The handler is therefore inert
+        // kthread reports when it switches back. Re-enqueueing the caller
+        // here as well would double-handle the re-enqueue — and, fatally,
+        // mutate scheduler state re-entrantly from inside the in-flight
+        // `step` the kthread is running under (the SP2a note's
+        // reconciliation). The handler is therefore inert
         // and always reports success; the value is encoded only on the
         // (degenerate) path where no user kthread is published.
         Ok(0)
@@ -11612,8 +11612,8 @@ where
 }
 
 /// Tear down the process-bookkeeping subset a task holds regardless of
-/// whether it ever reached user mode: its signal-intake / kill-gate /
-/// running-kill overlays, its own parent/child wait rows, its capability
+/// whether it ever reached user mode: its signal-intake and kill-gate
+/// state, its own parent/child wait rows, its capability
 /// record, and its address-space registry entry (streams, open files,
 /// limits, grants, cwd, and — when registered — the frozen space snapshot).
 ///
@@ -11641,26 +11641,19 @@ fn reclaim_process_bookkeeping(
 ) {
     // Drop the signal-intake state of every thread of the process (its opt-in
     // and any pending observed signal): a dead thread's intake must never
-    // linger, or a later task drawing its id would inherit one. The gates
-    // below are the same story, and all three are keyed
-    // by the individual thread — so the thread set is read once, before the
-    // capability record that holds it is dropped.
+    // linger, or a later task drawing its id would inherit one. The kill gate
+    // is the same story, and both are keyed by the individual thread — so the
+    // thread set is read once, before the capability record that holds it is
+    // dropped.
     let threads: Vec<u64> = {
         let guard = caps.read();
         guard.threads_of(process).map(|thread| thread.0).collect()
     };
-    for thread in threads {
+    for &thread in &threads {
         crate::procsignal::clear_intake(thread);
         if let Some(peers) = peer_watch {
             peers.forget_watcher(thread);
         }
-        // Drop the kill-gate state for the same reason — and so a thread
-        // that exits on its own while a termination was deferred against it
-        // (both raced) leaves no pending kill behind. That includes a
-        // teardown deferred while the thread ran in user mode: the process is
-        // already being reclaimed here, so the dispatch loop's later
-        // `land_running_kill` must find nothing and never reclaim twice.
-        crate::procsignal::clear_kill_gate(thread);
         // Its per-thread registry records (the user-stack span) go with it.
         aspaces.write().withdraw_thread(SecTaskId(thread));
     }
@@ -11673,6 +11666,13 @@ fn reclaim_process_bookkeeping(
     // orphan's link or an unreaped zombie — would be stranded forever.
     process_wait.parent_exited(process);
     let _ = crate::peerwatch::remove_record(peer_watch, caps, process);
+    // A death is claimed only against a member, so the gate is cleared once
+    // the record — and every thread's membership with it — is gone: a clear
+    // before that could be followed by a claim nothing would clear, and the
+    // dispatch loop would land it a second time.
+    for thread in threads {
+        crate::procsignal::clear_kill_gate(thread);
+    }
     // Withdraw the address-space registry entry last: streams, open files
     // (pipe ends wake their parked peers as they drop), limits, grants, cwd,
     // and any frozen space snapshot all go together, so no stale entry
@@ -12688,11 +12688,14 @@ where
             // lock and its wait-queue registration: the lock is then closed
             // for ever and every later load on that volume parks behind a
             // holder that no longer exists (`plans/OPEN-DEFECTS.md` D112).
-            crate::procsignal::kernel_enter(task);
-            let built = build_child_image(
-                services, sec_id, task, &plan, &body_seed, &arg_refs, &env_refs,
-            )
-            .map(|ready| upgrade_built_child(yielder, ready));
+            let built = if crate::procsignal::kernel_enter(task) {
+                Err(Errno::Interrupted)
+            } else {
+                build_child_image(
+                    services, sec_id, task, &plan, &body_seed, &arg_refs, &env_refs,
+                )
+                .map(|ready| upgrade_built_child(yielder, ready))
+            };
             // The gate closes only once the upgrade's own yield is behind us,
             // so nothing between here and user mode can be reclaimed
             // mid-flight.
@@ -12880,11 +12883,11 @@ where
 /// [`crate::kthread::reschedule_current`] resolves itself, so a wait loop
 /// that migrates across a park cannot suspend the wrong core's task.
 ///
-/// The scheduler is never touched here. Re-enqueuing the caller through
-/// `Scheduler::yield_current` would clear its per-CPU current-task slot
-/// while suspending nothing, so the task would carry on in user mode as a
-/// caller the next syscall could not attribute — and an unattributable
-/// syscall used to halt the CPU outright.
+/// The scheduler is never touched here. Re-enqueuing the caller from inside
+/// its own syscall would clear its per-CPU current-task slot while
+/// suspending nothing, so the task would carry on in user mode as a caller
+/// the next syscall could not attribute — and an unattributable syscall used
+/// to halt the CPU outright.
 ///
 /// A caller with no published resume handle simply is not suspended and
 /// its loop re-polls under its own deadline. `dispatch_step` publishes the
@@ -13482,193 +13485,23 @@ where
     }
 }
 
-impl<A> DispatchHook for KernelDispatchHook<'_, A>
+impl<A> KernelDispatchHook<'_, A>
 where
     A: KernelArch + 'static,
 {
-    fn dispatch(&self, raw_number: u64, args: RawArgs) -> DispatchOutcome {
-        // The completion path below decides on the syscall's *identity*, so
-        // decode the register once here through the same shared check the
-        // dispatcher applies; the two cannot disagree. `None` is a register
-        // that names no syscall, which the dispatcher refuses and which
-        // reschedules nothing.
-        let number = SyscallNumber::from_register(raw_number).ok();
-        // Step 1 — identify the caller. The
-        // scheduler's per-CPU current-task slot is the only sanctioned
-        // source; no caller-supplied identity is accepted.
-        let cpu = SchedulerArch::current_cpu(self.arch);
-        // Kernel-activity breadcrumb: record which syscall this CPU is
-        // entering *before* any handler work, so a CPU that wedges inside a
-        // syscall body reports `k_site=syscall k_detail=<number>` even though
-        // its watchdog sample can no longer be taken (it runs with FIQ, and
-        // on a stall IRQ, masked). The stale `pre_silence` PC only ever names
-        // the syscall-entry trampoline; this names the actual syscall.
-        crate::watchdog::note_kernel_breadcrumb(
-            cpu,
-            crate::watchdog::KernelBreadcrumb::Syscall,
-            raw_number,
-        );
-        let Some(sched_task_id) = self.sched.current_task(cpu) else {
-            self.audit_no_caller_context(cpu, "no_current_task");
-            return DispatchOutcome::NoCallerContext { cpu };
-        };
-
-        // Snapshot the caller's capability record under a *briefly* held
-        // read lock, then drop the guard before dispatching. The dispatcher
-        // checks the required capability against this consistent
-        // point-in-time snapshot (check before any
-        // state touch), so there is no TOCTOU between the snapshot and the
-        // check. Holding the read lock across the whole call instead would
-        // self-deadlock the caps-mutating handlers — `exit`, `cap_delegate`,
-        // `cap_revoke` all take `self.caps.write()`, and the
-        // writer-preference `RwLock` cannot grant a writer while this thread
-        // still holds a reader. Revocation by another CPU mid-call therefore
-        // takes effect from the caller's *next* syscall, the same
-        // credential-snapshot semantics a POSIX kernel gives a syscall in
-        // flight; the mutating handlers operate on the live table under
-        // their own write lock, so the revocation itself is not lost.
-        let task_id = SecTaskId(sched_task_id);
-        let caps_snapshot = {
-            let guard = self.caps.read();
-            if let Some(record) = guard.caps_for(task_id) {
-                record.clone()
-            } else {
-                drop(guard);
-                self.audit_no_caller_context(cpu, "no_capability_record");
-                return DispatchOutcome::NoCallerContext { cpu };
-            }
-        };
-
-        let caller = CallerContext {
-            task_id,
-            caps: &caps_snapshot,
-        };
-        // The calling thread's process, taken from the snapshot rather than a
-        // second table lookup: the kill boundary below tears the *process*
-        // down, not just the thread that was inside the handler.
-        let caller_process = caller.process();
-
-        // Open the kill gate's in-kernel window: from here until the
-        // boundary check below, a termination aimed at this task is
-        // deferred instead of destroying it mid-handler (the handler may
-        // hold kernel state only its own unwind can release). Both early
-        // returns above sit before this point, so the window never leaks.
-        crate::procsignal::kernel_enter(sched_task_id);
-
-        // Frame-budget boundary (entry): record which call this watched
-        // thread is entering, together with the user frame the port
-        // published, and report a span that went over budget while the
-        // thread was running user code — the frame just taken names that
-        // code, and its stack cannot move while the thread is in here.
-        #[cfg(feature = "watchdog-diagnostics")]
-        if let Some(over) = crate::latency::on_syscall_entry(cpu, sched_task_id, raw_number, || {
-            self.arch.monotonic_ns(cpu)
-        }) {
-            self.handlers
-                .report_latency_overrun(caller_process, task_id, &over);
-        }
-
-        // Steps 2–5: hand off to the dispatcher, which performs the
-        // capability check, argument validation, handler dispatch,
-        // and audit emission.
-        let dispatcher = Dispatcher::new(&self.handlers, self.audit);
-        let result = dispatcher.dispatch(&caller, raw_number, args);
-
-        // Re-read the live CPU for everything below. A *blocking* handler
-        // (`ipc_call`, `call_recv`, `irq_wait`, `hw_tree_wait`, …) parks
-        // the task, and a parked task can be woken and re-dispatched
-        // (work-stolen) onto a **different** core; when the handler
-        // returns we are physically running on whatever core resumed the
-        // task, which is the core its resume handle is now published on.
-        // The completion path below hands a `CpuId` to the arch port's
-        // `reschedule_current`, which is invoked on this same physical
-        // core — so it must name the core the task is on *now*, never the
-        // `cpu` captured at entry (before any migration). Passing the
-        // stale entry `cpu` would drive `reschedule_current` against a
-        // different core's resume handle, context-switching this core
-        // through another task's saved state and corrupting both — a wild
-        // fault. The task cannot migrate again between here and the
-        // `reschedule_current` call: the kernel is non-preemptible, and
-        // nothing below parks.
-        let completion_cpu = SchedulerArch::current_cpu(self.arch);
-
-        // Frame-budget boundary (exit): the call has returned, so its cost
-        // is known. A span that crosses its budget *here* was carried over
-        // by this very call, and the frame taken at its entry names the
-        // blocking call site.
-        #[cfg(feature = "watchdog-diagnostics")]
-        if let Some(over) = crate::latency::on_syscall_exit(completion_cpu, sched_task_id, || {
-            self.arch.monotonic_ns(completion_cpu)
-        }) {
-            self.handlers
-                .report_latency_overrun(caller_process, task_id, &over);
-        }
-
-        // The kill boundary: a teardown deferred while this task was inside
-        // the handler lands now, after the unwind released everything the
-        // handler held. The task never returns to user space. A signalled
-        // death carries the status the parent's `wait` reaps; a driver
-        // unload's carries none. A completing `exit` syscall already recorded
-        // its own death and reclaimed — the taken (and cleared) teardown is
-        // then simply superseded by the exit in flight.
-        if let Some(teardown) = crate::procsignal::kernel_exit_take_kill(sched_task_id) {
-            // A completing `exit` — or a `thread_exit` — already retired this
-            // thread through the shared landing rule, so the taken pending kill
-            // is superseded by the exit in flight.
-            if !matches!(
-                number,
-                Some(SyscallNumber::EXIT | SyscallNumber::THREAD_EXIT)
-            ) {
-                return self.handlers.land_pending_kill(
-                    caller_process,
-                    SecTaskId(sched_task_id),
-                    teardown.reaped_status(),
-                    result,
-                    completion_cpu,
-                );
-            }
-        }
-
-        // SP2b producer (`plans/SPAWN.md` SP2): a rescheduling syscall from
-        // a resumable user kthread must suspend its caller back to the
-        // scheduler rather than `eret` straight back into EL0 — the kthread
-        // `TaskAction` the scheduler observes when the task switches back is
-        // authoritative for the re-enqueue/reap, so the `yield_now`/`exit`
-        // handlers no longer drive the scheduler directly (reconciling the
-        // double-handling the SP2a note flagged). The bin-crate callback
-        // turns this into a `reschedule_current` call; if no user kthread is
-        // published on this CPU it falls back to an ordinary encoded return
-        // (fail closed — `crate::dispatch_slot::DispatchOutcome::Reschedule`).
-        // `completion_cpu` (re-read above) is the core the task is running
-        // on now, so a blocking syscall that migrated mid-handler still
-        // reschedules on the correct core.
-        completion_outcome(number, result, completion_cpu)
-    }
-
-    fn resolve_user_fault(
+    /// Resolve a user-mode data abort at `fault_va` for `thread` of
+    /// `process`, the faulting thread identified on `cpu`: back the page and
+    /// retry, or record the fault fatal to the thread. Runs inside the kill
+    /// gate's in-kernel window.
+    fn resolve_attributed_fault(
         &self,
+        cpu: CpuId,
+        process: ProcessId,
+        thread: SecTaskId,
         fault_va: u64,
         write: bool,
         regs: Option<&UserRegisterFrame>,
     ) -> UserFaultOutcome {
-        // Identify the faulting task exactly as `dispatch` identifies a
-        // syscall caller: the scheduler's per-CPU current-task slot, never
-        // anything caller-supplied. No task on this CPU means the fault
-        // cannot even be attributed; the port falls back to its fatal path.
-        let cpu = SchedulerArch::current_cpu(self.arch);
-        let Some(sched_task_id) = self.sched.current_task(cpu) else {
-            return UserFaultOutcome::Unhandled;
-        };
-        let thread = SecTaskId(sched_task_id);
-        // The faulting thread's process owns every mapping the resolvers
-        // consult; the thread itself owns only its stack span. A thread with
-        // no thread-group entry has no process to resolve against, so the
-        // fault is unattributable and the port takes its fatal path (fail
-        // closed — the resolvers never materialise memory for a task the
-        // kernel does not know).
-        let Some(process) = self.caps.read().process_of(thread) else {
-            return UserFaultOutcome::Unhandled;
-        };
         // Kernel-activity breadcrumb: the fault resolver runs in the
         // data-abort exception handler with IRQ masked (only the `svc`
         // syscall path re-enables IRQ), so a CPU that wedges here can be
@@ -13767,7 +13600,9 @@ where
         // the crash exit so a waiting parent reaps a real status (and the
         // audit log gets its stable fault-kill record), reclaim exactly
         // what a clean exit or a signal kill reclaims, and hand the port
-        // the CPU to suspend the task on.
+        // the CPU to suspend the task on. A file read that parked may have
+        // resumed this thread on another core.
+        let cpu = SchedulerArch::current_cpu(self.arch);
         crate::watchdog::note_kernel_breadcrumb(
             cpu,
             crate::watchdog::KernelBreadcrumb::FaultFatal,
@@ -13783,6 +13618,222 @@ where
             regs,
         );
         UserFaultOutcome::Terminated { cpu }
+    }
+}
+
+impl<A> DispatchHook for KernelDispatchHook<'_, A>
+where
+    A: KernelArch + 'static,
+{
+    fn dispatch(&self, raw_number: u64, args: RawArgs) -> DispatchOutcome {
+        // The completion path below decides on the syscall's *identity*, so
+        // decode the register once here through the same shared check the
+        // dispatcher applies; the two cannot disagree. `None` is a register
+        // that names no syscall, which the dispatcher refuses and which
+        // reschedules nothing.
+        let number = SyscallNumber::from_register(raw_number).ok();
+        // Step 1 — identify the caller. The
+        // scheduler's per-CPU current-task slot is the only sanctioned
+        // source; no caller-supplied identity is accepted.
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        // Kernel-activity breadcrumb: record which syscall this CPU is
+        // entering *before* any handler work, so a CPU that wedges inside a
+        // syscall body reports `k_site=syscall k_detail=<number>` even though
+        // its watchdog sample can no longer be taken (it runs with FIQ, and
+        // on a stall IRQ, masked). The stale `pre_silence` PC only ever names
+        // the syscall-entry trampoline; this names the actual syscall.
+        crate::watchdog::note_kernel_breadcrumb(
+            cpu,
+            crate::watchdog::KernelBreadcrumb::Syscall,
+            raw_number,
+        );
+        let Some(sched_task_id) = self.sched.current_task(cpu) else {
+            self.audit_no_caller_context(cpu, "no_current_task");
+            return DispatchOutcome::NoCallerContext { cpu };
+        };
+
+        // Snapshot the caller's capability record under a *briefly* held
+        // read lock, then drop the guard before dispatching. The dispatcher
+        // checks the required capability against this consistent
+        // point-in-time snapshot (check before any
+        // state touch), so there is no TOCTOU between the snapshot and the
+        // check. Holding the read lock across the whole call instead would
+        // self-deadlock the caps-mutating handlers — `exit`, `cap_delegate`,
+        // `cap_revoke` all take `self.caps.write()`, and the
+        // writer-preference `RwLock` cannot grant a writer while this thread
+        // still holds a reader. Revocation by another CPU mid-call therefore
+        // takes effect from the caller's *next* syscall, the same
+        // credential-snapshot semantics a POSIX kernel gives a syscall in
+        // flight; the mutating handlers operate on the live table under
+        // their own write lock, so the revocation itself is not lost.
+        let task_id = SecTaskId(sched_task_id);
+        let caps_snapshot = {
+            let guard = self.caps.read();
+            if let Some(record) = guard.caps_for(task_id) {
+                record.clone()
+            } else {
+                drop(guard);
+                self.audit_no_caller_context(cpu, "no_capability_record");
+                return DispatchOutcome::NoCallerContext { cpu };
+            }
+        };
+
+        let caller = CallerContext {
+            task_id,
+            caps: &caps_snapshot,
+        };
+        // The calling thread's process, taken from the snapshot rather than a
+        // second table lookup: the kill boundary below tears the *process*
+        // down, not just the thread that was inside the handler.
+        let caller_process = caller.process();
+
+        // Open the kill gate's in-kernel window: from here until the
+        // boundary check below, a termination aimed at this task is
+        // deferred instead of destroying it mid-handler (the handler may
+        // hold kernel state only its own unwind can release). Both early
+        // returns above sit before this point, so the window never leaks.
+        // A thread that already owes a death runs no handler at all.
+        let killed_at_entry = crate::procsignal::kernel_enter(sched_task_id);
+
+        // Frame-budget boundary (entry): record which call this watched
+        // thread is entering, together with the user frame the port
+        // published, and report a span that went over budget while the
+        // thread was running user code — the frame just taken names that
+        // code, and its stack cannot move while the thread is in here.
+        #[cfg(feature = "watchdog-diagnostics")]
+        if let Some(over) = crate::latency::on_syscall_entry(cpu, sched_task_id, raw_number, || {
+            self.arch.monotonic_ns(cpu)
+        }) {
+            self.handlers
+                .report_latency_overrun(caller_process, task_id, &over);
+        }
+
+        // Steps 2–5: hand off to the dispatcher, which performs the
+        // capability check, argument validation, handler dispatch,
+        // and audit emission.
+        let result = if killed_at_entry {
+            Err(Errno::Interrupted)
+        } else {
+            Dispatcher::new(&self.handlers, self.audit).dispatch(&caller, raw_number, args)
+        };
+
+        // Re-read the live CPU for everything below. A *blocking* handler
+        // (`ipc_call`, `call_recv`, `irq_wait`, `hw_tree_wait`, …) parks
+        // the task, and a parked task can be woken and re-dispatched
+        // (work-stolen) onto a **different** core; when the handler
+        // returns we are physically running on whatever core resumed the
+        // task, which is the core its resume handle is now published on.
+        // The completion path below hands a `CpuId` to the arch port's
+        // `reschedule_current`, which is invoked on this same physical
+        // core — so it must name the core the task is on *now*, never the
+        // `cpu` captured at entry (before any migration). Passing the
+        // stale entry `cpu` would drive `reschedule_current` against a
+        // different core's resume handle, context-switching this core
+        // through another task's saved state and corrupting both — a wild
+        // fault. The task cannot migrate again between here and the
+        // `reschedule_current` call: the kernel is non-preemptible, and
+        // nothing below parks.
+        let completion_cpu = SchedulerArch::current_cpu(self.arch);
+
+        // Frame-budget boundary (exit): the call has returned, so its cost
+        // is known. A span that crosses its budget *here* was carried over
+        // by this very call, and the frame taken at its entry names the
+        // blocking call site.
+        #[cfg(feature = "watchdog-diagnostics")]
+        if let Some(over) = crate::latency::on_syscall_exit(completion_cpu, sched_task_id, || {
+            self.arch.monotonic_ns(completion_cpu)
+        }) {
+            self.handlers
+                .report_latency_overrun(caller_process, task_id, &over);
+        }
+
+        // The kill boundary: a death owed by this task lands now, after the
+        // unwind released everything the handler held, and the task never
+        // returns to user space. A signalled death carries the status the
+        // parent's `wait` reaps; a driver unload's carries none.
+        if let Some(teardown) = crate::procsignal::kernel_exit_take_kill(sched_task_id) {
+            // An `exit` or `thread_exit` that ran already retired this thread
+            // through the shared landing rule, which supersedes the death.
+            if killed_at_entry
+                || !matches!(
+                    number,
+                    Some(SyscallNumber::EXIT | SyscallNumber::THREAD_EXIT)
+                )
+            {
+                return self.handlers.land_pending_kill(
+                    caller_process,
+                    SecTaskId(sched_task_id),
+                    teardown.reaped_status(),
+                    result,
+                    completion_cpu,
+                );
+            }
+        }
+
+        // SP2b producer (`plans/SPAWN.md` SP2): a rescheduling syscall from
+        // a resumable user kthread must suspend its caller back to the
+        // scheduler rather than `eret` straight back into EL0 — the kthread
+        // `TaskAction` the scheduler observes when the task switches back is
+        // authoritative for the re-enqueue/reap, so the `yield_now`/`exit`
+        // handlers no longer drive the scheduler directly (reconciling the
+        // double-handling the SP2a note flagged). The bin-crate callback
+        // turns this into a `reschedule_current` call; if no user kthread is
+        // published on this CPU it falls back to an ordinary encoded return
+        // (fail closed — `crate::dispatch_slot::DispatchOutcome::Reschedule`).
+        // `completion_cpu` (re-read above) is the core the task is running
+        // on now, so a blocking syscall that migrated mid-handler still
+        // reschedules on the correct core.
+        completion_outcome(number, result, completion_cpu)
+    }
+
+    fn resolve_user_fault(
+        &self,
+        fault_va: u64,
+        write: bool,
+        regs: Option<&UserRegisterFrame>,
+    ) -> UserFaultOutcome {
+        // Identify the faulting task exactly as `dispatch` identifies a
+        // syscall caller: the scheduler's per-CPU current-task slot, never
+        // anything caller-supplied. No task on this CPU means the fault
+        // cannot even be attributed; the port falls back to its fatal path.
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let Some(sched_task_id) = self.sched.current_task(cpu) else {
+            return UserFaultOutcome::Unhandled;
+        };
+        let thread = SecTaskId(sched_task_id);
+        // The faulting thread's process owns every mapping the resolvers
+        // consult; the thread itself owns only its stack span. A thread with
+        // no thread-group entry has no process to resolve against, so the
+        // fault is unattributable and the port takes its fatal path (fail
+        // closed — the resolvers never materialise memory for a task the
+        // kernel does not know).
+        let Some(process) = self.caps.read().process_of(thread) else {
+            return UserFaultOutcome::Unhandled;
+        };
+        // The resolvers read through the filesystem and park there, so a fault
+        // is a kernel body like a syscall: a death is taken at its boundary,
+        // never inside it, and one already owed skips the resolution.
+        let outcome = (!crate::procsignal::kernel_enter(sched_task_id))
+            .then(|| self.resolve_attributed_fault(cpu, process, thread, fault_va, write, regs));
+        let owed = crate::procsignal::kernel_exit_take_kill(sched_task_id);
+        // A resolver that parked may have resumed on another core, and the
+        // port suspends the task on the core this names.
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        match (outcome, owed) {
+            // A fault fatal to the thread landed its own death, which
+            // supersedes one owed.
+            (Some(UserFaultOutcome::Terminated { .. }), _) => UserFaultOutcome::Terminated { cpu },
+            (_, Some(teardown)) => {
+                let _ = self
+                    .handlers
+                    .land_thread_down(process, thread, teardown.reaped_status());
+                UserFaultOutcome::Terminated { cpu }
+            }
+            (Some(outcome), None) => outcome,
+            // Owed at entry and gone by the boundary: nothing but this thread's
+            // own boundary takes a death while it executes, so fail closed.
+            (None, None) => UserFaultOutcome::Unhandled,
+        }
     }
 
     fn terminate_user_fault(
@@ -14127,7 +14178,7 @@ mod tests {
     /// toward the scheduler — the reschedule path (driven from the
     /// dispatch hook by the `yield` syscall number) re-enqueues the
     /// caller from the kthread `TaskAction`, so the handler always reports
-    /// success and never touches `Scheduler::yield_current`. Driving the
+    /// success and never re-enqueues the caller itself. Driving the
     /// scheduler here would double-handle (and re-entrantly mutate) the
     /// in-flight `step` the kthread runs under.
     #[test]

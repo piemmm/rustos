@@ -281,8 +281,8 @@ boundary first. All four death paths (plus the signal terminate, which was
 already correct) now funnel through one landing rule,
 `KernelSyscallHandlers::land_thread_down`: retire this thread's per-thread state
 and tear the process down only when it was the group's **last**. The terminal
-status is carried through both deferral channels (the kill gate and the
-running-kill set) as a status rather than a signal, so a sibling's synthesised
+status is carried through the kill gate's owed register as a status rather
+than a signal, so a sibling's synthesised
 `128 + n` can never overwrite a real `exit` code. `thread_create` additionally
 refuses the second thread of a process whose signal producer cannot stop a group,
 since such a group could never be torn down.

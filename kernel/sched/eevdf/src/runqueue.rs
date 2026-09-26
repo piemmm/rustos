@@ -1,80 +1,107 @@
 //! Per-CPU virtual-time run queue for the EEVDF policy.
 //!
-//! Each CPU owns one [`RunQueue`]: a bounded set of [`Entry`] records
-//! (a [`TaskId`] with its current virtual deadline / eligible time)
-//! kept under a single `SpinLock`, plus that CPU's monotonically
-//! advancing virtual time and the total weight of the tasks it owns.
+//! Each CPU owns one [`RunQueue`]: its ready set, its virtual clock `V`, and
+//! the weight competing for it, under one `SpinLock`.
 //!
-//! The queue is *not* a priority array like the MLFQ sibling's
-//! Chase–Lev deques: EEVDF orders by a continuous virtual deadline, so
-//! the ready set is scanned for the earliest-eligible-virtual-deadline
-//! task on each pick. The scan is `O(n)` in the per-CPU ready count,
-//! which is the textbook EEVDF selection rule; a future tree-backed
-//! index can replace it behind this same module boundary without
-//! changing the scheduler (no interface creep).
+//! EEVDF runs the earliest virtual deadline among the tasks `V` has made
+//! eligible. The ready set is two binary heaps: *pending*, keyed by eligible
+//! time, and *eligible*, keyed by deadline. `V` never moves backwards, so an
+//! entry crosses from pending to eligible at most once per enqueue and every
+//! pick is `O(log n)` amortised; nothing on the dispatch path scans the set.
+//! No entry is ever removed from the middle — a stale one is discarded when it
+//! is picked — so a heap is all the set needs. Both heaps keep room for every
+//! entry, reserved fallibly on push, so a promotion never allocates. Equal keys
+//! break on arrival order: task ids are drawn at random, and letting one decide
+//! who runs first would hand the choice to the draw.
 //!
-//! Virtual time is fixed-point with [`SCALE`] sub-units per unit of
-//! service so the weighted divisions stay in integer arithmetic
-//! (no floats in kernel paths, deterministic).
+//! Virtual time is fixed-point in the shared [`SCALE`] sub-units per tick of
+//! service.
 
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
+use alloc::collections::{BinaryHeap, VecDeque};
+use core::cmp::Reverse;
 
+use tairix_kernel_sched_api::share::SCALE;
+use tairix_kernel_sched_api::SchedClass;
 use tairix_sync::SpinLock;
 
 use crate::TaskId;
 
-/// Fixed-point scaling factor for virtual time.
-///
-/// One unit of dispatched service is worth `SCALE` virtual sub-units
-/// before the per-task weight division, keeping `service * SCALE /
-/// weight` an exact integer for the small integer weights this policy
-/// uses.
-pub(crate) const SCALE: u64 = 1 << 20;
-
-/// Service charged for a single dispatch (one body invocation).
-///
-/// The cooperative dispatch model runs a task body exactly once per
-/// [`crate::Scheduler::step`]; that counts as one unit of service for
-/// virtual-time accounting. It is deliberately the request size too, so
-/// a task's virtual deadline after admission is `ve + SCALE/weight`.
-pub(crate) const SERVICE_PER_DISPATCH: u64 = 1;
-
-/// A ready task as tracked by a [`RunQueue`].
+/// A time-shared task as the scheduler queues it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Entry {
     /// The ready task.
     pub id: TaskId,
-    /// Virtual eligible time `ve` (fixed point). The task may be
-    /// dispatched only once the owning CPU's virtual time reaches `ve`.
+    /// Virtual eligible time `ve`: the task may run once `V` reaches it.
     pub eligible: u64,
-    /// Virtual deadline `vd` (fixed point). The earliest deadline among
-    /// eligible entries wins the pick.
+    /// Virtual deadline `vd`: the earliest among eligible entries runs.
     pub deadline: u64,
 }
 
+/// An eligible entry, ordered `(deadline, arrival)`.
+type EligibleKey = Reverse<(u64, u64, TaskId)>;
+
+/// A pending entry, ordered `(eligible, deadline, arrival)`.
+type PendingKey = Reverse<(u64, u64, u64, TaskId)>;
+
 /// Mutable interior of a [`RunQueue`], guarded by one `SpinLock`.
 struct Inner {
-    /// Strict-priority real-time band, in FIFO arrival order. Any entry
-    /// here is dispatched (and stolen) before *any* eligible time-shared
-    /// entry in [`Self::ready`], regardless of virtual deadline — the
-    /// [`tairix_kernel_sched_api::SchedClass::Realtime`] guarantee. A task
-    /// re-enqueued after a yield goes to the back, so equal real-time peers
-    /// share the CPU round-robin. Real-time tasks carry no virtual time;
-    /// only [`Self::total_weight`] counts them (for load-balanced
-    /// placement). Bounded by [`Self::capacity`] like the fair set.
+    /// Strict-priority real-time band, in FIFO arrival order, dispatched (and
+    /// stolen) before any time-shared entry whatever its deadline — the
+    /// [`SchedClass::Realtime`] guarantee. A task re-enqueued after a yield
+    /// goes to the back, so equal real-time peers share the CPU round-robin.
+    /// Real-time tasks carry no virtual time.
     rt_ready: VecDeque<TaskId>,
-    ready: Vec<Entry>,
-    /// The CPU's current virtual time `V` (fixed point). Advances by
-    /// `service * SCALE / total_weight` as the CPU dispatches work.
+    /// Time-shared entries `V` has reached: the pick set.
+    eligible: BinaryHeap<EligibleKey>,
+    /// Time-shared entries `V` has not reached yet.
+    pending: BinaryHeap<PendingKey>,
+    /// Arrival counter supplying the tie-break half of a key. One increment
+    /// per enqueue, so it cannot wrap in any real uptime.
+    next_seq: u64,
+    /// The CPU's virtual time `V`, advanced by time-shared service divided by
+    /// [`Self::fair_weight`] and never backwards.
     virtual_time: u64,
-    /// Sum of the weights of every task this CPU currently owns
-    /// (whether queued here or running off it). Drives the rate at
-    /// which `virtual_time` advances so the share is proportional.
+    /// Service owed to `V` that has not yet made up a whole unit of it, kept
+    /// so short dispatches under a heavy load still move the clock exactly.
+    carry: u64,
+    /// Weight of every task counted on this CPU, whatever its class: the
+    /// load placement balances.
     total_weight: u64,
-    /// Compile-time bound on `ready.len()` — back-pressure, never a
-    /// reallocation past this point (bounded queues).
+    /// Weight of the time-shared tasks alone, which paces `V`: real-time
+    /// service is not delivered to the fair competition.
+    fair_weight: u64,
+    /// Bound on the time-shared entries — back-pressure, never growth past it.
     capacity: usize,
+}
+
+impl Inner {
+    fn fair_len(&self) -> usize {
+        self.eligible.len() + self.pending.len()
+    }
+
+    /// Move every pending entry `V` has reached into the eligible heap.
+    fn promote(&mut self) {
+        while let Some(&Reverse((eligible, deadline, seq, id))) = self.pending.peek() {
+            if eligible > self.virtual_time {
+                break;
+            }
+            self.pending.pop();
+            // Room for every entry is reserved on push, so this never grows.
+            self.eligible.push(Reverse((deadline, seq, id)));
+        }
+    }
+
+    /// The next time-shared entry by the EEVDF rule, or `None` when there is
+    /// none: the earliest deadline among eligible entries, else the earliest
+    /// eligible entry, ties on its deadline.
+    fn take_fair(&mut self) -> Option<(TaskId, u64)> {
+        self.promote();
+        if let Some(Reverse((_, _, id))) = self.eligible.pop() {
+            return Some((id, self.virtual_time));
+        }
+        let Reverse((eligible, _, _, id)) = self.pending.pop()?;
+        Some((id, eligible))
+    }
 }
 
 /// Per-CPU EEVDF run queue.
@@ -83,11 +110,11 @@ pub(crate) struct RunQueue {
 }
 
 impl RunQueue {
-    /// Construct an empty queue bounded to `capacity` ready entries.
+    /// Construct an empty queue bounded to `capacity` time-shared entries.
     ///
-    /// Returns `None` if `capacity` is not a power of two `>= 2`,
-    /// mirroring the MLFQ sibling's queue-capacity contract so the two
-    /// policies accept the same [`crate::SchedulerConfig`].
+    /// Returns `None` if `capacity` is not a power of two `>= 2`, the
+    /// queue-capacity contract every policy accepts the same
+    /// [`crate::SchedulerConfig`] under.
     pub(crate) fn try_new(capacity: usize) -> Option<Self> {
         if capacity < 2 || !capacity.is_power_of_two() {
             return None;
@@ -95,185 +122,150 @@ impl RunQueue {
         Some(Self {
             inner: SpinLock::new(Inner {
                 rt_ready: VecDeque::new(),
-                ready: Vec::new(),
+                eligible: BinaryHeap::new(),
+                pending: BinaryHeap::new(),
+                next_seq: 0,
                 virtual_time: 0,
+                carry: 0,
                 total_weight: 0,
+                fair_weight: 0,
                 capacity,
             }),
         })
     }
 
-    /// Current virtual time `V` of this CPU. Used by the crate's tests to
-    /// assert the EEVDF clock advances proportionally to weight.
-    #[cfg(test)]
+    /// This CPU's virtual time `V`: where a task joining its competition is
+    /// placed, with zero lag.
     pub(crate) fn virtual_time(&self) -> u64 {
         self.inner.lock().virtual_time
     }
 
-    /// Account a task joining this CPU's competition: add its `weight`
-    /// and return the virtual eligible time it should adopt (the current
-    /// `V`, giving it zero initial lag — the EEVDF admission rule).
-    pub(crate) fn admit_weight(&self, weight: u64) -> u64 {
+    /// Add `weight` in `class` to this CPU's competition. Only a task's weight
+    /// ledger calls this, so what is added is exactly what it later removes.
+    pub(crate) fn add_weight(&self, weight: u64, class: SchedClass) {
         let mut g = self.inner.lock();
         g.total_weight = g.total_weight.saturating_add(weight);
-        g.virtual_time
+        if !class.is_realtime() {
+            g.fair_weight = g.fair_weight.saturating_add(weight);
+        }
     }
 
-    /// Account a real-time task joining this CPU's competition: add its
-    /// `weight` so load-balanced placement still counts it, without the
-    /// virtual-time placement the fair band's [`Self::admit_weight`]
-    /// performs (a real-time task carries no virtual time).
-    pub(crate) fn add_weight(&self, weight: u64) {
-        let mut g = self.inner.lock();
-        g.total_weight = g.total_weight.saturating_add(weight);
-    }
-
-    /// Account a task leaving this CPU's competition: subtract `weight`.
-    pub(crate) fn remove_weight(&self, weight: u64) {
+    /// Take `weight` in `class` off this CPU's competition, the counterpart of
+    /// [`Self::add_weight`].
+    pub(crate) fn remove_weight(&self, weight: u64, class: SchedClass) {
         let mut g = self.inner.lock();
         g.total_weight = g.total_weight.saturating_sub(weight);
+        if !class.is_realtime() {
+            g.fair_weight = g.fair_weight.saturating_sub(weight);
+        }
     }
 
-    /// Total weight currently competing on this CPU (`0` when it is
-    /// idle). The placement path reads it to put new and woken work on
-    /// the least-loaded eligible CPU.
+    /// Total weight competing on this CPU (`0` when it is idle). The
+    /// placement path reads it to put new and woken work on the least-loaded
+    /// eligible CPU.
     pub(crate) fn competing_weight(&self) -> u64 {
         self.inner.lock().total_weight
     }
 
-    /// Number of ready entries currently queued on this CPU.
+    /// Number of entries queued on this CPU, in either band.
     ///
     /// The task a CPU is *running* is held in the scheduler's current-task
     /// slot, not in this queue, so a non-zero count means at least one
-    /// **other** ready task is waiting — a competitor the running task
-    /// must be preempted for. The tickless preemption decision
-    /// (`crate::Scheduler::dispatch`) reads this to arm the one-shot timer
-    /// only when a CPU is contended.
+    /// **other** ready task is waiting — a competitor the running task must
+    /// be preempted for. The tickless preemption decision reads this to arm
+    /// the one-shot timer only when a CPU is contended.
     pub(crate) fn ready_len(&self) -> usize {
         let g = self.inner.lock();
-        g.rt_ready.len() + g.ready.len()
+        g.rt_ready.len() + g.fair_len()
     }
 
-    /// Push a ready entry. Returns `Err(id)` if the queue is at its
-    /// compile-time bound (the caller then routes it to overflow).
+    /// Queue a time-shared entry. Returns `Err(id)` when the queue is at its
+    /// bound or its storage cannot grow, and the caller routes it to overflow.
     pub(crate) fn push(&self, entry: Entry) -> Result<(), TaskId> {
         let mut g = self.inner.lock();
-        if g.ready.len() >= g.capacity {
+        let entries = g.fair_len() + 1;
+        if entries > g.capacity {
             return Err(entry.id);
         }
-        g.ready.push(entry);
+        // Each heap keeps room for every entry, so moving one between them
+        // never has to allocate.
+        let eligible_room = entries.saturating_sub(g.eligible.len());
+        let pending_room = entries.saturating_sub(g.pending.len());
+        if g.eligible.try_reserve(eligible_room).is_err()
+            || g.pending.try_reserve(pending_room).is_err()
+        {
+            return Err(entry.id);
+        }
+        let seq = g.next_seq;
+        g.next_seq = g.next_seq.wrapping_add(1);
+        if entry.eligible <= g.virtual_time {
+            g.eligible.push(Reverse((entry.deadline, seq, entry.id)));
+        } else {
+            g.pending
+                .push(Reverse((entry.eligible, entry.deadline, seq, entry.id)));
+        }
         Ok(())
     }
 
-    /// Push a real-time task onto the back of the strict-priority band
-    /// (FIFO / round-robin). Returns `Err(id)` if the band is at its
-    /// compile-time bound (the caller then routes it to overflow), exactly
-    /// like [`Self::push`].
+    /// Push a real-time task onto the back of the strict-priority band (FIFO
+    /// / round-robin). Returns `Err(id)` when the band is at its bound or
+    /// cannot grow, exactly like [`Self::push`].
     pub(crate) fn push_rt(&self, id: TaskId) -> Result<(), TaskId> {
         let mut g = self.inner.lock();
-        if g.rt_ready.len() >= g.capacity {
+        if g.rt_ready.len() >= g.capacity || g.rt_ready.try_reserve(1).is_err() {
             return Err(id);
         }
         g.rt_ready.push_back(id);
         Ok(())
     }
 
-    /// Pick and remove the earliest-eligible-virtual-deadline task.
+    /// Pick and remove the next task to run here, with the band it came from.
     ///
-    /// Among entries whose `eligible <= V` the smallest `deadline` wins
-    /// (ties broken by the smaller [`TaskId`] for determinism). If no
-    /// entry is eligible yet — which the integer virtual clock can
-    /// transiently produce — the earliest `eligible` entry is taken and
-    /// `V` is advanced to it so the CPU always makes progress when it
-    /// owns runnable work (no spin-waiting for time
-    /// to pass).
-    pub(crate) fn pick(&self) -> Option<Entry> {
+    /// A ready real-time task comes first. Otherwise the earliest-deadline
+    /// eligible entry runs; when none is eligible — which an integer virtual
+    /// clock can transiently produce — the earliest-eligible entry runs and
+    /// `V` is advanced to it, so a CPU holding runnable work never idles
+    /// waiting for virtual time to pass.
+    pub(crate) fn pick(&self) -> Option<(TaskId, SchedClass)> {
         let mut g = self.inner.lock();
-        // Strict priority: any ready real-time task is dispatched before the
-        // earliest-deadline fair task, and does not advance the fair virtual
-        // clock (a real-time task carries no virtual time).
         if let Some(id) = g.rt_ready.pop_front() {
-            return Some(Entry {
-                id,
-                eligible: 0,
-                deadline: 0,
-            });
+            return Some((id, SchedClass::Realtime));
         }
-        if g.ready.is_empty() {
-            return None;
+        let (id, reached) = g.take_fair()?;
+        if reached > g.virtual_time {
+            g.virtual_time = reached;
         }
-        let v = g.virtual_time;
-        // The earliest-deadline entry whose eligible time has arrived.
-        let eligible_best = g
-            .ready
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.eligible <= v)
-            .min_by_key(|(_, e)| (e.deadline, e.id))
-            .map(|(i, _)| i);
-        let idx = if let Some(i) = eligible_best {
-            i
-        } else {
-            // Nothing eligible yet: take the earliest-eligible entry and
-            // fast-forward V to it so the CPU never idles while holding
-            // runnable work (no spin-waiting for time).
-            let earliest = g
-                .ready
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, e)| (e.eligible, e.id))
-                .map_or(0, |(i, _)| i);
-            let ve = g.ready[earliest].eligible;
-            if ve > g.virtual_time {
-                g.virtual_time = ve;
-            }
-            earliest
-        };
-        Some(g.ready.swap_remove(idx))
+        Some((id, SchedClass::TimeShared))
     }
 
-    /// Advance this CPU's virtual time by one dispatch of `service`
-    /// units against `total_weight`. A queue with no competing weight
-    /// leaves `V` unchanged (there is nothing to apportion).
-    pub(crate) fn advance(&self, service: u64) {
+    /// Remove the task this CPU would run next, for another CPU to run.
+    ///
+    /// The same rule as [`Self::pick`], without advancing this CPU's clock:
+    /// the task will run against the stealing CPU's. Weight bookkeeping is the
+    /// caller's, as the task changes CPU.
+    pub(crate) fn steal(&self) -> Option<(TaskId, SchedClass)> {
         let mut g = self.inner.lock();
-        if g.total_weight == 0 {
+        if let Some(id) = g.rt_ready.pop_front() {
+            return Some((id, SchedClass::Realtime));
+        }
+        let (id, _) = g.take_fair()?;
+        Some((id, SchedClass::TimeShared))
+    }
+
+    /// Advance `V` by `ticks` of time-shared service apportioned over the
+    /// time-shared weight competing here.
+    ///
+    /// A zero-tick run is one tick, as its charge is. With no time-shared
+    /// weight there is nothing to apportion the service over, so it is dropped.
+    pub(crate) fn advance(&self, ticks: u64) {
+        let mut g = self.inner.lock();
+        let Some(weight) = core::num::NonZeroU64::new(g.fair_weight) else {
+            g.carry = 0;
             return;
-        }
-        let delta = service.saturating_mul(SCALE) / g.total_weight;
-        g.virtual_time = g.virtual_time.saturating_add(delta);
-    }
-
-    /// Steal the earliest-deadline ready entry for another CPU, if any.
-    /// Used by the work-stealing path; weight bookkeeping is settled by
-    /// the caller as the task changes owning CPU.
-    pub(crate) fn steal(&self) -> Option<Entry> {
-        let mut g = self.inner.lock();
-        // Steal a waiting real-time task first: moving it to an idle CPU
-        // shortens its dispatch latency, and it stays strict-priority there.
-        if let Some(id) = g.rt_ready.pop_front() {
-            return Some(Entry {
-                id,
-                eligible: 0,
-                deadline: 0,
-            });
-        }
-        if g.ready.is_empty() {
-            return None;
-        }
-        let mut best = 0usize;
-        for (i, e) in g.ready.iter().enumerate() {
-            let cur = g.ready[best];
-            if (e.deadline, e.id) < (cur.deadline, cur.id) {
-                best = i;
-            }
-        }
-        Some(g.ready.swap_remove(best))
-    }
-
-    /// Drop the weight of a stolen task from this queue's competition.
-    pub(crate) fn release_weight(&self, weight: u64) {
-        self.remove_weight(weight);
+        };
+        let owed = ticks.max(1).saturating_mul(SCALE).saturating_add(g.carry);
+        g.virtual_time = g.virtual_time.saturating_add(owed / weight);
+        g.carry = owed % weight;
     }
 }
 
@@ -281,12 +273,22 @@ impl RunQueue {
 mod tests {
     use super::*;
 
+    use alloc::vec::Vec;
+
+    use tairix_fuzzseed::Prng;
+
+    const FAIR: SchedClass = SchedClass::TimeShared;
+
     fn e(id: TaskId, eligible: u64, deadline: u64) -> Entry {
         Entry {
             id,
             eligible,
             deadline,
         }
+    }
+
+    fn picked(q: &RunQueue) -> Option<TaskId> {
+        q.pick().map(|(id, _)| id)
     }
 
     #[test]
@@ -298,10 +300,10 @@ mod tests {
     }
 
     #[test]
-    fn push_is_bounded() {
+    fn push_is_bounded_across_both_heaps() {
         let q = RunQueue::try_new(2).expect("q");
-        assert!(q.push(e(1, 0, 10)).is_ok());
-        assert!(q.push(e(2, 0, 20)).is_ok());
+        assert!(q.push(e(1, 0, 10)).is_ok(), "eligible");
+        assert!(q.push(e(2, 50, 60)).is_ok(), "pending");
         assert_eq!(q.push(e(3, 0, 30)), Err(3));
     }
 
@@ -311,35 +313,171 @@ mod tests {
         q.push(e(1, 0, 30)).expect("push");
         q.push(e(2, 0, 10)).expect("push");
         q.push(e(3, 0, 20)).expect("push");
-        assert_eq!(q.pick().map(|x| x.id), Some(2));
-        assert_eq!(q.pick().map(|x| x.id), Some(3));
-        assert_eq!(q.pick().map(|x| x.id), Some(1));
-        assert_eq!(q.pick(), None);
+        assert_eq!(picked(&q), Some(2));
+        assert_eq!(picked(&q), Some(3));
+        assert_eq!(picked(&q), Some(1));
+        assert_eq!(picked(&q), None);
+    }
+
+    /// An ineligible entry never runs ahead of an eligible one, however
+    /// early its deadline: that is what bounds a task's lead over its share.
+    #[test]
+    fn an_ineligible_entry_waits_behind_every_eligible_one() {
+        let q = RunQueue::try_new(8).expect("q");
+        q.push(e(1, 100, 101)).expect("push");
+        q.push(e(2, 0, 500)).expect("push");
+        assert_eq!(picked(&q), Some(2));
+        assert_eq!(picked(&q), Some(1), "then it runs, V fast-forwarded");
+        assert_eq!(q.virtual_time(), 100);
     }
 
     #[test]
     fn ineligible_entry_fast_forwards_virtual_time() {
         let q = RunQueue::try_new(4).expect("q");
-        // Only entry is not yet eligible; pick must still return it and
-        // advance V to its eligible time.
         q.push(e(7, 100, 200)).expect("push");
-        let picked = q.pick().expect("pick");
-        assert_eq!(picked.id, 7);
+        assert_eq!(picked(&q), Some(7));
         assert_eq!(q.virtual_time(), 100);
     }
 
+    /// Entries that become eligible together at a fast-forward run by
+    /// deadline, not by which was queued first.
     #[test]
-    fn advance_scales_by_weight() {
-        let q = RunQueue::try_new(4).expect("q");
-        q.admit_weight(2);
-        q.advance(SERVICE_PER_DISPATCH);
-        assert_eq!(q.virtual_time(), SCALE / 2);
+    fn a_fast_forward_picks_the_earliest_deadline_at_the_new_time() {
+        let q = RunQueue::try_new(8).expect("q");
+        q.push(e(1, 100, 300)).expect("push");
+        q.push(e(2, 100, 200)).expect("push");
+        assert_eq!(picked(&q), Some(2));
+        assert_eq!(picked(&q), Some(1));
     }
 
     #[test]
-    fn advance_without_weight_is_noop() {
+    fn equal_deadlines_run_in_arrival_order() {
+        let q = RunQueue::try_new(8).expect("q");
+        for id in [9, 2, 5] {
+            q.push(e(id, 0, 7)).expect("push");
+        }
+        assert_eq!(picked(&q), Some(9), "first in, first picked");
+        assert_eq!(picked(&q), Some(2));
+        assert_eq!(picked(&q), Some(5));
+    }
+
+    #[test]
+    fn a_realtime_task_runs_ahead_of_any_deadline() {
+        let q = RunQueue::try_new(8).expect("q");
+        q.push(e(1, 0, 1)).expect("push");
+        q.push_rt(2).expect("push rt");
+        assert_eq!(q.pick(), Some((2, SchedClass::Realtime)));
+        assert_eq!(q.pick(), Some((1, FAIR)));
+    }
+
+    #[test]
+    fn steal_takes_the_next_pick_without_moving_the_clock() {
+        let q = RunQueue::try_new(8).expect("q");
+        q.push(e(1, 100, 150)).expect("push");
+        q.push(e(2, 40, 400)).expect("push");
+        assert_eq!(q.steal(), Some((2, FAIR)), "the earliest eligible time");
+        assert_eq!(q.virtual_time(), 0, "the victim's clock is its own");
+        assert_eq!(q.steal(), Some((1, FAIR)));
+        assert_eq!(q.steal(), None);
+    }
+
+    #[test]
+    fn advance_scales_by_the_fair_weight() {
         let q = RunQueue::try_new(4).expect("q");
-        q.advance(SERVICE_PER_DISPATCH);
+        q.add_weight(2, FAIR);
+        q.advance(3);
+        assert_eq!(q.virtual_time(), 3 * SCALE / 2);
+    }
+
+    #[test]
+    fn realtime_weight_does_not_slow_the_fair_clock() {
+        let q = RunQueue::try_new(4).expect("q");
+        q.add_weight(2, FAIR);
+        q.add_weight(4, SchedClass::Realtime);
+        assert_eq!(q.competing_weight(), 6, "placement still counts it");
+        q.advance(3);
+        assert_eq!(q.virtual_time(), 3 * SCALE / 2);
+    }
+
+    #[test]
+    fn advance_without_fair_weight_is_a_noop() {
+        let q = RunQueue::try_new(4).expect("q");
+        q.add_weight(1, SchedClass::Realtime);
+        q.advance(5);
         assert_eq!(q.virtual_time(), 0);
+    }
+
+    /// Service too small to move `V` a whole unit under a heavy load is
+    /// carried, not lost: a thousand one-tick runs over a weight the scale
+    /// does not divide still add up exactly.
+    #[test]
+    fn short_runs_under_a_heavy_load_move_the_clock_exactly() {
+        let q = RunQueue::try_new(4).expect("q");
+        q.add_weight(1_000, FAIR);
+        for _ in 0..1_000 {
+            q.advance(1);
+        }
+        assert_eq!(q.virtual_time(), SCALE);
+    }
+
+    fn draw(rng: &mut Prng, below: usize) -> u64 {
+        u64::try_from(rng.below(below)).expect("a draw below a small bound fits")
+    }
+
+    /// The heaps against the rule they implement, stated as the linear scan
+    /// the queue replaced: over a long random mix of pushes, picks and clock
+    /// advances, every pick must be exactly the one the scan chooses.
+    #[test]
+    fn every_pick_matches_the_earliest_eligible_deadline_scan() {
+        let mut rng = Prng::new(0x0EE7_DF01);
+        let q = RunQueue::try_new(1 << 12).expect("q");
+        q.add_weight(3, FAIR);
+        // (eligible, deadline, arrival, id)
+        let mut model: Vec<(u64, u64, u64, TaskId)> = Vec::new();
+        let mut model_v = 0u64;
+        let mut model_carry = 0u64;
+        let mut arrival = 0u64;
+        let mut next_id: TaskId = 1;
+        for _ in 0..20_000 {
+            match rng.below(3) {
+                0 if model.len() < 1 << 12 => {
+                    let ahead = draw(&mut rng, 64);
+                    let behind = draw(&mut rng, 64).min(model_v);
+                    let eligible = model_v + ahead - behind;
+                    let deadline = eligible + 1 + draw(&mut rng, 64);
+                    q.push(e(next_id, eligible, deadline)).expect("room");
+                    model.push((eligible, deadline, arrival, next_id));
+                    arrival += 1;
+                    next_id += 1;
+                }
+                1 => {
+                    let ticks = draw(&mut rng, 8);
+                    q.advance(ticks);
+                    let owed = ticks.max(1) * SCALE + model_carry;
+                    model_v += owed / 3;
+                    model_carry = owed % 3;
+                }
+                _ => {
+                    let expected = model
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, x)| x.0 <= model_v)
+                        .min_by_key(|(_, x)| (x.1, x.2))
+                        .or_else(|| {
+                            model
+                                .iter()
+                                .enumerate()
+                                .min_by_key(|(_, x)| (x.0, x.1, x.2))
+                        })
+                        .map(|(i, _)| i);
+                    let want = expected.map(|i| model.remove(i));
+                    if let Some(entry) = want {
+                        model_v = model_v.max(entry.0);
+                    }
+                    assert_eq!(picked(&q), want.map(|x| x.3));
+                    assert_eq!(q.virtual_time(), model_v);
+                }
+            }
+        }
     }
 }

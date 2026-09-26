@@ -218,6 +218,10 @@ impl SchedulerArch for WasmArch {
         ms_to_ns(read_now_ms())
     }
 
+    fn quantum_ticks(&self) -> u64 {
+        crate::preempt::frame_interval_ns()
+    }
+
     fn send_ipi(&self, target: CpuId) {
         // Resolve the destination worker first. Sending to the calling
         // CPU is permitted (a self-reschedule). An unmapped / out-of-range

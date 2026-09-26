@@ -37,7 +37,7 @@ use alloc::sync::Arc;
 use tairix_abi::{Errno, RLIMIT_INFINITY};
 use tairix_arch_api::UserEntry;
 use tairix_kernel_mem::PAGE_SIZE;
-use tairix_kernel_sched_api::{Priority, SchedulerArch};
+use tairix_kernel_sched_api::{ExitDisposition, Priority, SchedulerArch, SchedulerPolicy};
 use tairix_kernel_sec::{CapTable, ProcessId, TaskId as SecTaskId, ThreadRegisterError};
 use tairix_kernel_syscall::{CallerContext, SyscallResult};
 use tairix_sync::RwLock;
@@ -164,6 +164,8 @@ pub fn thread_reserve_pages(stack_bytes: u64) -> u64 {
 /// * [`Errno::OutOfMemory`] — the anonymous window, the frame allocator, or the
 ///   scheduler's run queue cannot admit the thread (deterministic exhaustion,
 ///   never a panic).
+/// * [`Errno::Interrupted`] — the caller's group is being killed; the kill
+///   lands at this call's boundary, so the errno never reaches user space.
 pub fn create<A>(
     handlers: &KernelSyscallHandlers<'_, A>,
     caller: &CallerContext<'_>,
@@ -274,16 +276,11 @@ where
     // (an unknown process, or an id already registered) is a kernel invariant
     // violation: retire the task and fail closed rather than run a thread whose
     // authority the dispatcher cannot resolve.
-    if let Err(error) = handlers.caps.write().register_thread(thread, process) {
+    if let Err(errno) = register_unless_dying(handlers.caps, caller.task_id, thread, process) {
         let _ = handlers.sched.exit(task_id);
         tairix_kernel_sched_api::release_task_id(task_id);
         release_reservation(handlers, &space, process, reserve_base, reserve_pages);
-        return Err(match error {
-            ThreadRegisterError::AlreadyPresent => Errno::AlreadyExists,
-            // `UnknownProcess` and any future variant: the caller's own record
-            // vanished under us.
-            _ => Errno::NotFound,
-        });
+        return Err(errno);
     }
     handlers.aspaces.write().set_owned_thread_stack(
         process,
@@ -297,18 +294,68 @@ where
     );
 
     // Every piece of the thread's state now exists, so it is safe to run. A
-    // refused wake on a freshly parked task is a kernel invariant violation:
-    // retire it and fail closed.
-    if handlers.sched.unpark(task_id).is_err() {
-        let _ = handlers.sched.exit(task_id);
-        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
-        // Retire the thread that never ran through the one shared rule. The
-        // creating thread is still registered, so the group survives and no
-        // process teardown lands.
+    // thread that can no longer run fails closed, retired through the one
+    // shared rule; its creator is still registered, so the group survives.
+    let started = start_parked(handlers.sched, task_id, || {
         let _ = handlers.land_thread_down(process, thread, None);
+    });
+    if !started {
+        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
         return Err(Errno::NoSpace);
     }
     Ok(task_id)
+}
+
+/// Make the parked `task` runnable, reporting whether it can run.
+///
+/// A thread that cannot was retired before it ever ran, and `retire` lands it
+/// only if this call is the one that retired it: as a member of its group it
+/// can already have been claimed and retired by a kill, whose killer lands it,
+/// and a second landing would read it as the group's last thread down.
+fn start_parked<A, P>(sched: &P, task: u64, retire: impl FnOnce()) -> bool
+where
+    A: SchedulerArch,
+    P: SchedulerPolicy<A>,
+{
+    if sched.unpark(task).is_ok() {
+        return true;
+    }
+    if let Ok(ExitDisposition::Quiesced) = sched.exit(task) {
+        retire();
+    }
+    false
+}
+
+/// Register `thread` as a member of `process`, refused while its `creator`
+/// owes a death.
+///
+/// A group death is claimed under the table's read lock over the members it
+/// holds, and this check runs under the write lock, so a thread either joins
+/// before the claim and is claimed with the rest, or finds its creator dying
+/// and is never born: it cannot outlive the group it would have belonged to.
+///
+/// # Errors
+///
+/// [`Errno::Interrupted`] when `creator` owes a death; [`Errno::AlreadyExists`]
+/// for an id already registered; [`Errno::NotFound`] when `process` has no
+/// record.
+fn register_unless_dying(
+    caps: &RwLock<CapTable>,
+    creator: SecTaskId,
+    thread: SecTaskId,
+    process: ProcessId,
+) -> Result<(), Errno> {
+    let mut caps = caps.write();
+    if crate::procsignal::kill_pending(creator.0) {
+        return Err(Errno::Interrupted);
+    }
+    caps.register_thread(thread, process)
+        .map_err(|error| match error {
+            ThreadRegisterError::AlreadyPresent => Errno::AlreadyExists,
+            // `UnknownProcess` and any future variant: the caller's own record
+            // vanished under us.
+            _ => Errno::NotFound,
+        })
 }
 
 /// End the calling thread, releasing what it alone owns.
@@ -366,12 +413,14 @@ where
 /// ever fall through one definition: the syscall-side landing rule
 /// (`KernelSyscallHandlers::land_thread_down`) and the driver-store unload both
 /// reach it. What it retires is the thread's own and nothing the group shares —
-/// its signal-intake, kill-gate and running-kill overlays, its wait-queue
-/// registrations, its user-stack span, and its capability alias.
+/// its capability alias, its signal-intake and kill-gate state, its wait-queue
+/// registrations, and its user-stack span.
 ///
 /// Dropping the capability alias is what makes the count fall, so a thread the
 /// table never knew leaves it where it was and reads as the group's last — the
-/// single-threaded shape every process had before threads existed.
+/// single-threaded shape every process had before threads existed. It is
+/// dropped first: a death is only ever claimed against a member, so once the
+/// alias is gone the gate clear below is the last word on the thread.
 ///
 /// A non-leader's id returns to the draw here, once all of that is gone
 /// (`reserve_task_id`). The leader's id is the process's number, which its
@@ -382,6 +431,7 @@ pub fn retire(
     peer_watch: Option<&PeerWatch>,
     thread: SecTaskId,
 ) -> usize {
+    let retired = caps.write().remove_thread(thread);
     crate::procsignal::clear_intake(thread.0);
     if let Some(peers) = peer_watch {
         peers.forget_watcher(thread.0);
@@ -392,7 +442,6 @@ pub fn retire(
     // counted wake report a wake it never delivered.
     crate::waitq::retire_task(thread.0);
     aspaces.write().withdraw_thread(thread);
-    let retired = caps.write().remove_thread(thread);
     let Some((process, remaining)) = retired else {
         return 0;
     };
@@ -534,6 +583,110 @@ mod tests {
         assert_eq!(caps.read().process_of(SecTaskId(sibling)), None);
         assert!(!tairix_kernel_sched_api::task_id_reserved(sibling));
         assert!(tairix_kernel_sched_api::task_id_reserved(leader));
+        tairix_kernel_sched_api::release_task_id(leader);
+    }
+
+    /// Record a signalled death against every thread of `process`, as a kill
+    /// of it does.
+    fn claim_death_of(
+        caps: &RwLock<CapTable>,
+        process: u64,
+    ) -> alloc::vec::Vec<crate::procsignal::ClaimedKill> {
+        crate::procsignal::claim_group_kill(
+            Some(caps),
+            crate::procsignal::DeferredTeardown::Exit {
+                process: ProcessId(process),
+                status: 137,
+            },
+            None,
+        )
+    }
+
+    /// A thread created while its group is being killed is either among the
+    /// threads the kill claims, or finds its creator dying and is never born —
+    /// never a thread that outlives the kill of the group it joined.
+    #[test]
+    fn no_thread_is_born_into_a_group_claimed_for_death() {
+        let _gate = crate::procsignal::running_kill_test_lock();
+        let (leader, creator, newborn) = (LEADER + 4, LEADER + 5, LEADER + 6);
+        let (caps, _aspaces) = group_with_a_sibling(leader, creator);
+
+        assert_eq!(claim_death_of(&caps, leader).len(), 2, "both threads die");
+        assert_eq!(
+            register_unless_dying(
+                &caps,
+                SecTaskId(creator),
+                SecTaskId(newborn),
+                ProcessId(leader)
+            ),
+            Err(Errno::Interrupted)
+        );
+        assert_eq!(caps.read().process_of(SecTaskId(newborn)), None);
+
+        for thread in [leader, creator] {
+            crate::procsignal::clear_kill_gate(thread);
+            tairix_kernel_sched_api::release_task_id(thread);
+        }
+    }
+
+    /// A thread killed with its group before its creator could start it is
+    /// landed by its killer; the creator's failure path lands only a thread
+    /// it retired itself, so the process is not read as down around the live
+    /// creator.
+    #[test]
+    fn a_thread_its_group_killed_before_it_started_is_landed_once() {
+        let arch = alloc::sync::Arc::new(crate::test_arch::TestArch::with_cpus(1));
+        let sched = crate::sched::Scheduler::new(
+            tairix_kernel_sched_api::SchedulerConfig::defaults_for(1),
+            arch,
+        )
+        .expect("the scheduler builds");
+        let parked = || {
+            sched
+                .spawn_parked(0, Priority::Normal, |_| {
+                    tairix_kernel_sched_api::TaskAction::Exit
+                })
+                .expect("admitted parked")
+        };
+        let landings = core::cell::Cell::new(0);
+
+        let killed = parked();
+        assert_eq!(
+            sched.exit(killed),
+            Ok(ExitDisposition::Quiesced),
+            "the killer's"
+        );
+        assert!(!start_parked(&sched, killed, || landings.set(landings.get() + 1)));
+        assert_eq!(landings.get(), 0, "its killer landed it");
+
+        let fresh = parked();
+        assert!(start_parked(&sched, fresh, || landings.set(landings.get() + 1)));
+        assert_eq!(landings.get(), 0, "a thread that starts is not retired");
+    }
+
+    /// A thread's retire withdraws its membership before it clears the gate:
+    /// a death claimed while it was a member is cleared with it, and one
+    /// claimed from a stale view of the group afterwards is refused, so no
+    /// death is left for the dispatch loop to land on a thread already gone.
+    #[test]
+    fn a_retired_thread_keeps_no_death_and_can_be_claimed_for_none() {
+        let _gate = crate::procsignal::running_kill_test_lock();
+        let (leader, sibling) = (LEADER + 7, LEADER + 8);
+        let (caps, aspaces) = group_with_a_sibling(leader, sibling);
+
+        let _ = claim_death_of(&caps, leader);
+        assert!(crate::procsignal::kill_pending(sibling));
+        assert_eq!(retire(&caps, &aspaces, None, SecTaskId(sibling)), 1);
+        assert!(!crate::procsignal::kill_pending(sibling), "cleared with it");
+
+        let late = claim_death_of(&caps, leader);
+        assert!(late.iter().all(|claim| claim.thread != sibling));
+        assert!(
+            !crate::procsignal::kill_pending(sibling),
+            "none claimed after"
+        );
+
+        crate::procsignal::clear_kill_gate(leader);
         tairix_kernel_sched_api::release_task_id(leader);
     }
 

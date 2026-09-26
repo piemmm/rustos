@@ -328,12 +328,24 @@ impl CoreClass {
 /// category as [`Self::current_cpu`] — that the architecture-neutral
 /// scheduler genuinely needs to place work, and it is a provided method
 /// so existing ports inherit the homogeneous default unchanged.
+/// [`Self::quantum_ticks`] is admitted on the same footing: it is the one
+/// number that ties a policy's time scale to the port's tick.
 pub trait SchedulerArch: Send + Sync {
     /// Returns the calling CPU's identifier.
     fn current_cpu(&self) -> CpuId;
 
     /// Returns the current monotonic tick.
     fn ticks_now(&self) -> u64;
+
+    /// Length of the preemption quantum [`Self::set_preemption`] arms on the
+    /// calling CPU, in [`Self::ticks_now`] units, or `0` while the port has
+    /// not calibrated one.
+    ///
+    /// A policy that sizes work in quanta — a proportional-share request, a
+    /// periodic boost — reads its time scale here, because only the port can
+    /// state its quantum in its own tick. Required, with no default, so a port
+    /// cannot leave that scale silently wrong. Must never panic.
+    fn quantum_ticks(&self) -> u64;
 
     /// Asks `target` to enter the scheduler at its next safe point.
     ///
@@ -442,6 +454,10 @@ mod tests {
         }
 
         fn ticks_now(&self) -> u64 {
+            0
+        }
+
+        fn quantum_ticks(&self) -> u64 {
             0
         }
 

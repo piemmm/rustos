@@ -25,7 +25,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::arch::{CoreClass, TestArch};
+use crate::arch::{CoreClass, SchedulerArch, TestArch};
 use crate::config::SchedulerConfig;
 use crate::error::SchedError;
 use crate::outcome::{ExitDisposition, StepOutcome};
@@ -34,10 +34,13 @@ use crate::task::{Priority, SchedClass, TaskAction, TaskState};
 
 /// Run the entire conformance suite against scheduler policy `S`.
 ///
+/// `S` is shared into a task body where a property needs a body to act on
+/// its own scheduler, as a syscall does.
+///
 /// # Panics
 ///
 /// Panics (failing the test) if any required property does not hold.
-pub fn run_all<S: SchedulerPolicy<TestArch>>() {
+pub fn run_all<S: SchedulerPolicy<TestArch> + Send + Sync + 'static>() {
     spawn_runs_and_exits::<S>();
     spawn_parked_stays_parked_until_unpark::<S>();
     drawn_ids_carry_no_sequence::<S>();
@@ -45,9 +48,11 @@ pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     block_wake_roundtrip::<S>();
     unpark_before_park_is_not_lost::<S>();
     unpark_errs_only_for_a_task_that_can_never_run::<S>();
+    a_rewake_while_the_body_ran_leaves_the_task_queued_once::<S>();
+    an_exit_over_a_readmission_retires_the_queued_task::<S>();
     cross_cpu_ipc_reply_wakes_the_caller_without_delay::<S>();
+    a_yield_migration_announces_the_destination::<S>();
     lifecycle_error_codes::<S>();
-    yield_current_semantics::<S>();
     running_cpu_agrees_with_current_task::<S>();
     cpu_time_is_accounted_per_dispatch::<S>();
     load_observations_track_dispatch::<S>();
@@ -140,7 +145,7 @@ fn make<S: SchedulerPolicy<TestArch>>(
         cpus,
         queue_capacity_per_band,
         yields_before_demotion: 1,
-        boost_interval_ticks: 2,
+        boost_interval_quanta: 2,
     };
     let sched = S::new(cfg, arch.clone()).expect("scheduler builds");
     (arch, sched)
@@ -345,6 +350,162 @@ fn unpark_errs_only_for_a_task_that_can_never_run<S: SchedulerPolicy<TestArch>>(
     );
 }
 
+/// A remote park and wake that land while a task's body is still unwinding
+/// leave it `Ready` and queued exactly once, whatever the returning body asked
+/// for: the job-control shape, where a stop and a continue reach a running
+/// child. Applying the body's `Park` over the wake strands the task for good;
+/// applying its `Yield` queues it a second time, a double share.
+fn a_rewake_while_the_body_ran_leaves_the_task_queued_once<S>()
+where
+    S: SchedulerPolicy<TestArch> + Send + Sync + 'static,
+{
+    for returned in [TaskAction::Park, TaskAction::Yield] {
+        let (arch, sched) = make::<S>(1, 64);
+        arch.set_current_cpu(0);
+        let sched = Arc::new(sched);
+        let task_id = Arc::new(AtomicU64::new(0));
+        let runs = Arc::new(AtomicU64::new(0));
+        let body_sched = Arc::clone(&sched);
+        let body_id = Arc::clone(&task_id);
+        let body_runs = Arc::clone(&runs);
+        let id = sched
+            .spawn(0, Priority::Normal, move |_| {
+                if body_runs.fetch_add(1, Ordering::Relaxed) == 0 {
+                    let id = body_id.load(Ordering::Acquire);
+                    body_sched.park(id).expect("a remote park lands");
+                    body_sched.unpark(id).expect("and so does its wake");
+                    returned
+                } else {
+                    TaskAction::Exit
+                }
+            })
+            .expect("spawn");
+        task_id.store(id, Ordering::Release);
+
+        assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+        assert_eq!(
+            sched.state_of(id),
+            TaskState::Ready,
+            "{returned:?}: the wake stands"
+        );
+        assert_eq!(
+            sched.queue_depth(0),
+            Ok(1),
+            "{returned:?}: queued exactly once"
+        );
+        assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+        assert_eq!(
+            sched.step(0),
+            Ok(StepOutcome::Idle),
+            "{returned:?}: no second entry"
+        );
+        assert_eq!(runs.load(Ordering::Relaxed), 2);
+        assert_eq!(sched.live_task_count(), 0);
+    }
+}
+
+/// An exit decided while a remote park and wake re-queued the task — by the
+/// returning body, or by a kill that landed while it ran — retires it where
+/// it is queued: it is never dispatched again, and its entry is dropped
+/// without a run.
+fn an_exit_over_a_readmission_retires_the_queued_task<S>()
+where
+    S: SchedulerPolicy<TestArch> + Send + Sync + 'static,
+{
+    for killed in [false, true] {
+        let (arch, sched) = make::<S>(1, 64);
+        arch.set_current_cpu(0);
+        let sched = Arc::new(sched);
+        let task_id = Arc::new(AtomicU64::new(0));
+        let runs = Arc::new(AtomicU64::new(0));
+        let body_sched = Arc::clone(&sched);
+        let body_id = Arc::clone(&task_id);
+        let body_runs = Arc::clone(&runs);
+        let id = sched
+            .spawn(0, Priority::Normal, move |_| {
+                body_runs.fetch_add(1, Ordering::Relaxed);
+                let id = body_id.load(Ordering::Acquire);
+                body_sched.park(id).expect("a remote park lands");
+                body_sched.unpark(id).expect("and so does its wake");
+                if killed {
+                    assert_eq!(body_sched.exit(id), Ok(ExitDisposition::Deferred));
+                    TaskAction::Yield
+                } else {
+                    TaskAction::Exit
+                }
+            })
+            .expect("spawn");
+        task_id.store(id, Ordering::Release);
+
+        assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+        assert_eq!(sched.state_of(id), TaskState::Exited, "killed: {killed}");
+        assert_eq!(sched.live_task_count(), 0);
+        assert_eq!(
+            sched.step(0),
+            Ok(StepOutcome::Idle),
+            "killed: {killed}: the stale entry never runs"
+        );
+        assert_eq!(runs.load(Ordering::Relaxed), 1);
+        assert_eq!(sched.queue_depth(0), Ok(0));
+    }
+}
+
+/// A task a yield moves to another CPU is announced to that CPU: an idle core
+/// sleeps in its idle wait, and a queue entry alone cannot make it run.
+fn a_yield_migration_announces_the_destination<S: SchedulerPolicy<TestArch>>() {
+    const CPUS: u32 = 4;
+    let arch = Arc::new(TestArch::new(CPUS).expect("arch"));
+    // CPUs 0/1 performance, 2/3 efficiency.
+    arch.set_core_class(2, CoreClass::Efficiency);
+    arch.set_core_class(3, CoreClass::Efficiency);
+    let cfg = SchedulerConfig {
+        cpus: CPUS,
+        queue_capacity_per_band: 64,
+        yields_before_demotion: 1,
+        boost_interval_quanta: 1024,
+    };
+    let sched = S::new(cfg, arch.clone()).expect("sched");
+    let runs = Arc::new(AtomicU64::new(0));
+    let body_runs = runs.clone();
+    // Background work is placed on an efficiency core.
+    let low = sched
+        .spawn(0, Priority::Low, move |_| {
+            if body_runs.fetch_add(1, Ordering::Relaxed) == 0 {
+                TaskAction::Yield
+            } else {
+                TaskAction::Exit
+            }
+        })
+        .expect("spawn");
+
+    // A performance core with nothing of its own steals it; its yield there
+    // sends it back to its class.
+    arch.set_current_cpu(0);
+    let before: Vec<u64> = (0..CPUS).map(|c| arch.ipi_count(c)).collect();
+    assert_eq!(
+        sched.step(0),
+        Ok(StepOutcome::Ran(low)),
+        "stolen onto a performance core"
+    );
+    let announced: Vec<u32> = (0..CPUS)
+        .filter(|&c| arch.ipi_count(c) > before[c as usize])
+        .collect();
+    assert_eq!(announced.len(), 1, "exactly the destination is announced");
+    let dest = announced[0];
+    assert_eq!(
+        arch.core_class(dest),
+        CoreClass::Efficiency,
+        "it went back to its class"
+    );
+    arch.set_current_cpu(dest);
+    assert_eq!(
+        sched.step(dest),
+        Ok(StepOutcome::Ran(low)),
+        "the announced core runs it"
+    );
+    assert_eq!(runs.load(Ordering::Relaxed), 2);
+}
+
 /// A cross-core IPC round-trip wakes the parked caller **promptly**: the
 /// reply delivers an inter-processor interrupt to the exact core the woken
 /// caller lands on, so that core reschedules at once instead of waiting for
@@ -527,26 +688,6 @@ fn lifecycle_error_codes<S: SchedulerPolicy<TestArch>>() {
         sched.on_timer_tick(7),
         Err(crate::SchedError::NoSuchCpu),
         "tick rejects unknown cpu"
-    );
-}
-
-/// `yield_current` requeues a running task and rejects bad transitions.
-fn yield_current_semantics<S: SchedulerPolicy<TestArch>>() {
-    let (_arch, sched) = make::<S>(1, 64);
-    assert_eq!(
-        sched.yield_current(999),
-        Err(crate::SchedError::NoSuchTask),
-        "yield unknown task"
-    );
-    // A freshly spawned, not-yet-running task is `Ready`, not `Running`,
-    // so a syscall-style `yield_current` against it must be rejected.
-    let id = sched
-        .spawn(0, Priority::Normal, |_| TaskAction::Yield)
-        .expect("spawn");
-    assert_eq!(
-        sched.yield_current(id),
-        Err(crate::SchedError::InvalidState),
-        "yield a non-running task"
     );
 }
 
@@ -910,7 +1051,7 @@ fn smp_stress_four_cores<S: SchedulerPolicy<TestArch>>() {
         cpus: CPUS,
         queue_capacity_per_band: 4096,
         yields_before_demotion: 4,
-        boost_interval_ticks: 256,
+        boost_interval_quanta: 256,
     };
     let sched = S::new(cfg, arch.clone()).expect("sched");
 
@@ -1009,7 +1150,7 @@ fn heterogeneous_topology_preserves_liveness<S: SchedulerPolicy<TestArch>>() {
         cpus: CPUS,
         queue_capacity_per_band: 1024,
         yields_before_demotion: 2,
-        boost_interval_ticks: 32,
+        boost_interval_quanta: 32,
     };
     let sched = S::new(cfg, arch.clone()).expect("sched");
 

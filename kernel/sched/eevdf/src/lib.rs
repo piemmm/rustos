@@ -11,25 +11,33 @@
 //! * **Fully tickless EEVDF.** Dispatch is *Earliest Eligible Virtual
 //!   Deadline First* (Stoica & Abdel-Wahab, 1995). Each task carries a
 //!   virtual *eligible* time `ve` and a virtual *deadline* `vd = ve +
-//!   request/weight`. A task is eligible once its CPU's virtual time `V`
-//!   reaches `ve`; among eligible tasks the earliest `vd` runs. Fairness,
-//!   eligibility, and preemption are driven **entirely by virtual time
-//!   advanced as work is dispatched** — never by a periodic timer tick.
-//!   [`Scheduler::on_timer_tick`] is a pure observation counter; no
+//!   request/weight`, a request being one quantum of the port's own tick
+//!   ([`SchedulerArch::quantum_ticks`]). A task is eligible once its CPU's
+//!   virtual time `V` reaches `ve`; among eligible tasks the earliest `vd`
+//!   runs, found in `O(log n)` from two heaps. Every run is charged the
+//!   ticks it actually used: `ve` advances by that service over the task's
+//!   weight, the deadline moves on only once a whole request is served, and
+//!   `V` advances by the same service over the time-shared weight competing
+//!   on the CPU. Fairness, eligibility, and preemption are driven
+//!   **entirely by that measured virtual time** — never by a periodic timer
+//!   tick. [`Scheduler::on_timer_tick`] is a pure observation counter; no
 //!   scheduling decision reads it. This is the property that makes the
 //!   policy tickless: on a real port the timer can run in one-shot /
 //!   `NO_HZ` mode, programmed only for the next virtual deadline.
 //! * **Proportional share by weight.** The three [`Priority`] bands map
-//!   to a 4:2:1 weight ratio; a task accrues virtual time inversely to
-//!   its weight, so a `High` task is dispatched roughly four times as
-//!   often as a `Low` one while neither is ever starved (every eligible
-//!   task has a finite deadline).
+//!   to the shared 4:2:1 weight ratio; a task accrues virtual time
+//!   inversely to its weight, so a `High` task receives roughly four times
+//!   the CPU time of a `Low` one — time, not dispatches, since a short run
+//!   costs only what it used — while neither is ever starved (every
+//!   eligible task has a finite deadline).
 //! * **Per-CPU run queues, work-stealing across cores.** Each CPU owns
 //!   one virtual-time `RunQueue` with its own clock; idle
-//!   CPUs steal the earliest-deadline task from a victim chosen by the
-//!   shared per-CPU `StealScan` (`kernel/sched/api`) and rebase its virtual
-//!   times onto the stealing CPU's clock (the EEVDF migration rule — a task
-//!   carries no lag across CPUs).
+//!   CPUs steal the task a victim chosen by the shared per-CPU `StealScan`
+//!   (`kernel/sched/api`) would run next, and rebase its virtual times onto
+//!   the stealing CPU's clock (the EEVDF migration rule — a task carries no
+//!   lag across CPUs). Every change to a CPU's competing weight goes through
+//!   the task's shared weight ledger, so what leaves a CPU is exactly what
+//!   joined it.
 //! * **IPI-based preemption.** [`Scheduler::spawn`] and
 //!   [`Scheduler::unpark`] notify the home CPU via
 //!   [`SchedulerArch::send_ipi`]; the arch port decides whether that is

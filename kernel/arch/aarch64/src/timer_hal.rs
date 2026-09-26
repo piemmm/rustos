@@ -111,6 +111,8 @@ mod tests {
 
     #[test]
     fn passes_timer_conformance() {
+        // The callback slot is the preempt suite's, which clears it.
+        let _guard = crate::preempt::test_state_lock();
         conformance::run_all(&TimerHal::new());
         let dynamic: &dyn Timer = &TimerHal::new();
         conformance::run_all(dynamic);

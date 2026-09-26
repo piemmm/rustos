@@ -9,28 +9,24 @@
 //! ready set by a continuous virtual runtime and always dispatches the
 //! task with the *smallest* vruntime — the "leftmost" entity, exactly as
 //! Linux CFS picks the leftmost node of its per-runqueue red-black tree
-//! (Molnar's Completely Fair Scheduler). The set is a [`BTreeSet`] keyed
-//! by `(vruntime, id)`, so the leftmost pick and every insert/remove are
-//! `O(log n)` — the right structure from the start, never an `O(n)` scan
-//! of a growable list on the dispatch hot path.
+//! (Molnar's Completely Fair Scheduler). The set is a min-heap keyed by
+//! `(vruntime, arrival)`, so the pick and every insert are `O(log n)` —
+//! never an `O(n)` scan of a growable list on the dispatch hot path. No
+//! entry is removed from the middle (a stale one is discarded when picked),
+//! so a heap is all the set needs, and a push reserves its room fallibly,
+//! where a tree allocates a node per split with no way to refuse.
 //!
-//! Virtual runtime is fixed-point with [`SCALE`] sub-units per unit of
-//! service so the weighted divisions stay in integer arithmetic (no
-//! floats in kernel paths, deterministic).
+//! Virtual runtime is fixed-point in the shared [`SCALE`] sub-units per tick,
+//! so the weighted divisions stay in integer arithmetic (no floats in kernel
+//! paths, deterministic).
 
-use alloc::collections::{BTreeSet, VecDeque};
+use alloc::collections::{BinaryHeap, VecDeque};
+use core::cmp::Reverse;
 
+use tairix_kernel_sched_api::share::SCALE;
 use tairix_sync::SpinLock;
 
 use crate::TaskId;
-
-/// Fixed-point scaling factor for virtual runtime.
-///
-/// One unit of dispatched service is worth `SCALE` virtual sub-units
-/// before the per-task weight division, keeping `service * SCALE /
-/// weight` an exact integer for the small integer weights this policy
-/// uses.
-pub(crate) const SCALE: u64 = 1 << 20;
 
 /// Virtual-runtime head start a task joining the competition is placed
 /// ahead of the CPU's timeline floor by.
@@ -39,34 +35,13 @@ pub(crate) const SCALE: u64 = 1 << 20;
 /// `(vruntime, id)` tie-break to settle the pick, which hands the CPU to the
 /// lower id every time: a task that wakes among a CPU-bound population it was
 /// spawned after then loses a full scheduling round on every wake, so an
-/// I/O-bound task pays that round per round trip. One unit of service — the
-/// smallest increment [`vslice`] can charge — settles the pick instead, and
-/// every dispatch charges at least that much back, so a task that wakes
-/// repeatedly cannot outrun one that has been ready all along. The placement
-/// is absolute against the monotonic floor, so the head start can never
-/// accumulate past this bound (the CFS `place_entity` sleeper credit).
+/// I/O-bound task pays that round per round trip. One tick of service at the
+/// lightest weight settles the pick instead, and every dispatch charges at
+/// least a tick back, so a task that wakes repeatedly cannot outrun one that
+/// has been ready all along. The placement is absolute against the monotonic
+/// floor, so the head start can never accumulate past this bound (the CFS
+/// `place_entity` sleeper credit).
 pub(crate) const SLEEPER_CREDIT: u64 = SCALE;
-
-/// Weighted virtual-runtime increment `service_ticks` of execution costs a
-/// task of `weight`.
-///
-/// A `weight`-4 task accrues vruntime a quarter as fast as a `weight`-1
-/// task for the same elapsed service. A zero-tick observation is charged one
-/// tick so coarse host clocks still make deterministic forward progress, and
-/// the quotient/remainder form avoids overflowing `service_ticks * SCALE`.
-#[must_use]
-pub(crate) fn vslice(service_ticks: u64, weight: u64) -> u64 {
-    let service = service_ticks.max(1);
-    let divisor = weight.max(1);
-    let whole = service / divisor;
-    let remainder = service % divisor;
-    whole.saturating_mul(SCALE).saturating_add(
-        remainder
-            .saturating_mul(SCALE)
-            .checked_div(divisor)
-            .unwrap_or(0),
-    )
-}
 
 /// A ready task as tracked by a [`RunQueue`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -89,7 +64,7 @@ struct Inner {
     /// only [`Self::total_weight`] counts them (for load-balanced
     /// placement). Bounded by [`Self::capacity`] exactly like the fair set.
     rt_ready: VecDeque<TaskId>,
-    /// Ready set keyed by `(vruntime, seq, id)` so the leftmost element is
+    /// Ready set keyed by `(vruntime, seq, id)` so the top of the heap is
     /// the smallest-vruntime task, ties broken by arrival order. The CFS
     /// red-black tree analog.
     ///
@@ -101,7 +76,7 @@ struct Inner {
     /// would be an arbitrary winner; even ordered ids would systematically
     /// favour one task over another. Arrival order is the fair answer and
     /// the one a reader expects of a run queue.
-    ready: BTreeSet<(u64, u64, TaskId)>,
+    ready: BinaryHeap<Reverse<(u64, u64, TaskId)>>,
     /// Monotonic enqueue counter supplying the FIFO half of a `ready` key.
     ///
     /// One increment per enqueue, so it cannot wrap in any real uptime; a
@@ -142,7 +117,7 @@ impl RunQueue {
         Some(Self {
             inner: SpinLock::new(Inner {
                 rt_ready: VecDeque::new(),
-                ready: BTreeSet::new(),
+                ready: BinaryHeap::new(),
                 next_seq: 0,
                 min_vruntime: 0,
                 total_weight: 0,
@@ -151,30 +126,30 @@ impl RunQueue {
         })
     }
 
-    /// Account a task joining this CPU's competition: add its `weight` and
-    /// return the vruntime it should adopt — one [`SLEEPER_CREDIT`] ahead of
-    /// this CPU's monotonic timeline floor, so it sorts strictly before the
-    /// population that has been running rather than tying with it.
+    /// The vruntime a task joining this CPU's competition adopts — one
+    /// [`SLEEPER_CREDIT`] ahead of this CPU's monotonic timeline floor, so it
+    /// sorts strictly before the population that has been running rather than
+    /// tying with it.
     ///
     /// The floor advances only to a *picked* task's vruntime, so the head
     /// start is bounded by that one credit however long the joiner slept: it
     /// cannot leap the running population (the CFS `place_entity` rule).
-    pub(crate) fn admit_weight(&self, weight: u64) -> u64 {
-        let mut g = self.inner.lock();
-        g.total_weight = g.total_weight.saturating_add(weight);
-        g.min_vruntime.saturating_sub(SLEEPER_CREDIT)
+    pub(crate) fn front(&self) -> u64 {
+        self.inner
+            .lock()
+            .min_vruntime
+            .saturating_sub(SLEEPER_CREDIT)
     }
 
-    /// Account a real-time task joining this CPU's competition: add its
-    /// `weight` so load-balanced placement still counts it, without the
-    /// virtual-runtime placement the fair band's [`Self::admit_weight`]
-    /// performs (a real-time task carries no vruntime).
+    /// Add `weight` to this CPU's competition. Only a task's weight ledger
+    /// calls this, so what is added is exactly what it later removes.
     pub(crate) fn add_weight(&self, weight: u64) {
         let mut g = self.inner.lock();
         g.total_weight = g.total_weight.saturating_add(weight);
     }
 
-    /// Account a task leaving this CPU's competition: subtract `weight`.
+    /// Take `weight` off this CPU's competition, the counterpart of
+    /// [`Self::add_weight`].
     pub(crate) fn remove_weight(&self, weight: u64) {
         let mut g = self.inner.lock();
         g.total_weight = g.total_weight.saturating_sub(weight);
@@ -198,25 +173,26 @@ impl RunQueue {
     }
 
     /// Push a ready entry. Returns `Err(id)` if the queue is at its
-    /// compile-time bound (the caller then routes it to overflow).
+    /// compile-time bound or its storage cannot grow (the caller then routes
+    /// it to overflow).
     pub(crate) fn push(&self, entry: Entry) -> Result<(), TaskId> {
         let mut g = self.inner.lock();
-        if g.ready.len() >= g.capacity {
+        if g.ready.len() >= g.capacity || g.ready.try_reserve(1).is_err() {
             return Err(entry.id);
         }
         let seq = g.next_seq;
         g.next_seq = g.next_seq.wrapping_add(1);
-        g.ready.insert((entry.vruntime, seq, entry.id));
+        g.ready.push(Reverse((entry.vruntime, seq, entry.id)));
         Ok(())
     }
 
     /// Push a real-time task onto the back of the strict-priority band
     /// (FIFO / round-robin). Returns `Err(id)` if the band is at its
-    /// compile-time bound (the caller then routes it to overflow), exactly
-    /// like [`Self::push`].
+    /// compile-time bound or cannot grow (the caller then routes it to
+    /// overflow), exactly like [`Self::push`].
     pub(crate) fn push_rt(&self, id: TaskId) -> Result<(), TaskId> {
         let mut g = self.inner.lock();
-        if g.rt_ready.len() >= g.capacity {
+        if g.rt_ready.len() >= g.capacity || g.rt_ready.try_reserve(1).is_err() {
             return Err(id);
         }
         g.rt_ready.push_back(id);
@@ -234,9 +210,7 @@ impl RunQueue {
         if let Some(id) = g.rt_ready.pop_front() {
             return Some(Entry { id, vruntime: 0 });
         }
-        let &key = g.ready.iter().next()?;
-        g.ready.remove(&key);
-        let (vruntime, _seq, id) = key;
+        let Reverse((vruntime, _seq, id)) = g.ready.pop()?;
         if vruntime > g.min_vruntime {
             g.min_vruntime = vruntime;
         }
@@ -253,15 +227,8 @@ impl RunQueue {
         if let Some(id) = g.rt_ready.pop_front() {
             return Some(Entry { id, vruntime: 0 });
         }
-        let &key = g.ready.iter().next()?;
-        g.ready.remove(&key);
-        let (vruntime, _seq, id) = key;
+        let Reverse((vruntime, _seq, id)) = g.ready.pop()?;
         Some(Entry { id, vruntime })
-    }
-
-    /// Drop the weight of a stolen task from this queue's competition.
-    pub(crate) fn release_weight(&self, weight: u64) {
-        self.remove_weight(weight);
     }
 }
 
@@ -324,7 +291,7 @@ mod tests {
         // A joiner lands one credit ahead of that floor — never a stale zero,
         // and never level with it, which would leave arrival order to decide
         // the pick and put the joiner behind the queued population.
-        assert_eq!(q.admit_weight(1), 100 * SCALE - SLEEPER_CREDIT);
+        assert_eq!(q.front(), 100 * SCALE - SLEEPER_CREDIT);
     }
 
     #[test]
@@ -336,7 +303,7 @@ mod tests {
             q.push(e(id, 100 * SCALE)).expect("push");
         }
         assert_eq!(q.pick().map(|x| x.id), Some(1), "the floor is established");
-        let joiner = q.admit_weight(1);
+        let joiner = q.front();
         q.push(e(9, joiner)).expect("push");
         assert_eq!(
             q.pick().map(|x| x.id),
@@ -348,17 +315,6 @@ mod tests {
     #[test]
     fn an_empty_queues_floor_cannot_underflow() {
         let q = RunQueue::try_new(8).expect("q");
-        assert_eq!(q.admit_weight(1), 0, "a zero floor saturates, never wraps");
-    }
-
-    #[test]
-    fn vruntime_delta_scales_elapsed_service_by_weight() {
-        assert_eq!(vslice(8, 4), SCALE * 2);
-        assert_eq!(vslice(8, 2), SCALE * 4);
-        assert_eq!(vslice(8, 1), SCALE * 8);
-        assert_eq!(vslice(0, 4), SCALE / 4);
-        // A malformed zero weight cannot divide by zero (fail closed).
-        assert_eq!(vslice(1, 0), SCALE);
-        assert_eq!(vslice(u64::MAX, 1), u64::MAX);
+        assert_eq!(q.front(), 0, "a zero floor saturates, never wraps");
     }
 }

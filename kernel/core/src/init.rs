@@ -34,7 +34,7 @@ use tairix_caps::CapabilitySet;
 use tairix_kernel_ipc::PortRegistry;
 use tairix_kernel_irq::{IrqController, IrqTable, MonotonicClock};
 use tairix_kernel_mem::{AllocError, FrameAllocator, PhysMap, UserAddressSpace};
-use tairix_kernel_sched_api::{ExitDisposition, Priority, StepOutcome};
+use tairix_kernel_sched_api::{ExitDisposition, Priority, StepOutcome, TaskState};
 use tairix_kernel_sec::{
     CapTable, ProcName, ProcessId as SecProcessId, TaskCapabilities, TaskId as SecTaskId, UserId,
 };
@@ -1277,14 +1277,12 @@ fn run_dispatch_loop<A: KernelArch>(
             // A task ran. On the boot CPU, stop once every task has
             // exited so `kernel_main` halts; keep dispatching otherwise.
             Ok(StepOutcome::Ran(id)) => {
-                // If this dispatch just retired a task that was terminated
-                // while it executed (a signal kill or a driver unload of a
-                // still-running process), land the deferred teardown now:
-                // the task returned to this loop and executes nowhere, so
-                // reclaiming its resources can no longer race its own
-                // accesses into a wild fault. A task that was not killed
-                // while running makes this a single relaxed atomic read.
-                crate::procsignal::land_running_kill(id);
+                // A thread retired while it owed a death lands it here, where
+                // it executes nowhere; with no death owed anywhere this is one
+                // relaxed load.
+                crate::procsignal::land_retired_kill(id, || {
+                    scheduler.state_of(id) == TaskState::Exited
+                });
                 // A task body ran, which is the only thing that makes a CPU
                 // busy. Stamped with the top-of-loop instant so the span the
                 // governor folds covers the run rather than starting after it.
@@ -1377,7 +1375,7 @@ mod dispatch_loop_tests {
                 cpus: 1,
                 queue_capacity_per_band: 8,
                 yields_before_demotion: 1,
-                boost_interval_ticks: 10,
+                boost_interval_quanta: 10,
             },
             arch.clone(),
         )
@@ -1414,7 +1412,7 @@ mod dispatch_loop_tests {
                 cpus,
                 queue_capacity_per_band: 8,
                 yields_before_demotion: 1,
-                boost_interval_ticks: 10,
+                boost_interval_quanta: 10,
             },
             arch.clone(),
         )
@@ -1528,7 +1526,7 @@ mod dispatch_loop_tests {
                     cpus: 1,
                     queue_capacity_per_band: 8,
                     yields_before_demotion: 1,
-                    boost_interval_ticks: 10,
+                    boost_interval_quanta: 10,
                 },
                 arch.clone(),
             )
@@ -1885,11 +1883,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
     }
 
     fn terminate_driver_process(&self, handle: u64) -> Result<(), Errno> {
-        // The handle is the driver's PID, which is its scheduler task id and,
-        // equally, the numeric its security id was minted under
-        // (`admit_process` builds `SecTaskId(task_id)`). Reclaim every
-        // kernel-held piece of the driver under that one id.
-        let sched_id = handle;
+        // The handle is the driver's PID, the numeric its security id was
+        // minted under (`admit_process` builds `SecTaskId(task_id)`). Reclaim
+        // every kernel-held piece of the driver under that one id.
         let sec_id = SecProcessId(handle);
 
         // Presence is keyed on the address-space registry entry every spawned
@@ -1902,64 +1898,50 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             return Err(Errno::NotFound);
         }
 
-        // Reap the driver's scheduler tasks: mark each Exited (never dispatched
-        // again) and drop its body, reclaiming its kernel stack and, with the
-        // last of them, the process's live address space and page-table frames.
-        // A parked driver (the common case — one blocked in `irq_wait` / a
-        // served-endpoint park) drops immediately; a vanished id is a benign
-        // no-op. Idempotent, never a panic.
-        //
-        // The unit is the driver's whole **thread group**: a user-space driver
-        // may have created threads of its own (`plans/THREADS.md`), and one left
-        // running would keep executing against the state this teardown withdraws
-        // with no path left to stop it. A build that registered no capability
-        // record still has the leader task to stop.
-        //
-        // A thread that cannot be reclaimed *here* is never destroyed
-        // mid-flight; the teardown follows it to the point it reaches safely,
-        // exactly as a signalled termination does. Two cases, and neither may
-        // be retired on the spot:
-        //
-        // * Inside the kernel on its own stack — a driver blocked in
-        //   `irq_wait`, or one part-way through a filesystem call holding a
-        //   mount's `SleepLock`. The scheduler's per-task body lock is free
-        //   the moment such a thread parks, so `exit` would report it
-        //   quiescent and drop a stack whose frames still own that lock,
-        //   closing the mount for the rest of the boot. The gate records the
-        //   teardown instead and the wake below runs the thread to its own
-        //   boundary, which lands it.
-        // * Still executing in user mode on another CPU. Withdrawing the
-        //   address space under its own code turns a legitimate access into a
-        //   wild fault, so the dispatch loop reclaims once it retires.
-        //
-        // The unload is committed either way — audit it now.
-        let mut threads: alloc::vec::Vec<u64> =
-            self.caps.read().threads_of(sec_id).map(|t| t.0).collect();
-        if threads.is_empty() {
-            threads.push(sched_id);
-        }
+        // The unit is the driver's whole **thread group**: a thread left
+        // running would keep executing against the state this teardown
+        // withdraws, with no path left to stop it (`plans/THREADS.md`). Each
+        // thread's death is claimed first and then taken where it is safe to
+        // take, exactly as a signalled termination's is: a thread inside a
+        // kernel body — blocked in `irq_wait`, or holding a mount's `SleepLock`
+        // mid-call — dies at that body's boundary once woken, and one still
+        // executing dies where the scheduler retires it. Only a thread that is
+        // neither is retired here. The unload is committed either way — audit
+        // it now.
+        let teardown = crate::procsignal::DeferredTeardown::Plain { process: sec_id };
         let mut deferred = false;
-        for thread in threads {
-            let teardown = crate::procsignal::DeferredTeardown::Plain { process: sec_id };
-            if crate::procsignal::defer_kill_in_kernel(thread, teardown) {
-                // Every in-kernel park loop re-tests after a wake and unwinds
-                // when the gate holds a teardown for it, so even an unbounded
-                // `irq_wait` reaches its boundary rather than sleeping on as
-                // an unstoppable driver.
-                let _ = self.scheduler.unpark(thread);
-                deferred = true;
-            } else if let Ok(ExitDisposition::Deferred) = self.scheduler.exit(thread) {
-                crate::procsignal::defer_plain_reclaim(thread, sec_id);
-                deferred = true;
-            } else {
-                // Down now: retire its per-thread state so the group's count can
-                // reach zero and a deferred sibling's landing knows it was last.
+        for claim in crate::procsignal::claim_group_kill(Some(self.caps), teardown, None) {
+            let quiesced = match claim.site {
+                // Every in-kernel park loop re-tests the gate after a wake and
+                // unwinds, so even an unbounded `irq_wait` reaches its boundary.
+                crate::procsignal::KillSite::Boundary => {
+                    let _ = self.scheduler.unpark(claim.thread);
+                    false
+                }
+                // Another death owns this thread and lands its teardown in full.
+                crate::procsignal::KillSite::Retire if !claim.recorded => false,
+                // Only a thread this call retired is down here. A member the
+                // scheduler no longer knows was retired by another death whose
+                // landing is still under way, and a second teardown alongside
+                // it would reclaim the process twice.
+                crate::procsignal::KillSite::Retire => matches!(
+                    self.scheduler.exit(claim.thread),
+                    Ok(ExitDisposition::Quiesced)
+                ),
+            };
+            if quiesced {
+                // Withdraw its death, and retire the thread's per-thread state
+                // so the group's count can reach zero and a deferred sibling's
+                // landing knows it was last.
+                let _ = crate::procsignal::take_owed_kill(claim.thread);
                 let _ = crate::threads::retire(
                     self.caps,
                     self.aspaces,
                     Some(self.peer_watch),
-                    SecTaskId(thread),
+                    SecTaskId(claim.thread),
                 );
+            } else {
+                deferred = true;
             }
         }
         if deferred {
@@ -3350,8 +3332,13 @@ mod tests {
         assert_eq!(ctx.terminate_driver_process(0x9999), Err(Errno::NotFound));
 
         // Make a handle "known" exactly as `admit_process` does for a spawned
-        // driver: a capability record minted under its `SecTaskId`.
-        let handle = 0x4242u64;
+        // driver: a parked task, and a capability record minted under its id.
+        let handle = state
+            .scheduler
+            .spawn_parked(0, Priority::Normal, |_| {
+                tairix_kernel_sched_api::TaskAction::Exit
+            })
+            .expect("the driver's task is admitted");
         let sec = SecProcessId(handle);
         let mut caps = CapabilitySet::empty();
         caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
@@ -3376,6 +3363,49 @@ mod tests {
         // A second teardown of the now-gone handle is a benign idempotent
         // miss — never a panic, never a double-reclaim.
         assert_eq!(ctx.terminate_driver_process(handle), Err(Errno::NotFound));
+    }
+
+    /// A member the scheduler no longer knows was retired by another death,
+    /// whose landing is still under way and tears the process down in full.
+    /// The unload leaves it to that landing instead of reclaiming the process
+    /// alongside it, which would tear it down twice.
+    #[test]
+    fn an_unload_leaves_a_thread_it_did_not_retire_to_the_landing_under_way() {
+        let _gate = crate::procsignal::running_kill_test_lock();
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+        let ctx = KernelInitSpawner::new(
+            state.frame_allocator,
+            audit_sink,
+            &state.scheduler,
+            &state.caps,
+            &state.peer_watch,
+            &state.aspaces,
+            state.arch.as_ref(),
+            process_wait,
+            &state.irq,
+            &crate::devres::NULL_SHARED_MEM_FACILITY,
+        );
+        let retired_elsewhere = 0x05ee_d296u64;
+        let sec = SecProcessId(retired_elsewhere);
+        state.caps.write().insert(TaskCapabilities::derive(
+            sec,
+            UserId(0),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            audit_sink,
+        ));
+
+        assert_eq!(ctx.terminate_driver_process(retired_elsewhere), Ok(()));
+        assert!(
+            state.caps.read().caps_of_process(sec).is_some(),
+            "the landing under way owns the teardown"
+        );
+
+        crate::procsignal::clear_kill_gate(retired_elsewhere);
+        let _ = state.caps.write().remove(sec);
     }
 
     /// Unloading a driver stops its whole thread group, not just its leader.
@@ -3474,7 +3504,14 @@ mod tests {
             &state.irq,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
         );
-        let handle = 0x05ee_d271u64;
+        // A parked task at the number, as the admission leaves a driver it has
+        // not yet started: the unload's own teardown retires it.
+        let handle = state
+            .scheduler
+            .spawn_parked_as(0x05ee_d271, 0, Priority::Normal, |_| {
+                tairix_kernel_sched_api::TaskAction::Exit
+            })
+            .expect("the driver's task is admitted");
         let sec = SecProcessId(handle);
         state.caps.write().insert(TaskCapabilities::derive(
             sec,
@@ -3492,6 +3529,137 @@ mod tests {
             Err(tairix_kernel_sched_api::SchedError::TaskIdInUse)
         );
         tairix_kernel_sched_api::release_task_id(handle);
+    }
+
+    /// A booted kernel, its published dispatch hook, and a user task on it
+    /// that owes a signalled death (`137`) its parent `1` would reap, the task
+    /// running `body` against the hook when stepped.
+    fn doomed_task_on_a_booted_kernel<F>(
+        body: F,
+    ) -> (
+        &'static KernelState<TestArch>,
+        &'static (dyn ProcessWait + 'static),
+        &'static TestSink,
+        u64,
+    )
+    where
+        F: FnOnce(&'static (dyn crate::DispatchHook + 'static)) + Send + 'static,
+    {
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let slot = leak_dispatch_slot();
+        let boot = bootinfo_with_slot(log_sink, audit_sink, make_memory_map(), slot);
+        let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+        let hook = slot.get().expect("the syscall phase publishes its hook");
+        let mut body = Some(body);
+        let task = state
+            .scheduler
+            .spawn(0, Priority::Normal, move |_| {
+                if let Some(body) = body.take() {
+                    body(hook);
+                }
+                tairix_kernel_sched_api::TaskAction::Exit
+            })
+            .expect("the task is admitted");
+        let process = SecProcessId(task);
+        state.caps.write().insert(TaskCapabilities::derive(
+            process,
+            UserId(0),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            audit_sink,
+        ));
+        process_wait.register_child(SecProcessId(1), process);
+        let claims = crate::procsignal::claim_group_kill(
+            Some(&state.caps),
+            crate::procsignal::DeferredTeardown::Exit {
+                process,
+                status: 137,
+            },
+            None,
+        );
+        assert_eq!(claims.len(), 1);
+        (state, process_wait, audit_sink, task)
+    }
+
+    /// A syscall made by a thread that already owes a death runs no handler:
+    /// the thread goes straight to the call's boundary and dies of that death.
+    /// A handler run there could park, and the scheduler retires a thread told
+    /// to die at its next stopping point — inside a handler, that frees a
+    /// stack whose frames own kernel state. An `exit` shows it: run, it would
+    /// have recorded its own code in the kill's place.
+    #[test]
+    fn a_syscall_made_while_a_death_is_owed_runs_no_handler() {
+        let _gate = crate::procsignal::running_kill_test_lock();
+        let outcome: &'static tairix_sync::SpinLock<Option<crate::DispatchOutcome>> =
+            Box::leak(Box::new(tairix_sync::SpinLock::new(None)));
+        let (state, process_wait, _audit, task) = doomed_task_on_a_booted_kernel(move |hook| {
+            let exit = u64::from(tairix_abi::SyscallNumber::EXIT.as_u16());
+            *outcome.lock() = Some(hook.dispatch(
+                exit,
+                tairix_kernel_syscall::RawArgs([0; tairix_abi::SYSCALL_MAX_ARGS]),
+            ));
+        });
+
+        assert!(matches!(state.scheduler.step(0), Ok(StepOutcome::Ran(_))));
+        assert!(matches!(
+            *outcome.lock(),
+            Some(crate::DispatchOutcome::Reschedule {
+                action: crate::RescheduleAction::Exit,
+                ..
+            })
+        ));
+        assert!(!crate::procsignal::kill_pending(task));
+        assert_eq!(
+            process_wait.poll(
+                SecProcessId(1),
+                tairix_abi::WAIT_PID_ANY,
+                tairix_abi::WaitFlags::empty()
+            ),
+            Ok(crate::procwait::WaitedChild {
+                pid: task,
+                status: tairix_abi::WaitStatus::Exited(137)
+            }),
+            "the kill's status, not the skipped exit's"
+        );
+    }
+
+    /// The user-fault resolver reads through the filesystem and parks there,
+    /// so a fault is a kernel body too: a thread that faults owing a death is
+    /// never resolved, and dies of that death at the fault's boundary rather
+    /// than of the fault.
+    #[test]
+    fn a_fault_taken_while_a_death_is_owed_lands_that_death() {
+        let _gate = crate::procsignal::running_kill_test_lock();
+        let outcome: &'static tairix_sync::SpinLock<Option<crate::UserFaultOutcome>> =
+            Box::leak(Box::new(tairix_sync::SpinLock::new(None)));
+        let (state, process_wait, audit_sink, task) = doomed_task_on_a_booted_kernel(move |hook| {
+            *outcome.lock() = Some(hook.resolve_user_fault(0xdead_0000, false, None));
+        });
+        audit_sink.clear();
+
+        assert!(matches!(state.scheduler.step(0), Ok(StepOutcome::Ran(_))));
+        assert!(matches!(
+            *outcome.lock(),
+            Some(crate::UserFaultOutcome::Terminated { .. })
+        ));
+        assert!(
+            !audit_sink
+                .event_ids()
+                .contains(&AuditEvent::TaskFaultKilled.id().0),
+            "the fault was never resolved into a crash"
+        );
+        assert_eq!(
+            process_wait.poll(
+                SecProcessId(1),
+                tairix_abi::WAIT_PID_ANY,
+                tairix_abi::WaitFlags::empty()
+            ),
+            Ok(crate::procwait::WaitedChild {
+                pid: task,
+                status: tairix_abi::WaitStatus::Exited(137)
+            })
+        );
     }
 
     #[test]

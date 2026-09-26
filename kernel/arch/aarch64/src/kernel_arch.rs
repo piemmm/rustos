@@ -501,6 +501,10 @@ impl SchedulerArch for Aarch64Arch {
         read_cntpct()
     }
 
+    fn quantum_ticks(&self) -> u64 {
+        crate::preempt::timer_interval_ticks(self.current_cpu())
+    }
+
     fn core_class(&self, cpu: CpuId) -> CoreClass {
         // Out-of-range CPUs report the safe homogeneous default per the
         // Arch HAL contract; a stored byte is always a valid encoding
@@ -1299,6 +1303,8 @@ mod tests {
     #[test]
     fn passes_arch_hal_conformance_suite() {
         static S: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
+        // The quantum is read from the preempt suite's per-CPU slots.
+        let _guard = crate::preempt::test_state_lock();
         let arch = Aarch64Arch::new(&S, 0, 1_000);
         let blob = tairix_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
         let fdt = crate::fdt::Fdt::new(&blob).expect("valid fdt");

@@ -1556,29 +1556,45 @@ quiescent to the scheduler, whose per-task body lock is free the moment it
 suspends, so nothing but the gate stops the terminate path reclaiming a
 half-unwound stack.
 
-The signal producer therefore consults the **kill gate**
-(`kernel/core::procsignal`): a victim inside the kernel has the signal
-recorded *pending*, is woken out of any park (every in-kernel park loop
-re-tests after a wake and unwinds with `Errno::Interrupted` when a kill
-is pending, so an indefinite wait — a console read, `waitset_wait`, a
-blocking `wait`, a pipe park, `irq_wait` — never leaves a task
-unkillable), and dies at that body's **own boundary** once it has unwound:
+The signal producer therefore records each thread's death in the **kill
+gate** (`kernel/core::procsignal`) *before* acting on it, and the gate decides
+where the death is owed. A victim inside a kernel body is woken out of any park
+(every in-kernel park loop re-tests after a wake and unwinds with
+`Errno::Interrupted` when a death is owed, so an indefinite wait — a console
+read, `waitset_wait`, a blocking `wait`, a pipe park, `irq_wait` — never leaves
+a task unkillable) and dies at that body's **own boundary** once it has unwound:
 the boundary records the `128 + n` status, runs the one shared resource
-reclaim, and suspends the task with an `Exit` action. The completed
-syscall's result (including that `Errno::Interrupted`) never reaches user
-space, and a killed loading child never enters user mode. A victim in user
-mode holds no kernel state and is terminated immediately, its teardown
-deferred only until the dispatch loop retires it — and withheld there too
-while it is inside the kernel, because a dispatch retires on a park as well
-as on a return. The deferral is invisible to the signalling parent —
-`signal` answers `0` and `wait` reaps the child when the exit is
-recorded, typically a few block-I/O milliseconds later at worst.
+reclaim, and suspends the task with an `Exit` action. The completed syscall's
+result (including that `Errno::Interrupted`) never reaches user space, and a
+killed loading child never enters user mode. A victim outside the kernel holds
+no kernel state: one that is quiescent is retired and reclaimed on the spot,
+and one still executing is told to die and dies where the scheduler retires it,
+the dispatch loop landing its death then. The deferral is invisible to the
+signalling parent — `signal` answers `0` and `wait` reaps the child when the
+exit is recorded, typically a few block-I/O milliseconds later at worst.
 
-Which of the two deferral registers a death lands in is decided under the
-gate's one lock, concurrently with the victim's own entry into the kernel.
-Split across two locks, a kill arriving exactly as the victim enters could be
-recorded as a user-mode teardown against a thread that is by then inside a
-body, and the dispatch loop would free that body's stack at its next park.
+Four rules make each death land exactly once:
+
+* **Recorded first.** The death is in the gate before the scheduler is told
+  anything, so a victim retired by its own CPU before the killer returns still
+  finds it; recorded afterwards, it could arrive after the only point that
+  looks for it.
+* **Owed where the victim is.** Whether a death is owed at a boundary or at a
+  retire is one decision on the gate's in-kernel set, under the lock the
+  victim's own entry into the kernel takes. A thread that enters a kernel body
+  — a syscall, the deferred-load body, the user-fault resolver — with a death
+  already owed never runs that body: it goes straight to its boundary. The
+  scheduler retires a thread told to die at its next stopping point, and inside
+  a body that would free a stack whose frames still own kernel state.
+* **Landed only once retired.** A dispatch returns on a yield and a park as
+  well as on a retire, so the dispatch loop lands a death only for a thread the
+  scheduler reports `Exited`.
+* **Claimed only against members.** A group death is claimed against the
+  threads the group table holds, under its read lock, and every thread's
+  teardown withdraws its membership before it clears the gate — so no death is
+  recorded that its teardown would not clear, however stale the killer's view
+  of the group. A thread registered while its group is dying finds its
+  creator's death owed and is refused.
 
 `peer_watch` (no. 130) is how a service learns that a process it holds state
 for has gone — a client's sockets, sessions, or counted connections, where the

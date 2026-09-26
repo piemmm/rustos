@@ -100,6 +100,28 @@ fn animation_frame_drives_the_tick_callback_and_counts() {
     clear_for_tests();
 }
 
+/// The quantum is the frame period the host actually delivered: unknown
+/// until a second frame gives an interval to measure, then that interval.
+#[test]
+fn the_frame_interval_is_measured_between_consecutive_frames() {
+    let _guard = lock_state();
+    clear_for_tests();
+    assert_eq!(frame_interval_ns(), 0, "no frame has run");
+
+    let before = crate::kernel_arch::ms_to_ns(crate::kernel_arch::read_now_ms());
+    on_animation_frame();
+    assert_eq!(frame_interval_ns(), 0, "one frame gives no interval");
+    on_animation_frame();
+    let after = crate::kernel_arch::ms_to_ns(crate::kernel_arch::read_now_ms());
+    let interval = frame_interval_ns();
+    assert!(interval > 0, "the host clock advanced between the frames");
+    assert!(
+        interval < after - before,
+        "the interval lies inside the span both frames started in"
+    );
+    clear_for_tests();
+}
+
 #[test]
 fn animation_frame_without_recorded_cpu_does_not_fire() {
     let _guard = lock_state();

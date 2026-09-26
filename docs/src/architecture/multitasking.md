@@ -367,7 +367,10 @@ task parks, so without the gate a termination would find the child "quiescent"
 and free a stack whose frames still hold that mount lock, closing the volume
 for the rest of the boot (`plans/OPEN-DEFECTS.md` D112). A death taken at the
 body's boundary supersedes both outcomes: the child neither enters user mode
-nor reports a load failure, and retires carrying the signal's own status.
+nor reports a load failure, and retires carrying the signal's own status. A
+child already owing a death when its body starts builds nothing and goes
+straight to that boundary, since a child told to die may be retired at its next
+stopping point, and inside the build that would be mid-body.
 
 **Failure is loud, never silent (`AGENTS.md` §24).** A load that fails on
 the child's own slice does not surface as a `spawn` errno — the caller

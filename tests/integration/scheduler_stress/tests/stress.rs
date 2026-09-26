@@ -26,7 +26,7 @@ fn workspace_stress_four_cores_twenty_thousand_tasks() {
         cpus,
         queue_capacity_per_band: 8192,
         yields_before_demotion: 4,
-        boost_interval_ticks: 256,
+        boost_interval_quanta: 256,
     };
     let sched = Arc::new(Scheduler::new(cfg, arch.clone()).expect("sched"));
 

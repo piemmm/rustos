@@ -126,6 +126,8 @@ fn send_ipi_to_unmapped_target_is_dropped_as_stray() {
 /// W2).
 #[test]
 fn passes_arch_hal_conformance_suite() {
+    // The quantum is the frame interval, which the frame tests rewrite.
+    let _guard = crate::preempt::test_state_lock();
     let arch = WasmArch::new(0);
     let discovery = crate::platform::HostCapabilityDiscovery::new(
         crate::platform::HostCapabilities::new(4, true),

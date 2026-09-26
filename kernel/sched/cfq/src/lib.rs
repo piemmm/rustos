@@ -12,14 +12,14 @@
 //! * **Completely Fair Queuing (Linux-CFS-like).** Each task carries a
 //!   virtual runtime `vruntime`; the ready task with the *smallest*
 //!   `vruntime` is dispatched next (the leftmost node of Linux CFS's
-//!   red-black tree, here an ordered [`alloc::collections::BTreeSet`] keyed
-//!   by `(vruntime, id)` — `O(log n)` pick/insert/remove). A dispatch
+//!   red-black tree, here the top of a min-heap keyed by
+//!   `(vruntime, arrival)` — `O(log n)` pick and insert). A dispatch
 //!   charges the running task `elapsed_ticks * SCALE / weight` of virtual
-//!   runtime, so equal-weight tasks receive equal CPU time even when one
-//!   runs briefly and parks while another consumes a full quantum. A
-//!   heavier task's `vruntime` rises more slowly for the same elapsed
-//!   service — proportional share, with no band ever starved (every
-//!   `vruntime` advances monotonically).
+//!   runtime (the shared proportional-share charge), so equal-weight tasks
+//!   receive equal CPU time even when one runs briefly and parks while
+//!   another consumes a full quantum. A heavier task's `vruntime` rises more
+//!   slowly for the same elapsed service — proportional share, with no band
+//!   ever starved (every `vruntime` advances monotonically).
 //! * **Non-tickless — the tickless carve-out.** TAIRiX is otherwise a
 //!   tickless (`NO_HZ`) kernel: a policy arms its preemption one-shot only
 //!   when a CPU is *contended* and disarms for a sole runnable task, so a

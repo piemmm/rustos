@@ -2,11 +2,11 @@
 //!
 //! The policy-neutral lifecycle vocabulary ([`Priority`], [`TaskState`],
 //! [`TaskAction`], [`TaskContext`], [`TaskId`]) is defined once in
-//! `kernel/sched/api` and re-exported by this
-//! crate. This module owns only the EEVDF-specific representation of a
-//! live task: the boxed body, the lifecycle atomics, and the
-//! virtual-time bookkeeping (weight, virtual runtime, virtual deadline)
-//! the dispatch loop reads and writes.
+//! `kernel/sched/api` and re-exported by this crate, as are the band weights
+//! and the ledger recording where a task's weight is counted. This module owns
+//! only the EEVDF-specific representation of a live task: the boxed body, the
+//! lifecycle atomics, and the virtual eligible time and deadline the dispatch
+//! loop reads and writes.
 //!
 //! The body is a closure (`FnMut(&mut TaskContext) -> TaskAction`) so the
 //! scheduler is host-testable; the real context-switch machinery lands
@@ -20,27 +20,12 @@ use alloc::boxed::Box;
 use tairix_sync::SpinLock;
 
 use crate::{CpuId, Priority, SchedClass, TaskAction, TaskContext, TaskId, TaskState};
+use tairix_kernel_sched_api::share::{weight_of, WeightLedger};
 use tairix_kernel_sched_api::ParkableTask;
 
 /// Concrete closure type stored inside a task. Boxed and trait-object'd
 /// because tasks are owned heterogeneously by [`crate::Scheduler`].
 pub(crate) type TaskBody = dyn FnMut(&mut TaskContext) -> TaskAction + Send + 'static;
-
-/// Per-priority scheduling weight.
-///
-/// EEVDF apportions virtual time inversely to a task's weight: a task
-/// with twice the weight accrues virtual runtime at half the rate, so it
-/// is dispatched roughly twice as often. The three bands map to a 4:2:1
-/// weight ratio — the same shape the MLFQ sibling expresses through
-/// discrete queues, here expressed as a continuous proportional share.
-#[must_use]
-pub(crate) const fn weight_of(priority: Priority) -> u64 {
-    match priority {
-        Priority::High => 4,
-        Priority::Normal => 2,
-        Priority::Low => 1,
-    }
-}
 
 /// Per-task data shared between the scheduler and any holder of the task.
 ///
@@ -58,7 +43,8 @@ pub(crate) struct TaskInner {
     /// land on the CPU that last ran the task.
     pub home_cpu: AtomicU32,
     /// Current priority band, stored as `Priority as u8`. Determines the
-    /// task's [`weight_of`] weight.
+    /// task's [`weight_of`] weight: EEVDF charges virtual time inversely to
+    /// it, so a heavier task is dispatched proportionally more often.
     pub priority: AtomicU8,
     /// Scheduling class, stored as `SchedClass as u8`. A
     /// [`SchedClass::Realtime`] task is dispatched ahead of every
@@ -80,9 +66,11 @@ pub(crate) struct TaskInner {
     /// to run on a CPU only once that CPU's virtual time has reached
     /// `ve`; this is the "eligible" half of EEVDF.
     pub virtual_eligible: AtomicU64,
-    /// Virtual deadline `vd` (fixed point) = `ve + request / weight`.
-    /// Among eligible tasks the scheduler dispatches the earliest `vd`;
-    /// this is the "earliest virtual deadline first" half of EEVDF.
+    /// Virtual deadline `vd` (fixed point) = `ve + request / weight`, where a
+    /// request is one quantum of service. It moves on only once the service
+    /// charged to `ve` has fulfilled the request. Among eligible tasks the
+    /// scheduler dispatches the earliest `vd`; this is the "earliest virtual
+    /// deadline first" half of EEVDF.
     pub virtual_deadline: AtomicU64,
     /// Tick at which the task last started running. Used by tests for
     /// latency / starvation measurements.
@@ -108,6 +96,9 @@ pub(crate) struct TaskInner {
     /// killed while running is never reclaimed by the killer while it is
     /// still on-CPU.
     pub doomed: AtomicBool,
+    /// Where this task's weight is counted: every change to a CPU's competing
+    /// weight on its behalf goes through here.
+    pub ledger: WeightLedger,
 }
 
 impl TaskInner {
@@ -132,6 +123,7 @@ impl TaskInner {
             body: SpinLock::new(Some(body)),
             wake_pending: AtomicBool::new(false),
             doomed: AtomicBool::new(false),
+            ledger: WeightLedger::new(),
         }
     }
 
@@ -175,18 +167,6 @@ impl TaskInner {
     /// Unconditionally store the state.
     pub(crate) fn store_state(&self, new: TaskState) {
         self.state.store(new.as_u8(), Ordering::Release);
-    }
-
-    /// Atomically swap in `new`, returning the previous state.
-    ///
-    /// Used by the terminal transitions (`exit`, the dispatch-loop
-    /// `Park`/`Exit` arms) so the caller can settle this CPU's
-    /// competing-weight bookkeeping exactly once — only the transition
-    /// that actually moves the task *out* of [`TaskState::Ready`] /
-    /// [`TaskState::Running`] decrements the weight.
-    pub(crate) fn swap_state(&self, new: TaskState) -> TaskState {
-        let prev = self.state.swap(new.as_u8(), Ordering::AcqRel);
-        TaskState::from_u8(prev).unwrap_or(TaskState::Exited)
     }
 
     /// Store the virtual eligible / deadline pair the dispatcher computed.
@@ -238,12 +218,6 @@ impl ParkableTask for TaskInner {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn weights_follow_priority_order() {
-        assert!(weight_of(Priority::High) > weight_of(Priority::Normal));
-        assert!(weight_of(Priority::Normal) > weight_of(Priority::Low));
-    }
 
     #[test]
     fn cas_state_transitions() {

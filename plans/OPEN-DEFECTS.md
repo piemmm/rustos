@@ -22,7 +22,7 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 83 open, 200 closed, 283 total.
+**closed**, and a partial fix stays **open**. 83 open, 212 closed, 295 total.
 
 ### Open (83)
 
@@ -41,8 +41,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D53 | kernel-heap grow/shrink thrash costs work proportional to page count | reachability unconfirmed; fix only once confirmed |
 | D54 | a desktop worker issues ~2500 file opens at session start | starves every concurrent reader; the loop is not yet identified |
 | D60 | the window-content release has no end-to-end vertical | — |
-| D74 | EEVDF charges every dispatch a fixed service quantum regardless of runtime | — |
-| D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
 | D80.1 | a window the terminal is refused is invisible to the user: the refusal reaches only its `stderr`, which a desktop app has no reader for | sub-item of the closed D80. The charter's fallback, the system log, needs `CAP_LOG_EMIT` in the terminal's manifest; a notice in the app's own UI is a `plans/GUI-TERMINAL.md` decision |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
 | D97 | a userland service's log threshold cannot be lowered on a shipped system | four documents told the reader to lower it; corrected. The device manager's `13002`/`13006`/`13007` are unreachable on a real boot |
@@ -111,6 +109,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D272 | a hand-over the instance's mailbox refuses after the session relayed its document leaves the onward delegation pending in the instance's table | noticed fixing D133; not absorbed, because the fix is a kernel mechanism a grantor withdraws an unredeemed delegation through. `DeskReach::queue_open_target` redeems the session's grant and mints the instance its own before `hand_over` queues the entry; a refused queue answers `false`, which the launch contract reads as "nothing delegated", yet the instance's handle stays pending until it or the session exits. D133's per-grantor bound caps the residue at 64 per instance, charged to the session. The fix is either a withdraw operation on a delegation the caller minted, or a desk that reserves its slot before the relay mints |
 | D273 | a signal intake a non-leader thread opts into is never used: the opt-in, the take and the wait-set readiness are keyed by the calling thread, while delivery and its targeted wake are keyed by the process | noticed fixing D270; not absorbed, because keying the intake by process needs a wake that reaches whichever thread waits, not the leader's task id. `signal_intake` and `WaitSourceKind::Signal` use `caller.task_id`, `try_intake` and `signal_intake_wake` the target `ProcessId`, and `threads::retire` clears the retiring thread's own entry; so only a leader can observe a termination request, and a request aimed at a process whose worker opted in terminates it instead. The docs already describe one intake per process |
 | D284 | riscv64's remote fence has no fail-closed outcome when the firmware refuses the last resort | noticed fixing D281; not absorbed, because either answer changes a contract the charter guards. `fence_remote` answers a refused fence with a whole-space fence of every hart, the most permissive call the SBI has, and drops that call's status: `CrossCpuTlbShootdown` is infallible, so an `SBI_ERR_FAILED` there returns as though every hart had fenced, and the caller frees frames a stale translation may still reach. The fix is either a fallible shootdown whose failure keeps the batch's frames out of the allocator (`Retiring` already withholds a frame it cannot scrub), which widens the Arch HAL on every port for a failure only one can produce, or a stop-the-world fatal report stating the reason, which halts on a production path |
+| D294 | a scheduler's overflow list still grows infallibly on the wake and yield paths | noticed fixing D291; not absorbed. See the section |
+| D297 | every syscall entry and exit, and every user fault, takes the one global kill-gate spin lock and inserts into or removes from a shared B-tree | noticed fixing D296; not absorbed, because the fix is per-thread gate state reached without a global structure. See the section |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -137,7 +137,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (200)
+### Closed (212)
 
 | ID | Subject |
 |---|---|
@@ -341,6 +341,18 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D264 | a kept USB node reported a slot id a controller reset reassigned |
 | D265 | a storage device without a serial number was kept across a reset on model and position alone |
 | D266 | `docs/src/platform/aarch64.md` documented the deleted keyboard scaffold's diagnostics as live, under ids the audit catalogue has since reissued; the table and the poll-loop paragraph are gone, the note says which ids were reissued, and the one live record the table carried, the boot path's `4100` PCIe discovery (still colliding with `FsNodeMutated`, D169), is named on its beacon row |
+| D74 | EEVDF charged every dispatch a fixed service quantum regardless of how long it ran |
+| D75 | EEVDF's ready set was a `Vec` scanned linearly on the dispatch path |
+| D286 | a returning body's `Park` or `Yield` was applied over a remote park and wake that landed while it ran, losing the wake or queuing the task twice |
+| D287 | a task a yield or an overflow drain moved to another CPU was queued there without a signal, so an idle CPU could leave it waiting |
+| D288 | a CPU's competing weight drifted: a priority change while a task was counted, or a steal or migration racing a remote park, took off a different weight than went on |
+| D289 | CFQ's and EEVDF's virtual time saturated `u64` within hours of CPU time on a gigahertz counter |
+| D290 | the scheduler's intervals had no unit: MLFQ's boost interval and EEVDF's request were raw port ticks |
+| D291 | a run-queue push allocated infallibly on the wake and yield paths, so memory exhaustion aborted the kernel |
+| D292 | a task that left the real-time band by a yield kept the virtual time it left with and held the CPU until it caught up |
+| D293 | `SchedulerPolicy::yield_current` was dead contract surface, and two crates' docs described it as the live `irq_wait` path |
+| D295 | the aarch64 and riscv64 timer-HAL conformance tests installed and fired a tick callback in the preempt statics the preempt suite clears, holding none of its lock |
+| D296 | a kill recorded its victim's death only after telling the scheduler to retire it, so a retire in between orphaned the death: the parent's `wait` hung and the process was never reclaimed (`stress-qemu-aarch64`); the same unsynchronised split let a death land twice, land on a queued thread, or retire a thread inside a kernel body |
 
 ## Scope
 
@@ -648,15 +660,11 @@ The open items, in priority order:
   scheduling round on every wake. Recorded first as a second D68; renumbered
   here because the guard-arena D68 owns that id in code and docs. Detail
   below.
-- **D74 — EEVDF charges every dispatch a fixed service quantum regardless of
-  how long it ran — OPEN.** The D73 inversion in a different shape, in the
-  sibling policy: actual runtime never enters the accounting, so a task doing
-  many short dispatches is charged far more than one doing few long ones.
-  Noticed while confirming D73's scope; not folded in because it changes
-  EEVDF's core clock. Detail below.
-- **D75 — EEVDF's ready set is a `Vec` scanned linearly on the dispatch
-  path — OPEN.** An O(n) scan of a growable list to pick the
-  earliest-deadline eligible entry, where CFQ keys a `BTreeSet`. Detail
+- **D74 — EEVDF charged every dispatch a fixed service quantum regardless of
+  how long it ran — FIXED.** Every run is now charged the ticks it used, so
+  CPU time, not dispatch count, is shared by weight. Detail below.
+- **D75 — EEVDF's ready set was a `Vec` scanned linearly on the dispatch
+  path — FIXED.** Two binary heaps give an `O(log n)` amortised pick. Detail
   below.
 - **D50 — the flake hunt's concurrent replicas re-planted one guest's backing
   image underneath itself — DONE.** Up to four simultaneous runs of one
@@ -1722,12 +1730,10 @@ reaching a filesystem driver without the VFS's per-operation mapping read
      deferred-load body brackets itself with it across the build **and** the
      `become_user` yield. A termination taken at that boundary supersedes both
      outcomes: the child neither enters user mode nor reports a load failure.
-  2. *The two deferral registers share one lock.* Which one a death lands in
-     is a single decision on the in-kernel set, so a kill arriving exactly as
-     the victim entered the kernel can no longer be recorded as a user-mode
-     teardown the dispatch loop lands at the victim's next park. A dispatch
-     retires on a park as well as on a return, so `land_running_kill`
-     additionally withholds a teardown while its thread is in the kernel.
+  2. *Where a death is owed is decided under the gate's one lock*, on the
+     in-kernel set, concurrently with the victim's own entry into the kernel,
+     and the dispatch loop lands only a death whose thread the scheduler has
+     retired (the owed-death protocol is D296's).
   3. *The driver-unload path went through the gate too.* It called
      `SchedulerPolicy::exit` directly, so unloading a driver parked in
      `irq_wait` or mid-filesystem-call hit the same defect. It now records a
@@ -5795,35 +5801,38 @@ confirming that are recorded as D74 and D75.
 
 ---
 
-## D74 — EEVDF charges every dispatch a fixed service quantum regardless of how long it ran (OPEN)
+## D74 — EEVDF charged every dispatch a fixed service quantum regardless of how long it ran (FIXED)
 
-`kernel/sched/eevdf`'s `request()`/`advance()` pair charges
-`SERVICE_PER_DISPATCH` per dispatch and advances virtual time by the same
-constant, so actual runtime never enters the accounting. A task that runs a
-brief slice and parks is charged exactly what a task that consumes a whole
-quantum is charged, so an I/O-bound task doing a thousand short dispatches
-is charged a thousand quanta while a CPU-bound one doing ten long dispatches
-is charged ten — the fairness inversion D73 fixed in CFQ, in a different
-shape. CFQ charges measured ticks (`vslice(service_ticks, weight)`) and
-EEVDF has the same `ticks_now()`/`last_run_tick` bracket available to do so.
+Every run is charged the ticks it used, measured on the bracket the per-task
+CPU time already used. `ve` advances by that service over the task's weight
+(the shared `share::vslice`), the deadline moves on a whole request only once
+`ve` reaches it — a task that ran short keeps its deadline, since the rest of
+its request is still owed — and `V` advances by the same service over the
+*time-shared* weight on the CPU, with the sub-unit remainder carried to the
+next run. A request is one quantum of the port's own tick, which the port now
+states (`SchedulerArch::quantum_ticks`, D290). Real-time service neither
+advances `V` nor dilutes its rate.
 
-Not folded into D73: correcting it changes EEVDF's core clock (the coupling
-between the per-dispatch charge, the eligibility test, and the `V` advance),
-which is that policy's central invariant and needs its own conformance work.
-The charter's own carve-out applies — the fix lands with a test that fails
-before and passes after, and the defect is not closed until it does.
+`equal_weights_share_time_not_dispatches` (a long runner got 1600 ticks to a
+short runner's 200 under the fixed charge; now within one request),
+`a_short_run_keeps_its_deadline_until_the_request_is_served` and
+`a_realtime_run_leaves_the_fair_clock_alone` (`kernel/sched/eevdf`), each
+failing against the fixed charge.
 
 ---
 
-## D75 — EEVDF's ready set is a `Vec` scanned linearly on the dispatch path (OPEN)
+## D75 — EEVDF's ready set was a `Vec` scanned linearly on the dispatch path (FIXED)
 
-`kernel/sched/eevdf`'s `Inner::ready` is a `Vec<Entry>`, so selecting the
-earliest-deadline eligible entry is an O(n) scan of a growable list on the
-dispatch hot path — the structure the charter names explicitly as the wrong
-one for a foundational primitive, and the one CFQ's own module docs cite as
-what CFQ avoids by keying a `BTreeSet`. It is bounded only by the queue
-capacity, so the cost grows with the runnable population exactly where it
-must not.
+The ready set is two binary heaps, *pending* by eligible time and *eligible*
+by deadline. `V` never moves backwards, so an entry is promoted at most once
+per enqueue and a pick is `O(log n)` amortised; when nothing is eligible the
+earliest-eligible entry runs and `V` fast-forwards to it. No entry is removed
+from the middle — a stale one is discarded when picked — so a heap is all the
+set needs, and both heaps keep room for every entry, reserved fallibly on
+push, so a promotion never allocates (D291). Ties break on arrival order, not
+the drawn task id. `every_pick_matches_the_earliest_eligible_deadline_scan`
+model-checks the heaps against the linear scan they replaced over 20 000 random
+pushes, picks and clock advances.
 
 ---
 
@@ -8279,8 +8288,8 @@ let parked = reschedule_current(cpu, RescheduleAction::Park);
 park, an unpark, or a wake must name — and `kernel/sched/api`'s `TaskId` is
 `pub type TaskId = u64`, so `ProcessId(pub u64)`'s `.0` compiled silently.
 `kill_pending(parent.0)` was the same slip a second time, and a
-security-relevant one in its own right: the kill gate's `pending` map is keyed
-by **thread** (`defer_kill_in_kernel(thread, …)`), so a non-leader thread
+security-relevant one in its own right: the kill gate's owed deaths are keyed
+by **thread**, so a non-leader thread
 parked in `wait` consulted the leader's row and could never observe a
 termination deferred against itself — an unkillable waiter surviving its own
 group's teardown. This is exactly the
@@ -9684,3 +9693,267 @@ fade as its comment says, and a compile-time assertion holds that; `AGENTS.md`,
 `plans/FIGURE.md` and `plans/WINTERSUN.md` no longer home presets in the figure
 crate; and measuring every shipped preset is now a WS6 deliverable rather than
 a promise no item carried.
+
+## D286 — a returning body's `Park` or `Yield` was applied over a remote park and wake — FIXED
+
+A task's body can be parked and woken by another CPU while it unwinds — a
+job-control stop and continue reaching a running child. Every policy re-read
+the state and then *stored* the one the body asked for, so a wake landing
+between the read and the store was overwritten: EEVDF and MLFQ applied a
+`Park` over it and stranded the task for good, and all three applied a `Yield`
+by queuing the task a second time, a double share until an entry was culled.
+CFQ's guard covered only the `Park` case and still raced the window.
+
+`kernel/sched/api`'s `park::settle` is the one post-body settle every policy
+calls: each transition is a compare-exchange from the state it was decided on,
+a lost exchange is decided again against the new state, a task found `Ready`
+is left exactly as its waker queued it, and a departure from the ready set runs
+under the policy's weight accounting (D288). Pinned for every policy by the
+conformance suite's `a_rewake_while_the_body_ran_leaves_the_task_queued_once`
+(old MLFQ and EEVDF: `Parked` where `Ready` was due; old CFQ: queued twice),
+and `park.rs`'s settle tests, including one whose exchange loses to a park.
+
+## D287 — a task moved to another CPU was queued there without a signal — FIXED
+
+EEVDF and MLFQ re-homed a task a yield placed on the wrong class of core, and
+EEVDF re-queued an overflowed task onto its home CPU, without an IPI, so an
+idle destination slept in its idle wait with the task queued and nothing to
+wake it. Both now signal the destination after publishing, as CFQ already
+did. Pinned for every policy by the conformance suite's
+`a_yield_migration_announces_the_destination` (old MLFQ and EEVDF announced
+nothing), and EEVDF's `an_overflow_drain_announces_the_home_it_requeues_onto`.
+
+## D288 — a CPU's competing weight drifted — FIXED
+
+CFQ and EEVDF added a task's weight where it was admitted and took off
+`task.weight()` where it left, reading the priority again. `sched_set_priority`
+lets an unprivileged parent lower its own child, so admitting a child at
+`Normal`, lowering it and letting it park leaked a unit onto the CPU for the
+rest of the boot, skewing every later placement away from it and, under EEVDF,
+slowing its virtual clock. A steal or yield-migration that raced a remote park
+moved weight the park had already taken off: the victim lost it twice and the
+stealer kept it forever.
+
+`share::WeightLedger` records, per task, the CPU, weight and class its weight
+is counted at; every change to a CPU's total goes through it, and what comes
+off is what went on. A count re-reads under the ledger lock whether the task
+still competes, and a park, exit or settle performs its state transition under
+it, so no interleaving counts a task twice or leaves a parked one counted.
+`a_reprioritised_task_takes_off_the_weight_it_was_counted_at` and
+`a_stale_entry_a_steal_finds_moves_no_weight` in both CFQ and EEVDF, each
+failing against the old accounting, and the ledger's own tests in `share.rs`.
+
+## D289 — virtual time saturated `u64` within hours on a gigahertz counter — FIXED
+
+CFQ and EEVDF counted virtual time in raw `ticks_now` units scaled by `2^20`.
+x86_64's tick is the TSC, so a weight-1 task's timeline reached `u64::MAX`
+after about 6 000 s of CPU, a CPU's floor within hours, after which saturating
+adds pinned every task level and fairness fell to arrival order; wasm32's
+nanosecond tick lasted under ten hours. The fixed point is now
+`share::SCALE = 4`, the least common multiple of the band weights, which keeps
+every charge exact and lasts decades at 5 GHz; EEVDF's `V` carries the
+remainder of a division by the competing weight instead of needing the
+resolution. `a_decade_of_a_fast_counter_does_not_saturate` (`share.rs`).
+
+## D290 — the scheduler's intervals had no unit — FIXED
+
+`SchedulerConfig::boost_interval_ticks` was a raw port-tick count every boot
+passed as `256`: about 4 µs on aarch64, so MLFQ's anti-starvation boost — which
+walks the whole task registry — fired on almost every step, promoting every
+task to `High` and leaving demotion no effect. EEVDF had no way to size a
+request in real time at all (D74). `SchedulerArch::quantum_ticks` is now a
+required Arch HAL method: the quantum `set_preemption` arms, in the port's own
+tick, `0` until calibrated — aarch64 and riscv64 their per-CPU timer interval,
+x86_64 its calibrated quantum rebased onto the TSC (`Calibration::quantum_tsc`,
+shared with the scheduler-stress guest), wasm32 the frame interval it measures.
+The config field is `boost_interval_quanta`, defaulting to a second's worth at
+the shared quantum rate, and EEVDF's request is one quantum. The Arch HAL
+conformance vertical holds the quantum stable across back-to-back reads
+(`suite_rejects_a_quantum_that_changes_between_reads`), and wasm32's
+measurement is pinned by
+`the_frame_interval_is_measured_between_consecutive_frames`. The ports' Arch HAL
+conformance tests read the quantum from state the preempt suite writes, so on
+aarch64, riscv64 and wasm32 they hold the preempt suite's lock (D295).
+
+## D291 — a run-queue push allocated infallibly on the wake and yield paths — FIXED
+
+CFQ's ready set was a `BTreeSet`, which allocates a node on a split with no way
+to refuse, and EEVDF's a `Vec`; both real-time bands were `VecDeque`s grown the
+same way. Memory exhaustion therefore aborted the kernel inside a wake. The
+fair sets are binary heaps — neither policy removes an entry from the middle —
+and every push reserves its room fallibly, answering `Err` to the caller, which
+routes the task to overflow. What remains on that path is D294.
+
+## D292 — a task that left the real-time band by a yield kept its stale virtual time — FIXED
+
+A task's virtual time does not move while it competes in the real-time band.
+One that left it by a yield rejoined the fair band at the virtual time it had
+left with — under CFQ a `vruntime` from before everything the CPU ran since —
+and held the CPU until it had caught up on all of it. CFQ now places every
+fair enqueue at `max(front, own)`, a no-op for a task that has been running,
+and EEVDF re-admits a task whose band changed while it ran with zero lag.
+`a_task_back_from_realtime_rejoins_at_the_front` (`kernel/sched/cfq`), failing
+without the placement.
+
+## D293 — `SchedulerPolicy::yield_current` was dead contract surface — FIXED
+
+The call re-enqueued a running task and cleared its current-task slot without
+suspending it, so it was sound only when the caller suspended at once; it had
+no production caller, the kernel's `yield` and `irq_wait` paths both being
+documented as avoiding it, while `kernel/core::kthread_irq`'s and
+`kernel/irq`'s rustdoc still described it as the `irq_wait` loop's yield. It is
+gone from the trait, the three policies and the conformance suite, and the
+docs describe the park the loop really performs.
+
+## D294 — a scheduler's overflow list still grows infallibly on the wake and yield paths (OPEN)
+
+Each policy routes a task its CPU's queue refuses — full, or unable to grow
+under D291's fallible push — to a `SpinLock<Vec<TaskId>>` overflow list whose
+`push` grows infallibly, so under memory exhaustion a wake still aborts the
+kernel, one level down from where D291 left it. The fix is an intrusive link in
+the task record, so neither enqueue path allocates at all, with a mark that
+refuses a second insertion: a stale queue entry can make a task overflow twice.
+It changes all three policies' overflow paths and the drain's ordering, so it
+is recorded rather than folded into D291. Noticed fixing D291.
+
+## D295 — two timer-HAL conformance tests raced the preempt suite over shared statics — FIXED
+
+The timer HAL's `installed_callback_fires_on_dispatch` installs a tick callback
+and dispatches through it; on aarch64 and riscv64 the callback lives in the
+preempt module's process-global slot, which every preempt test's
+`clear_for_tests` clears, and the timer-HAL test took none of that suite's
+lock. The harness runs a crate's tests on parallel threads, so a clear landing
+between the install and the dispatch failed the round trip — wasm32 already
+held the lock for this reason. Each port's preempt lock now lives beside the
+statics it guards (`preempt::test_state_lock`) rather than inside the test
+module, and every test touching them holds it: the preempt suite, the
+timer-HAL vertical, and the Arch HAL conformance test, which reads the quantum
+from those slots (D290). The fix is structural — no test can reach the statics
+unguarded — since a thread interleaving between two test functions has no
+deterministic reproducer; the rule is D117's: a host test reads process-global
+state only under the lock of the suite that owns it.
+
+## D296 — a kill's death was decided in three places, none of them first — FIXED
+
+**Mechanism.** A kill told the scheduler to retire its victim (`exit`, which
+marks it doomed) and only then recorded the death the retire owed
+(`defer_running_kill`). A victim executing elsewhere could be retired by its
+own CPU, and that CPU's dispatch loop look for the death, in between: the death
+was recorded after the only point that would ever land it. The parent's `wait`
+never saw the exit, the process was never reclaimed, and the stray entry kept
+every later dispatch on the gate's slow path. `stress-qemu-aarch64` hung on
+exactly that — nine of ten `Terminate`d workers reaped, the tenth gone from the
+scheduler with its exit never recorded, and the grace-window `Kill` answering
+"target absent".
+
+The same split between the scheduler's doom, the gate's two registers, and the
+thread's own teardown let a death go wrong in five further ways:
+
+* **Twice.** A killer's view of the group is a snapshot. One taken before a
+  thread's teardown and acted on after it recorded a death nothing would clear,
+  which the dispatch loop then landed on a process already torn down — or, once
+  the id was drawn again, on a thread of another process. A group exit that
+  found a sibling already doomed landed it itself as well as leaving it to its
+  retire, and `thread_create`, finding the thread it had just registered
+  already retired by such a kill, landed it again on its failure path. A
+  thread the group table no longer holds reads as the group's last, so each
+  second landing tore the process down under its live threads.
+* **On a queued thread.** The dispatch loop landed any recorded death after any
+  dispatch of its thread. `Deferred` did not mean the run would retire the
+  task: nothing ordered the killer's doom-then-probe against the dispatch's
+  release-then-read, so on x86_64 and riscv64 the killer could see the body held
+  while the run read the mark stale and queued the task again. The landing then
+  reclaimed a process whose thread was still runnable.
+* **Mid-body.** The in-kernel check and `exit` were separate steps, so a victim
+  that entered the kernel and parked between them was retired as quiescent. A
+  victim doomed in user mode that then entered a kernel body and yielded
+  (`yield_if_owed` on the shared block path) was retired at that yield. And the
+  user-fault resolver, which parks on the filesystem, was not bracketed by the
+  gate at all. Each frees a stack whose frames own kernel state: D112's wedge.
+* **Never.** A victim doomed in user mode that entered a blocking syscall before
+  taking the nudge parked with its death owed and nothing to wake it. A thread
+  created while its group was being killed was never claimed, and outlived the
+  kill.
+* **Missed nudge.** A killer that saw the victim's body held but no current-task
+  slot naming it sent no IPI, since nothing orders the dispatch's slot store
+  before its lock store for the killer; a victim alone on a tickless core then
+  ran on. And a fault resolver that parked and resumed on another core reported
+  the core it faulted on, so the port suspended the wrong CPU's task.
+
+**The protocol now.** One owed register replaces the two, and each death lands
+exactly once.
+
+* A group death is recorded for every member first
+  (`procsignal::claim_group_kill`), under the group table's read lock. The
+  table is exact against both ends of a thread's life: `threads::retire` and
+  the process teardown withdraw membership before they clear the gate, and
+  `thread_create` refuses a thread whose creator owes a death
+  (`register_unless_dying`), and lands a thread it could not start only if its
+  own `exit` retired it (`start_parked`).
+* The claim reports where each death is owed. At a boundary, the killer wakes
+  the thread. At a retire, the killer calls `exit`, and a victim it finds
+  quiescent is landed inline.
+* `kernel_enter` reports a death already owed, and the syscall path, the
+  deferred-load body, and the user-fault resolver (now bracketed, re-reading
+  its core at the boundary) then skip their body for their boundary. A thread
+  the scheduler was told to retire is never inside a body.
+* The dispatch loop lands only a thread the scheduler reports `Exited`
+  (`land_retired_kill`).
+* `park::doom`/`park::observe_doom` fence the kill's probe against the run's
+  read, so `Deferred` is truthful in all three policies.
+* `park::nudge_doomed` signals every CPU when no slot names the doomed task.
+* The driver unload claims its group through the same function. It retires
+  only a thread its own `exit` retired, since a member the scheduler no longer
+  knows is one whose landing is under way elsewhere, and it keeps its inline
+  teardown for the rest (D271).
+
+`TaskReclaim::land_thread_down`'s rustdoc claimed idempotency the landing rule
+does not have — a thread the table no longer holds reads as the last one down —
+and now states that each death is handed to exactly one landing.
+
+**Tests** (each fails on the code before this change):
+`a_kill_whose_victim_retires_before_the_killer_returns_still_lands` (the
+stress hang, through a scheduler that retires the victim and runs its dispatch
+loop before the kill returns),
+`a_group_exit_leaves_a_dying_sibling_to_the_death_it_already_owes`,
+`only_a_retired_thread_has_its_death_landed_by_the_dispatch_loop`,
+`a_retired_thread_keeps_no_death_and_can_be_claimed_for_none`,
+`no_thread_is_born_into_a_group_claimed_for_death`,
+`a_thread_its_group_killed_before_it_started_is_landed_once`,
+`a_syscall_made_while_a_death_is_owed_runs_no_handler`,
+`a_fault_taken_while_a_death_is_owed_lands_that_death`,
+`a_thread_owing_a_death_enters_the_kernel_only_to_die`,
+`an_unload_leaves_a_thread_it_did_not_retire_to_the_landing_under_way`,
+`a_doomed_task_no_cpu_names_is_nudged_everywhere`, and
+`a_kill_and_a_returning_body_never_both_miss_each_other` — a store-buffering
+litmus run of the real mark and body lock, which records hundreds to thousands
+of forbidden outcomes per 400 000 rounds with the fences removed and none with
+them. The conformance property
+`an_exit_over_a_readmission_retires_the_queued_task` pins, in all three
+policies, that an exit decided over a remote park and wake retires the task
+where it is queued.
+
+## D297 — every syscall and user fault takes the one global kill-gate lock (OPEN)
+
+**What.** `kernel_enter` and `kernel_exit_take_kill` bracket every syscall, the
+deferred-load body and (since D296) every user fault. Each takes
+`procsignal`'s single global `SpinLock` and inserts into or removes from a
+shared `BTreeSet` of in-kernel threads. On a machine with many cores taking
+syscalls and faults at once, every entry and exit serialises on that one cache
+line. A B-tree node split or merge allocates or frees on the syscall path, and
+fails as an abort rather than a value; a kill's claim allocates the same way.
+
+**Why it is not absorbed.** The structural fix is per-thread gate state created
+fallibly at thread admission and reached without a global structure. The state
+fits one word: an in-kernel bit, an owed bit, the teardown kind and its
+status. The victim's own entry and exit then become one atomic read-modify-write
+each on that word, reached from the current CPU's published thread. A killer's
+claim becomes a compare-and-swap on the same word, which linearises with the
+victim's entry exactly as the lock does now. That is a new per-thread record
+threaded through every user-thread admission (process spawn, `thread_create`,
+PID 1, the driver loader) and published at switch-in beside the process space.
+It is a design change to thread admission, not a local fix.
+
+**Remains.** The per-thread gate word and its admission-time allocation, the
+switch-in publication, and a loom model of the claim-versus-entry protocol on
+it, which also needs the kernel crate graph to build under `--cfg loom` (D131).

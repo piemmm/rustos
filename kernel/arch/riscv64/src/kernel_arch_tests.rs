@@ -109,6 +109,9 @@ fn send_ipi_drops_unmapped_target_into_stray_counter() {
 #[test]
 fn passes_arch_hal_conformance_suite() {
     static S: RiscvArchStorage<1> = RiscvArchStorage::new();
+    // The quantum is the calling hart's interval slot, which the preempt
+    // suite writes.
+    let _guard = crate::preempt::test_state_lock();
     let arch = RiscvArch::new(&S, 0, 10_000_000);
     let blob = crate::fdt::tests::virt_like(0x8000_0000, 0x1000_0000, 10_000_000);
     let fdt = crate::fdt::Fdt::new(&blob).expect("valid fdt");

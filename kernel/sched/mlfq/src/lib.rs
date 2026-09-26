@@ -14,7 +14,8 @@
 //!   `runqueue` for the citation and ordering rationale.
 //! * **MLFQ priority + fairness.** Three bands (High / Normal / Low),
 //!   demotion after `yields_before_demotion` voluntary yields, and an
-//!   anti-starvation global priority boost every `boost_interval_ticks`.
+//!   anti-starvation global priority boost every `boost_interval_quanta`
+//!   quanta of the port's own quantum ([`SchedulerArch::quantum_ticks`]).
 //!   The policy is the classical MLFQ as described in Arpaci-Dusseau,
 //!   *Operating Systems: Three Easy Pieces*, ch. 8.
 //! * **Tickless boost cadence (carve-out).** TAIRiX is tickless: there is no global fixed-frequency timer. The
@@ -23,7 +24,7 @@
 //!   one-shots** the kernel already arms whenever a CPU is *contended*
 //!   (exactly when starvation is possible). [`Scheduler::step`] — and with
 //!   it the internal `maybe_priority_boost` — runs at that quantum cadence,
-//!   so the boost fires once `boost_interval_ticks` elapse; a CPU running a
+//!   so the boost fires once `boost_interval_quanta` quanta elapse; a CPU running a
 //!   sole runnable task disarms (no starvation, no boost needed) and takes
 //!   no ticks. No global periodic tick is reintroduced for the boost.
 //! * **IPI-based preemption.** [`Scheduler::spawn`] and

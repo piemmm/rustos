@@ -76,6 +76,16 @@ static TICK_CPU_ID: AtomicU64 = AtomicU64::new(NO_CPU);
 /// the browser harness to prove the frame loop drives the scheduler.
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// `u64` sentinel meaning "no animation frame has run in this context yet".
+const NO_FRAME: u64 = u64::MAX;
+
+/// Monotonic nanoseconds at the start of the previous animation frame.
+static LAST_FRAME_NS: AtomicU64 = AtomicU64::new(NO_FRAME);
+
+/// Nanoseconds between the two most recent frames: this context's
+/// preemption quantum, since a running task is preempted at the next frame.
+static FRAME_INTERVAL_NS: AtomicU64 = AtomicU64::new(0);
+
 /// Install the per-context tick callback.
 ///
 /// Invoked from the frame loop on every tick with this context's
@@ -121,12 +131,22 @@ pub fn tick_count() -> u64 {
     TICK_COUNT.load(Ordering::Acquire)
 }
 
+/// The host's frame period as last observed, in nanoseconds, or `0` until two
+/// frames have run. The host sets it (display refresh, background throttling),
+/// so it is measured rather than assumed.
+#[must_use]
+pub fn frame_interval_ns() -> u64 {
+    FRAME_INTERVAL_NS.load(Ordering::Acquire)
+}
+
 #[cfg(test)]
 fn clear_for_tests() {
     TICK_CALLBACK_FN.clear();
     IPI_CALLBACK_FN.clear();
     TICK_CPU_ID.store(NO_CPU, Ordering::Release);
     TICK_COUNT.store(0, Ordering::Release);
+    LAST_FRAME_NS.store(NO_FRAME, Ordering::Release);
+    FRAME_INTERVAL_NS.store(0, Ordering::Release);
 }
 
 /// `true` once `elapsed_ms` of work in a single frame has reached the
@@ -163,6 +183,11 @@ pub fn init_local_preempt(cpu: CpuId) {
 /// the host unit tests). Requesting the next frame last keeps the
 /// scheduler running at least one tick before the loop can re-enter.
 pub fn on_animation_frame() {
+    let now = crate::kernel_arch::ms_to_ns(crate::kernel_arch::read_now_ms());
+    let last = LAST_FRAME_NS.swap(now, Ordering::AcqRel);
+    if last != NO_FRAME {
+        FRAME_INTERVAL_NS.store(now.saturating_sub(last), Ordering::Release);
+    }
     let cpu = TICK_CPU_ID.load(Ordering::Acquire);
     if cpu != NO_CPU {
         // Dispatch the tick through the Arch HAL timer surface so the

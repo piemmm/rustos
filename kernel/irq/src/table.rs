@@ -91,8 +91,8 @@ pub trait IrqController {
 /// outcome to the documented stable `Errno`:
 ///
 /// * [`Self::Ready`] → `Ok(())`
-/// * [`Self::Continue`] → drop back to user space via
-///   `Scheduler::yield_current` and retry on the next quantum.
+/// * [`Self::Continue`] → park the caller until the line fires or its
+///   deadline passes, then poll again.
 /// * [`Self::TimedOut`] → `Err(Errno::TimedOut)`.
 /// * [`Self::NotFound`] → `Err(Errno::NotFound)` — handle was
 ///   not minted for the caller, or was released between two

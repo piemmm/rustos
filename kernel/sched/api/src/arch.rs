@@ -39,10 +39,12 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 /// running on — while staying single-threaded so the tests are
 /// deterministic and reproducible (no flaky tests).
 #[cfg(any(test, feature = "test-arch"))]
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TestArch {
     current: AtomicU32,
     ticks: AtomicU64,
+    /// [`SchedulerArch::quantum_ticks`]; one tick unless a test sets it.
+    quantum: AtomicU64,
     /// Count of IPIs dispatched to each CPU, indexed by [`CpuId`].
     ///
     /// Bounded to the configured CPU count; out-of-range targets increment
@@ -95,6 +97,7 @@ impl TestArch {
         Some(Self {
             current: AtomicU32::new(0),
             ticks: AtomicU64::new(0),
+            quantum: AtomicU64::new(1),
             ipis,
             stray_ipis: AtomicU64::new(0),
             core_classes,
@@ -138,6 +141,13 @@ impl TestArch {
     /// timer interrupts.
     pub fn advance_ticks(&self, delta: u64) {
         self.ticks.fetch_add(delta, Ordering::Relaxed);
+    }
+
+    /// Sets the quantum [`SchedulerArch::quantum_ticks`] reports, so a test
+    /// can model a port whose quantum spans many ticks (or an uncalibrated
+    /// `0`).
+    pub fn set_quantum_ticks(&self, ticks: u64) {
+        self.quantum.store(ticks, Ordering::Relaxed);
     }
 
     /// Returns the number of IPIs ever delivered to `target`.
@@ -209,6 +219,10 @@ impl SchedulerArch for TestArch {
 
     fn ticks_now(&self) -> u64 {
         self.ticks.load(Ordering::Relaxed)
+    }
+
+    fn quantum_ticks(&self) -> u64 {
+        self.quantum.load(Ordering::Relaxed)
     }
 
     fn send_ipi(&self, target: CpuId) {

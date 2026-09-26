@@ -31,7 +31,7 @@ fn mk(cpus: u32) -> (Arc<TestArch>, Scheduler<TestArch>) {
             cpus: c,
             queue_capacity_per_band: 64,
             yields_before_demotion: 1,
-            boost_interval_ticks: 1_000_000, // disabled unless a test wants it
+            boost_interval_quanta: 1_000_000, // disabled unless a test wants it
         }
     })
 }
@@ -221,7 +221,7 @@ fn starvation_freedom_via_priority_boost() {
         cpus: c,
         queue_capacity_per_band: 64,
         yields_before_demotion: 1,
-        boost_interval_ticks: 4,
+        boost_interval_quanta: 4,
     });
     let low_runs = Arc::new(AtomicU64::new(0));
     let low_clone = low_runs.clone();

@@ -2605,6 +2605,7 @@ name = "tairix-kernel-sched-eevdf"
 version = "0.0.0"
 dependencies = [
  "tairix-arch-api",
+ "tairix-fuzzseed",
  "tairix-kernel-sched-api",
  "tairix-kernel-sched-eevdf",
  "tairix-sync",

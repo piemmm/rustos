@@ -748,15 +748,7 @@ pub unsafe fn init_local_preempt<M: LapicMmio>(
     // deadline.
     PREEMPT_TSC_HZ.store(calibration.tsc_per_second, Ordering::Relaxed);
     PREEMPT_LAPIC_HZ.store(calibration.ticks_per_second, Ordering::Relaxed);
-    let quantum_tsc = if calibration.ticks_per_second == 0 {
-        0
-    } else {
-        let t = u128::from(calibration.initial_count)
-            .saturating_mul(u128::from(calibration.tsc_per_second))
-            / u128::from(calibration.ticks_per_second);
-        u64::try_from(t).unwrap_or(u64::MAX)
-    };
-    PREEMPT_QUANTUM_TSC.store(quantum_tsc, Ordering::Relaxed);
+    PREEMPT_QUANTUM_TSC.store(calibration.quantum_tsc(), Ordering::Relaxed);
 
     Ok(())
 }

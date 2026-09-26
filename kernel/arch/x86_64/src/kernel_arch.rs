@@ -344,6 +344,18 @@ impl SchedulerArch for X86_64Arch {
         }
     }
 
+    fn quantum_ticks(&self) -> u64 {
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            crate::preempt::quantum_tsc()
+        }
+        // No LAPIC off the freestanding target, so no quantum is calibrated.
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            0
+        }
+    }
+
     fn core_class(&self, cpu: CpuId) -> CoreClass {
         // Out-of-range CPUs report the safe homogeneous default per the
         // Arch HAL contract; a stored byte is always a valid encoding

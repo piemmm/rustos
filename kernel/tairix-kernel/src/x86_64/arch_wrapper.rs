@@ -281,6 +281,10 @@ impl SchedulerArch for BinArch {
         self.arch.ticks_now()
     }
 
+    fn quantum_ticks(&self) -> u64 {
+        self.arch.quantum_ticks()
+    }
+
     fn send_ipi(&self, target: CpuId) {
         self.arch.send_ipi(target);
     }
