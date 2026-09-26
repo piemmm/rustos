@@ -1,7 +1,8 @@
 //! Resolving an icon to drawable pixels: the shared artwork layer.
 //!
-//! [`IconKind`] and [`builtin_icon`] give the desktop a
-//! *total* set of scalable vector glyphs — every kind always draws something.
+//! [`IconKind`] and [`builtin_picture`] give the desktop a *total* set of
+//! scalable built-in pictures — every kind always draws something: a settings
+//! category its colour badge, every other kind a tintable glyph.
 //! On top of that floor this module adds the preferred tiers: the shipped
 //! **class artwork** under `/System/Graphics/Icons`, as either an
 //! `<asset-id>.png` raster master or an `<asset-id>.svg` vector one, and above
@@ -9,7 +10,7 @@
 //! `Resources/` master, named by its signed manifest. A draw site states both
 //! in one [`IconRequest`] and the answer resolves in one order: the thing's
 //! own icon, then its class's raster artwork, then its class's vector
-//! artwork, then the built-in glyph. Resolution is therefore total however
+//! artwork, then the built-in picture. Resolution is therefore total however
 //! much of it is missing, and the order lives here rather than being
 //! re-decided by each surface.
 //!
@@ -58,6 +59,7 @@ use tairix_reclaim::{
     working_set_ui_cache, CacheLedger, CachedBytes, PressureGauge, ReclaimCache, Served,
 };
 
+use crate::badge::badge_picture;
 use crate::glyph::{builtin_icon, IconKind};
 
 /// Where the OS ships its desktop graphics assets.
@@ -396,6 +398,17 @@ pub enum IconPicture<'a> {
 }
 
 impl<'a> IconPicture<'a> {
+    /// `surface` as `kind`'s built-in picture: ready-coloured for a kind drawn
+    /// as a badge, a mask to be tinted for any other.
+    #[must_use]
+    pub const fn builtin(kind: IconKind, surface: &'a Surface) -> Self {
+        if kind.badge().is_some() {
+            Self::Artwork(surface)
+        } else {
+            Self::Mask(surface)
+        }
+    }
+
     /// The shipped artwork this picture is, or `None` when it is a glyph mask.
     ///
     /// For a caller that *stores* a picture instead of drawing it now — a
@@ -577,12 +590,12 @@ pub enum ArtworkKey {
         /// same name may legitimately resolve different bundles.
         home: Option<String>,
     },
-    /// A built-in glyph's *coverage mask*, rasterised in this process from the
-    /// first-party vector art compiled into it — no read, no decode, no
-    /// sandbox. Retained like any asset because resolving coverage is the
-    /// expensive part of a vector glyph and it does not depend on the colour
-    /// the glyph is drawn in: one mask serves every tint and state.
-    Glyph(IconKind),
+    /// A kind's built-in picture ([`builtin_picture`]), rasterised in this
+    /// process from the first-party vector art compiled into it — no read, no
+    /// decode, no sandbox. Retained like any asset because rasterising is the
+    /// expensive part of vector art: a glyph's coverage mask serves every tint
+    /// and state, and a badge carries its own colours.
+    Builtin(IconKind),
 }
 
 /// The outcome of building one cache slot.
@@ -746,28 +759,27 @@ impl ArtworkCache {
                 Slot::Empty => {}
             }
         }
-        self.glyph_mask(request.icon_kind(), side)
+        self.builtin(request.icon_kind(), side)
     }
 
-    /// The retained coverage mask for `kind`'s built-in glyph at `side`,
-    /// rasterising it on a miss.
+    /// The retained built-in picture for `kind` at `side`, rasterising it on a
+    /// miss.
     ///
     /// Resolved here rather than through the [`ArtworkResolver`] because it
     /// needs neither: the vector art is first-party and compiled in, so there
     /// is nothing to read and nothing untrusted to decode in a sandbox. That
-    /// also keeps it *synchronous* — a glyph is on screen in the first frame
-    /// that asks for it, where an asset may take a frame or two to arrive.
-    ///
-    /// One mask serves every colour and every control state, because coverage
-    /// does not depend on the tint the drawing control chooses
-    /// ([`Surface::blit_tinted`]).
-    fn glyph_mask(&mut self, kind: IconKind, side: u32) -> Option<IconPicture<'_>> {
-        let key = (ArtworkKey::Glyph(kind), side);
+    /// also keeps it *synchronous* — the picture is on screen in the first
+    /// frame that asks for it, where an asset may take a frame or two to
+    /// arrive.
+    fn builtin(&mut self, kind: IconKind, side: u32) -> Option<IconPicture<'_>> {
+        let key = (ArtworkKey::Builtin(kind), side);
         match self.entries.get_or_build(&(), key.clone(), || {
-            Some(CachedArtwork(glyph_mask(kind, side)))
+            Some(CachedArtwork(builtin_picture(kind, side)))
         }) {
             // Retained: read it back out of the slot it now occupies.
-            Some(_) => self.borrow_slot(&key).map(IconPicture::Mask),
+            Some(_) => self
+                .borrow_slot(&key)
+                .map(|surface| IconPicture::builtin(kind, surface)),
             // Too tight to retain, so there is nothing to borrow. The caller
             // draws the glyph inline this frame rather than nothing at all.
             None => None,
@@ -901,9 +913,9 @@ pub fn render_artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
             .into_iter()
             .find_map(|dir| bundle_icon_path(reader, &dir))
             .and_then(|path| render_icon(reader, rasteriser, &path, side)),
-        // A glyph is first-party vector art compiled into this binary, so the
+        // Built-in art is first-party and compiled into this binary, so the
         // cache rasterises it in place and no resolver is ever handed one.
-        ArtworkKey::Glyph(kind) => glyph_mask(*kind, side),
+        ArtworkKey::Builtin(kind) => builtin_picture(*kind, side),
     }
 }
 
@@ -915,13 +927,32 @@ pub fn render_artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
 /// painted enlarged and averaged back down to resolve the seams between them —
 /// which is exactly why the result is retained rather than redrawn per frame.
 ///
-/// Public so the *one* uncached draw path — a control handed no picture at all
-/// — draws through the same mask-and-tint arithmetic a cached one does. Baking
-/// the colour into the rasterise instead would round it at a different step,
-/// and a cached icon and an uncached one would not be the same pixels.
+/// A badge kind's mask is its symbol alone: a control that draws only glyphs
+/// in its own colour — a button's leading mark, a menu row — shows the
+/// category's symbol, not a tinted plate.
+///
+/// Public so a glyph-only draw site composites through the same mask-and-tint
+/// arithmetic a cached one does. Baking the colour into the rasterise instead
+/// would round it at a different step, and a cached icon and an uncached one
+/// would not be the same pixels.
 #[must_use]
 pub fn glyph_mask(kind: IconKind, side: u32) -> Option<Surface> {
     builtin_icon(kind, MASK_COLOR).rasterise(side)
+}
+
+/// `kind`'s built-in picture at `side` pixels, the last tier every request
+/// resolves to: a settings category's colour badge, or any other kind's
+/// coverage mask ([`glyph_mask`]). [`IconPicture::builtin`] says which.
+///
+/// Public so the one uncached draw path — a control handed no picture at all —
+/// draws the very pixels the cache would have retained.
+#[must_use]
+pub fn builtin_picture(kind: IconKind, side: u32) -> Option<Surface> {
+    if kind.badge().is_some() {
+        badge_picture(kind, side)
+    } else {
+        glyph_mask(kind, side)
+    }
 }
 
 /// The colour a glyph mask is rasterised in: opaque white, so the mask's alpha

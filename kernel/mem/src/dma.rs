@@ -514,6 +514,12 @@ impl DmaWindowMap {
         Ok((record.start_frame.start(), record.data_pages * PAGE_SIZE))
     }
 
+    /// Whether a live allocation's first data page is at `virt`.
+    #[must_use]
+    pub fn holds(&self, virt: VirtAddr) -> bool {
+        self.allocations.contains_key(&virt.as_u64())
+    }
+
     /// Number of live allocations.
     #[must_use]
     pub fn live(&self) -> usize {
@@ -768,19 +774,24 @@ impl DmaWindowMap {
         let trailing_guard_slot = record.leading_guard_slot + 1 + data_pages;
 
         // A page already cleared is where the loop means to leave it.
+        let mut unmapped = 0_u64;
         let cleared = (0..data_pages).try_for_each(|i| {
             let page = Page::from_addr(self.virt_of_slot(first_data_slot + i))?;
             match space.unmap(page) {
-                Ok(_) | Err(PageTableError::NotMapped) => Ok(()),
+                Ok(_) | Err(PageTableError::NotMapped) => {
+                    unmapped += 1;
+                    Ok(())
+                }
                 Err(err) => Err(err),
             }
         });
-        // Even after a failed page, and before any scrub: the pages before it
+        // Even after a failed page, and before any scrub: the pages cleared
         // are gone here, but a late store through another CPU or a snapshot
-        // would survive into the next owner.
+        // would survive into the next owner. Only they leave the views; the
+        // rest are still mapped, and still the driver's.
         let base = self.virt_of_slot(first_data_slot).as_u64();
         space.shoot_remote(base, data_pages as u64);
-        retire.retire(base, data_pages as u64);
+        retire.retire(base, unmapped);
         // A page still mapped, or a block that cannot be scrubbed, keeps its
         // record, so teardown surrenders the frames rather than leaking them.
         cleared?;
@@ -955,9 +966,11 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
     ///   not clear. A page already cleared is not an error.
     /// * [`DmaError::Alloc`] — the allocator refused the scrubbed block.
     ///
-    /// A live buffer's range is shot down and retired whatever becomes of it.
-    /// Only an allocator refusal drops the record; after the two errors
-    /// before it the block stays live, for teardown to surrender.
+    /// A live buffer's range is shot down whatever becomes of it, and the
+    /// pages it cleared are retired. Only an allocator refusal drops the
+    /// record; after the two errors before it the block stays live in the
+    /// pool, out of reuse, since a kernel pool has no custodian to surrender
+    /// it to.
     pub fn free(&mut self, buf: DmaBuffer) -> Result<(), DmaError> {
         self.window
             .free_from(&mut self.address_space, self.frames, self.phys, buf)

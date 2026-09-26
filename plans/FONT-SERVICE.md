@@ -365,13 +365,15 @@ Load-bearing facts a future reader needs:
   write reach), and `CAP_LOG_EMIT`, and the `fontd` service account (uid 15,
   `FONTD_CEILING`) grants exactly those three.
 - **Weights.** A face declaring a `wght` axis is instanced at the requested
-  weight's OpenType coordinate (400/500/700) and cached per (face, weight), so
-  the glyph *and* its advance are the ones the designer drew (§2.7). Only a
-  face without that axis falls to the synthetic stroke
-  (`userland/system/fontd/src/embolden.rs`): em/48 (Medium) or em/24 (Bold) —
-  the strength a stroke-widening rasteriser applies for a synthetic bold, as
-  FreeType's `FT_GlyphSlot_Embolden` does — carried in 1/256 px fixed point and
-  applied to the 8-bit coverage, never the outline. That stroke is
+  weight's OpenType coordinate — any point on the axis; the desktop's roles
+  ask for their named weights set `lib/theme`'s `TEXT_WEIGHT_LIFT` heavier —
+  and cached per (face, weight), so the glyph *and* its advance are the ones
+  the designer drew (§2.7). Only a face without that axis falls to the
+  synthetic stroke (`userland/system/fontd/src/embolden.rs`): zero at Regular,
+  rising linearly to em/24 at Bold (§3.3) — the strength a stroke-widening
+  rasteriser applies for a synthetic bold, as FreeType's
+  `FT_GlyphSlot_Embolden` does — carried in 1/256 px fixed point and applied
+  to the 8-bit coverage, never the outline. That stroke is
   **horizontal only**, so the baseline, box height, and pen advance are
   unchanged and a synthetic bold run occupies exactly what its regular twin
   would; `Regular` adds a zero stroke.

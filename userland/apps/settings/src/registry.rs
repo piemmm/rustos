@@ -698,7 +698,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
     CategoryRow {
         category: Category::Networking,
         label: "Networking",
-        icon: IconKind::Network,
+        icon: IconKind::Networking,
         panes: &[
             PaneRow {
                 pane: Pane::Ethernet,

@@ -90,7 +90,7 @@ mod program {
     use tairix_terminal::appbar::{self, BarCommand};
     use tairix_terminal::effects::{EffectState, Effects, Phase};
     use tairix_terminal::layout::{
-        fit_font_size, grid_dims, grid_size, snap_to_cells, window_size,
+        cell_font, fit_font_size, grid_dims, grid_size, snap_to_cells, window_size,
     };
     use tairix_terminal::menu::{self, Command};
     // `Settings` here is the sheet UI; the app-data handle is `SettingsStore`.
@@ -468,7 +468,7 @@ mod program {
             let screen = (desktop.screen_width_px(), desktop.screen_height_px());
             let size = fit_font_size(profile.font_size_px, screen, theme, desktop.scale());
             Self {
-                font: BitmapFont::monospace(desktop.scale().scale_length(u32::from(size))),
+                font: cell_font(size, theme, desktop.scale()),
                 painted: Painted::resolve(
                     profile.scheme,
                     &profile.custom,
@@ -514,7 +514,7 @@ mod program {
             if changed.metrics() {
                 let screen = (desktop.screen_width_px(), desktop.screen_height_px());
                 let size = fit_font_size(profile.font_size_px, screen, theme, desktop.scale());
-                self.font = BitmapFont::monospace(desktop.scale().scale_length(u32::from(size)));
+                self.font = cell_font(size, theme, desktop.scale());
             }
             if changed.painted() {
                 self.painted = Painted::resolve(

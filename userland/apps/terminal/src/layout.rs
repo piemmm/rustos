@@ -20,7 +20,7 @@
 use tairix_controls::{FrameInsets, WindowFrame, WindowFurnitureState};
 use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::grid::MAX_DIMENSION;
 use crate::profile::MIN_FONT_SIZE_PX;
@@ -106,7 +106,7 @@ pub fn fit_font_size(preferred: u16, screen: (u32, u32), theme: &Theme, scale: S
     let budget_h = screen.1.saturating_sub(chrome_h);
     let mut size = preferred.max(MIN_FONT_SIZE_PX);
     while size > MIN_FONT_SIZE_PX {
-        let font = BitmapFont::monospace(scale.scale_length(u32::from(size)));
+        let font = cell_font(size, theme, scale);
         let (need_w, need_h) = grid_size(COLS, ROWS, font);
         if need_w <= budget_w && need_h <= budget_h {
             break;
@@ -114,6 +114,18 @@ pub fn fit_font_size(preferred: u16, screen: (u32, u32), theme: &Theme, scale: S
         size -= 1;
     }
     size
+}
+
+/// The face the screen grid is drawn in: the theme's fixed-width role, at the
+/// profile's own text size of `size` logical pixels.
+///
+/// The size is the profile's to choose, but the family and weight are the
+/// theme's, so the terminal's text is set exactly as every other fixed-width
+/// run on the desktop is.
+#[must_use]
+pub fn cell_font(size: u16, theme: &Theme, scale: Scale) -> BitmapFont {
+    let spec = theme.fonts().spec(TextRole::Monospace);
+    BitmapFont::new(spec.family, scale.scale_length(u32::from(size))).with_weight(spec.weight)
 }
 
 /// The largest client size no larger than `width_px` × `height_px` that holds

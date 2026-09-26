@@ -130,6 +130,27 @@ impl FontSpec {
     }
 }
 
+/// How much heavier than its named weight every role is set, in units of the
+/// face's own `wght` design axis.
+///
+/// The UI face's named weights are drawn light for interface text on a
+/// screen, which reads thin beside the fuller text other desktops set (macOS
+/// most visibly). Moving every rung the same distance along the designed axis
+/// gets that fullness from the type designer's own letterforms rather than a
+/// synthesised stroke, and leaves the ladder's hierarchy exactly as the boards
+/// set it.
+pub const TEXT_WEIGHT_LIFT: u16 = 80;
+
+/// `weight` lifted by [`TEXT_WEIGHT_LIFT`]: the weight a role named `weight`
+/// is actually set in.
+#[must_use]
+pub const fn lifted(weight: FontWeight) -> FontWeight {
+    match FontWeight::new(weight.axis_value().saturating_add(TEXT_WEIGHT_LIFT)) {
+        Ok(lifted) => lifted,
+        Err(_) => weight,
+    }
+}
+
 /// One rung of the ladder: a role's size as a percentage of the base size,
 /// and the weight the boards set it in.
 struct Rung {
@@ -147,8 +168,8 @@ struct Rung {
 /// other and the weight — not the size — carries most of the hierarchy.
 const LADDER: [Rung; 9] = [
     // The one deliberate break from that tight cluster: a screen-filling
-    // readout carries its hierarchy on size alone, and stays regular-weight so
-    // it reads light rather than heavy at that size.
+    // readout carries its hierarchy on size alone, and stays on the regular
+    // rung so it reads light rather than heavy at that size.
     Rung {
         role: TextRole::Display,
         percent: 250,
@@ -243,7 +264,7 @@ impl Fonts {
             } else {
                 ui_family
             };
-            FontSpec::new(family, rung_size(base, rung.percent), rung.weight)
+            FontSpec::new(family, rung_size(base, rung.percent), lifted(rung.weight))
         });
         Self {
             ui_family,

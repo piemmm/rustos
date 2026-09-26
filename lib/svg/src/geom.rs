@@ -12,7 +12,7 @@
 use alloc::vec::Vec;
 
 use tairix_raster::Affine;
-use tairix_util::mathf::hypot;
+use tairix_util::mathf::{hypot, round_i32};
 
 use crate::error::SvgError;
 
@@ -344,6 +344,25 @@ pub fn bounds(subpaths: &[SubPath]) -> Option<(Point, Point)> {
         max = (max.0.max(point.0), max.1.max(point.1));
     }
     seen.then_some((min, max))
+}
+
+/// `subpaths` mapped through `to_design` onto an integer design grid, the
+/// contour form a filled layer holds, dropping any that enclose no area.
+#[must_use]
+pub fn place(subpaths: &[SubPath], to_design: Affine) -> Vec<Vec<(i32, i32)>> {
+    subpaths
+        .iter()
+        .filter(|sub| !sub.is_degenerate())
+        .map(|sub| {
+            sub.points
+                .iter()
+                .map(|point| {
+                    let placed = to_design.apply(*point);
+                    (round_i32(placed.0), round_i32(placed.1))
+                })
+                .collect()
+        })
+        .collect()
 }
 
 #[cfg(test)]

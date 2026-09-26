@@ -12623,9 +12623,10 @@ const SETTINGS_CASCADE_SLOT: u64 = 0;
 const SETTINGS_ABSENCE_CATEGORY: tairix_settings::Category = tairix_settings::Category::Bluetooth;
 
 /// The strip row every Settings dump reads as the one drawn *at rest*: a
-/// category that discloses no panes, so it draws no chevron, and one the walk
-/// never presses before it is photographed beside another.
-const SETTINGS_RESTING_CATEGORY: tairix_settings::Category = tairix_settings::Category::Appearance;
+/// category that discloses no panes, so it draws no chevron, that the walk
+/// never presses, and that sits mid-strip, so the column seats it on the
+/// strip's first page and on the page that brings Storage in alike.
+const SETTINGS_RESTING_CATEGORY: tairix_settings::Category = tairix_settings::Category::Sound;
 
 /// What one photographed Settings frame draws where its dump reads, on screen.
 #[derive(Copy, Clone, Debug)]
@@ -12654,6 +12655,7 @@ struct SettingsWalk {
     absence_row: tairix_geometry::Point,
     strip_page: tairix_geometry::Point,
     storage_row: tairix_geometry::Point,
+    strip_page_up: tairix_geometry::Point,
     appearance_row: tairix_geometry::Point,
     appearance_combo: tairix_geometry::Point,
     light_choice: tairix_geometry::Point,
@@ -12763,6 +12765,61 @@ fn settings_row_centre(
         .strip_row_rect(index, viewport, RECONSTRUCTION_SCALE, theme)
         .ok_or_else(|| format!("settings script: the strip does not seat {category:?}"))?;
     rect_centre(rect, "strip row")
+}
+
+/// Choose Light on the Appearance pane on show — its row's list, then the
+/// choice on it — checked to ask the desktop for a light appearance, and
+/// answer where the two presses landed.
+fn settings_choose_light(
+    shell: &mut tairix_settings::Shell,
+    viewport: tairix_geometry::Rect,
+    theme: &tairix_theme::Theme,
+) -> Result<(tairix_geometry::Point, tairix_geometry::Point), String> {
+    use tairix_theme::Appearance;
+
+    let scale = RECONSTRUCTION_SCALE;
+    let combo = shell
+        .setting_rect(tairix_settings::Setting::Appearance, viewport, scale, theme)
+        .ok_or_else(|| "settings script: Appearance draws no appearance row".to_string())?;
+    let appearance_combo = rect_centre(combo, "appearance row")?;
+    settings_click(shell, appearance_combo, viewport, theme);
+    let light = Appearance::ALL
+        .iter()
+        .position(|appearance| *appearance == Appearance::Light)
+        .ok_or_else(|| "settings script: no light appearance is offered".to_string())?;
+    let choice = shell
+        .choice_rect(light, viewport, scale, theme)
+        .ok_or_else(|| "settings script: the appearance row opened no list".to_string())?;
+    let light_choice = rect_centre(choice, "light choice")?;
+    let chosen = settings_click(shell, light_choice, viewport, theme);
+    if !chosen
+        .document()
+        .is_some_and(|document| document.contains("appearance = light"))
+    {
+        return Err(format!(
+            "settings script: the light choice asked for {chosen:?}, not a light desktop"
+        ));
+    }
+    Ok((appearance_combo, light_choice))
+}
+
+/// Press the strip's scroll track on `part`'s side of its thumb, paging toward
+/// `goal`, and answer where the press landed.
+fn settings_page_strip(
+    shell: &mut tairix_settings::Shell,
+    part: tairix_controls::ScrollPart,
+    goal: tairix_settings::Category,
+    viewport: tairix_geometry::Rect,
+    theme: &tairix_theme::Theme,
+) -> Result<tairix_geometry::Point, String> {
+    let track = shell
+        .strip_scroll_rect(part, viewport, RECONSTRUCTION_SCALE, theme)
+        .ok_or_else(|| {
+            format!("settings script: the strip draws no track to page to {goal:?} by")
+        })?;
+    let at = rect_centre(track, "strip track")?;
+    settings_click(shell, at, viewport, theme);
+    Ok(at)
 }
 
 /// Press `category`'s strip row and check the shell went there.
@@ -12897,39 +12954,27 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
     }
     // The track after the thumb pages the strip down; the end button beneath
     // it sits in the client's outermost pixels, which the resize zone claims.
-    let track = shell
-        .strip_scroll_rect(ScrollPart::TrackAfter, viewport, scale, &theme)
-        .ok_or_else(|| {
-            "settings script: the strip draws no track to page down to Storage by".to_string()
-        })?;
-    let strip_page = rect_centre(track, "strip track")?;
-    settings_click(&mut shell, strip_page, viewport, &theme);
+    let strip_page = settings_page_strip(
+        &mut shell,
+        ScrollPart::TrackAfter,
+        Category::Storage,
+        viewport,
+        &theme,
+    )?;
     let storage_row = settings_walk_to(&mut shell, Category::Storage, viewport, &theme)?;
     let storage = settings_frame(&shell, viewport, &theme, origin)?;
 
+    // Appearance leads the strip, so the page that brought Storage in has
+    // scrolled it away: the track before the thumb pages back up to it.
+    let strip_page_up = settings_page_strip(
+        &mut shell,
+        ScrollPart::TrackBefore,
+        Category::Appearance,
+        viewport,
+        &theme,
+    )?;
     let appearance_row = settings_walk_to(&mut shell, Category::Appearance, viewport, &theme)?;
-    let combo = shell
-        .setting_rect(Setting::Appearance, viewport, scale, &theme)
-        .ok_or_else(|| "settings script: Appearance draws no appearance row".to_string())?;
-    let appearance_combo = rect_centre(combo, "appearance row")?;
-    settings_click(&mut shell, appearance_combo, viewport, &theme);
-    let light = Appearance::ALL
-        .iter()
-        .position(|appearance| *appearance == Appearance::Light)
-        .ok_or_else(|| "settings script: no light appearance is offered".to_string())?;
-    let choice = shell
-        .choice_rect(light, viewport, scale, &theme)
-        .ok_or_else(|| "settings script: the appearance row opened no list".to_string())?;
-    let light_choice = rect_centre(choice, "light choice")?;
-    let chosen = settings_click(&mut shell, light_choice, viewport, &theme);
-    if !chosen
-        .document()
-        .is_some_and(|document| document.contains("appearance = light"))
-    {
-        return Err(format!(
-            "settings script: the light choice asked for {chosen:?}, not a light desktop"
-        ));
-    }
+    let (appearance_combo, light_choice) = settings_choose_light(&mut shell, viewport, &theme)?;
 
     Ok(SettingsWalk {
         capsule,
@@ -12938,6 +12983,7 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
         absence_row: to_screen(absence_row)?,
         strip_page: to_screen(strip_page)?,
         storage_row: to_screen(storage_row)?,
+        strip_page_up: to_screen(strip_page_up)?,
         appearance_row: to_screen(appearance_row)?,
         appearance_combo: to_screen(appearance_combo)?,
         light_choice: to_screen(light_choice)?,
@@ -12950,8 +12996,8 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
 }
 
 /// Open Settings from the capsule's system menu, walk its strip to a stated
-/// absence, down past the fold to Storage, and to Appearance, choose Light,
-/// then choose *Dark Appearance* from the capsule's menu.
+/// absence, down past the fold to Storage, and back up to Appearance, choose
+/// Light, then choose *Dark Appearance* from the capsule's menu.
 ///
 /// Every gate is the session's own witness that what the next press aims at is
 /// on screen: the menu drawn, the window's first frame, and — for each pane —
@@ -12992,6 +13038,12 @@ fn settings_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         2,
         MouseButton::Primary,
         walk.storage_row,
+    );
+    pen.click(
+        WINDOW_RETITLED_MARKER,
+        3,
+        MouseButton::Primary,
+        walk.strip_page_up,
     );
     pen.click(
         WINDOW_RETITLED_MARKER,

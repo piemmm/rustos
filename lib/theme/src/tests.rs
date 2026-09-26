@@ -8,9 +8,10 @@ use tairix_abi::sysinfo::VolumeHealth;
 use crate::motion::MotionInteraction;
 use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA};
 use crate::{
-    Accessibility, Appearance, Contrast, CursorKind, CursorSet, CursorSetId, Density, Fade,
+    lifted, Accessibility, Appearance, Contrast, CursorKind, CursorSet, CursorSetId, Density, Fade,
     FamilyKey, FontWeight, Fonts, Metrics, Motion, MotionTheme, Palette, Rgba, SignalRole,
     SurfaceGround, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS,
+    TEXT_WEIGHT_LIFT,
 };
 
 #[test]
@@ -870,7 +871,10 @@ fn the_ladder_derives_every_role_from_one_base_size() {
         fonts.spec(TextRole::SectionHeader).size_px,
         fonts.spec(TextRole::Body).size_px
     );
-    assert_eq!(fonts.spec(TextRole::SectionHeader).weight, FontWeight::BOLD);
+    assert_eq!(
+        fonts.spec(TextRole::SectionHeader).weight,
+        lifted(FontWeight::BOLD)
+    );
     // The display rung breaks out of the cluster: a screen-filling readout is
     // dominant, not merely one step up from a panel heading.
     assert!(fonts.spec(TextRole::Display).size_px >= fonts.spec(TextRole::Body).size_px * 2);
@@ -886,18 +890,19 @@ fn the_ladder_carries_the_boards_weights_and_families() {
 
     // On the boards the hierarchy is carried mostly by weight: titling text
     // is medium, column headers and metric readouts are bold, and running
-    // text stays regular.
-    assert_eq!(fonts.spec(TextRole::Heading).weight, FontWeight::MEDIUM);
-    assert_eq!(fonts.spec(TextRole::ItemTitle).weight, FontWeight::MEDIUM);
+    // text stays regular — each set the one lift heavier.
+    let rung = |role| fonts.spec(role).weight;
+    assert_eq!(rung(TextRole::Heading), lifted(FontWeight::MEDIUM));
+    assert_eq!(rung(TextRole::ItemTitle), lifted(FontWeight::MEDIUM));
     // The display rung is the exception: at that size a medium weight reads
     // heavy, so it states its hierarchy on size alone.
-    assert_eq!(fonts.spec(TextRole::Display).weight, FontWeight::REGULAR);
-    assert_eq!(fonts.spec(TextRole::WindowTitle).weight, FontWeight::MEDIUM);
-    assert_eq!(fonts.spec(TextRole::SectionHeader).weight, FontWeight::BOLD);
-    assert_eq!(fonts.spec(TextRole::Metric).weight, FontWeight::BOLD);
-    assert_eq!(fonts.spec(TextRole::Body).weight, FontWeight::REGULAR);
-    assert_eq!(fonts.spec(TextRole::Caption).weight, FontWeight::REGULAR);
-    assert_eq!(fonts.spec(TextRole::Monospace).weight, FontWeight::REGULAR);
+    assert_eq!(rung(TextRole::Display), lifted(FontWeight::REGULAR));
+    assert_eq!(rung(TextRole::WindowTitle), lifted(FontWeight::MEDIUM));
+    assert_eq!(rung(TextRole::SectionHeader), lifted(FontWeight::BOLD));
+    assert_eq!(rung(TextRole::Metric), lifted(FontWeight::BOLD));
+    assert_eq!(rung(TextRole::Body), lifted(FontWeight::REGULAR));
+    assert_eq!(rung(TextRole::Caption), lifted(FontWeight::REGULAR));
+    assert_eq!(rung(TextRole::Monospace), lifted(FontWeight::REGULAR));
 
     // Only the fixed-width role leaves the UI family.
     assert_eq!(fonts.ui_family(), key("board-sans"));
@@ -908,6 +913,26 @@ fn the_ladder_carries_the_boards_weights_and_families() {
             assert_eq!(fonts.spec(role).family, key("board-sans"), "{role:?}");
         }
     }
+}
+
+#[test]
+fn the_lift_sets_every_role_heavier_and_keeps_the_hierarchy() {
+    for named in [FontWeight::REGULAR, FontWeight::MEDIUM, FontWeight::BOLD] {
+        assert_eq!(
+            lifted(named).axis_value(),
+            named.axis_value() + TEXT_WEIGHT_LIFT,
+            "{named:?}"
+        );
+    }
+    // One step for every rung, so a heavier rung stays heavier by as much as
+    // the boards made it, and none crosses into the next named weight.
+    assert!(lifted(FontWeight::REGULAR) > FontWeight::REGULAR);
+    assert!(lifted(FontWeight::REGULAR) < FontWeight::MEDIUM);
+    assert!(lifted(FontWeight::MEDIUM) < lifted(FontWeight::BOLD));
+    // A weight the axis cannot lift that far is left where it was rather than
+    // clamped to a point nobody named.
+    let heaviest = FontWeight::new(tairix_abi::font_ipc::FONT_MAX_WEIGHT).expect("in range");
+    assert_eq!(lifted(heaviest), heaviest);
 }
 
 #[test]
@@ -1280,6 +1305,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             chart_height: 40,
             selector_extent: 14,
             toggle_track_length: 24,
+            sidebar_icon_extent: 20,
             title_bar_height: 24,
             frame_inset: 1,
             resize_grabber_extent: 14,
@@ -1360,6 +1386,7 @@ fn density_moves_the_spacing_metrics_and_nothing_else() {
         assert_eq!(derived.control_corner_radius, normal.control_corner_radius);
         assert_eq!(derived.border_thickness, normal.border_thickness);
         assert_eq!(derived.selector_extent, normal.selector_extent);
+        assert_eq!(derived.sidebar_icon_extent, normal.sidebar_icon_extent);
         assert_eq!(derived.toggle_track_length, normal.toggle_track_length);
         assert_eq!(derived.bead_size, normal.bead_size);
         assert_eq!(derived.title_bar_height, normal.title_bar_height);

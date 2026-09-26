@@ -147,6 +147,11 @@ pub struct Metrics {
     /// pill's proportions from theme data rather than a ratio buried in the
     /// renderer.
     pub toggle_track_length: u32,
+    /// The square extent of a sidebar entry's leading icon, in logical pixels.
+    ///
+    /// Taller than the line of text beside it, because a sidebar is found by
+    /// its icons before its labels are read; an entry grows to seat it.
+    pub sidebar_icon_extent: u32,
 
     // --- Window-furniture metrics ---------------------------------------
     /// The height of a window title bar, in logical pixels.

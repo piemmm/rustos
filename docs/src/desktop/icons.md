@@ -63,17 +63,12 @@ background work), `TaskSwitch` (an arrow entering a window body),
 downward arrow) and `Quit` (a cross), the settings categories each sidebar
 row of [Settings](settings.md) is found by without reading — `Settings` (a
 cog), `Appearance`, `Wallpaper`, `Display`, `LockScreen`, `Screensaver`,
-`Power`, `Bluetooth`, `Sound`, `Notifications`, `Keyboard`, `Mouse`,
-`Trackpad`, `Touchscreen`, `Printer`, `Accessibility`, `Language`, `Sharing`,
-`Users` (two busts, beside the single `User` bust that stands for one
-account) and `Storage` (stacked media, beside the `Disk` family that stands
-for one drive) — and a `Generic` fallback diamond.
-
-Two of those categories share the artwork of the reading they stand beside,
-because they *are* the same mark: `Sound` draws `Volume`'s speaker and
-`Notifications` draws `Bell`'s bell. Each still has its own asset slot, so a
-theme may give the settings category different artwork from the tray's
-reading without either inheriting the other's.
+`Power`, `Networking` (a globe, beside the tray's `Network` bars), `Bluetooth`,
+`Sound`, `Notifications`, `Keyboard`, `Mouse`, `Trackpad`, `Touchscreen`,
+`Printer`, `Accessibility`, `Language`, `Sharing`, `Users` and `Storage` —
+and a `Generic` fallback diamond. A category never draws the tray reading or
+the single thing it stands beside (`Volume`, `Bell`, `Network`, `User`,
+`Disk`): each is drawn as a badge, below.
 `IconKind::for_asset` resolves a theme asset identifier to a kind and
 falls back to `Generic` for an unrecognised id, so an unexpected notification
 still draws a placeholder instead of nothing (`AGENTS.md` §2.9).
@@ -93,13 +88,36 @@ every other tier: a glyph is retained as an untinted coverage mask keyed
 `(kind, side)`, so the shape is resolved once and drawn in whatever colour the
 control's state calls for rather than re-rasterised per icon per frame.
 
+## Settings category badges
+
+A settings category's built-in picture is a **badge**: its symbol in white on
+a rounded plate of the category's own hue, the way macOS draws its settings
+panes. `IconKind::badge()` names the hue from the closed `BadgeHue` set — kin
+categories share one (the input devices and the machine's parts stand on grey,
+connections and people on blue) — and `builtin_picture(kind, side)` draws it.
+The hue is the icon's identity rather than a theme tint, so the same badge
+reads on the light and dark desktops, and every ramp is dark enough at its
+midpoint that the symbol stands at least 3:1 clear of its plate.
+
+A badge is vector art rasterised at exactly the side its slot asks for: the
+plate spans the whole slot, so its flat edges fall on pixel boundaries, and
+nothing is ever resampled, so no scale leaves one edge of a stroke solid and
+its mirror grey. The symbols are authored as SVG path data on a 24-unit grid
+and built through `lib/svg`'s one flattener and stroker, so a symbol and a
+decoded SVG asset are the same drawing to the rasteriser. The symbol is also
+the category's tintable glyph: `glyph_mask(kind, side)` — what a button or a
+menu row draws in its own colour — is the symbol alone, never a tinted plate.
+
+The badge is retained by `ArtworkCache` exactly as a glyph mask is, once per
+`(kind, side)`, and handed out as ready-coloured `IconPicture::Artwork`.
+
 An **application bundle's own** icon, which every app must ship
 (`plans/APPS.md` §14), is authored as a raster master: a lit, shaded picture of
 what the program does, trimmed to fill its square. An SVG bundle icon is still
 accepted and decodes through this same path. The complete order a request
 resolves through — a thing's own icon,
 then its class's raster master, then the class vector asset, then the built-in
-glyph — is described under [tairix-icon](../lib/icon.md).
+picture — is described under [tairix-icon](../lib/icon.md).
 
 ## An account's identity disc
 

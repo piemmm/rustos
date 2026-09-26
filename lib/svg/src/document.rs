@@ -42,7 +42,9 @@ use tairix_util::mathf::{round_i32, sqrt};
 use crate::css::{self, Declaration, Stylesheet};
 use crate::error::SvgError;
 use crate::font::FontProvider;
-use crate::geom::{bounds, LineCap, LineJoin, Point, StrokeStyle, SubPath, Vertex, Vertices};
+use crate::geom::{
+    bounds, place, LineCap, LineJoin, Point, StrokeStyle, SubPath, Vertex, Vertices,
+};
 use crate::marker::{Marker, Position};
 use crate::number::{opacity_to_alpha, parse_length, parse_number};
 use crate::paint::{PaintServers, PatternTile, Resolved};
@@ -1984,24 +1986,6 @@ fn optional_attr_length(
         Some(text) => parse_length(text, basis).map(Some),
         None => Ok(None),
     }
-}
-
-/// Map flattened sub-paths onto the design grid, dropping any that enclose no
-/// area.
-fn place(subpaths: &[SubPath], to_design: Affine) -> Vec<Vec<(i32, i32)>> {
-    subpaths
-        .iter()
-        .filter(|sub| !sub.is_degenerate())
-        .map(|sub| {
-            sub.points
-                .iter()
-                .map(|point| {
-                    let placed = to_design.apply(*point);
-                    (round_i32(placed.0), round_i32(placed.1))
-                })
-                .collect()
-        })
-        .collect()
 }
 
 #[cfg(test)]

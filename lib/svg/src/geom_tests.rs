@@ -8,7 +8,7 @@ use alloc::vec;
 
 use tairix_raster::Affine;
 
-use super::{Point, SubPath, Vertex};
+use super::{place, Point, SubPath, Vertex};
 
 /// Whether two points agree to the last few bits, which is all an exact
 /// rotation of an exact unit vector can lose.
@@ -91,4 +91,12 @@ fn a_vertex_with_no_directions_maps_to_one_with_none() {
     assert_eq!(moved.at, (6.0, 8.0));
     assert_eq!(moved.incoming, None);
     assert_eq!(moved.outgoing, None);
+}
+
+#[test]
+fn placing_rounds_onto_the_grid_and_drops_contours_with_no_area() {
+    let triangle = SubPath::closed(vec![(0.2, 0.2), (1.26, 0.2), (0.2, 1.74)]);
+    let sliver = SubPath::open(vec![(0.0, 0.0), (1.0, 1.0)]);
+    let placed = place(&[triangle, sliver], Affine::scale(10.0, 10.0));
+    assert_eq!(placed, vec![vec![(2, 2), (13, 2), (2, 17)]]);
 }

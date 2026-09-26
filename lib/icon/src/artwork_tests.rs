@@ -1254,6 +1254,33 @@ fn a_glyph_is_resolved_once_however_many_times_it_is_drawn() {
     assert_eq!(other.width(), 24);
 }
 
+/// A settings category's built-in tier is its ready-coloured badge, retained
+/// like a glyph mask is: resolved once per side, then served in place.
+#[test]
+fn a_badge_is_retained_ready_coloured() {
+    let mut c = cache();
+    let mut reader = CountingReader::new();
+    let mut ras = SquareRasteriser;
+    let request = IconRequest::kind(IconKind::Display);
+
+    let Some(IconPicture::Artwork(badge)) =
+        c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 22)
+    else {
+        panic!("a category's built-in picture is artwork, not a mask");
+    };
+    assert_eq!((badge.width(), badge.height()), (22, 22));
+    let charged = c.charged_bytes();
+    let reads = reader.reads;
+    for _ in 0..10 {
+        assert!(matches!(
+            c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 22),
+            Some(IconPicture::Artwork(_))
+        ));
+    }
+    assert_eq!(c.charged_bytes(), charged, "the badge is rasterised once");
+    assert_eq!(reader.reads, reads, "and costs no further asset reads");
+}
+
 /// A glyph mask carries coverage, not colour, so the same retained mask serves
 /// every tint a control draws it in — which is what keeps the cache key free of
 /// the theme's state colours.

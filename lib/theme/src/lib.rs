@@ -66,4 +66,4 @@ pub use motion::{Contrast, Density, Fade, Motion, MotionInteraction, MotionTheme
 pub use palette::{Palette, SignalRole};
 pub use registry::{ThemeError, ThemeRegistry};
 pub use theme::{Accessibility, Appearance, SurfaceGround, Theme, ThemeId};
-pub use typography::{FamilyKey, FontSpec, FontWeight, Fonts, TextRole};
+pub use typography::{lifted, FamilyKey, FontSpec, FontWeight, Fonts, TextRole, TEXT_WEIGHT_LIFT};

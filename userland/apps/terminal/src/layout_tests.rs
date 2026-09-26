@@ -2,19 +2,34 @@
 
 use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::grid::MAX_DIMENSION;
 use crate::profile::{DEFAULT_FONT_SIZE_PX, MIN_FONT_SIZE_PX};
 
 use super::{
-    chrome_extent, fit_font_size, grid_dims, grid_size, snap_to_cells, window_size, COLS, ROWS,
+    cell_font, chrome_extent, fit_font_size, grid_dims, grid_size, snap_to_cells, window_size,
+    COLS, ROWS,
 };
 
 /// The font a terminal opens with at the profile's default text size, on an
 /// unscaled (100%) display.
 fn default_font() -> BitmapFont {
-    BitmapFont::monospace(Scale::ONE.scale_length(u32::from(DEFAULT_FONT_SIZE_PX)))
+    cell_font(DEFAULT_FONT_SIZE_PX, &Theme::dark(), Scale::ONE)
+}
+
+/// The profile chooses the size; the family and weight are the theme's
+/// fixed-width role, so the terminal's text is set like the desktop's.
+#[test]
+fn the_cell_font_is_the_themes_fixed_width_role_at_the_profiles_size() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let spec = *theme.fonts().spec(TextRole::Monospace);
+        let scale = Scale::from_percent(150).expect("a valid scale");
+        let font = cell_font(20, &theme, scale);
+        assert_eq!(font.family(), spec.family);
+        assert_eq!(font.weight(), spec.weight);
+        assert_eq!(font.pixel_height(), scale.scale_length(20));
+    }
 }
 
 // --- The headline requirement: the conventional screen fits a small display -

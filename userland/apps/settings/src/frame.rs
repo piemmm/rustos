@@ -55,13 +55,13 @@ pub const WIN_RESIZABLE: bool = sizing_of(0, 0).resizable();
 
 /// The logical width of the category sidebar, at the reference density.
 ///
-/// Wide enough at that density, in the shipped face, for the longest category
-/// label the registry holds beside its leading glyph — with the strip's own
-/// scrollbar taken out of it, because a window short enough to scroll the strip
-/// carves the bar from this column. A label that still does not fit (another
-/// locale's, a larger face) is elided with the shared mark rather than
-/// widening the column.
-pub const SIDEBAR_WIDTH: u32 = 208;
+/// Wide enough at that density, in the shipped face and weight, for the
+/// longest category label the registry holds beside its badge — with the
+/// strip's own scrollbar taken out of it, because a window short enough to
+/// scroll the strip carves the bar from this column. A label that still does
+/// not fit (another locale's, a larger face) is elided with the shared mark
+/// rather than widening the column.
+pub const SIDEBAR_WIDTH: u32 = 224;
 
 /// The narrowest logical width the content column is given before the sidebar
 /// is shed to widen it.

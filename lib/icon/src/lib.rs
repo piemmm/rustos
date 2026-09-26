@@ -21,7 +21,9 @@
 //! [`IconKind`] names a status/notification glyph; [`builtin_icon`] turns a
 //! kind plus a single theme colour into a [`VectorIcon`]; the taskbar
 //! rasterises that icon to a [`Surface`] sized to the notification slot at
-//! the active scale and composites it onto the bar.
+//! the active scale and composites it onto the bar. A settings category is the
+//! exception to the single colour: its built-in picture is a colour badge
+//! ([`badge`], [`builtin_picture`]).
 //!
 //! ```
 //! use tairix_icon::{builtin_icon, IconKind};
@@ -47,10 +49,12 @@ extern crate alloc;
 
 pub mod account;
 pub mod artwork;
+pub mod badge;
 pub mod desk;
 pub mod glyph;
 pub mod load;
 pub mod svg;
+mod symbol;
 pub mod vector;
 
 #[cfg(test)]
@@ -58,12 +62,13 @@ mod tests;
 
 pub use account::{monogram_disc, monogram_of, FALLBACK_MONOGRAM};
 pub use artwork::{
-    artwork_cache, artwork_kind_for_file, glyph_mask, icon_artwork_path, icon_vector_path,
-    render_artwork, ArtworkCache, ArtworkKey, ArtworkOutcome, ArtworkRasteriser, ArtworkReader,
-    ArtworkResolver, CachedArtwork, IconArtwork, IconArtworkSource, IconPicture, IconRequest,
-    InlineArtwork, NoArtwork, NoArtworkSeam, Resolved, ARTWORK_ENTRY_METADATA_BYTES, GRAPHICS_DIR,
-    ICONS_DIR, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE, MIN_ARTWORK_SIDE,
+    artwork_cache, artwork_kind_for_file, builtin_picture, glyph_mask, icon_artwork_path,
+    icon_vector_path, render_artwork, ArtworkCache, ArtworkKey, ArtworkOutcome, ArtworkRasteriser,
+    ArtworkReader, ArtworkResolver, CachedArtwork, IconArtwork, IconArtworkSource, IconPicture,
+    IconRequest, InlineArtwork, NoArtwork, NoArtworkSeam, Resolved, ARTWORK_ENTRY_METADATA_BYTES,
+    GRAPHICS_DIR, ICONS_DIR, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE, MIN_ARTWORK_SIDE,
 };
+pub use badge::BadgeHue;
 pub use desk::{ArtworkDesk, ArtworkJob, Delivered, Landed};
 pub use glyph::{builtin_icon, disk_icon, IconKind};
 pub use load::{IconAssetSource, IconSet, ICON_KINDS};

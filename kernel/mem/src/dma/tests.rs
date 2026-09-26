@@ -824,6 +824,87 @@ fn a_free_that_finds_a_page_already_cleared_still_returns_the_block() {
     assert_eq!(again.virt().as_u64(), base);
 }
 
+/// A page table that refuses to clear one page, as a table walk that fails
+/// part-way through a release does.
+struct RefusingUnmap<'a> {
+    table: HostPageTable,
+    refused: &'a Cell<Option<u64>>,
+}
+
+impl HalAddressSpace for RefusingUnmap<'_> {
+    fn map_page(&mut self, vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), MapError> {
+        self.table.map_page(vaddr, paddr, flags)
+    }
+
+    fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
+        self.table.translate(vaddr)
+    }
+
+    fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
+        if self.refused.get() == Some(vaddr) {
+            return Err(MapError::PoolExhausted);
+        }
+        self.table.unmap(vaddr)
+    }
+
+    fn root_phys(&self) -> u64 {
+        self.table.root_phys()
+    }
+
+    fn access_tracking(&self) -> AccessTracking {
+        self.table.access_tracking()
+    }
+
+    unsafe fn activate(&self) {}
+}
+
+impl TlbShootdown for RefusingUnmap<'_> {
+    fn flush_page(&mut self, vaddr: u64) {
+        self.table.flush_page(vaddr);
+    }
+}
+
+/// A release that cannot clear a page part-way retires only the pages it did
+/// clear: the rest are still mapped, and still the driver's.
+#[test]
+fn a_release_that_cannot_clear_a_page_retires_only_what_it_cleared() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let refused = Cell::new(None);
+    let space = AddressSpace::new(RefusingUnmap {
+        table: HostPageTable::new(),
+        refused: &refused,
+    });
+    let mut pool = DmaPool::new(space, VirtAddr::new(0x1000_0000), 16, &frames, &sim)
+        .expect("pool constructs");
+    let buf = pool.alloc(3 * PAGE_SIZE).expect("alloc 3 pages");
+    let base = buf.virt().as_u64();
+    refused.set(Some(base + PAGE_SIZE as u64));
+    let held = frames.free_frames();
+
+    let mut retired = Retired::default();
+    let freed = pool.window.free_at(
+        &mut pool.address_space,
+        pool.frames,
+        pool.phys,
+        buf.virt(),
+        &mut retired,
+    );
+
+    assert!(matches!(freed, Err(DmaError::PageTable(_))), "{freed:?}");
+    assert_eq!(
+        retired.0,
+        [(base, 1)],
+        "only the cleared page left the views"
+    );
+    assert_eq!(pool.live(), 1, "the block is still the pool's");
+    assert_eq!(
+        frames.free_frames(),
+        held,
+        "none of it reached the allocator"
+    );
+}
+
 /// A block that cannot be scrubbed is not handed back to the allocator: its
 /// record stays live for teardown to surrender, and its range is still shot
 /// down and retired first.

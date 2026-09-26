@@ -40,19 +40,21 @@ draw site always gets something:
    illustrative file-class and disk pictures are raster. Shipping one id in
    both formats is a packaging defect the image build refuses, because the
    raster tier would always win and the vector could never be selected.
-3. **Built-in glyph (always last).** `builtin_icon(kind, colour)` — the
-   monochrome vector silhouette compiled into the crate. This tier can never
-   be absent, so the desktop always shows a meaningful icon even with no
-   on-disk assets at all (a headless or freshly-installed system), which is
-   why it is the **required** fail-closed fallback for every kind
-   (`AGENTS.md` §2.9). It is retained like the asset tiers: `glyph_mask(kind,
-   side)` rasterises the silhouette in opaque white so the mask's alpha *is*
-   its coverage, and the drawing control supplies the colour
-   (`Surface::blit_tinted`). Coverage does not depend on the tint, so one
-   retained mask serves every colour and control state — and resolving a
-   multi-layer glyph is expensive enough (its layers are painted enlarged and
-   averaged back down to remove their seams) that paying it per icon per frame
-   is what a caching tier exists to prevent.
+3. **Built-in picture (always last).** `builtin_picture(kind, side)` — vector
+   art compiled into the crate. For most kinds it is the glyph's coverage
+   mask: `glyph_mask(kind, side)` rasterises `builtin_icon(kind, colour)`'s
+   monochrome silhouette in opaque white so the mask's alpha *is* its
+   coverage, and the drawing control supplies the colour
+   (`Surface::blit_tinted`). A settings category's is its ready-coloured
+   badge instead ([Desktop icons](../desktop/icons.md)); `IconPicture::builtin`
+   says which. This tier can never be absent, so the desktop always shows a
+   meaningful icon even with no on-disk assets at all (a headless or
+   freshly-installed system), which is why it is the **required** fail-closed
+   fallback for every kind (`AGENTS.md` §2.9). It is retained like the asset
+   tiers, once per `(kind, side)`: a mask serves every colour and control
+   state, and rasterising vector art (its layers painted enlarged and averaged
+   back down to remove their seams) is expensive enough that paying it per
+   icon per frame is what a caching tier exists to prevent.
 
 A fine-grained file-class kind (`TextHtml`, `TextRust`, `ImagePng`,
 `ImageSvg`, `DiskHard`, `DiskUsb`, …) names its own distinct raster/vector
@@ -71,12 +73,12 @@ never runs in this library or in the renderer that consumes it
 (`AGENTS.md` §19.5):
 
 - `ArtworkCache::artwork` is **total**: it answers every request, with shipped
-  artwork or with the glyph mask that always resolves, tagged as an
+  artwork or with the built-in picture that always resolves, tagged as an
   `IconPicture` so the drawing control knows whether to composite the pixels as
   they are or to tint them. A draw site therefore never rasterises vector art
   itself; the one exception is a caller holding `NoArtwork` (a headless build,
-  a test), which draws through the *same* mask-and-tint arithmetic so a cached
-  icon and an uncached one are the same pixels. A caller that *stores* a
+  a test), which draws the *same* `builtin_picture` so a cached icon and an
+  uncached one are the same pixels. A caller that *stores* a
   picture rather than drawing it now — a taskbar slot keeping its
   application's icon — takes `IconPicture::artwork()` and stores nothing for a
   mask, because a mask is not finished pixels.
@@ -145,8 +147,8 @@ reads each surface in place. `artwork_cache(label, seat, fb_bytes, pressure,
 sink)` builds the cache identically for both consumers, and
 `IconArtworkSource` binds a cache to its resolver so a renderer receives a
 plain `IconArtwork` lookup that knows nothing about I/O. `NoArtwork` is the
-all-glyph lookup a headless build or a test uses — it never resolves any
-artwork, so every draw site falls back to its built-in glyph.
+all-built-in lookup a headless build or a test uses — it never resolves any
+artwork, so every draw site falls back to its built-in picture.
 
 A bundle is keyed by its *directory*, not by the asset its manifest names, so
 the manifest read is paid once per bundle and a bundle that declares no icon
@@ -178,8 +180,8 @@ and critical take what is held above the reserve.
 
 Where retention genuinely is refused — an entry larger than what the budget can
 hold, or an output whose budget is smaller than one decode — the decode cannot
-be kept and the draw site falls back to its built-in glyph, which is the tier
-that exists for it. What must not follow is asking again on every frame, so the
+be kept and the draw site falls back to its built-in picture, which is the
+tier that exists for it. What must not follow is asking again on every frame, so the
 cache reports the refusal to the resolver that produced it
 (`ArtworkResolver::declined`) and a deferring resolver holds that key back until
 the band moves.
@@ -196,14 +198,14 @@ a draw needs* and *producing it*:
 - `ArtworkDesk` is the deferring resolver: it answers `Resolved::Pending` for a
   key it has just recorded, and `Resolved::Done` once a producer has delivered
   it. Nothing is retained meanwhile, the draw falls to the tier below — for the
-  last tier, the built-in glyph — and the same lookup serves the artwork once
+  last tier, the built-in picture — and the same lookup serves the artwork once
   the pixels land.
 - Both produce the decode through `render_artwork`, so where it ran cannot
   change what it produced.
 - **A process is pictured from the name the kernel attested it.**
   `IconRequest::program(kind, name, home)` resolves that name to the first
   bundle of that name in the program-store order and then through that bundle's
-  own manifest, falling back to the class artwork and the built-in glyph as any
+  own manifest, falling back to the class artwork and the built-in picture as any
   other request does. It exists because a surface listing *processes* has
   nothing else to work from: the kernel attests a task's name from the store
   path it loaded the image from and carries no image path, so the name is the
@@ -292,7 +294,7 @@ spread over as many answers as it has tiers to try.
 knows what it is *about* to draw asks for it there, and the cache asks the
 resolver for the one tier it does not already hold — so the decode is finished
 before the frame that needs it. Without it, a surface showing a screenful of
-icons paints every one as a built-in glyph and replaces them a round trip per
+icons paints every one as its built-in picture and replaces them a round trip per
 icon after the user is already looking at it. `InlineArtwork` prefetches
 nothing, which is right: it has nothing to prepare, and "preparing" would be
 the very stall the caller is avoiding.

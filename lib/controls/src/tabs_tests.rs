@@ -15,6 +15,7 @@
 
 use alloc::string::String;
 use alloc::vec;
+use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
@@ -2150,42 +2151,79 @@ fn sidebar_surface(tabs: &Tabs, theme: &Theme, w: u32, h: u32) -> Surface {
     surface
 }
 
-/// An entry's leading glyph draws inside its own row, and the row's label
-/// still draws beside it.
+/// An entry's leading icon draws inside its own row, which grows to seat it,
+/// and the row's label still draws beside it.
 #[test]
-fn a_sidebar_entry_draws_its_leading_glyph() {
+fn a_sidebar_entry_seats_and_draws_its_leading_icon() {
     let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H * 4);
     let plain = Tabs::new(vec![Tab::new("General")]).with_orientation(TabsOrientation::Vertical);
     let with_icon = Tabs::new(vec![Tab::new("General").with_icon(IconKind::Settings)])
         .with_orientation(TabsOrientation::Vertical);
 
-    let row = plain
-        .tab_area(0, Rect::new(0, 0, W, H * 4), Scale::ONE, &theme)
+    let bare_row = plain
+        .tab_area(0, bounds, Scale::ONE, &theme)
         .expect("a seated entry");
-    // A glyph costs the row no height: the two strips seat the same row.
+    let row = with_icon
+        .tab_area(0, bounds, Scale::ONE, &theme)
+        .expect("a seated entry");
+    let side = with_icon.icon_side(Scale::ONE, &theme);
+    assert!(
+        row.height >= side.saturating_add(theme.metrics().control_gap),
+        "the row seats its icon with clearance above and below it"
+    );
+    assert!(
+        row.height >= bare_row.height,
+        "an icon never squeezes its row"
+    );
     assert_eq!(
-        with_icon.tab_area(0, Rect::new(0, 0, W, H * 4), Scale::ONE, &theme),
-        Some(row)
+        plain.icon_side(Scale::ONE, &theme),
+        side,
+        "the slot is the sidebar's, whatever its entries carry"
     );
 
     let bare = sidebar_surface(&plain, &theme, W, H * 4);
-    let glyphed = sidebar_surface(&with_icon, &theme, W, H * 4);
+    let drawn = sidebar_surface(&with_icon, &theme, W, H * 4);
     assert_ne!(
         bare.pixels(),
-        glyphed.pixels(),
-        "the glyph drew nothing at all"
+        drawn.pixels(),
+        "the icon drew nothing at all"
     );
-    // The glyph is inside the entry it belongs to, never over the row below.
+    // The icon is inside the entry it belongs to, never over what lies below.
     let below = u32::try_from(row.bottom()).expect("a positive row bottom");
+    let ground = drawn.get(0, H * 4 - 1);
     for y in below..H * 4 {
         for x in 0..W {
-            assert_eq!(
-                bare.get(x, y),
-                glyphed.get(x, y),
-                "glyph spilled at {x},{y}"
-            );
+            assert_eq!(drawn.get(x, y), ground, "icon spilled at {x},{y}");
         }
     }
+}
+
+/// Every row of a strip that carries icons keeps one rhythm: a disclosed page
+/// with no icon of its own is as tall as the entry that disclosed it.
+#[test]
+fn a_strip_with_icons_keeps_one_row_height() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H * 6);
+    let tabs = Tabs::new(vec![
+        Tab::new("General")
+            .with_icon(IconKind::Settings)
+            .with_disclosure(true),
+        Tab::new("About").nested(),
+        Tab::new("Wallpaper").with_icon(IconKind::Wallpaper),
+    ])
+    .with_orientation(TabsOrientation::Vertical);
+    let heights: Vec<u32> = (0..3)
+        .map(|index| {
+            tabs.tab_area(index, bounds, Scale::ONE, &theme)
+                .expect("a seated entry")
+                .height
+        })
+        .collect();
+    assert!(
+        heights.iter().all(|height| *height == heights[0]),
+        "{heights:?}"
+    );
 }
 
 /// A horizontal strip is a page shape with no room for sidebar anatomy, so it
@@ -2296,25 +2334,43 @@ fn a_nested_entry_indents_and_still_takes_the_cursor() {
     }
 }
 
-/// A row too narrow to seat its glyph keeps its label: room is given out in
+/// A row too narrow to seat its icon keeps its label: room is given out in
 /// the order a reader needs it, and a nameless indent is no use.
 #[test]
 fn a_cramped_entry_gives_up_its_glyph_before_its_label() {
     let theme = Theme::dark();
-    let tabs = Tabs::new(vec![Tab::new("General").with_icon(IconKind::Settings)])
-        .with_orientation(TabsOrientation::Vertical);
+    // Each strip carries one icon, so both keep the same row height and only
+    // the first row's icon differs between them.
+    let tabs = Tabs::new(vec![
+        Tab::new("General").with_icon(IconKind::Settings),
+        Tab::new("Spare"),
+    ])
+    .with_orientation(TabsOrientation::Vertical);
+    let bare = Tabs::new(vec![
+        Tab::new("General"),
+        Tab::new("Spare").with_icon(IconKind::Storage),
+    ])
+    .with_orientation(TabsOrientation::Vertical);
     let side = tabs.icon_side(Scale::ONE, &theme);
-    assert!(side > 0, "a sidebar entry reserves a glyph slot");
+    assert!(side > 0, "a sidebar entry reserves an icon slot");
 
-    // Narrow enough that the glyph slot cannot be afforded at all.
+    // Narrow enough that the icon slot cannot be afforded at all.
     let narrow = side.saturating_add(4);
-    let surface = sidebar_surface(&tabs, &theme, narrow, H * 2);
-    let bare = Tabs::new(vec![Tab::new("General")]).with_orientation(TabsOrientation::Vertical);
-    assert_eq!(
-        surface.pixels(),
-        sidebar_surface(&bare, &theme, narrow, H * 2).pixels(),
-        "a slot that does not fit is not drawn"
-    );
+    let row = tabs
+        .tab_area(0, Rect::new(0, 0, narrow, H * 4), Scale::ONE, &theme)
+        .expect("a seated entry");
+    let cramped = sidebar_surface(&tabs, &theme, narrow, H * 4);
+    let plain = sidebar_surface(&bare, &theme, narrow, H * 4);
+    let rows = u32::try_from(row.bottom()).expect("a positive row bottom");
+    for y in 0..rows {
+        for x in 0..narrow {
+            assert_eq!(
+                cramped.get(x, y),
+                plain.get(x, y),
+                "a slot that does not fit is not drawn, at {x},{y}"
+            );
+        }
+    }
 }
 
 /// The strip's hover and press latch are about which entries it holds, so a

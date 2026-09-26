@@ -431,6 +431,8 @@ struct EntryPaint<'a> {
     scale: Scale,
     theme: &'a Theme,
     font: BitmapFont,
+    /// The height of the entry's label line ([`Tabs::entry_line`]).
+    line: u32,
     artwork: &'a mut dyn IconArtwork,
 }
 
@@ -634,10 +636,11 @@ impl Tabs {
             TabsOrientation::Vertical => {
                 let heading = heading_height(scale, theme);
                 let statement = text_plate_height(theme, scale, TextRole::Body);
+                let line = self.entry_line(scale, theme);
                 let entries = self.items.iter().fold(0u32, |total, tab| {
                     total
                         .saturating_add(if tab.group.is_some() { heading } else { 0 })
-                        .saturating_add(entry_height(tab, scale, theme))
+                        .saturating_add(entry_height(tab, line, scale, theme))
                 });
                 let absences = u32::try_from(self.absences.len())
                     .unwrap_or(u32::MAX)
@@ -793,6 +796,7 @@ impl Tabs {
                 let heading_h = heading_height(scale, theme);
                 let absence_h =
                     heading_h.saturating_add(text_plate_height(theme, scale, TextRole::Body));
+                let line = self.entry_line(scale, theme);
                 let mut bands = Vec::with_capacity(self.items.len());
                 let mut top = 0u32;
                 let mut absences = self
@@ -822,7 +826,7 @@ impl Tabs {
                         top = top.saturating_add(absence_h);
                     }
                     let own_heading = if tab.group.is_some() { heading_h } else { 0 };
-                    let entry_h = entry_height(tab, scale, theme);
+                    let entry_h = entry_height(tab, line, scale, theme);
                     // A heading never appears without at least its own first
                     // entry beneath it.
                     if top
@@ -959,6 +963,7 @@ impl Tabs {
             return;
         }
         let font = role_font(theme, scale, TextRole::Body);
+        let line = self.entry_line(scale, theme);
         for band in self.layout(bounds, scale, theme) {
             let Some(rect) = surface_rect(band.rect) else {
                 continue;
@@ -976,6 +981,7 @@ impl Tabs {
                             scale,
                             theme,
                             font,
+                            line,
                             artwork,
                         },
                     );
@@ -987,21 +993,33 @@ impl Tabs {
         }
     }
 
-    /// The side of the square glyph slot a sidebar entry reserves, which is
-    /// also the pixel side an owner's cache should rasterise its glyphs at.
+    /// The side of the square icon slot a sidebar entry reserves, which is
+    /// also the pixel side an owner's cache should rasterise its icons at.
     ///
     /// One definition, so what the strip paints at and what its owner
     /// resolves at cannot drift apart. Zero for a horizontal strip, which
-    /// draws no glyph.
+    /// draws no icon.
     #[must_use]
     pub fn icon_side(&self, scale: Scale, theme: &Theme) -> u32 {
         match self.orientation {
             TabsOrientation::Horizontal => 0,
-            TabsOrientation::Vertical => icon_slot_side(
-                role_font(theme, scale, TextRole::Body),
-                text_plate_height(theme, scale, TextRole::Body),
-            ),
+            TabsOrientation::Vertical => entry_icon_side(scale, theme),
         }
+    }
+
+    /// The height of every vertical entry's label line: the body text plate,
+    /// or in a strip whose entries carry icons, whatever seats the icon with a
+    /// control gap's clearance shared above and below it.
+    ///
+    /// One height for the whole strip, so a disclosed page's row keeps the
+    /// rhythm of the rows around it whether or not it has an icon of its own.
+    fn entry_line(&self, scale: Scale, theme: &Theme) -> u32 {
+        let text = text_plate_height(theme, scale, TextRole::Body);
+        if self.items.iter().all(|tab| tab.icon.is_none()) {
+            return text;
+        }
+        let clearance = scale.scale_length(theme.metrics().control_gap).max(1);
+        text.max(entry_icon_side(scale, theme).saturating_add(clearance))
     }
 
     /// Paint one empty group: its heading, then the line saying why it is
@@ -1269,7 +1287,7 @@ impl Tabs {
             Self::paint_tab_bead(surface, rect, scale, theme, tab);
             return;
         };
-        let label_row = text_plate_height(theme, scale, TextRole::Body);
+        let label_row = paint.line;
         let text_y = y.saturating_add(label_row.saturating_sub(font.glyph_height()) / 2);
 
         let bead_w = Self::bead_gutter(scale, theme, rect, tab);
@@ -1387,7 +1405,7 @@ impl Tabs {
             .scale
             .scale_length(paint.theme.metrics().control_gap)
             .max(1);
-        let side = icon_slot_side(paint.font, label_row);
+        let side = entry_icon_side(paint.scale, paint.theme).min(label_row);
         let Some(remaining) = line.avail.checked_sub(side.saturating_add(gap)) else {
             return;
         };
@@ -1409,13 +1427,11 @@ impl Tabs {
         line.avail = remaining;
     }
 
-    /// The leading offset a nested entry is drawn at: one glyph slot plus the
+    /// The leading offset a nested entry is drawn at: one icon slot plus the
     /// gap after it, so a page lines up with the label of the entry that
     /// disclosed it rather than at an indent of its own.
     fn nest_indent(scale: Scale, theme: &Theme) -> u32 {
-        let font = role_font(theme, scale, TextRole::Body);
-        let label_row = text_plate_height(theme, scale, TextRole::Body);
-        icon_slot_side(font, label_row)
+        entry_icon_side(scale, theme)
             .saturating_add(scale.scale_length(theme.metrics().control_gap).max(1))
     }
 
@@ -1622,18 +1638,24 @@ impl Tabs {
     }
 }
 
-/// The height one vertical entry claims: the shared one-line plate height,
-/// plus its own trend where it carries one.
+/// The height one vertical entry claims: the strip's `line`
+/// ([`Tabs::entry_line`]), plus its own trend where it carries one.
 ///
 /// The reading shares the label's line, so it costs no height; the trend is
 /// what an entry pays for, which is why an entry with no rate behind it is
 /// visibly shorter than one with a trace.
-fn entry_height(tab: &Tab, scale: Scale, theme: &Theme) -> u32 {
-    let row = text_plate_height(theme, scale, TextRole::Body);
+fn entry_height(tab: &Tab, line: u32, scale: Scale, theme: &Theme) -> u32 {
     match tab.trend {
-        Some(_) => row.saturating_add(chart_height(scale, theme)),
-        None => row,
+        Some(_) => line.saturating_add(chart_height(scale, theme)),
+        None => line,
     }
+}
+
+/// The side a sidebar entry's leading icon is drawn at.
+fn entry_icon_side(scale: Scale, theme: &Theme) -> u32 {
+    scale
+        .scale_length(theme.metrics().sidebar_icon_extent)
+        .max(1)
 }
 
 /// Paint a group heading into the top of `rect`: the accent, so a heading

@@ -984,20 +984,24 @@ a page:
   negative origin draws nothing. The position is part of the reader's view of
   the list, so it survives a restatement that keeps the same entries and is
   clamped into one that no longer holds it, like the hover and the cursor.
-- **An entry may lead with a glyph, and the owner resolves the picture.**
+- **An entry may lead with an icon, and the owner resolves the picture.**
   `Tab::with_icon` names the kind; the strip resolves it through the owner's
-  icon lookup at the one slot side it paints at (`Tabs::icon_side`), so a
-  strip of glyphs costs a cache lookup per entry rather than re-resolving
-  vector coverage every frame. Room is claimed in the order a reader needs
-  it — the Signal Bead, then the disclosure chevron and the reading, then the
-  glyph, then the label, which is what gives way, elided with the shared mark
-  — so an entry too narrow for its glyph keeps its name rather than becoming a
-  nameless indent, and a cut name never reads as a complete one.
+  icon lookup at the one slot side it paints at (`Tabs::icon_side`, the
+  theme's `sidebar_icon_extent`), so a strip of icons costs a cache lookup per
+  entry rather than re-rasterising vector art every frame. The icon is taller
+  than the label's line of text, because a sidebar is found by its icons
+  before its labels are read, so a strip carrying icons seats every entry — a
+  disclosed page included — on one row tall enough for the icon and a control
+  gap's clearance. Room is claimed in the order a reader needs it — the Signal
+  Bead, then the disclosure chevron and the reading, then the icon, then the
+  label, which is what gives way, elided with the shared mark — so an entry
+  too narrow for its icon keeps its name rather than becoming a nameless
+  indent, and a cut name never reads as a complete one.
 - **A sidebar list may be two levels deep, and it is still one column.** An
   entry that holds pages of its own carries a trailing disclosure chevron
   stating *its own* posture (`Tab::with_disclosure`): down while its pages are
   shown, right while they are not. Each page is an ordinary entry declared
-  nested (`Tab::nested`), indented by exactly one glyph slot so it lines up
+  nested (`Tab::nested`), indented by exactly one icon slot so it lines up
   with the label of the entry that disclosed it. One cursor therefore walks
   the whole column, every row is hit-tested and selectable, and no index means
   anything special. What *choosing* a disclosing entry does is the owner's —

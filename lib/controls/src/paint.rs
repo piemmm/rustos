@@ -11,7 +11,7 @@
 
 use tairix_font::{BitmapFont, TextShadow, ELLIPSIS};
 use tairix_geometry::{Rect, Region, Scale};
-use tairix_icon::{glyph_mask, IconKind, IconPicture};
+use tairix_icon::{builtin_picture, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{Contrast, Palette, Rgba, SignalRole, SurfaceGround, TextRole, Theme};
@@ -648,8 +648,8 @@ pub(crate) fn icon_slot_side(font: BitmapFont, content_height: u32) -> u32 {
 pub const FULL_COLOUR: u8 = 255;
 
 /// Paint a content icon into the `(x, y, side)` square `slot` from the
-/// `picture` its owner resolved: shipped artwork as it is, or a built-in glyph
-/// mask tinted `tint`.
+/// `picture` its owner resolved: ready-coloured artwork (shipped, or a settings
+/// category's built-in badge) as it is, or a built-in glyph mask tinted `tint`.
 ///
 /// This is the one place every collection control — a taskbar item, a card, a
 /// list row — turns a resolved picture into pixels, so the three can never draw
@@ -663,14 +663,14 @@ pub const FULL_COLOUR: u8 = 255;
 /// corner.
 ///
 /// **Nothing is rasterised here on the cached path.** Both the decode of
-/// shipped artwork and the coverage of a built-in glyph are resolved once per
-/// (picture, pixel side) by the owner's cache and blitted thereafter, so no
-/// frame pays for vector coverage a previous frame already resolved. The inline
-/// rasterise below is reached only by a caller holding *no* cache
+/// shipped artwork and the built-in picture are resolved once per (picture,
+/// pixel side) by the owner's cache and blitted thereafter, so no frame pays
+/// for vector art a previous frame already resolved. The inline rasterise below
+/// is reached only by a caller holding *no* cache
 /// ([`NoArtwork`](tairix_icon::NoArtwork)) — a headless build or a test — where
-/// drawing nothing would blank an icon the reader needs. It draws through the
-/// same mask-and-tint arithmetic, so a cached icon and an uncached one are the
-/// same pixels.
+/// drawing nothing would blank an icon the reader needs. It draws the very
+/// picture the cache would have retained, so a cached icon and an uncached one
+/// are the same pixels.
 ///
 /// `saturation` reduces the *artwork's* colour on its way in
 /// ([`Pixel::desaturate`](tairix_raster::Pixel::desaturate): [`FULL_COLOUR`]
@@ -686,28 +686,32 @@ pub fn paint_icon_slot(
     picture: Option<IconPicture<'_>>,
     saturation: u8,
 ) {
-    let (x, y, side) = slot;
-    let centred = |art: &Surface| {
-        (
-            to_i32(x) + (to_i32(side) - to_i32(art.width())) / 2,
-            to_i32(y) + (to_i32(side) - to_i32(art.height())) / 2,
-        )
-    };
-    match picture {
-        Some(IconPicture::Artwork(art)) => {
-            let (ax, ay) = centred(art);
+    let mut draw = |picture: IconPicture<'_>| match picture {
+        IconPicture::Artwork(art) => {
+            let (ax, ay) = centred_in(slot, art);
             surface.blit_desaturated(ax, ay, art, saturation);
         }
-        Some(IconPicture::Mask(mask)) => {
-            let (ax, ay) = centred(mask);
+        IconPicture::Mask(mask) => {
+            let (ax, ay) = centred_in(slot, mask);
             surface.blit_tinted(ax, ay, mask, tint);
         }
+    };
+    match picture {
+        Some(picture) => draw(picture),
         None => {
-            if let Some(mask) = glyph_mask(kind, side) {
-                surface.blit_tinted(to_i32(x), to_i32(y), &mask, tint);
+            if let Some(built) = builtin_picture(kind, slot.2) {
+                draw(IconPicture::builtin(kind, &built));
             }
         }
     }
+}
+
+/// Where `art` is blitted to sit centred in the `(x, y, side)` square `slot`.
+fn centred_in((x, y, side): (u32, u32, u32), art: &Surface) -> (i32, i32) {
+    (
+        to_i32(x) + (to_i32(side) - to_i32(art.width())) / 2,
+        to_i32(y) + (to_i32(side) - to_i32(art.height())) / 2,
+    )
 }
 
 /// Update `armed` from one pointer event and report whether a primary

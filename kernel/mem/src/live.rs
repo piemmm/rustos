@@ -1150,16 +1150,14 @@ where
     }
 
     fn free_dma(&mut self, cpu_va: u64, retire: &mut dyn Retire) -> Result<usize, LiveSpaceError> {
-        let released = self.dma.free_at(
-            &mut self.space,
-            self.frames,
-            &self.physmap,
-            VirtAddr::new(cpu_va),
-            retire,
-        );
-        // Past an unknown buffer the record is gone whether or not the release
-        // completed, so the block can never be surrendered for its room.
-        if !matches!(released, Err(DmaError::UnknownBuffer)) {
+        let virt = VirtAddr::new(cpu_va);
+        let was_live = self.dma.holds(virt);
+        let released = self
+            .dma
+            .free_at(&mut self.space, self.frames, &self.physmap, virt, retire);
+        // A reservation goes back exactly when its record leaves: a block a
+        // failed release kept is surrendered at teardown, which spends it then.
+        if was_live && !self.dma.holds(virt) {
             if let Some(custodian) = self.dma_custodian {
                 custodian.custody.unreserve(custodian.node);
             }
@@ -2088,11 +2086,14 @@ mod tests {
         ($frames:expr, $simmap:expr) => {
             shared_live_space!($frames, $simmap, host_tlb())
         };
-        ($frames:expr, $simmap:expr, $tlb:expr) => {{
+        ($frames:expr, $simmap:expr, $tlb:expr) => {
+            shared_live_space!(map: SharedSim($simmap), $frames, $tlb)
+        };
+        (map: $map:expr, $frames:expr, $tlb:expr) => {{
             LiveSpace::new(
                 AddressSpace::new(HostPageTable::new()),
                 $tlb,
-                SharedSim($simmap),
+                $map,
                 $frames,
                 VirtAddr::new(MMIO_WINDOW_BASE),
                 MMIO_WINDOW_PAGES,
@@ -2463,6 +2464,67 @@ mod tests {
             Err(LiveSpaceError::Dma(DmaError::UnknownBuffer)),
             "and a repeat returns nothing more"
         );
+    }
+
+    /// A [`SharedSim`] that can be told to stop reaching RAM, as a platform
+    /// whose direct map misses a region does.
+    struct RefusableSim {
+        sim: &'static SimPhysMap,
+        refusing: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    }
+
+    impl PhysMap for RefusableSim {
+        fn translate(
+            &self,
+            phys: crate::frame::PhysAddr,
+            len: usize,
+        ) -> Option<core::ptr::NonNull<u8>> {
+            if self.refusing.load(core::sync::atomic::Ordering::Relaxed) {
+                return None;
+            }
+            self.sim.translate(phys, len)
+        }
+
+        fn clean_invalidate(&self, phys: crate::frame::PhysAddr, len: usize) {
+            self.sim.clean_invalidate(phys, len);
+        }
+
+        fn sync_instruction_cache(&self, phys: crate::frame::PhysAddr, len: usize) {
+            self.sim.sync_instruction_cache(phys, len);
+        }
+    }
+
+    #[test]
+    fn a_free_that_keeps_its_block_keeps_its_reservation_for_teardown() {
+        // A block that cannot be scrubbed stays live, and the teardown that
+        // surrenders it spends its reservation: returning the reservation at
+        // the failed free as well would spend it twice.
+        let (frames, simmap) = backing!();
+        let held = custody!();
+        let refusing = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+        let mut live = shared_live_space!(
+            map: RefusableSim {
+                sim: simmap,
+                refusing: alloc::sync::Arc::clone(&refusing),
+            },
+            frames,
+            host_tlb()
+        );
+        let mapping = live
+            .alloc_dma(PAGE_SIZE, 0, custodian(held))
+            .expect("a free block exists");
+        refusing.store(true, core::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            live.free_dma(mapping.cpu_va, &mut Unpublished),
+            Err(LiveSpaceError::Dma(DmaError::DirectMap)),
+            "the scrub cannot reach the block"
+        );
+        held.with(|r| assert_eq!(r.reserved, 1, "the kept block still holds its room"));
+        drop(live);
+        held.with(|r| {
+            assert_eq!(r.reserved, 0, "teardown spent the room");
+            assert_eq!(r.held.len(), 1, "on the block it surrendered");
+        });
     }
 
     #[test]

@@ -182,7 +182,7 @@ fn each_settings_category_glyph_is_its_own_mark() {
         IconKind::LockScreen,
         IconKind::Screensaver,
         IconKind::Power,
-        IconKind::Network,
+        IconKind::Networking,
         IconKind::Bluetooth,
         IconKind::Sound,
         IconKind::Notifications,
@@ -214,29 +214,22 @@ fn each_settings_category_glyph_is_its_own_mark() {
 }
 
 #[test]
-fn a_settings_category_shares_the_reading_it_stands_beside() {
-    // The audio category and the tray's volume reading are one speaker, and
-    // the notification-policy category and a pending notification one bell:
-    // each category carries its own asset slot a theme may override, never a
-    // second copy of the artwork.
-    assert_eq!(
-        builtin_icon(IconKind::Sound, FG),
-        builtin_icon(IconKind::Volume, FG)
-    );
-    assert_eq!(
-        builtin_icon(IconKind::Notifications, FG),
-        builtin_icon(IconKind::Bell, FG)
-    );
-    // The plural accounts and the whole machine's storage are *not* the
-    // single account and the single drive, so each draws its own mark.
-    assert_ne!(
-        builtin_icon(IconKind::Users, FG),
-        builtin_icon(IconKind::User, FG)
-    );
-    assert_ne!(
-        builtin_icon(IconKind::Storage, FG),
-        builtin_icon(IconKind::Disk, FG)
-    );
+fn a_settings_category_is_never_the_reading_it_stands_beside() {
+    // A category's symbol is drawn to stand on its badge, so it is never the
+    // tray's reading or the single thing the plural category gathers.
+    for (category, reading) in [
+        (IconKind::Sound, IconKind::Volume),
+        (IconKind::Notifications, IconKind::Bell),
+        (IconKind::Networking, IconKind::Network),
+        (IconKind::Users, IconKind::User),
+        (IconKind::Storage, IconKind::Disk),
+    ] {
+        assert_ne!(
+            builtin_icon(category, FG),
+            builtin_icon(reading, FG),
+            "{category:?} draws {reading:?}"
+        );
+    }
 }
 
 #[test]

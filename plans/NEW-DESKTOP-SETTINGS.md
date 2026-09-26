@@ -50,6 +50,7 @@ dropped is a category the surface then has to lie about.
 | **DS12** | Lock Screen and Screensaver — the session's single idle deadline and the one timer armed only while a policy has one pending | DS3 | DS12 | done |
 | **DS13** | The `settings_qemu_aarch64` vertical and the docs pages the surface owes | DS2–DS9 | DS13 | done |
 | **DS14** | Retire the second form idiom — `datetime.app`'s six-field row and `lib/browse`'s `PermGrid`, with the private layout arithmetic each carries deleted | DS1 | DS14, §6 | done |
+| **DS15** | The sidebar's category badges: colour built-in pictures at the theme's sidebar icon size, on rows tall enough to seat them, retained in the window's own icon cache and trimmed on the memory-pressure wake | DS2 | §4, `plans/ICONS.md` I13 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -463,18 +464,19 @@ Everything else a pane needs already exists:
 tracks), `StatusPill` (a volume's health band, a link state), and
 `ActionRail` where a pane commands a selected subject. **No new control is added for a job an existing one does.**
 
-New `IconKind` glyphs, one per category, each with the mandatory first-party
-built-in vector glyph so the sidebar can never blank: `Settings`, `Appearance`,
-`Wallpaper`, `Display`, `LockScreen`, `Screensaver`, `Power`, `Bluetooth`,
-`Sound`, `Notifications`, `Keyboard`, `Mouse`, `Trackpad`, `Touchscreen`,
-`Printer`, `Accessibility`, `Language`, `Sharing`, `Users`, `Storage`.
-`Network` is reused as-is for Networking. Two of the new kinds share the
-artwork of the reading they stand beside rather than drawing a second copy of
-it — `Sound` draws `Volume`'s speaker and `Notifications` draws `Bell`'s
-bell — keeping an asset slot of their own so a theme may distinguish the
-settings category from the tray reading. `Users` and `Storage` draw marks of
-their own, because a group of accounts is not one account and a machine's
-storage is not one drive.
+One `IconKind` per category, each drawn as a **colour badge** — its symbol in
+white on a plate of the category's hue, the way macOS draws its settings panes
+— so a reader finds a category by colour before reading its name: `Settings`,
+`Appearance`, `Wallpaper`, `Display`, `LockScreen`, `Screensaver`, `Power`,
+`Networking`, `Bluetooth`, `Sound`, `Notifications`, `Keyboard`, `Mouse`,
+`Trackpad`, `Touchscreen`, `Printer`, `Accessibility`, `Language`, `Sharing`,
+`Users`, `Storage` (DS15). None of them is the tray reading or the single thing
+it stands beside (`Network`, `Volume`, `Bell`, `User`, `Disk`): a category's
+symbol is drawn to stand on its badge. The badge is the kind's built-in
+picture — compiled in, so the sidebar can never blank and Settings needs no
+read or decode authority to show it — and its symbol is the kind's tintable
+glyph wherever a control draws only in its own colour. `plans/ICONS.md` I13
+carries the badge's own decisions.
 
 ---
 
@@ -1365,7 +1367,8 @@ autoload root disk, unlocks, logs in, starts `desktop`, opens the capsule's
 system menu and chooses *Settings…*, then photographs the window on General,
 on Lock Screen's composed form, on Bluetooth's stated absence, and on Storage —
 reached past the strip's fold
-by the strip's own scrollbar — before walking to Appearance, choosing Light,
+by the strip's own scrollbar — before paging the strip back up to Appearance,
+choosing Light,
 and photographing the desktop redrawn light. Its last gesture is the system
 menu's *Dark Appearance* row.
 
@@ -1406,9 +1409,9 @@ What the vertical needed, and now guarantees:
 - **Every cut name carries the mark.** Each label, reading, cell, caption and
   title `lib/controls` draws, and the Settings band and statement, are elided
   through the one recipe (`elide_to_width`, then `paint_run`), which the crate
-  exports for application-drawn names. The strip is 208 logical pixels, room
-  for the longest category label beside its glyph with the strip's scrollbar
-  carved out. The app-local cuts elsewhere are `plans/OPEN-DEFECTS.md` D154.
+  exports for application-drawn names. The strip is `SIDEBAR_WIDTH` logical
+  pixels, room in the shipped face and weight for the longest category label
+  beside its badge with the strip's scrollbar carved out. The app-local cuts elsewhere are `plans/OPEN-DEFECTS.md` D154.
 
 Docs landed with it: the Settings page's General section, the window title,
 the vertical, and the corrected Sound statement; the session page's two

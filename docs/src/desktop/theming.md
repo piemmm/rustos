@@ -165,7 +165,7 @@ bundles, under a stable `ThemeId`:
   `selection_backdrop_blur`, `seam_thickness`,
   `rail_thickness`, `bead_size`, `measured_thickness`, `progress_thickness`,
   `composition_thickness`, `chart_height`, `selector_extent`,
-  `toggle_track_length`); the desktop's
+  `toggle_track_length`, `sidebar_icon_extent`); the desktop's
   floating chrome (`taskbar_margin`, `chrome_backdrop_blur`); and the window
   furniture
   (`title_bar_height`, `frame_inset`, `title_hue_reach`,
@@ -234,6 +234,11 @@ bundles, under a stable `ThemeId`:
     breadth) and `toggle_track_length` size a boolean selector's *mark*
     smaller than the row that carries it, so the glyph stays compact while the
     full row remains the hit target.
+  - `sidebar_icon_extent` is the other way about: a sidebar entry's leading
+    icon is taller than the line of text beside it, because a sidebar is found
+    by its icons before its labels are read, and the entry grows to seat it.
+    Like the selector extents it is what a control *is*, so density leaves it
+    alone and moves only the clearance around it.
 - `Fonts` — one `FontSpec` (family, size, weight) per `TextRole`, derived from
   a single authored base size through the boards' shared ladder (see
   [Typography](#typography)), referencing faces under `/System/Fonts`.
@@ -344,21 +349,29 @@ Every role's size is a percentage of one authored base (body) size, measured
 from the design boards, so a theme states *one* number and the whole desktop's
 type scales together (`AGENTS.md` §2.2):
 
-| Role | Size | Weight |
-| --- | --- | --- |
-| `Display` | 250% | Regular |
-| `Heading` | 133% | Medium |
-| `ItemTitle` | 113% | Medium |
-| `WindowTitle` | 100% | Medium |
-| `Body` | 100% | Regular |
-| `Metric` | 100% | Bold |
-| `Caption` | 87% | Regular |
-| `SectionHeader` | 80% | Bold |
-| `Monospace` | 100% | Regular |
+| Role | Size | Named weight | Set in |
+| --- | --- | --- | --- |
+| `Display` | 250% | Regular | 480 |
+| `Heading` | 133% | Medium | 580 |
+| `ItemTitle` | 113% | Medium | 580 |
+| `WindowTitle` | 100% | Medium | 580 |
+| `Body` | 100% | Regular | 480 |
+| `Metric` | 100% | Bold | 780 |
+| `Caption` | 87% | Regular | 480 |
+| `SectionHeader` | 100% | Bold | 780 |
+| `Monospace` | 100% | Regular | 480 |
 
 The boards carry their hierarchy with a deliberately *tight* size ladder and a
 rising weight — a detail line sits within a point of the title above it, and a
-column header is smaller but bold — so weight, not size, does most of the work.
+column header is the size of the rows it heads but bold — so weight, not size,
+does most of the work.
+
+Every role is set `TEXT_WEIGHT_LIFT` (80) heavier than its named weight along
+the face's own `wght` axis (`lifted`). The UI face's named weights are drawn
+light for interface text on a screen and read thin beside the fuller text
+other desktops set; one step for every rung gets that fullness from the type
+designer's own letterforms, thickens every weight by about the same number of
+pixels, and leaves the ladder's hierarchy exactly as the boards set it.
 `Display` is the one deliberate exception: it is the rung for a *single*
 dominant line on a full screen of its own — the login and lock screens' clock —
 and is light rather than heavy, because at that size weight would shout. It has
@@ -381,10 +394,11 @@ The shared controls (`lib/controls`) and the shared directory-browser engine
 application drawing it, so a control's typography cannot be overridden at a
 call site. See
 [the control library](../lib/controls.md#the-theme-chooses-the-face-not-the-caller). The weight a role names
-is the font service's own `FontWeight`, re-exported rather than restated: the
-shipped faces are Regular-only, so `fontd` synthesises the heavier weights as a
-bounded thickening of the same outline coverage, leaving the advance — and
-therefore every layout — unchanged.
+is the font service's own `FontWeight`, re-exported rather than restated. The
+UI face is variable, so `fontd` instances it at exactly that weight — the
+glyph and its advance are the ones the designer drew; a face with no `wght`
+axis (the fixed-width faces) is thickened instead by the service's bounded
+synthetic stroke, which leaves its advance alone.
 
 ## No duplicated colour algebra
 

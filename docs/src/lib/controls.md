@@ -401,15 +401,18 @@ on drop.
   *choosing* a disclosing entry does is the owner's — the strip states the
   posture and nothing more — which is what lets one strip hold a list whose
   sections both select a view and open their pages.
-- **A sidebar entry may lead with a glyph.** `Tab::with_icon` names the kind;
+- **A sidebar entry may lead with an icon.** `Tab::with_icon` names the kind;
   `Tabs::render` resolves the picture through the owner's `IconArtwork` lookup
-  at `Tabs::icon_side`, so a strip of glyphs costs a cache lookup per entry
-  rather than re-resolving vector coverage every frame, and an owner holding
-  no cache passes `NoArtwork` and each glyph is rasterised in place. Room is
-  claimed in the order a reader needs it: the Signal Bead, then the chevron
-  and the reading, then the glyph, then the label, which is what gives way —
-  so a row too narrow for its glyph keeps its name rather than becoming a
-  nameless indent. A label or reading that gives way is elided through the
+  at `Tabs::icon_side` — the theme's `sidebar_icon_extent`, taller than the
+  line of text beside it — so a strip of icons costs a cache lookup per entry
+  rather than re-rasterising vector art every frame, and an owner holding no
+  cache passes `NoArtwork` and each icon is rasterised in place. A strip that
+  carries icons gives every entry, a disclosed page included, one row tall
+  enough to seat the icon with a control gap's clearance, so the column keeps
+  one rhythm. Room is claimed in the order a reader needs it: the Signal Bead,
+  then the chevron and the reading, then the icon, then the label, which is
+  what gives way — so a row too narrow for its icon keeps its name rather than
+  becoming a nameless indent. A label or reading that gives way is elided through the
   shared `paint_run` recipe, mark included, so a cut name never reads as a
   complete one.
 - **The two orientations carry selection differently, because one is a row and

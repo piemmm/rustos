@@ -35,6 +35,13 @@ over a resolution-independent design grid, so the same glyph is
   `IconKind::for_asset` (theme asset id → kind, falling back to `Generic`,
   `AGENTS.md` §2.9), `IconKind::index` (its stable slot in `ICON_KINDS`),
   `builtin_icon`, and `disk_icon`.
+- `badge` — `BadgeHue` and `IconKind::badge`: a settings category's
+  built-in picture is a colour badge, its symbol in white on a plate of the
+  category's hue, drawn at the exact side its slot asks for.
+  `builtin_picture(kind, side)` answers the badge for a category and the
+  glyph mask for every other kind; `glyph_mask` of a category is its symbol.
+  The symbols (a private `symbol` module) are SVG path data built through
+  `lib/svg`'s one flattener and stroker.
 - The drive kinds are `Disk` (the generic drive), `DiskHard`,
   `DiskSolidState`, and `DiskUsb`; they share one built-in disk glyph.
   `disk_icon(medium)` maps the `BlkDeviceClass` a mounted volume reports —

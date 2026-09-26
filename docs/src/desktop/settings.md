@@ -69,10 +69,14 @@ refusal and changes nothing — it never reports a success it did not get.
 
 - **The sidebar** is `tabs::Tabs` in its vertical, sidebar-list form — the
   control the Switchboard's System section already uses, turned on its side,
-  not a second selection model. Each row carries its category's `IconKind`
-  glyph and its label; a category holding more than one pane carries a
-  disclosure chevron and its panes appear as nested rows of the same strip, so
-  one cursor walks the whole column.
+  not a second selection model. Each row carries its category's colour badge
+  (a white symbol on the category's hue, [Desktop icons](icons.md)) at the
+  theme's sidebar icon size, and its label; a category holding more than one
+  pane carries a disclosure chevron and its panes appear as nested rows of the
+  same strip, so one cursor walks the whole column. The badges are compiled
+  in and retained in the window's own icon cache, once per side, so the strip
+  never rasterises one per frame, and the cache gives its pixels back on the
+  memory-pressure wake.
 - **The search field** sits above the sidebar and filters the strip to the
   categories and panes a word reaches — by a category's label, a pane's title,
   or a setting label a pane declares. The index is derived from the one
@@ -509,7 +513,8 @@ menu and photographs it on General, on Lock Screen, on a stated absence, and
 on Storage —
 reached past the fold of the strip by the strip's own scrollbar — each dump
 gated on the desktop session's witness that the frame carrying that pane's
-title is on screen. It then chooses Light on Appearance and photographs the
+title is on screen. It then pages the strip back up, chooses Light on
+Appearance and photographs the
 desktop redrawn light, and passes only once the desktop's published settings
 document has been committed twice: for that choice, and for the system menu's
 *Dark Appearance* row, which reaches the same document through the same

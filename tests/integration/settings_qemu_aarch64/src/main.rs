@@ -19,10 +19,10 @@
 //! drives the desktop blind through the QEMU monitor: unlock, log in, start
 //! the desktop, open the capsule's menu, choose *Settings…*, photograph the
 //! window on General, walk to a pane that states an absence, scroll the strip,
-//! walk to Storage, walk to Appearance and choose Light, photograph the
-//! desktop redrawn light, and finally choose *Dark Appearance* from the
-//! capsule's menu. Only the audit sink is swapped, for the PASS witnesses
-//! below.
+//! walk to Storage, page the strip back up, walk to Appearance and choose
+//! Light, photograph the desktop redrawn light, and finally choose *Dark
+//! Appearance* from the capsule's menu. Only the audit sink is swapped, for the
+//! PASS witnesses below.
 //!
 //! # The PASS gate
 //!

@@ -134,6 +134,7 @@ impl<'a> CpuMask<'a> {
     /// A port gives an id to every CPU it starts, so a member without one
     /// means the mask no longer names only CPUs the port can reach: a
     /// shootdown over it must reach every CPU instead.
+    #[must_use = "an unread reach is a shootdown that reached no CPU"]
     pub fn reach<'f, T>(
         self,
         id_of: impl Fn(CpuId) -> Option<T> + 'f,

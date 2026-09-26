@@ -33,6 +33,7 @@ bounds), and `plans/GUI-CONTROLS-DESIGN.md`.
 | I10 | One decode path owns the SVG class assets | blocked: which path owns them is undecided |
 | I11 | An SVG element the decoder cannot honour falls back rather than being skipped | blocked: refusing per element class or globally is undecided |
 | I12 | Raster masters exceed every slot the desktop can draw them in | blocked: the master side against decode cost and the byte bound is undecided |
+| I13 | A settings category's built-in picture is a colour badge | done |
 
 Each item's section below records what it guarantees or what remains.
 
@@ -50,12 +51,15 @@ Each item's section below records what it guarantees or what remains.
   takes one `IconRequest` (a kind alone, a kind plus an already-resolved
   asset path, or a kind plus a bundle directory) and owns the tier order, so
   a taskbar button, a launcher row, a desktop icon and a file-manager tile
-  cannot resolve the same thing three different ways.
+  cannot resolve the same thing three different ways. The last tier is the
+  kind's built-in picture (`builtin_picture`): its glyph's coverage mask, or
+  for a settings category its colour badge (I13).
 - **Every tier is retained, the glyph included, so no frame resolves coverage
   twice.** A glyph is cached as an *untinted coverage mask* keyed
   `(kind, side)` — the shape does not depend on the colour it is drawn in, so
   one mask serves every tint and control state, and the drawing control
-  composites it with `Surface::blit_tinted`. Resolving a multi-layer glyph
+  composites it with `Surface::blit_tinted`. A settings category's badge is
+  retained the same way, ready-coloured. Resolving a multi-layer glyph
   means painting its layers enlarged and averaging them back down to remove
   the seams between them, which measured 20–38 µs per icon: paid per icon per
   frame that is what made a long listing crawl, and paid once it is free
@@ -516,7 +520,34 @@ is a decision this plan has not taken. High-resolution sources for the
 terminal, Switchboard and program-library masters are in `plans/icons/`; the
 other masters would be re-rendered or re-authored at the larger side.
 
-## 14. What this plan deliberately does not cover
+## 14. I13 — a settings category is a colour badge
+
+A settings category is found by colour before its name is read, so its
+built-in picture is a badge: its symbol in white on a rounded plate of the
+category's hue (`lib/icon`'s `badge` module).
+
+- **A badge is chrome, and built in.** It is a silhouette in a fixed ink on a
+  plate whose colour is data — a closed `BadgeHue` set, one hue per kin group
+  — not a rendered picture, so it is vector art with no raster master. It is
+  the kind's built-in tier, compiled in, which is also what lets Settings show
+  it holding no read or decode authority.
+- **Drawn at the exact side, never resampled.** The plate spans the slot, so
+  its flat edges fall on pixel boundaries; a centred symmetric symbol renders
+  mirror-symmetric at every side. The artefact this closed — the old 24-unit
+  glyphs drawn at a fractional scale, one edge of a stroke solid and its mirror
+  grey — is a host test over every side from 12 to 66 pixels.
+- **One geometry path.** Symbols are SVG path data on a 24-unit grid, built
+  through `lib/svg`'s one flattener and stroker and its `place` onto the
+  design grid; nothing in `lib/icon` flattens a curve.
+- **Legible on its own plate.** Every hue's midpoint stands the white symbol
+  at least 3:1 clear, the non-text contrast floor, and a test holds each ramp
+  to it.
+- **The symbol is also the glyph.** `glyph_mask` of a category — what a button
+  or menu row draws in its own colour — is the symbol alone, never a tinted
+  plate. A category never draws the tray reading it stands beside (`Network`,
+  `Volume`, `Bell`) or the single thing it gathers (`User`, `Disk`).
+
+## 15. What this plan deliberately does not cover
 
 - **Cursors and window chrome stay vector.** They are tintable silhouettes
   resolved from the theme; a raster master would be the wrong source format

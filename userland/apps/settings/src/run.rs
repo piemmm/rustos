@@ -50,12 +50,15 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::net_ipc::{NetServerAddr, MAX_RESOLVER_SERVERS};
     use tairix_abi::pinboard_ipc::PinboardDocument;
+    use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
     use tairix_abi::window_ipc::{PointerAction, WindowEvent};
     use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
     use tairix_appdata::RtHost;
     use tairix_geometry::{Point, Rect, Region, Scale};
-    use tairix_icon::NoArtwork;
+    use tairix_icon::{
+        artwork_cache, ArtworkCache, IconArtworkSource, InlineArtwork, NoArtworkSeam,
+    };
     use tairix_input::InputEvent;
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_rt::io::{Stderr, Write};
@@ -907,6 +910,9 @@ mod program {
         /// Set when the park woke for a desktop change, cleared when the loop
         /// adopts it.
         desktop_moved: &'a Cell<bool>,
+        /// Set when the memory-pressure band moved, cleared when the loop has
+        /// trimmed the window's icon cache to it.
+        pressure_moved: &'a Cell<bool>,
     }
 
     impl EventDrain for RtEventSource<'_> {
@@ -953,7 +959,8 @@ mod program {
                 }
                 Wake::PressureChanged => {
                     tairix_font::trim_glyph_cache();
-                    Ok(Parked::Served)
+                    self.pressure_moved.set(true);
+                    Ok(Parked::Interrupted)
                 }
                 Wake::DesktopChanged => {
                     self.desktop_moved.set(true);
@@ -971,6 +978,9 @@ mod program {
         mode: DisplayMode,
         /// The title the session is carrying for the window.
         title: &'static str,
+        /// The built-in pictures the shell draws — the categories' badges —
+        /// rasterised once per side rather than once per frame.
+        artwork: ArtworkCache,
     }
 
     impl SettingsWindow {
@@ -1023,8 +1033,19 @@ mod program {
             damage: DamageRect,
         ) -> Result<(), Errno> {
             let viewport = self.viewport();
+            let artwork = &mut self.artwork;
+            // Nothing this window draws is read from a file: every picture is
+            // compiled in, so the resolver refuses every asset tier and the
+            // cache answers from its built-in one.
+            let mut resolver = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
             self.window.present(damage, |surface| {
-                shell.render(surface, viewport, scale, theme, &mut NoArtwork);
+                shell.render(
+                    surface,
+                    viewport,
+                    scale,
+                    theme,
+                    &mut IconArtworkSource::new(artwork, &mut resolver),
+                );
             })?;
             let wanted = shell.title();
             if wanted != self.title {
@@ -1346,6 +1367,7 @@ mod program {
         themes: &'a mut ThemeRegistry,
         shell: &'a mut Shell,
         desktop_moved: &'a Cell<bool>,
+        pressure_moved: &'a Cell<bool>,
         pictures: &'a mut Pictures,
         desks: Desks<'a>,
     }
@@ -1475,10 +1497,16 @@ mod program {
             themes,
             shell,
             desktop_moved,
+            pressure_moved,
             pictures,
             mut desks,
         } = session;
         loop {
+            // Memory goes back when the machine asks for it, not at whatever
+            // later frame happens to draw an icon.
+            if pressure_moved.take() {
+                surface.artwork.trim();
+            }
             // An answer the park drained is the loop's to adopt, whether or
             // not an event came with it.
             if !adopt_answers(surface, shell, themes, desktop, &mut desks) {
@@ -1822,6 +1850,25 @@ mod program {
         Ok(())
     }
 
+    /// The window's icon cache, budgeted from the `frame_bytes` of the
+    /// window it draws into, and registered with the process's cache report.
+    fn icon_cache(frame_bytes: usize) -> ArtworkCache {
+        // The reclaim bookkeeping's audit sink. The shared constructor takes
+        // a `'static` borrow, and the runtime sink owns nothing.
+        static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
+        let cache = artwork_cache(
+            "settings.icon-artwork",
+            SEAT_PRIMARY,
+            frame_bytes,
+            tairix_rt::pressure::gauge(),
+            &LOG_SINK,
+        );
+        if let Some(ledger) = cache.ledger() {
+            tairix_rt::cachereport::register(ledger);
+        }
+        cache
+    }
+
     /// Program entry point.
     fn main() -> i32 {
         let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);
@@ -1832,10 +1879,20 @@ mod program {
             Err(err) => return fail_shell(err),
         };
         let (initial_w, initial_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+        let mode = app::mode_for(initial_w, initial_h);
+        // A frame region that cannot be sized is a window that can never open,
+        // so it is stated here rather than as a refused create later.
+        let Some(frame_bytes) = app::region_bytes(&mode, app::FRAME_COUNT) else {
+            return fail(
+                app::EXIT_NO_FRAMES,
+                "window frame larger than the address width",
+            );
+        };
         let mut surface = SettingsWindow {
             window,
-            mode: app::mode_for(initial_w, initial_h),
+            mode,
             title: "",
+            artwork: icon_cache(frame_bytes),
         };
 
         let binding = match app::bind_event_mailbox() {
@@ -1873,6 +1930,7 @@ mod program {
         };
 
         let desktop_moved = Cell::new(false);
+        let pressure_moved = Cell::new(false);
         let events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set: binding.set(),
@@ -1883,6 +1941,7 @@ mod program {
             accounts,
             elevator,
             desktop_moved: &desktop_moved,
+            pressure_moved: &pressure_moved,
         });
         run_event_loop(
             Session {
@@ -1891,6 +1950,7 @@ mod program {
                 themes: &mut themes,
                 shell: &mut shell,
                 desktop_moved: &desktop_moved,
+                pressure_moved: &pressure_moved,
                 pictures: &mut Pictures::new(),
                 desks: Desks {
                     applier,

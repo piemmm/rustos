@@ -99,7 +99,10 @@ This crate is pure theme *data*. A `Theme` is a table of:
   so text can be neither too small to read nor too large to rasterise
   (`AGENTS.md` §5.4). `Display` is the top rung — the single dominant line on
   a screen of its own, such as the login and lock screens' clock — and is the
-  one deliberate break from the tight ladder the other roles keep.
+  one deliberate break from the tight ladder the other roles keep. Every rung
+  is set `TEXT_WEIGHT_LIFT` heavier than its named weight along the face's own
+  `wght` axis (`lifted`), so interface text reads full rather than thin while
+  the hierarchy stays as the boards set it.
 - `CursorSet` — one cursor asset id per `CursorKind`, referencing assets
   under `/System/Graphics`. `CURSOR_KINDS` is the closed kind list, beside the
   enum, so a loader or a cache never restates it.

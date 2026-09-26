@@ -31,7 +31,8 @@ use crate::menu::{Menu, MenuItem};
 use crate::metric::{CompositionBar, CompositionSegment, MetricTile, StatusPill};
 use crate::nav::{Breadcrumb, Crumb};
 use crate::paint::{
-    grab_after, ground_fill, resolve_frame, route_pointer, ChromeLayer, FrameColors,
+    grab_after, ground_fill, paint_icon_slot, resolve_frame, route_pointer, ChromeLayer,
+    FrameColors, FULL_COLOUR,
 };
 use crate::rail::ActionRail;
 use crate::record::{Fact, FactList, Timeline, TimelineEvent};
@@ -1180,4 +1181,39 @@ fn point(x: u32, y: u32) -> Point {
         i32::try_from(x).expect("inside the canvas"),
         i32::try_from(y).expect("inside the canvas"),
     )
+}
+
+/// A slot handed no picture draws its kind's built-in picture itself — for a
+/// settings category, the colour badge — as exactly the pixels a cached one
+/// would have drawn.
+#[test]
+fn an_uncached_slot_draws_the_same_badge_a_cache_would() {
+    const SIDE: u32 = 22;
+    let ground = Color::rgb(0x10, 0x14, 0x18);
+    let paint = |picture: Option<tairix_icon::IconPicture<'_>>| {
+        let mut surface = Surface::new(SIDE + 8, SIDE + 8).expect("surface");
+        surface.fill_rect(0, 0, SIDE + 8, SIDE + 8, ground);
+        paint_icon_slot(
+            &mut surface,
+            (4, 4, SIDE),
+            IconKind::Power,
+            Color::rgb(255, 255, 255),
+            picture,
+            FULL_COLOUR,
+        );
+        surface
+    };
+    let built = tairix_icon::builtin_picture(IconKind::Power, SIDE).expect("a badge");
+    let cached = paint(Some(tairix_icon::IconPicture::builtin(
+        IconKind::Power,
+        &built,
+    )));
+    let uncached = paint(None);
+    assert_eq!(uncached.pixels(), cached.pixels());
+    // The plate's own hue, not the tint a glyph would take.
+    let centre_left = uncached.get(5, 4 + SIDE / 2).expect("in bounds");
+    assert!(
+        centre_left.g > centre_left.r.saturating_add(40),
+        "the power badge is green, not tinted: {centre_left:?}"
+    );
 }
